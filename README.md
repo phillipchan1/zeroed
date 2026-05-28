@@ -1,0 +1,75 @@
+# Zeroed
+
+## Setup
+
+### 1. Install dependencies
+
+```bash
+npm install
+```
+
+### 2. Environment variables
+
+```bash
+cp .env.local.example .env.local
+```
+
+Open `.env.local` and paste your values from the [Supabase dashboard](https://app.supabase.com) → Project Settings → API:
+
+```
+VITE_SUPABASE_URL=https://your-project-id.supabase.co
+VITE_SUPABASE_ANON_KEY=your-anon-key-here
+```
+
+> **Security:** The `VITE_` prefix causes Vite to bundle values into the browser build — intentional for the public URL and anon key. `SUPABASE_SERVICE_ROLE_KEY` and `ANTHROPIC_API_KEY` are **not** in `.env.local.example` and must never carry the `VITE_` prefix. Store them exclusively as Supabase Edge Function secrets via `supabase secrets set`.
+
+### 3. Run locally
+
+```bash
+npm run dev
+```
+
+Open [http://localhost:5173](http://localhost:5173). Once keys are in `.env.local` the page will show "✓ connected".
+
+### 4. Other scripts
+
+```bash
+npm run type-check   # TypeScript type check (no emit)
+npm run build        # Production build → dist/
+npm run preview      # Serve the dist/ build locally
+```
+
+## Deploy to Vercel
+
+1. Push the repo to GitHub.
+2. Import it at [vercel.com](https://vercel.com) — Vercel auto-detects Vite.
+3. In Project → Settings → Environment Variables, add:
+   - `VITE_SUPABASE_URL`
+   - `VITE_SUPABASE_ANON_KEY`
+4. Redeploy. Vercel runs `vite build` and serves `dist/`.
+
+## Supabase CLI
+
+```bash
+# Install
+brew install supabase/tap/supabase
+
+# Link to your project
+supabase link --project-ref your-project-ref
+
+# Apply committed migrations
+supabase db push
+```
+
+Migrations live in `supabase/migrations/`. Create new ones with `supabase migration new <name>`.
+
+## iOS (Capacitor)
+
+The Capacitor config is committed (`capacitor.config.ts`). Add the iOS platform when ready:
+
+```bash
+npm run build
+npx cap add ios
+npx cap sync
+npx cap open ios
+```
