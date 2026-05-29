@@ -1,11 +1,7 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
-import {
-  Button, SectionHeader, Skeleton, InsightCard, InsightMovementRow,
-  TelemetryStrip, TickingNumber, BracketFrame,
-} from '../../components/ui'
-import { summarizeInsightMovement, type InsightMovementSummary } from '../../engine'
+import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
 
 interface TodayScreenProps {
@@ -24,9 +20,9 @@ const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
 
 function getWeekDays(): Date[] {
   const today = new Date()
-  const dow   = today.getDay()                     // 0 = Sun
+  const dow   = today.getDay()
   const monday = new Date(today)
-  monday.setDate(today.getDate() - ((dow + 6) % 7)) // rewind to Monday
+  monday.setDate(today.getDate() - ((dow + 6) % 7))
   return Array.from({ length: 7 }, (_, i) => {
     const d = new Date(monday)
     d.setDate(monday.getDate() + i)
@@ -42,32 +38,32 @@ function isSameDay(a: Date, b: Date) {
   )
 }
 
+/**
+ * TRAIN — the calm surface: what you're chasing, the one read moving underneath
+ * it, and the session to do. The depth (the weak-link stack, the "why") lives in
+ * Coach; the plan and rules live in Program. Show the conclusion, hide the
+ * working — the feeling of intelligence is the confidence number that moves.
+ */
 export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [weekDays, setWeekDays] = useState<WeekDayStatus[]>([])
   const [loading, setLoading]   = useState(true)
-  const [nonNegotiables, setNonNegotiables] = useState<string[]>([])
-  const [activeInsights, setActiveInsights] = useState<InsightRow[]>([])
-  const [movement, setMovement] = useState<InsightMovementSummary | null>(null)
   const [totalInsights, setTotalInsights] = useState(0)
   const [likelyCount, setLikelyCount]     = useState(0)
   const [p1Count, setP1Count]             = useState(0)
   const [lastSignalAt, setLastSignalAt]   = useState<string | null>(null)
-  const [phaseInfo, setPhaseInfo]         = useState<{ name: string; weekCurrent: number; weekTotal: number } | null>(null)
-  const [retestDays, setRetestDays]       = useState<number | null>(null)
   const [goal, setGoal]                   = useState<string | null>(null)
+  const [p1, setP1] = useState<{ category: string; confidence: number } | null>(null)
 
   useEffect(() => {
     loadWeekData()
-    loadPhaseAndProfile()
+    loadGoal()
     loadInsights()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [athleteId])
 
   async function loadInsights() {
-    // Load every insight so we can summarise what moved this week, plus keep
-    // the active stack for the "your zero" focus when nothing has moved yet.
     const { data } = await supabase
       .from('insight')
       .select('*')
@@ -76,211 +72,98 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
 
     const all = (data ?? []) as InsightRow[]
     const active = all.filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
-    setActiveInsights(active)
-    setMovement(summarizeInsightMovement(all, getWeekDays()[0]))
-
-    // Telemetry strip counts (all statuses count toward the total).
     setTotalInsights(all.length)
     setLikelyCount(all.filter((i) => i.status === 'likely').length)
     setP1Count(active.filter((i) => i.priority === 'P1').length)
-    const maxUpdated = all.reduce<string | null>((max, i) =>
-      !max || i.updated_at > max ? i.updated_at : max, null)
-    setLastSignalAt(maxUpdated)
+    const top = active[0] ?? null
+    setP1(top ? { category: top.category, confidence: top.confidence } : null)
+    setLastSignalAt(all.reduce<string | null>((max, i) =>
+      !max || i.updated_at > max ? i.updated_at : max, null))
   }
 
-  async function loadPhaseAndProfile() {
-    const { data: phase } = await supabase
-      .from('phase')
-      .select('name, week_start, week_end, non_negotiables, program!inner(athlete_id, status)')
-      .eq('program.athlete_id', athleteId)
-      .eq('program.status', 'active')
-      .eq('status', 'active')
-      .maybeSingle()
-
-    setNonNegotiables((phase?.non_negotiables as string[] | null) ?? [])
-
-    // The TARGET is the durable anchor — what the athlete is chasing
-    // (athlete.goals), falling back to their obstacle. The read/confidence is
-    // the live thing moving underneath it. (The program's session objective is
-    // a lower altitude — it belongs on Program, not as the anchor.)
+  // The TARGET is the durable anchor — what the athlete is chasing
+  // (athlete.goals), falling back to their obstacle.
+  async function loadGoal() {
     const { data: ath } = await supabase
       .from('athlete')
       .select('goals, obstacle')
       .eq('id', athleteId)
       .maybeSingle()
     setGoal((ath?.goals as string | null) || (ath?.obstacle as string | null) || null)
-
-    if (phase?.week_start && phase?.week_end) {
-      const start = new Date(phase.week_start as string)
-      const end   = new Date(phase.week_end as string)
-      const dayMs = 1000 * 60 * 60 * 24
-      const weekTotal   = Math.max(1, Math.round((end.getTime() - start.getTime()) / dayMs / 7) + 1)
-      const elapsedDays = Math.floor((Date.now() - start.getTime()) / dayMs)
-      const weekCurrent = Math.min(weekTotal, Math.max(1, Math.floor(elapsedDays / 7) + 1))
-      setPhaseInfo({ name: phase.name as string, weekCurrent, weekTotal })
-    }
-
-    const { data: profile } = await supabase
-      .from('athlete_profile')
-      .select('retest_date')
-      .eq('athlete_id', athleteId)
-      .maybeSingle()
-
-    if (profile?.retest_date) {
-      const diff = Math.ceil((new Date(profile.retest_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
-      setRetestDays(diff)
-    }
   }
 
   async function loadWeekData() {
     setLoading(true)
-    const days   = getWeekDays()
-    const today  = new Date()
-
-    const weekStart = days[0]
-    const weekEnd   = days[6]
-
+    const days  = getWeekDays()
+    const today = new Date()
     const { data: workouts } = await supabase
       .from('workout')
       .select('performed_at, routine_id, routine!inner(program!inner(athlete_id))')
-      .gte('performed_at', weekStart.toISOString())
-      .lte('performed_at', new Date(weekEnd.getFullYear(), weekEnd.getMonth(), weekEnd.getDate(), 23, 59, 59).toISOString())
-
+      .gte('performed_at', days[0].toISOString())
+      .lte('performed_at', new Date(days[6].getFullYear(), days[6].getMonth(), days[6].getDate(), 23, 59, 59).toISOString())
     const loggedDates = (workouts ?? []).map((w) => new Date(w.performed_at))
-
     setWeekDays(days.map((d) => ({
-      date:    d,
-      logged:  loggedDates.some((ld) => isSameDay(ld, d)),
+      date: d,
+      logged: loggedDates.some((ld) => isSameDay(ld, d)),
       isToday: isSameDay(d, today),
     })))
-
     setLoading(false)
   }
 
   function handleStartWorkout() {
-    if (todayRoutine) {
-      navigate(`/app/workout/${todayRoutine.id}`)
-    }
+    if (todayRoutine) navigate(`/app/workout/${todayRoutine.id}`)
   }
-
-  const today = new Date()
-  const dateStr = today.toLocaleDateString('en-US', { weekday: 'long', month: 'long', day: 'numeric' })
-
-  const p1Insight  = activeInsights[0] ?? null
-  const p1Category = p1Insight?.category ?? null
-  const movements  = movement?.movements ?? []
-  const hasMovement = movements.length > 0
-  const movedCount  = movement?.movedCount ?? 0
-  const heroValue   = movedCount > 0 ? movedCount : p1Count
-  const heroLabel   = movedCount > 0 ? 'INSIGHTS MOVED' : 'P1 ACTIVE'
 
   const telemetryItems: Array<{ label: string; value: string | number; signal?: boolean }> = [
     { label: 'INSIGHTS', value: totalInsights },
     { label: String(likelyCount), value: 'LIKELY' },
-    { label: String(p1Count), value: 'P1' },
+    { label: String(p1Count), value: 'P1', signal: p1Count > 0 },
   ]
-  if (phaseInfo) {
-    telemetryItems.push({ label: 'PHASE', value: `${phaseInfo.name} w${phaseInfo.weekCurrent}/${phaseInfo.weekTotal}` })
-  }
-  if (retestDays !== null) {
-    telemetryItems.push({ label: 'RETEST', value: `${retestDays}d`, signal: retestDays <= 7 })
-  }
+
+  const confidencePct = p1 ? Math.round(p1.confidence * 100) : null
 
   return (
     <div className="screen with-nav">
-      {/* First-arrival orientation — one warm line, first visit only (Act 6) */}
       {isFirstVisit && (
         <p
           className="fade-rise"
-          style={{
-            padding: '12px 16px',
-            fontSize: 14,
-            color: 'var(--text)',
-            lineHeight: 1.5,
-            borderBottom: '1px solid var(--line)',
-          }}
+          style={{ padding: '12px 16px', fontSize: 14, color: 'var(--text)', lineHeight: 1.5, borderBottom: '1px solid var(--line)' }}
         >
-          This is Today. Open it before each session — it tells you what to do and tracks what shifts.
+          This is Today. Open it before each session — it shows you what to do, and the read sharpens underneath as you train.
         </p>
       )}
 
-      {/* Telemetry strip — always-on system state (presence dot, one per screen) */}
-      {!loading && (
-        <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />
-      )}
+      {!loading && <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />}
 
-      {/* Main content */}
       <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
 
-        {/* Goal anchor — the durable thing at the top. The read/confidence is
-            the live thing moving underneath it. */}
-        <div className="fade-rise" style={{ marginBottom: 20 }}>
+        {/* Goal anchor — the durable thing. The read moves underneath, and taps
+            through to Coach for the why. */}
+        <div className="fade-rise" style={{ marginBottom: 28 }}>
           <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-            {goal ? 'Your goal' : dateStr}
+            {goal ? 'Chasing' : 'Today'}
           </p>
           <h2 style={{ marginTop: goal ? 6 : 4, fontSize: goal ? 21 : 22, fontWeight: 600, lineHeight: 1.25 }}>
             {goal ?? 'Today'}
           </h2>
-          {!loading && p1Insight && (
-            <p className="text-xs text-dim" style={{ marginTop: 8, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-              THE READ UNDERNEATH · {(p1Category ?? '').toUpperCase()} ·{' '}
-              <span className="num text-signal">{Math.round(p1Insight.confidence * 100)}%</span> CONFIDENT
-            </p>
+          {!loading && p1 && confidencePct !== null && (
+            <button
+              type="button"
+              onClick={() => navigate('/app/coach')}
+              style={{
+                marginTop: 10, padding: 0, background: 'none', border: 'none', cursor: 'pointer',
+                fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em',
+                color: 'var(--text-dim)', display: 'inline-flex', alignItems: 'center', gap: 6,
+              }}
+            >
+              THE READ · {p1.category.toUpperCase()} ·{' '}
+              <span className="num text-signal">{confidencePct}%</span> CONFIDENT
+              <span style={{ opacity: 0.6 }}>›</span>
+            </button>
           )}
         </div>
 
-        {/* Hero number — telemetric headline (always present) */}
-        {!loading && (
-          <div className="fade-rise" style={{ marginBottom: 16 }}>
-            <TickingNumber
-              value={heroValue}
-              className="hero-number text-signal"
-              style={{ fontSize: 32, display: 'block' }}
-            />
-            <span className="hero-number__label">{heroLabel}</span>
-          </div>
-        )}
-
-        {/* Your zero this week — insights-first (Shift 4 / Shift 6) */}
-        <div className="fade-rise" style={{ marginBottom: 24 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 12, gap: 12 }}>
-            <SectionHeader>Your zero this week</SectionHeader>
-            {!loading && movement?.headline && (
-              <span className="num text-xs text-signal" style={{ letterSpacing: '0.02em', whiteSpace: 'nowrap' }}>
-                {movement.headline}
-              </span>
-            )}
-          </div>
-
-          {loading ? (
-            <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              <Skeleton height={10} width={80} />
-              <Skeleton height={14} width="90%" />
-              <Skeleton height={11} width="70%" />
-            </div>
-          ) : (
-            <BracketFrame style={{ padding: 8 }}>
-              {hasMovement ? (
-                movements.slice(0, 3).map((m) => (
-                  <InsightMovementRow key={m.insight.id} movement={m} />
-                ))
-              ) : p1Insight ? (
-                <>
-                  <p className="text-xs text-dim" style={{ marginBottom: 10, lineHeight: 1.6 }}>
-                    No movement this week. The P1 limiter is still the bottleneck.
-                  </p>
-                  <InsightCard insight={p1Insight} />
-                </>
-              ) : (
-                <p className="text-sm text-dim">
-                  No weak links flagged — your program is building strength.
-                </p>
-              )}
-            </BracketFrame>
-          )}
-        </div>
-
-        {/* Session card */}
+        {/* Session card — the one action */}
         {loading ? (
           <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
             <Skeleton height={12} width={80} />
@@ -289,36 +172,17 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
           </div>
         ) : todayRoutine ? (
           <div className="card fade-rise fade-rise-delay-1" style={{ marginBottom: 16 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 12 }}>
-              <div>
-                <SectionHeader>Session ready</SectionHeader>
-                <h3 style={{ marginTop: 8, fontSize: 18, fontWeight: 600 }}>
-                  {todayRoutine.name}
-                </h3>
-                {p1Category && (
-                  <p
-                    className="text-dim"
-                    style={{
-                      marginTop: 6,
-                      fontFamily: 'var(--font-mono)',
-                      fontSize: 11,
-                      letterSpacing: '0.06em',
-                      textTransform: 'uppercase',
-                    }}
-                  >
-                    targeting P1 · {p1Category}
-                  </p>
-                )}
-                {todayRoutine.intent && (
-                  <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>
-                    {todayRoutine.intent}
-                  </p>
-                )}
-              </div>
-            </div>
-
-            {/* Exercise count */}
-            <div style={{ display: 'flex', gap: 20, marginBottom: 16 }}>
+            <SectionHeader>Session ready</SectionHeader>
+            <h3 style={{ marginTop: 8, fontSize: 18, fontWeight: 600 }}>{todayRoutine.name}</h3>
+            {p1 && (
+              <p className="text-dim" style={{ marginTop: 6, fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                targeting P1 · {p1.category}
+              </p>
+            )}
+            {todayRoutine.intent && (
+              <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{todayRoutine.intent}</p>
+            )}
+            <div style={{ display: 'flex', gap: 20, margin: '16px 0' }}>
               <div>
                 <span className="num text-signal" style={{ fontSize: 20, fontWeight: 600 }}>
                   {(todayRoutine.exercises as unknown[]).length}
@@ -326,17 +190,11 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
                 <span className="text-xs text-dim" style={{ marginLeft: 4 }}>exercises</span>
               </div>
               <div>
-                <span className="num text-dim" style={{ fontSize: 20 }}>~</span>
-                <span className="num text-dim" style={{ fontSize: 20 }}>
-                  {(todayRoutine.exercises as unknown[]).length * 8}
-                </span>
+                <span className="num text-dim" style={{ fontSize: 20 }}>~{(todayRoutine.exercises as unknown[]).length * 8}</span>
                 <span className="text-xs text-dim" style={{ marginLeft: 4 }}>min</span>
               </div>
             </div>
-
-            <Button variant="primary" full onClick={handleStartWorkout}>
-              Start session →
-            </Button>
+            <Button variant="primary" full onClick={handleStartWorkout}>Start session →</Button>
           </div>
         ) : (
           <div className="card fade-rise fade-rise-delay-1">
@@ -344,45 +202,10 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
           </div>
         )}
 
-        {/* Non-negotiables — phase rules that apply every session */}
-        {nonNegotiables.length > 0 && (
-          <div className="fade-rise fade-rise-delay-2" style={{ marginTop: 20 }}>
-            <SectionHeader>Non-negotiables</SectionHeader>
-            <p
-              className="text-dim"
-              style={{
-                marginTop: 8,
-                fontFamily: 'var(--font-mono)',
-                fontSize: 11,
-                letterSpacing: '0.06em',
-                textTransform: 'uppercase',
-              }}
-            >
-              RULES — every session, no skips
-            </p>
-            <ul style={{ marginTop: 12, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {nonNegotiables.map((rule, i) => (
-                <li
-                  key={i}
-                  style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5 }}
-                >
-                  <span className="num text-signal" style={{ fontSize: 13, flexShrink: 0 }}>
-                    {String(i + 1).padStart(2, '0')}
-                  </span>
-                  <span>{rule}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-
-        {/* Week strip — de-emphasised, below the fold (Shift 4) */}
-        <div className="fade-rise fade-rise-delay-3" style={{ marginTop: 28 }}>
+        {/* Week strip — cadence, de-emphasised */}
+        <div className="fade-rise fade-rise-delay-2" style={{ marginTop: 28 }}>
           <SectionHeader>This week</SectionHeader>
-          <div
-            className="week-strip"
-            style={{ marginTop: 10, opacity: 0.7, padding: 0 }}
-          >
+          <div className="week-strip" style={{ marginTop: 10, opacity: 0.7, padding: 0 }}>
             {loading
               ? Array.from({ length: 7 }).map((_, i) => (
                   <div key={i} className="week-day" style={{ minWidth: 36 }}>
@@ -396,9 +219,7 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
                     key={i}
                     className={`week-day${day.isToday ? ' week-day--today' : ''}${day.logged ? ' week-day--logged' : ''}`}
                   >
-                    <span className="week-day__label">
-                      {DAY_LABELS[(day.date.getDay() + 6) % 7]}
-                    </span>
+                    <span className="week-day__label">{DAY_LABELS[(day.date.getDay() + 6) % 7]}</span>
                     <span className="week-day__num">{day.date.getDate()}</span>
                     <div className="week-day__dot" />
                   </div>
@@ -406,9 +227,6 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
             }
           </div>
         </div>
-
-        {/* Weekly Review stub — Prompt 2 tier-3 moment */}
-        {/* TODO Prompt 2: weekly_review trigger when week_ending passes */}
       </div>
     </div>
   )
