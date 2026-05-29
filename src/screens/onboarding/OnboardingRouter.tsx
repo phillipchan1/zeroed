@@ -97,6 +97,7 @@ export function OnboardingRouter({
     if (!athlete) return
     void supabase.from('athlete').update({
       name: f.name.trim() || null,
+      goals: f.target.trim() || null,
       training_age: f.trainingAge,
       sessions_per_week: f.sessions,
     }).eq('id', athlete.id)

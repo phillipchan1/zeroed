@@ -1,22 +1,24 @@
 import { useState } from 'react'
+import { TargetScreen } from './TargetScreen'
 import { IdentityScreen } from './IdentityScreen'
 import { TrainingContextScreen } from './TrainingContextScreen'
 import { AcknowledgmentScreen } from './AcknowledgmentScreen'
 import type { AthleteRow } from '../../types/database'
 
 export interface OrientationFields {
+  target: string
   name: string
   trainingAge: number
   sessions: number
 }
 
-type OrientationSub = 'identity' | 'context' | 'acknowledgment'
+type OrientationSub = 'target' | 'identity' | 'context' | 'acknowledgment'
 
 /**
- * Orientation — calibrates the first session. Training age + sessions/week are
- * load-bearing (they drive the safety clamp + program shape); name is optional
- * warmth. No sport, no movement screen. The acknowledgment proves the system
- * read the inputs, then hands off to the provisional build.
+ * Orientation — calibrates the first session. Leads with the TARGET (the durable
+ * anchor: "what are you chasing?", agent-tailored from the obstacle). Then
+ * training age + sessions/week (load-bearing for the safety clamp + program
+ * shape); name is optional warmth. No sport, no movement screen.
  */
 export function OrientationAct({
   athlete,
@@ -27,8 +29,9 @@ export function OrientationAct({
   obstacle: string
   onComplete: (fields: OrientationFields) => void
 }) {
-  const [sub, setSub] = useState<OrientationSub>('identity')
+  const [sub, setSub] = useState<OrientationSub>('target')
   const [fields, setFields] = useState<OrientationFields>({
+    target: athlete.goals ?? '',
     name: athlete.name ?? '',
     trainingAge: athlete.training_age ?? 6,
     sessions: athlete.sessions_per_week ?? 4,
@@ -36,6 +39,14 @@ export function OrientationAct({
 
   return (
     <>
+      {sub === 'target' && (
+        <TargetScreen
+          obstacle={obstacle}
+          initial={fields.target}
+          onNext={(target) => { setFields((f) => ({ ...f, target })); setSub('identity') }}
+        />
+      )}
+
       {sub === 'identity' && (
         <IdentityScreen
           name={fields.name}

@@ -22,7 +22,7 @@ import type {
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
 import {
-  callProbe, callSessionReview, callProgramDesign, callInfoGain,
+  callProbe, callSessionReview, callProgramDesign, callInfoGain, callTarget,
   type ProgramDesignResult, type InsightCategory,
 } from './agentClient'
 import { validateProvisionalProgram } from './safety'
@@ -145,6 +145,37 @@ export async function runDiagnosticAnalysisAgent(
 
   // Model failed / rate-limited / offline → deterministic floor.
   return deterministicProbe(obstacle)
+}
+
+/**
+ * TargetAgent → a tailored "what are you chasing?" question + a concrete
+ * suggested target, inferred from the obstacle and the working hypothesis. Asked
+ * in orientation; the system should look like it already inferred the answer.
+ * On model failure, a plain deterministic question with no pre-fill.
+ */
+export interface TargetPrompt {
+  source: 'agent' | 'fallback'
+  question: string
+  suggested: string
+}
+
+export async function generateTargetPrompt(
+  obstacle: string,
+  hypothesis?: { claim: string; category: string } | null,
+): Promise<TargetPrompt> {
+  const res = await callTarget({ obstacle, hypothesis: hypothesis ?? null })
+  if (res.ok) {
+    return {
+      source: 'agent',
+      question: res.data.target_question,
+      suggested: res.data.suggested_target ?? '',
+    }
+  }
+  return {
+    source: 'fallback',
+    question: 'What are you chasing? A number, a lift, or a moment to be ready for.',
+    suggested: '',
+  }
 }
 
 /**

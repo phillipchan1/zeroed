@@ -77,6 +77,11 @@ export interface SessionReviewResult {
   rationale: string
 }
 
+export interface TargetResult {
+  target_question: string
+  suggested_target: string | null
+}
+
 // ---- device id (pre-auth probe rate limiting) -------------------------------
 
 const DEVICE_KEY = 'zeroed_device_id'
@@ -165,4 +170,12 @@ export function callSessionReview(payload: {
   insights: Array<{ id: string; category: string; claim: string; confidence: number; status: string }>
 }): Promise<AgentResult<SessionReviewResult>> {
   return invokeAgent<SessionReviewResult>('session_review', payload)
+}
+
+/** Target — post-auth. obstacle + hypothesis → a tailored target Q + suggestion. */
+export function callTarget(payload: {
+  obstacle: string
+  hypothesis: { claim: string; category: string } | null
+}): Promise<AgentResult<TargetResult>> {
+  return invokeAgent<TargetResult>('target', payload)
 }

@@ -99,24 +99,16 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
 
     setNonNegotiables((phase?.non_negotiables as string[] | null) ?? [])
 
-    // The GOAL is the durable anchor — program.goal, falling back to the
-    // athlete's own obstacle. The read/confidence is the live thing underneath.
-    const { data: program } = await supabase
-      .from('program')
-      .select('goal')
-      .eq('athlete_id', athleteId)
-      .eq('status', 'active')
+    // The TARGET is the durable anchor — what the athlete is chasing
+    // (athlete.goals), falling back to their obstacle. The read/confidence is
+    // the live thing moving underneath it. (The program's session objective is
+    // a lower altitude — it belongs on Program, not as the anchor.)
+    const { data: ath } = await supabase
+      .from('athlete')
+      .select('goals, obstacle')
+      .eq('id', athleteId)
       .maybeSingle()
-    let g = (program?.goal as string | null) ?? null
-    if (!g) {
-      const { data: ath } = await supabase
-        .from('athlete')
-        .select('obstacle')
-        .eq('id', athleteId)
-        .maybeSingle()
-      g = (ath?.obstacle as string | null) ?? null
-    }
-    setGoal(g)
+    setGoal((ath?.goals as string | null) || (ath?.obstacle as string | null) || null)
 
     if (phase?.week_start && phase?.week_end) {
       const start = new Date(phase.week_start as string)

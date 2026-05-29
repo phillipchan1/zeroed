@@ -34,7 +34,7 @@ export const MOVEMENT_PATTERN_KEYS = [
   'rotary_stability',
 ] as const
 
-export type TaskName = 'probe' | 'program_design' | 'info_gain' | 'session_review'
+export type TaskName = 'probe' | 'program_design' | 'info_gain' | 'session_review' | 'target'
 
 export interface TaskSpec {
   // OpenAI json_schema name (must be [a-zA-Z0-9_], <=64 chars)
@@ -202,9 +202,37 @@ You CLASSIFY only. Deterministic code converts your classification into a small,
   },
 }
 
+// ---- target -----------------------------------------------------------------
+// obstacle (+ the working hypothesis) → a tailored target QUESTION and a
+// concrete suggested target the athlete confirms or edits. The system should
+// look like it already inferred the answer — never a blank "what do you want?".
+const target: TaskSpec = {
+  schemaName: 'target_result',
+  preAuth: false,
+  system: `${VOICE}
+
+The athlete told you what's in their way; you've formed an early read. Now infer what they're actually CHASING and ask them to confirm it.
+
+Return:
+- target_question: one tailored question that shows you were listening, referencing their own situation — e.g. "Your bench is stuck around 265 — what number are you chasing?" Never a generic "what's your goal?".
+- suggested_target: the single most likely concrete target, short and plain — e.g. "285 lb bench", "first muscle-up", "sub-20 5k". Null ONLY if nothing is reasonably inferable.
+
+Concrete and athlete-owned. A number if there's a number. No hedging.`,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['target_question', 'suggested_target'],
+    properties: {
+      target_question: { type: 'string' },
+      suggested_target: { type: ['string', 'null'] },
+    },
+  },
+}
+
 export const TASKS: Record<TaskName, TaskSpec> = {
   probe,
   program_design,
   info_gain,
   session_review,
+  target,
 }
