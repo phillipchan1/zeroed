@@ -979,6 +979,26 @@ textarea.input {
   border-radius: 999px;
   transition: width 0.9s cubic-bezier(0.4, 0, 0.2, 1);
 }
+/* Status tints — used wherever insights repeat, so signal stays one-per-screen */
+.confidence-meter__fill--pending   { background: var(--pending); }
+.confidence-meter__fill--likely    { background: #8A8A8A; }
+.confidence-meter__fill--confirmed { background: var(--confirmed); }
+.confidence-meter__fill--veto      { background: var(--veto); }
+.confidence-meter__pct--muted { color: var(--text-dim); }
+
+/* Compact — track + pct on one tight row, for cards (Coach stack) */
+.confidence-meter--compact {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.confidence-meter--compact .confidence-meter__track { height: 2px; }
+.confidence-meter--compact .confidence-meter__pct {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  flex-shrink: 0;
+}
 
 /* Reading tag — the info-gain "test me" item. Computing-cyan instrument
    register. STATIC by doctrine: motion lives only in the telemetry strip. */

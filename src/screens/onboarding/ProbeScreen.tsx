@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Logo, Button, TypeOn, PresenceDot } from '../../components/ui'
+import { Logo, Button, TypeOn, PresenceDot, ConfidenceMeter } from '../../components/ui'
 import { runDiagnosticAnalysisAgent, type ProbeOutcome } from '../../engine'
 
 /**
@@ -213,26 +213,6 @@ function FollowupQuestion({
   )
 }
 
-function ConfidenceMeter({ confidence }: { confidence: number }) {
-  const pct = Math.round(Math.max(0, Math.min(1, confidence)) * 100)
-  const [w, setW] = useState(0)
-  useEffect(() => {
-    const id = setTimeout(() => setW(pct), 80)
-    return () => clearTimeout(id)
-  }, [pct])
-  return (
-    <div className="confidence-meter">
-      <div className="confidence-meter__head">
-        <span className="confidence-meter__label">CONFIDENCE</span>
-        <span className="num confidence-meter__pct">{pct}% · STILL SHARPENING</span>
-      </div>
-      <div className="confidence-meter__track">
-        <div className="confidence-meter__fill" style={{ width: `${w}%` }} />
-      </div>
-    </div>
-  )
-}
-
 function Reveal({ outcome, onSave }: { outcome: ProbeOutcome; onSave: () => void }) {
   const { hypothesis } = outcome
   return (
@@ -254,6 +234,9 @@ function Reveal({ outcome, onSave }: { outcome: ProbeOutcome; onSave: () => void
           </p>
           <p className="text-sm" style={{ lineHeight: 1.5, marginBottom: 14 }}>{hypothesis.claim}</p>
           <ConfidenceMeter confidence={hypothesis.confidence} />
+          <p className="text-xs text-dim" style={{ marginTop: 6, fontFamily: 'var(--font-mono)', letterSpacing: '0.08em' }}>
+            STILL SHARPENING
+          </p>
         </div>
 
         {/* Layer 3 — warm characterization */}

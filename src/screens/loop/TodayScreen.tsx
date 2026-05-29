@@ -161,6 +161,11 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
               <span style={{ opacity: 0.6 }}>›</span>
             </button>
           )}
+          {!loading && p1 && confidencePct !== null && (
+            <div className="confidence-meter__track" style={{ maxWidth: 240, marginTop: 8 }}>
+              <div className="confidence-meter__fill" style={{ width: `${confidencePct}%` }} />
+            </div>
+          )}
         </div>
 
         {/* Session card — the one action */}

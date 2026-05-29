@@ -339,6 +339,15 @@ const STATUS_ABBR: Record<InsightStatus, string> = {
   disproved: 'DISP',
 }
 
+// Confidence-bar tint by insight status — keeps signal yellow one-per-screen.
+const STATUS_TONE: Record<InsightStatus, ConfidenceTone> = {
+  hypothesis: 'pending',
+  likely: 'likely',
+  confirmed: 'confirmed',
+  resolved: 'confirmed',
+  disproved: 'veto',
+}
+
 const SOURCE_LABEL: Record<string, string> = {
   diagnostic: 'DIAGNOSTIC',
   session_observation: 'SESSION',
@@ -368,6 +377,59 @@ function InsightAttribution({ insight }: { insight: InsightRow }) {
       generated {attrTime(insight.generated_at)} · {sourceLabel}
       {wasUpdated && ` · updated ${attrTime(insight.updated_at)}`}
     </p>
+  )
+}
+
+// ---- Confidence meter — the read, made visible -----------------------------
+// The one reusable confidence readout. Signal tint is reserved for the single
+// per-screen read accent (Train read line, Probe reveal); everywhere insights
+// repeat (the Coach stack) it takes a STATUS tint so signal stays one-per-screen.
+// The fill grows on mount — a reactive width transition, not ambient motion.
+
+export type ConfidenceTone = 'signal' | 'pending' | 'likely' | 'confirmed' | 'veto'
+
+export function ConfidenceMeter({
+  confidence,
+  label = 'CONFIDENCE',
+  tone = 'signal',
+  compact = false,
+}: {
+  confidence: number
+  label?: string
+  tone?: ConfidenceTone
+  compact?: boolean
+}) {
+  const pct = Math.round(Math.max(0, Math.min(1, confidence)) * 100)
+  const [w, setW] = useState(0)
+  useEffect(() => {
+    const id = setTimeout(() => setW(pct), 60)
+    return () => clearTimeout(id)
+  }, [pct])
+
+  const fillClass = `confidence-meter__fill${tone === 'signal' ? '' : ` confidence-meter__fill--${tone}`}`
+  const pctClass = `num confidence-meter__pct${tone === 'signal' ? '' : ' confidence-meter__pct--muted'}`
+
+  if (compact) {
+    return (
+      <div className="confidence-meter confidence-meter--compact">
+        <div className="confidence-meter__track" style={{ flex: 1 }}>
+          <div className={fillClass} style={{ width: `${w}%` }} />
+        </div>
+        <span className={pctClass}>{pct}%</span>
+      </div>
+    )
+  }
+
+  return (
+    <div className="confidence-meter">
+      <div className="confidence-meter__head">
+        <span className="confidence-meter__label">{label}</span>
+        <span className={pctClass}>{pct}%</span>
+      </div>
+      <div className="confidence-meter__track">
+        <div className={fillClass} style={{ width: `${w}%` }} />
+      </div>
+    </div>
   )
 }
 
@@ -406,8 +468,11 @@ export function InsightCard({ insight, pulse, typeOn }: InsightCardProps) {
       <p className="text-sm" style={{ lineHeight: 1.5 }}>
         {typeOn ? <TypeOn text={insight.claim} delay={18} /> : insight.claim}
       </p>
+      <div style={{ marginTop: 10 }}>
+        <ConfidenceMeter confidence={insight.confidence} tone={STATUS_TONE[insight.status]} compact />
+      </div>
       {insight.program_impact && (
-        <p className="text-xs text-dim" style={{ marginTop: 6 }}>{insight.program_impact}</p>
+        <p className="text-xs text-dim" style={{ marginTop: 8 }}>{insight.program_impact}</p>
       )}
       <InsightAttribution insight={insight} />
     </Card>
