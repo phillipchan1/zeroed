@@ -16,6 +16,23 @@ export type PhaseStatus = 'pending' | 'active' | 'completed' | 'skipped'
 
 export type ProgramStatus = 'draft' | 'active' | 'completed' | 'paused'
 
+// Six-act onboarding state machine — see migration 20260530000001 and App.tsx.
+export type OnboardingStep =
+  | 'hook'                    // pre-Screen 03; no auth yet
+  | 'orientation'             // Screens 04-06
+  | 'screening'               // Screens 07-16
+  | 'computing'               // Screen 17 (transient, ~25s)
+  | 'zeroed_in'               // Screen 18 — pre-CTA
+  | 'first_session_pending'   // Screens 19-20
+  | 'first_session_complete'  // Screen 21 — pre-CTA
+  | 'complete'                // in the daily loop
+
+// Onboarding steps that render inside the OnboardingRouter (no nav, no URL).
+// The remaining steps render the daily loop.
+export const ONBOARDING_FUNNEL_STEPS: ReadonlySet<OnboardingStep> = new Set([
+  'hook', 'orientation', 'screening', 'computing', 'zeroed_in',
+])
+
 // ---- Row types (returned by SELECT) ----------------------------------------
 
 export interface AthleteRow {
@@ -27,6 +44,8 @@ export interface AthleteRow {
   training_age: number | null
   sessions_per_week: number | null
   created_at: string
+  onboarding_step: OnboardingStep
+  obstacle: string | null
 }
 
 export interface DiagnosticRow {

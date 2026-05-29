@@ -20,6 +20,7 @@ import type {
   ExerciseTemplate,
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
+import { callProbe, callSessionReview } from './agentClient'
 
 // ---- Types -----------------------------------------------------------------
 
@@ -47,28 +48,197 @@ export interface GeneratedProgram {
 
 // ---- Agent stubs (TODO: Prompt 3) ------------------------------------------
 
-/**
- * TODO (Prompt 3): DiagnosticAnalysisAgent
- * Real behavior: sends raw_results to Claude, gets structured weak-link analysis,
- * writes InsightDraft rows, then promotes to Insight via the promotion engine.
- */
-export async function runDiagnosticAnalysisAgent(
-  _athleteId: string,
-  _results: DiagnosticResults,
-): Promise<void> {
-  // no-op until Prompt 3
+// ────────────────────────────────────────────────────────────────────────────
+// CONFIDENCE MATH (deterministic — agent CLASSIFIES, code DISPOSES)
+// The agent never returns a number. It returns a direction + magnitude, and
+// THIS table is the only place a confidence delta is decided. Bounded by design:
+// no single observation can move confidence more than ±0.15.
+// ────────────────────────────────────────────────────────────────────────────
+const CONFIDENCE_STEP: Record<'confirming' | 'disconfirming' | 'neutral', Record<'weak' | 'moderate' | 'strong', number>> = {
+  confirming:    { weak: 0.05, moderate: 0.10, strong: 0.15 },
+  disconfirming: { weak: -0.05, moderate: -0.10, strong: -0.15 },
+  neutral:       { weak: 0.0, moderate: 0.0, strong: 0.0 },
+}
+
+export function boundedConfidenceDelta(
+  direction: 'confirming' | 'disconfirming' | 'neutral',
+  magnitude: 'weak' | 'moderate' | 'strong',
+): number {
+  return CONFIDENCE_STEP[direction][magnitude]
+}
+
+function clampConfidence(c: number): number {
+  return Math.max(0, Math.min(1, c))
 }
 
 /**
- * TODO (Prompt 3): SessionReviewAgent
- * Real behavior: after each workout, reads session_observations, compares
- * to existing insights, updates confidence, generates new drafts if warranted.
+ * DiagnosticAnalysisAgent → reframed as the Probe (the new "first read").
+ *
+ * In the Confidence-Driven Read, the wall-of-7 diagnostic is retired: the first
+ * read comes from the athlete's obstacle text via the agentic Probe. This calls
+ * the `probe` task (server-side model) and returns a single early, falsifiable
+ * hypothesis. If the model fails, it falls back to a deterministic keyword read
+ * so the app always produces a (low-confidence) hypothesis.
+ *
+ * agent proposes → code disposes: the agent's confidence is clamped to [0,1] and
+ * floored low here; nothing downstream trusts it as certainty.
+ */
+export interface ProbeOutcome {
+  source: 'agent' | 'fallback'
+  followupQuestion: string | null
+  hypothesis: {
+    claim: string
+    category: string
+    confidence: number
+    rationale: string
+  }
+}
+
+const OBSTACLE_CATEGORY_HINTS: Array<{ test: RegExp; category: string }> = [
+  { test: /knee|ankle|squat|lunge|calf|shin|quad|hip(?!\s*flex)/i, category: 'Lower Chain' },
+  { test: /shoulder|elbow|wrist|press|overhead|rotator|pec|bench/i, category: 'Upper Chain' },
+  { test: /hamstring|glute|deadlift|hinge|rdl|posterior|sprint|run/i, category: 'Posterior Chain' },
+  { test: /back|spine|core|ab|lumbar|brace|rotation/i, category: 'Core' },
+  { test: /tired|sleep|energy|recover|stress|burn|fatigue/i, category: 'Recovery' },
+  { test: /weak|strong|stall|plateau|stuck|1rm|max/i, category: 'Strength' },
+]
+
+function deterministicProbe(obstacle: string): ProbeOutcome {
+  const category =
+    OBSTACLE_CATEGORY_HINTS.find((h) => h.test.test(obstacle))?.category ?? 'Lower Chain'
+  return {
+    source: 'fallback',
+    followupQuestion: 'When it shows up, is it a sharp limit you can point to, or a slow fade across the session?',
+    hypothesis: {
+      claim: `Most likely a ${category.toLowerCase()} limiter — we'll sharpen this as you train.`,
+      category,
+      confidence: 0.2, // one line of text, no screening yet: deliberately low
+      rationale: 'Inferred from the language of your obstacle alone; unverified.',
+    },
+  }
+}
+
+export async function runDiagnosticAnalysisAgent(
+  obstacle: string,
+  followupAnswer?: string,
+): Promise<ProbeOutcome> {
+  const result = await callProbe({ obstacle, followup_answer: followupAnswer })
+
+  if (result.ok) {
+    const h = result.data.hypothesis
+    return {
+      source: 'agent',
+      followupQuestion: result.data.followup_question,
+      hypothesis: {
+        claim: h.claim,
+        category: h.category,
+        confidence: clampConfidence(h.confidence), // code clamps; never trust raw
+        rationale: h.rationale,
+      },
+    }
+  }
+
+  // Model failed / rate-limited / offline → deterministic floor.
+  return deterministicProbe(obstacle)
+}
+
+/**
+ * SessionReviewAgent → classify one observation, then DISPOSE deterministically.
+ *
+ * The agent classifies (direction + magnitude + which insight + warm claim). The
+ * confidence change and status transition are computed HERE with a bounded step.
+ * On model failure we fall back to the existing rule-based resolveObservationAction.
  */
 export async function runSessionReviewAgent(
-  _athleteId: string,
-  _workoutId: string,
-): Promise<void> {
-  // no-op until Prompt 3
+  athleteId: string,
+  workoutId: string,
+  observationLabel: string,
+  signalText: string,
+  severity: number,
+  existingInsights: InsightRow[],
+): Promise<ObservationAction> {
+  const review = await callSessionReview({
+    observation: { label: observationLabel, signal: signalText, severity },
+    insights: existingInsights.map((i) => ({
+      id: i.id,
+      category: i.category,
+      claim: i.claim,
+      confidence: i.confidence,
+      status: i.status,
+    })),
+  })
+
+  if (!review.ok) {
+    // Deterministic fallback floor.
+    return resolveObservationAction(
+      athleteId,
+      workoutId,
+      observationLabel,
+      signalText,
+      severity,
+      existingInsights,
+    )
+  }
+
+  const c = review.data
+  const evidenceEntry = {
+    workout_id: workoutId,
+    observation: observationLabel,
+    signal: signalText,
+    severity,
+    direction: c.direction,
+    magnitude: c.magnitude,
+    rationale: c.rationale,
+    logged_at: new Date().toISOString(),
+  }
+
+  // The agent named a target insight → update it with a bounded delta.
+  const target = c.target_insight_id
+    ? existingInsights.find(
+        (i) => i.id === c.target_insight_id && i.status !== 'resolved' && i.status !== 'disproved',
+      ) ?? null
+    : null
+
+  if (target) {
+    const delta = boundedConfidenceDelta(c.direction, c.magnitude)
+    const updatedConfidence = clampConfidence(target.confidence + delta)
+    const updatedEvidence = [
+      ...(Array.isArray(target.evidence) ? target.evidence : []),
+      evidenceEntry,
+    ]
+    return {
+      insightCategory: c.category,
+      action: 'update',
+      existingInsightId: target.id,
+      updatedConfidence,
+      updatedEvidence,
+      // status only advances on rising confidence; disconfirming never advances.
+      updatedStatus: delta > 0 ? advanceStatus(target.status, updatedConfidence) : null,
+      newInsight: null,
+    }
+  }
+
+  // No target → a new low-confidence hypothesis, claim in the agent's voice.
+  return {
+    insightCategory: c.category,
+    action: 'create',
+    existingInsightId: null,
+    updatedConfidence: null,
+    updatedEvidence: null,
+    updatedStatus: null,
+    newInsight: {
+      athlete_id: athleteId,
+      source_id: workoutId,
+      claim: c.claim,
+      category: c.category,
+      priority: 'P3' as Priority,
+      confidence: clampConfidence(0.2 + boundedConfidenceDelta(c.direction, c.magnitude)),
+      status: 'hypothesis',
+      evidence: [evidenceEntry],
+      source: 'session_observation',
+      program_impact: null,
+    },
+  }
 }
 
 /**
@@ -640,6 +810,81 @@ export function summarizeInsightMovement(
   }
 
   return { movements, movedCount, p1Progressing, headline }
+}
+
+// ============================================================================
+// Ambient Work — life-integration movements tied to weak-link categories
+// Lifted from Phil's Health life-integration menu. Every other app says "do
+// these at the gym"; Zeroed meets the athlete in their life. Shown on the
+// Zeroed In screen (Act 5), mapped to the P1/P2 insight categories.
+// TODO Prompt 3: the ProgramDesignAgent personalises these per athlete.
+// ============================================================================
+
+export interface AmbientItem {
+  label: string
+  when: string
+  priority: Priority   // inherited from the insight whose category placed it
+}
+
+const AMBIENT_WORK_BY_CATEGORY: Record<string, Array<{ label: string; when: string }>> = {
+  'Lower Chain': [
+    { label: 'Assisted deep squat hold', when: 'Grab a doorframe or pole — heels down, 30–60s' },
+    { label: '90/90 floor sitting',       when: 'Meetings, TV, reading — swap the chair' },
+    { label: 'Ankle mobility sequence',   when: 'Any wall, morning or pre-session' },
+  ],
+  'Upper Chain': [
+    { label: 'Scapular wall hold',           when: 'Waiting for coffee, the elevator, anywhere' },
+    { label: 'Doorframe pec stretch',        when: 'Every doorway you walk through' },
+    { label: 'Chin tuck + thoracic extension', when: 'Over the back of your desk chair' },
+  ],
+  'Core': [
+    { label: '90/90 floor sitting', when: 'Meetings, TV, reading — swap the chair' },
+    { label: 'Single-arm carry',    when: 'Groceries, a bag — intentionally one-sided' },
+    { label: 'Dead bug, slow',      when: 'Floor time at home — 5 reps a side' },
+  ],
+  'Posterior Chain': [
+    { label: 'Assisted deep squat hold', when: 'Doorframe or pole — heels down, 30–60s' },
+    { label: 'Standing hamstring float', when: 'Heel on a low step — soft knee, hinge in' },
+    { label: 'Half-kneel hip flexor',    when: 'By the couch — 45s a side' },
+  ],
+  'Recovery': [
+    { label: 'Box breathing',  when: '4 in · 4 hold · 6 out — a few rounds' },
+    { label: 'Evening walk',   when: '10 minutes after dinner, no phone' },
+  ],
+}
+
+const AMBIENT_FALLBACK = AMBIENT_WORK_BY_CATEGORY['Lower Chain']
+
+/**
+ * Picks 2–3 ambient items tied to the athlete's top weak links (P1/P2). Walks
+ * insights in priority order, pulling each category's menu and stamping the
+ * item with that insight's priority, deduped by label, capped at 3.
+ */
+export function getAmbientWork(insights: InsightRow[]): AmbientItem[] {
+  const ranked = [...insights].sort(
+    (a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority],
+  )
+
+  const items: AmbientItem[] = []
+  const seen = new Set<string>()
+
+  for (const insight of ranked) {
+    if (items.length >= 3) break
+    const menu = AMBIENT_WORK_BY_CATEGORY[insight.category] ?? AMBIENT_FALLBACK
+    for (const entry of menu) {
+      if (items.length >= 3) break
+      if (seen.has(entry.label)) continue
+      seen.add(entry.label)
+      items.push({ ...entry, priority: insight.priority })
+    }
+  }
+
+  // No insights at all — give a sane starting pair so the block never renders empty.
+  if (items.length === 0) {
+    return AMBIENT_FALLBACK.slice(0, 2).map((e) => ({ ...e, priority: 'P1' as Priority }))
+  }
+
+  return items
 }
 
 // ============================================================================

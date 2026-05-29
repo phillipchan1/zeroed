@@ -1,15 +1,15 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
-import { generateInitialProgram } from '../../engine'
+import { generateInitialProgram, getAmbientWork } from '../../engine'
 import {
-  Logo, Button, InsightCard, Spinner, SectionHeader, TypeOn, BracketFrame,
+  Logo, Button, InsightCard, Spinner, SectionHeader, TypeOn, BracketFrame, StatusDot,
 } from '../../components/ui'
 import type { InsightRow } from '../../types/database'
 
 interface ZeroedInProps {
   athleteId: string
-  onComplete: () => void
+  /** Advance to first_session_pending and head into the daily loop. */
+  onStartSession: () => void
 }
 
 function weeksBetween(startStr: string, endStr: string): number {
@@ -21,8 +21,7 @@ function weeksBetween(startStr: string, endStr: string): number {
 
 type BuildPhase = 'loading' | 'building' | 'ready' | 'error'
 
-export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
-  const navigate = useNavigate()
+export function ZeroedInScreen({ athleteId, onStartSession }: ZeroedInProps) {
   const [buildPhase, setBuildPhase] = useState<BuildPhase>('loading')
   const [insights, setInsights]     = useState<InsightRow[]>([])
   const [p1Category, setP1Category] = useState<string>('Lower Chain')
@@ -179,9 +178,8 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
     setBuildPhase('ready')
   }
 
-  async function handleStart() {
-    onComplete()
-    navigate('/app/today')
+  function handleStart() {
+    onStartSession()
   }
 
   // ---- Render states -------------------------------------------------------
@@ -233,6 +231,10 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
 
   const weakLinkLabel = `${insights.length} weak link${insights.length === 1 ? '' : 's'}`
 
+  // Ambient Work — life-integration moves tied to the P1/P2 weak links. The moat:
+  // every other app says "do these at the gym"; Zeroed meets you in your life.
+  const ambientItems = getAmbientWork(insights)
+
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
       {/* Header */}
@@ -272,6 +274,20 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
           <p className="hero-characterization" style={{ marginTop: 16 }}>
             <TypeOn text={characterization} delay={40} />
           </p>
+
+          {/* Evolution promise — sets expectation that the read sharpens over time */}
+          <p
+            className="text-xs text-dim"
+            style={{
+              fontFamily: 'var(--font-mono)',
+              letterSpacing: '0.08em',
+              textTransform: 'uppercase',
+              marginTop: 16,
+              lineHeight: 1.6,
+            }}
+          >
+            This is your starting read. The system sharpens with every session.
+          </p>
         </div>
 
         {/* Phase assignment — telemetric, the one bracketed surface */}
@@ -304,6 +320,26 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
             <div style={{ marginTop: 12 }}>
               {insights.map((ins) => (
                 <InsightCard key={ins.id} insight={ins} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Ambient Work — tied to the weak links, lived between sessions */}
+        {ambientItems.length > 0 && (
+          <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 32 }}>
+            <SectionHeader>AMBIENT WORK — tied to your weak links</SectionHeader>
+            <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {ambientItems.map((item) => (
+                <div key={item.label} style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                  <span style={{ marginTop: 5 }}>
+                    <StatusDot status={item.priority === 'P1' ? 'hypothesis' : 'likely'} />
+                  </span>
+                  <div>
+                    <p className="num text-xs" style={{ letterSpacing: '0.04em' }}>{item.label}</p>
+                    <p className="text-xs text-dim" style={{ marginTop: 2, lineHeight: 1.5 }}>{item.when}</p>
+                  </div>
+                </div>
               ))}
             </div>
           </div>

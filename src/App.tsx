@@ -4,11 +4,11 @@ import { useAppState } from './hooks/useAppState'
 import { Spinner } from './components/ui'
 import { Nav } from './components/layout/Nav'
 import { DebugReset } from './components/DebugReset'
+import { ONBOARDING_FUNNEL_STEPS } from './types/database'
 
-// Funnel
-import { AuthScreen }       from './screens/funnel/AuthScreen'
-import { DiagnosticIntake } from './screens/funnel/DiagnosticIntake'
-import { ZeroedInScreen }   from './screens/funnel/ZeroedInScreen'
+// Onboarding (six-act "First Read")
+import { OnboardingRouter }             from './screens/onboarding/OnboardingRouter'
+import { PostSessionRevelationScreen }  from './screens/onboarding/PostSessionRevelationScreen'
 
 // Loop
 import { TodayScreen }   from './screens/loop/TodayScreen'
@@ -52,74 +52,35 @@ function LoopLayout({
 
 function AppRoutes() {
   const { user, loading: authLoading } = useAuth()
-  const {
-    athlete,
-    hasDiagnostic,
-    hasProfile,
-    todayRoutine,
-    loading: stateLoading,
-    refresh,
-  } = useAppState(user?.id)
+  const { athlete, todayRoutine, loading: stateLoading, refresh } = useAppState(user?.id)
 
   if (authLoading || stateLoading) return <Splash />
 
-  // Not signed in → auth screen
-  if (!user) {
-    return (
-      <Routes>
-        <Route path="*" element={<AuthScreen />} />
-      </Routes>
-    )
+  // Onboarding owns the athlete until they finish the first session. That's
+  // every state before auth, the brief no-athlete beat after sign-in, and every
+  // funnel step (hook → zeroed_in). Everything else is the daily loop.
+  const inOnboarding =
+    !user || !athlete || ONBOARDING_FUNNEL_STEPS.has(athlete.onboarding_step)
+
+  if (inOnboarding) {
+    return <OnboardingRouter user={user} athlete={athlete} refresh={refresh} />
   }
 
-  // Signed in but no diagnostic → intake funnel
-  if (!hasDiagnostic) {
-    return (
-      <Routes>
-        <Route
-          path="*"
-          element={
-            <DiagnosticIntake
-              athleteId={athlete?.id ?? null}
-              userId={user.id}
-              onComplete={refresh}
-            />
-          }
-        />
-      </Routes>
-    )
-  }
-
-  // Has diagnostic but zeroed-in not cleared → ZeroedIn screen
-  if (!hasProfile) {
-    return (
-      <Routes>
-        <Route
-          path="/zeroed-in"
-          element={
-            athlete ? (
-              <ZeroedInScreen athleteId={athlete.id} onComplete={refresh} />
-            ) : (
-              <Splash />
-            )
-          }
-        />
-        <Route path="*" element={<Navigate to="/zeroed-in" replace />} />
-      </Routes>
-    )
-  }
-
-  // Fully unlocked loop
-  const athleteId   = athlete!.id
-  const athleteName = athlete?.name ?? null
+  // ---- Daily loop (first_session_pending / first_session_complete / complete)
+  const athleteId      = athlete!.id
+  const athleteName    = athlete!.name ?? null
+  const onboardingStep = athlete!.onboarding_step
 
   return (
     <Routes>
       {/* Redirect root to today */}
       <Route path="/" element={<Navigate to="/app/today" replace />} />
 
-      {/* Redirect funnel routes back to loop */}
-      <Route path="/zeroed-in" element={<Navigate to="/app/today" replace />} />
+      {/* Act 6 — the post-session revelation (Screen 21) */}
+      <Route
+        path="/onboarding/revelation"
+        element={<PostSessionRevelationScreen athleteId={athleteId} onComplete={refresh} />}
+      />
 
       {/* Loop with persistent nav */}
       <Route
@@ -134,13 +95,13 @@ function AppRoutes() {
         }
       >
         <Route index element={<Navigate to="today" replace />} />
-        <Route path="today"   element={<TodayScreen   athleteId={athleteId} todayRoutine={todayRoutine} />} />
+        <Route path="today"   element={<TodayScreen   athleteId={athleteId} todayRoutine={todayRoutine} onboardingStep={onboardingStep} />} />
         <Route path="profile" element={<ProfileScreen athleteId={athleteId} athleteName={athleteName} />} />
         <Route path="program" element={<ProgramScreen />} />
         <Route path="coach"   element={<CoachScreen />} />
       </Route>
 
-      {/* Workout — full-screen, no nav (rendered outside LoopLayout) */}
+      {/* Workout — full-screen, no nav */}
       <Route path="/app/workout/:routineId" element={<WorkoutScreen />} />
 
       {/* Catch-all */}

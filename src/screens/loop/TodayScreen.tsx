@@ -6,11 +6,12 @@ import {
   TelemetryStrip, TickingNumber, BracketFrame,
 } from '../../components/ui'
 import { summarizeInsightMovement, type InsightMovementSummary } from '../../engine'
-import type { RoutineRow, InsightRow } from '../../types/database'
+import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
 
 interface TodayScreenProps {
   athleteId: string
   todayRoutine: RoutineRow | null
+  onboardingStep?: OnboardingStep
 }
 
 interface WeekDayStatus {
@@ -41,8 +42,9 @@ function isSameDay(a: Date, b: Date) {
   )
 }
 
-export function TodayScreen({ athleteId, todayRoutine }: TodayScreenProps) {
+export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
+  const isFirstVisit = onboardingStep === 'first_session_pending'
   const [weekDays, setWeekDays] = useState<WeekDayStatus[]>([])
   const [loading, setLoading]   = useState(true)
   const [nonNegotiables, setNonNegotiables] = useState<string[]>([])
@@ -174,6 +176,22 @@ export function TodayScreen({ athleteId, todayRoutine }: TodayScreenProps) {
 
   return (
     <div className="screen with-nav">
+      {/* First-arrival orientation — one warm line, first visit only (Act 6) */}
+      {isFirstVisit && (
+        <p
+          className="fade-rise"
+          style={{
+            padding: '12px 16px',
+            fontSize: 14,
+            color: 'var(--text)',
+            lineHeight: 1.5,
+            borderBottom: '1px solid var(--line)',
+          }}
+        >
+          This is Today. Open it before each session — it tells you what to do and tracks what shifts.
+        </p>
+      )}
+
       {/* Telemetry strip — always-on system state (presence dot, one per screen) */}
       {!loading && (
         <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />

@@ -8,7 +8,7 @@ import {
 } from '../../components/ui'
 import type {
   RoutineRow, ExerciseTemplate, SetLog, InsightRow,
-  OBSERVATION_CATEGORIES, SessionObservationInsert,
+  OBSERVATION_CATEGORIES, SessionObservationInsert, OnboardingStep,
 } from '../../types/database'
 
 type ObsCat = typeof OBSERVATION_CATEGORIES[number]
@@ -185,6 +185,8 @@ export function WorkoutScreen() {
 
   const [routine, setRoutine]     = useState<RoutineRow | null>(null)
   const [athleteId, setAthleteId] = useState<string | null>(null)
+  const [athleteName, setAthleteName] = useState<string | null>(null)
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep | null>(null)
   const [loading, setLoading]     = useState(true)
   const [elapsed, setElapsed]     = useState(0)
   const [saving, setSaving]       = useState(false)
@@ -225,9 +227,21 @@ export function WorkoutScreen() {
     if (data) {
       const r = data as RoutineRow
       setRoutine(r)
-      // Grab athlete_id for the observation → insight writeback
+      // Grab athlete_id for the observation → insight writeback, plus the
+      // athlete's name + onboarding step (drives the Act 6 first-win redirect).
       const programData = (data as unknown as { program: { athlete_id: string } | null }).program
-      if (programData) setAthleteId(programData.athlete_id)
+      if (programData) {
+        setAthleteId(programData.athlete_id)
+        const { data: ath } = await supabase
+          .from('athlete')
+          .select('name, onboarding_step')
+          .eq('id', programData.athlete_id)
+          .maybeSingle()
+        if (ath) {
+          setAthleteName((ath as { name: string | null }).name ?? null)
+          setOnboardingStep((ath as { onboarding_step: OnboardingStep }).onboarding_step)
+        }
+      }
       // Initialise set logs
       const exs = r.exercises as ExerciseTemplate[]
       const initial: Record<number, SetLog[]> = {}
@@ -342,7 +356,12 @@ export function WorkoutScreen() {
     }
     await supabase.from('session_observation').insert(obs)
 
-    // 4. Execute update or create on the insight table
+    // 4. Execute update or create on the insight table. Capture the moved
+    //    insight + its confidence shift for the post-session revelation.
+    let movedInsightId: string | null = null
+    let previousConfidence: number | null = null
+    let newConfidence: number | null = null
+
     if (action.action === 'update' && action.existingInsightId) {
       const updatePayload: Record<string, unknown> = {
         confidence: action.updatedConfidence,
@@ -356,19 +375,63 @@ export function WorkoutScreen() {
         .from('insight')
         .update(updatePayload)
         .eq('id', action.existingInsightId)
+
+      const prior = (existingInsights ?? []).find((i) => i.id === action.existingInsightId)
+      movedInsightId = action.existingInsightId
+      previousConfidence = prior?.confidence ?? null
+      newConfidence = action.updatedConfidence
     } else if (action.action === 'create' && action.newInsight) {
-      await supabase.from('insight').insert(action.newInsight)
+      const { data: created } = await supabase
+        .from('insight')
+        .insert(action.newInsight)
+        .select()
+        .single()
+      if (created) {
+        movedInsightId = (created as InsightRow).id
+        newConfidence = (created as InsightRow).confidence
+      }
     }
 
     setSavingObs(false)
-    // 5. Navigate to Profile with the insight category so the pulse targets the right card
+
+    // 5. First session ever → the post-session revelation (Act 6, Screen 21).
+    //    Every session after → the existing profile pulse.
+    if (onboardingStep === 'first_session_pending') {
+      await supabase
+        .from('athlete')
+        .update({ onboarding_step: 'first_session_complete' })
+        .eq('id', athleteId)
+
+      navigate('/onboarding/revelation', {
+        replace: true,
+        state: {
+          movedInsightId,
+          category: action.insightCategory,
+          previousConfidence,
+          newConfidence,
+          isNew: action.action === 'create',
+          durationMins: Math.ceil(elapsed / 60),
+          setsLogged: Object.values(setLogs).flat().filter((s) => s.done).length,
+          name: athleteName,
+        },
+      })
+      return
+    }
+
     navigate('/app/profile', {
       state: { pulsedCategory: action.insightCategory },
       replace: true,
     })
   }
 
-  function handleObsSkip() {
+  async function handleObsSkip() {
+    // First-session skip still completes onboarding — there's just no revelation.
+    if (onboardingStep === 'first_session_pending' && athleteId) {
+      await supabase
+        .from('athlete')
+        .update({ onboarding_step: 'complete' })
+        .eq('id', athleteId)
+    }
     navigate('/app/today', { replace: true })
   }
 
