@@ -1,13 +1,13 @@
 import { useEffect, useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ChevronLeft, Check, Plus } from 'lucide-react'
+import { ChevronLeft, Check, Plus, Info } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { resolveObservationAction } from '../../engine'
 import {
-  Button, Spinner,
+  Button, Spinner, ExerciseInsightSheet,
 } from '../../components/ui'
 import type {
-  RoutineRow, ExerciseTemplate, SetLog,
+  RoutineRow, ExerciseTemplate, SetLog, InsightRow,
   OBSERVATION_CATEGORIES, SessionObservationInsert,
 } from '../../types/database'
 
@@ -192,6 +192,10 @@ export function WorkoutScreen() {
   const [savingObs, setSavingObs] = useState(false)
   const [workoutId, setWorkoutId] = useState<string | null>(null)
 
+  // insight_id → insight, for the per-exercise "why" surface (Shift 5)
+  const [insightMap, setInsightMap] = useState<Record<string, InsightRow>>({})
+  const [openInsight, setOpenInsight] = useState<InsightRow | null>(null)
+
   // Set logs: exerciseIndex → SetLog[]
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
 
@@ -225,11 +229,24 @@ export function WorkoutScreen() {
       const programData = (data as unknown as { program: { athlete_id: string } | null }).program
       if (programData) setAthleteId(programData.athlete_id)
       // Initialise set logs
+      const exs = r.exercises as ExerciseTemplate[]
       const initial: Record<number, SetLog[]> = {}
-      ;(r.exercises as ExerciseTemplate[]).forEach((ex, i) => {
+      exs.forEach((ex, i) => {
         initial[i] = Array.from({ length: ex.sets }, (_, j) => newSetLog(j + 1))
       })
       setSetLogs(initial)
+
+      // Load the insights that placed these exercises, for the "why" surface
+      const insightIds = [...new Set(exs.map((ex) => ex.insight_id).filter(Boolean))] as string[]
+      if (insightIds.length > 0) {
+        const { data: insightRows } = await supabase
+          .from('insight')
+          .select('*')
+          .in('id', insightIds)
+        const map: Record<string, InsightRow> = {}
+        ;(insightRows ?? []).forEach((ins) => { map[(ins as InsightRow).id] = ins as InsightRow })
+        setInsightMap(map)
+      }
     }
     setLoading(false)
   }
@@ -327,12 +344,17 @@ export function WorkoutScreen() {
 
     // 4. Execute update or create on the insight table
     if (action.action === 'update' && action.existingInsightId) {
+      const updatePayload: Record<string, unknown> = {
+        confidence: action.updatedConfidence,
+        evidence:   action.updatedEvidence,
+      }
+      // Advance status if the engine crossed a confidence threshold.
+      // (updated_at / prev_status are maintained by the DB trigger.)
+      if (action.updatedStatus) updatePayload.status = action.updatedStatus
+
       await supabase
         .from('insight')
-        .update({
-          confidence: action.updatedConfidence,
-          evidence:   action.updatedEvidence,
-        })
+        .update(updatePayload)
         .eq('id', action.existingInsightId)
     } else if (action.action === 'create' && action.newInsight) {
       await supabase.from('insight').insert(action.newInsight)
@@ -453,7 +475,19 @@ export function WorkoutScreen() {
             >
               {/* Exercise header */}
               <div style={{ marginBottom: 10 }}>
-                <p style={{ fontWeight: 600, fontSize: 15 }}>{ex.name}</p>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <p style={{ fontWeight: 600, fontSize: 15 }}>{ex.name}</p>
+                  {ex.insight_id && insightMap[ex.insight_id] && (
+                    <button
+                      type="button"
+                      className="exercise-info-btn"
+                      aria-label="Why this exercise"
+                      onClick={() => setOpenInsight(insightMap[ex.insight_id!])}
+                    >
+                      <Info size={12} strokeWidth={2} />
+                    </button>
+                  )}
+                </div>
                 {ex.cue && (
                   <p className="text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.5 }}>
                     {ex.cue}
@@ -537,6 +571,14 @@ export function WorkoutScreen() {
           onSave={handleObsSave}
           onSkip={handleObsSkip}
           saving={savingObs}
+        />
+      )}
+
+      {/* Exercise "why" sheet (Shift 5) */}
+      {openInsight && (
+        <ExerciseInsightSheet
+          insight={openInsight}
+          onClose={() => setOpenInsight(null)}
         />
       )}
     </div>

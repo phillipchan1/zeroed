@@ -2,8 +2,9 @@ import { useEffect, useState, useCallback } from 'react'
 import { useLocation } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import {
-  InsightCard, SectionHeader, Skeleton, Divider,
+  InsightCard, SectionHeader, Skeleton, Divider, StatusCounts,
 } from '../../components/ui'
+import { countInsightsByStatus } from '../../engine'
 import type { InsightRow, AthleteProfileRow, ProgramRow, PhaseRow } from '../../types/database'
 
 interface ProfileScreenProps {
@@ -27,12 +28,12 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     setLoading(true)
 
     const [insightRes, profileRes, programRes] = await Promise.all([
+      // Load ALL statuses so the header can count by status (incl. resolved);
+      // the weak-link stack filters to active ones client-side.
       supabase
         .from('insight')
         .select('*')
         .eq('athlete_id', athleteId)
-        .neq('status', 'resolved')
-        .neq('status', 'disproved')
         .order('priority'),
       supabase
         .from('athlete_profile')
@@ -84,6 +85,12 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
 
   const retestDays = retestDaysRemaining()
 
+  // All statuses drive the header counts; the stack shows active weak links only.
+  const statusCounts   = countInsightsByStatus(insights)
+  const activeInsights = insights.filter(
+    (i) => i.status !== 'resolved' && i.status !== 'disproved',
+  )
+
   return (
     <div className="screen with-nav">
       <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
@@ -101,6 +108,11 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
             <h2 style={{ marginTop: 4, fontSize: 22, fontWeight: 600 }}>
               {athleteName ?? 'Profile'}
             </h2>
+            {!loading && statusCounts.length > 0 && (
+              <div style={{ marginTop: 10 }}>
+                <StatusCounts counts={statusCounts} />
+              </div>
+            )}
           </div>
           <button
             className="btn btn--ghost text-xs"
@@ -180,8 +192,8 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
                   <Skeleton height={11} width="70%" />
                 </div>
               ))
-            ) : insights.length > 0 ? (
-              insights.map((ins) => (
+            ) : activeInsights.length > 0 ? (
+              activeInsights.map((ins) => (
                 <InsightCard
                   key={ins.id}
                   insight={ins}

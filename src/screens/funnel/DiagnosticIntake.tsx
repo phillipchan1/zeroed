@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react'
+import { useState, useCallback, useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { generateInsightsFromDiagnostic } from '../../engine'
@@ -34,17 +34,74 @@ interface SubjectiveData {
   pain: string
 }
 
-type Step = 'movement' | 'strength' | 'profile' | 'subjective' | 'saving'
+type Step = 'profile' | 'movement' | 'strength' | 'subjective' | 'saving'
 
-const STEP_INDICES: Record<Step, number> = {
-  movement: 0,
-  strength: 1,
-  profile: 2,
-  subjective: 3,
-  saving: 3,
+// Goal-first ordering: we ask what the athlete wants BEFORE we screen them,
+// so the diagnostic reads as the answer to a question they just asked.
+// The active step list is built dynamically from the battery plan (below),
+// so step numbering and the progress indicator adapt per athlete.
+
+// ---- Goal → battery mapping ------------------------------------------------
+// A good coach doesn't run the same combine on a marathoner and a powerlifter.
+// The movement screen is the universal spine (everyone benefits from knowing
+// how they move); strength baselines are switched on only when the goal needs
+// them. For pain-led rehab and pure-endurance goals a 1RM ask is irrelevant
+// (and intimidating), so we skip it and let the movement screen carry the load.
+
+type GoalType = 'strength' | 'sport' | 'rehab' | 'endurance' | 'general'
+
+interface BatteryPlan {
+  goalType: GoalType
+  includeStrength: boolean
 }
 
-const TOTAL_STEPS = 4
+function planBattery(goals: string, sport: string): BatteryPlan {
+  const text = `${goals} ${sport}`.toLowerCase()
+  const has = (re: RegExp) => re.test(text)
+
+  const isStrength  = has(/strength|strong|muscle|hypertroph|1rm|lift|powerlift|olympic|bench|squat|deadlift|press|mass|bigger|gain|tone|build/)
+  const isSport     = has(/rugby|football|soccer|basketball|tennis|sprint|jump|athletic|sport|competit|\bgame\b|season|field|court|combine|hockey|baseball|volleyball|mma|boxing|climb/)
+  const isRehab     = has(/pain|injur|rehab|recover|ache|hurt|tight|prehab|niggle|impinge/)
+  const isEndurance = has(/\brun|marathon|\b5k\b|\b10k\b|\bhalf\b|ultra|endurance|cardio|aerobic|cycling|cycle|triathlon|swim|stamina/)
+
+  // Precedence: an explicit strength/sport intent wins — those athletes want
+  // (and expect) load testing even if they also mention a niggle.
+  let goalType: GoalType = 'general'
+  if (isStrength) goalType = 'strength'
+  else if (isSport) goalType = 'sport'
+  else if (isRehab) goalType = 'rehab'
+  else if (isEndurance) goalType = 'endurance'
+
+  const includeStrength = !(goalType === 'rehab' || goalType === 'endurance')
+
+  return { goalType, includeStrength }
+}
+
+// Plain-language "why" + how-to for each movement pattern. The athlete is
+// self-scoring, so they need to know what each test reveals and how to grade it.
+const PATTERN_GUIDE: Record<string, string> = {
+  deep_squat:        'Whole-body mobility — ankles, hips, and upper back working together. Limits how deep and upright you can load a squat.',
+  hurdle_step:       'Single-leg control and hip stability. Where most landing and cutting issues show up.',
+  inline_lunge:      'Stability in a split stance — balance, hip flexibility, and trunk control under a stagger.',
+  shoulder_mobility: 'Overhead range and shoulder freedom. Gates pressing, pulling, and anything over your head.',
+  aslr:              'Hamstring and posterior chain length, plus core control. Underpins hinging and sprinting.',
+  trunk_stability:   'Can your core stay rigid while your limbs move? Protects the spine when you press and push.',
+  rotary_stability:  'Coordinated core control across the body — the base for rotation, throwing, and change of direction.',
+}
+
+// Guided "test me" decomposition. When an athlete can't honestly self-grade a
+// pattern, we hand them the protocol and a set of observable yes/no checks, then
+// compute the 0–3 score deterministically — facts they can see, not a grade they
+// have to judge. (Prompt 3: replace with video/vision-based scoring.)
+const PATTERN_TEST: Record<string, { setup: string; clean: string }> = {
+  deep_squat:        { setup: 'Feet shoulder-width, arms straight overhead. Squat as deep as you can.',                                       clean: 'Heels stay flat, knees track over toes, torso stays upright, and hips drop below the knees.' },
+  hurdle_step:       { setup: 'Stand tall. Step one foot up and over an imaginary knee-height bar, tap the heel down, return. Both sides.',   clean: 'Hips stay level, no wobble, the standing leg stays stable, and both sides feel equal.' },
+  inline_lunge:      { setup: 'Step into a long split stance. Lower the back knee toward the floor behind the front heel. Both sides.',        clean: 'Torso stays upright, front heel stays down, no loss of balance, and both sides are equal.' },
+  shoulder_mobility: { setup: 'Reach one hand over the shoulder and the other up the back, try to touch fingertips. Swap sides.',             clean: 'Fingertips touch (or nearly) on both sides without shrugging or arching the back.' },
+  aslr:              { setup: 'Lie on your back. Keep one leg flat on the floor and raise the other straight up as high as it goes.',         clean: 'The raised leg passes the mid-thigh of the down leg while both knees stay straight.' },
+  trunk_stability:   { setup: 'Push-up position with hands at forehead level. Press up as one rigid unit.',                                    clean: 'The body rises as one plank — no sag in the hips, no lag in the lower back.' },
+  rotary_stability:  { setup: 'On hands and knees, extend the same-side arm and leg, then draw elbow to knee under the body. Both sides.',     clean: 'You stay balanced and level through the whole motion, on both sides.' },
+}
 
 // ---- Helper: micro-reveal --------------------------------------------------
 
@@ -59,27 +116,99 @@ function InsightReveal({ insight, index }: { insight: InsightRow; index: number 
 
 // ---- Step sub-components ---------------------------------------------------
 
+// Guided self-test: walks the athlete through the protocol and resolves a 0–3
+// score from observable yes/no answers instead of asking them to grade themselves.
+function GuidedMovementTest({
+  patternKey,
+  onResolve,
+}: {
+  patternKey: string
+  onResolve: (score: number) => void
+}) {
+  const test = PATTERN_TEST[patternKey]
+  const [stage, setStage] = useState<'pain' | 'complete' | 'clean'>('pain')
+  if (!test) return null
+
+  const questions = {
+    pain: {
+      prompt: 'Any pain during the movement?',
+      a: { label: 'No pain',        onClick: () => setStage('complete') },
+      b: { label: 'Yes — it hurt',  onClick: () => onResolve(0) },
+    },
+    complete: {
+      prompt: 'Could you complete the movement at all?',
+      a: { label: 'Yes',            onClick: () => setStage('clean') },
+      b: { label: "No — couldn't",  onClick: () => onResolve(1) },
+    },
+    clean: {
+      prompt: test.clean,
+      a: { label: 'All true',       onClick: () => onResolve(3) },
+      b: { label: 'Not quite',      onClick: () => onResolve(2) },
+    },
+  } as const
+
+  const q = questions[stage]
+
+  return (
+    <div style={{ marginTop: 8, padding: '12px 14px', background: 'var(--ground)', border: '1px solid var(--line)', borderRadius: 8 }}>
+      <p className="text-xs text-dim" style={{ lineHeight: 1.5, marginBottom: 10 }}>{test.setup}</p>
+      <p style={{ fontSize: 13, marginBottom: 10, lineHeight: 1.5 }}>{q.prompt}</p>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <Button variant="outline" onClick={q.a.onClick} style={{ flex: 1 }}>{q.a.label}</Button>
+        <Button variant="ghost"   onClick={q.b.onClick} style={{ flex: 1 }}>{q.b.label}</Button>
+      </div>
+    </div>
+  )
+}
+
 function MovementStep({
+  stepNo,
   scores,
   onScore,
   revealedInsights,
   onNext,
+  onBack,
 }: {
+  stepNo: number
   scores: Record<string, number | null>
   onScore: (key: string, score: number) => void
   revealedInsights: InsightRow[]
   onNext: () => void
+  onBack: () => void
 }) {
   const allScored = MOVEMENT_PATTERNS.every((p) => scores[p.key] !== null)
+  const [guidedKey, setGuidedKey] = useState<string | null>(null)
 
   return (
     <div>
-      <SectionHeader>01 // MOVEMENT SCREEN</SectionHeader>
-      <p className="text-dim" style={{ marginTop: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.6 }}>
-        Score each pattern 0–3. Perform as described. Be honest — this determines everything.
+      <SectionHeader>{String(stepNo).padStart(2, '0')} // FIND YOUR WEAKNESSES</SectionHeader>
+      <p className="text-dim" style={{ marginTop: 8, marginBottom: 16, fontSize: 13, lineHeight: 1.6 }}>
+        This is the part that makes your program yours. Before we load anything, we
+        find out how you move — because the limiter we miss here is the one that
+        stalls progress (or gets you hurt) later. Score each pattern, or tap
+        <span className="text-signal"> Test me</span> and we'll walk you through it.
       </p>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+      {/* Scoring rubric — the athlete is self-grading, so define the scale plainly */}
+      <div
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 4,
+          padding: '12px 14px',
+          background: 'var(--surface)',
+          border: '1px solid var(--line)',
+          borderRadius: 8,
+          marginBottom: 24,
+        }}
+      >
+        <span className="text-xs text-dim"><span className="num text-signal">0</span> — pain anywhere in the movement</span>
+        <span className="text-xs text-dim"><span className="num text-signal">1</span> — can't complete it</span>
+        <span className="text-xs text-dim"><span className="num text-signal">2</span> — complete it, but with compensation or wobble</span>
+        <span className="text-xs text-dim"><span className="num text-signal">3</span> — clean, controlled, no compensation</span>
+      </div>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
         {MOVEMENT_PATTERNS.map((pattern) => (
           <div key={pattern.key}>
             <div
@@ -87,16 +216,36 @@ function MovementStep({
                 display: 'flex',
                 justifyContent: 'space-between',
                 alignItems: 'center',
-                marginBottom: 8,
+                marginBottom: 4,
               }}
             >
               <span style={{ fontSize: 14, fontWeight: 500 }}>{pattern.label}</span>
               <span className="text-xs text-dim">{pattern.category}</span>
             </div>
+            {PATTERN_GUIDE[pattern.key] && (
+              <p className="text-xs text-dim" style={{ marginBottom: 8, lineHeight: 1.5 }}>
+                {PATTERN_GUIDE[pattern.key]}
+              </p>
+            )}
             <ScorePicker
               value={scores[pattern.key] ?? null}
               onChange={(s) => onScore(pattern.key, s)}
             />
+            {guidedKey === pattern.key ? (
+              <GuidedMovementTest
+                patternKey={pattern.key}
+                onResolve={(s) => { onScore(pattern.key, s); setGuidedKey(null) }}
+              />
+            ) : (
+              <button
+                type="button"
+                onClick={() => setGuidedKey(pattern.key)}
+                className="text-xs text-dim link-button"
+                style={{ marginTop: 6, background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
+              >
+                Not sure how to score? Test me →
+              </button>
+            )}
           </div>
         ))}
       </div>
@@ -116,8 +265,9 @@ function MovementStep({
         </div>
       )}
 
-      <div style={{ marginTop: 32 }}>
-        <Button variant="primary" full disabled={!allScored} onClick={onNext}>
+      <div style={{ marginTop: 32, display: 'flex', gap: 8 }}>
+        <Button variant="ghost" onClick={onBack} style={{ flex: 1 }}>← Back</Button>
+        <Button variant="primary" disabled={!allScored} onClick={onNext} style={{ flex: 2 }}>
           Continue →
         </Button>
       </div>
@@ -126,11 +276,13 @@ function MovementStep({
 }
 
 function StrengthStep({
+  stepNo,
   data,
   onChange,
   onNext,
   onBack,
 }: {
+  stepNo: number
   data: StrengthData
   onChange: (key: keyof StrengthData, val: string) => void
   onNext: () => void
@@ -146,9 +298,10 @@ function StrengthStep({
 
   return (
     <div>
-      <SectionHeader>02 // STRENGTH BASELINES</SectionHeader>
+      <SectionHeader>{String(stepNo).padStart(2, '0')} // STRENGTH BASELINES</SectionHeader>
       <p className="text-dim" style={{ marginTop: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.6 }}>
-        Approximate values are fine. Leave at 0 if untested. These set your load prescription.
+        Now the numbers. These tell us where you're starting so we can set loads that
+        challenge you without overshooting. Approximate is fine — leave at 0 if untested.
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -178,23 +331,27 @@ function StrengthStep({
 }
 
 function ProfileStep({
+  stepNo,
   data,
   onChange,
   onNext,
   onBack,
 }: {
+  stepNo: number
   data: SportProfile
   onChange: (key: keyof SportProfile, val: string) => void
   onNext: () => void
-  onBack: () => void
+  onBack?: () => void
 }) {
   const complete = data.name.trim() && data.sport.trim()
 
   return (
     <div>
-      <SectionHeader>03 // SPORT & GOAL PROFILE</SectionHeader>
+      <SectionHeader>{String(stepNo).padStart(2, '0')} // WHAT YOU'RE CHASING</SectionHeader>
       <p className="text-dim" style={{ marginTop: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.6 }}>
-        Brief answers. This shapes program design and AI coaching context.
+        Start with the goal. Everything that follows exists to answer one question:
+        what's standing between you and this? Tell us where you're headed and we'll
+        build the right tests around it.
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -261,8 +418,10 @@ function ProfileStep({
       </div>
 
       <div style={{ marginTop: 32, display: 'flex', gap: 8 }}>
-        <Button variant="ghost" onClick={onBack} style={{ flex: 1 }}>← Back</Button>
-        <Button variant="primary" onClick={onNext} disabled={!complete} style={{ flex: 2 }}>
+        {onBack && (
+          <Button variant="ghost" onClick={onBack} style={{ flex: 1 }}>← Back</Button>
+        )}
+        <Button variant="primary" full={!onBack} onClick={onNext} disabled={!complete} style={{ flex: 2 }}>
           Continue →
         </Button>
       </div>
@@ -271,45 +430,50 @@ function ProfileStep({
 }
 
 function SubjectiveStep({
+  stepNo,
   data,
   onChange,
   onSubmit,
   onBack,
   saving,
 }: {
+  stepNo: number
   data: SubjectiveData
   onChange: (key: keyof SubjectiveData, val: number | string) => void
   onSubmit: () => void
   onBack: () => void
   saving: boolean
 }) {
-  const scaleFields: Array<{ key: 'sleep' | 'energy' | 'stress'; label: string }> = [
-    { key: 'sleep',  label: 'Sleep quality' },
-    { key: 'energy', label: 'Energy level' },
-    { key: 'stress', label: 'Stress level (1 = low)' },
+  const scaleFields: Array<{ key: 'sleep' | 'energy' | 'stress'; label: string; anchor: string }> = [
+    { key: 'sleep',  label: 'Sleep quality',  anchor: '0 = terrible · 3 = great' },
+    { key: 'energy', label: 'Energy level',   anchor: '0 = drained · 3 = fresh' },
+    { key: 'stress', label: 'Stress level',   anchor: '0 = calm · 3 = maxed out' },
   ]
 
   return (
     <div>
-      <SectionHeader>04 // READINESS</SectionHeader>
+      <SectionHeader>{String(stepNo).padStart(2, '0')} // READINESS</SectionHeader>
       <p className="text-dim" style={{ marginTop: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.6 }}>
-        Your baseline today. Honest inputs calibrate load prescription.
+        Last thing — how you're showing up today. This calibrates your starting load
+        so day one meets you where you actually are, not where a spreadsheet assumes.
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
-        {scaleFields.map(({ key, label }) => (
+        {scaleFields.map(({ key, label, anchor }) => (
           <div key={key}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: 8 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
               <span style={{ fontSize: 14 }}>{label}</span>
-              {data[key] !== null && (
+              {data[key] !== null ? (
                 <span className="num text-signal" style={{ fontSize: 14 }}>
-                  {data[key]}/5
+                  {data[key]}/3
                 </span>
+              ) : (
+                <span className="text-xs text-dim">{anchor}</span>
               )}
             </div>
             <ScorePicker
               value={data[key]}
-              onChange={(v) => onChange(key, v === 0 ? 1 : v)}
+              onChange={(v) => onChange(key, v)}
             />
           </div>
         ))}
@@ -362,8 +526,8 @@ interface DiagnosticIntakeProps {
 export function DiagnosticIntake({ athleteId: existingAthleteId, userId, onComplete }: DiagnosticIntakeProps) {
   const navigate = useNavigate()
 
-  // Step state
-  const [step, setStep] = useState<Step>('movement')
+  // Step state — goal-first: profile leads, then we screen
+  const [step, setStep] = useState<Step>('profile')
 
   // Movement scores: null = not yet scored
   const [movementScores, setMovementScores] = useState<Record<string, number | null>>(
@@ -418,6 +582,8 @@ export function DiagnosticIntake({ athleteId: existingAthleteId, userId, onCompl
         program_impact: null,
         generated_at: new Date().toISOString(),
         resolved_at: null,
+        updated_at: new Date().toISOString(),
+        prev_status: null,
       }
 
       setRevealedInsights((prev) => {
@@ -535,7 +701,36 @@ export function DiagnosticIntake({ athleteId: existingAthleteId, userId, onCompl
     navigate('/zeroed-in')
   }
 
-  const currentStepIndex = STEP_INDICES[step]
+  // Goal-adaptive battery: the goal selects which tests we run. Movement is the
+  // universal spine; strength baselines switch on only when the goal needs them.
+  const plan = useMemo(
+    () => planBattery(sportProfile.goals, sportProfile.sport),
+    [sportProfile.goals, sportProfile.sport],
+  )
+
+  const activeSteps = useMemo<Step[]>(
+    () => [
+      'profile',
+      'movement',
+      ...(plan.includeStrength ? (['strength'] as Step[]) : []),
+      'subjective',
+    ],
+    [plan.includeStrength],
+  )
+
+  // 'saving' shares the subjective screen for indexing purposes
+  const stepForIndex: Step = step === 'saving' ? 'subjective' : step
+  const currentStepIndex = Math.max(0, activeSteps.indexOf(stepForIndex))
+  const stepNo = (s: Step) => activeSteps.indexOf(s) + 1
+
+  function goNext() {
+    const next = activeSteps[activeSteps.indexOf(stepForIndex) + 1]
+    if (next) setStep(next)
+  }
+  function goBack() {
+    const prev = activeSteps[activeSteps.indexOf(stepForIndex) - 1]
+    if (prev) setStep(prev)
+  }
 
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
@@ -554,44 +749,48 @@ export function DiagnosticIntake({ athleteId: existingAthleteId, userId, onCompl
         }}
       >
         <Logo />
-        <StepIndicator total={TOTAL_STEPS} current={currentStepIndex} />
+        <StepIndicator total={activeSteps.length} current={currentStepIndex} />
       </div>
 
       {/* Content */}
       <div style={{ flex: 1, padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
+        {step === 'profile' && (
+          <ProfileStep
+            stepNo={stepNo('profile')}
+            data={sportProfile}
+            onChange={(k, v) => setSportProfile((prev) => ({ ...prev, [k]: v }))}
+            onNext={goNext}
+          />
+        )}
+
         {step === 'movement' && (
           <MovementStep
+            stepNo={stepNo('movement')}
             scores={movementScores}
             onScore={handleMovementScore}
             revealedInsights={revealedInsights}
-            onNext={() => setStep('strength')}
+            onNext={goNext}
+            onBack={goBack}
           />
         )}
 
-        {step === 'strength' && (
+        {step === 'strength' && plan.includeStrength && (
           <StrengthStep
+            stepNo={stepNo('strength')}
             data={strength}
             onChange={(k, v) => setStrength((prev) => ({ ...prev, [k]: v }))}
-            onNext={() => setStep('profile')}
-            onBack={() => setStep('movement')}
-          />
-        )}
-
-        {step === 'profile' && (
-          <ProfileStep
-            data={sportProfile}
-            onChange={(k, v) => setSportProfile((prev) => ({ ...prev, [k]: v }))}
-            onNext={() => setStep('subjective')}
-            onBack={() => setStep('strength')}
+            onNext={goNext}
+            onBack={goBack}
           />
         )}
 
         {(step === 'subjective' || step === 'saving') && (
           <SubjectiveStep
+            stepNo={stepNo('subjective')}
             data={subjective}
             onChange={(k, v) => setSubjective((prev) => ({ ...prev, [k]: v }))}
             onSubmit={handleSubmit}
-            onBack={() => setStep('profile')}
+            onBack={goBack}
             saving={step === 'saving'}
           />
         )}

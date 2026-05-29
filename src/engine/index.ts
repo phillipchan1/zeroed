@@ -14,6 +14,7 @@ import type {
   DiagnosticResults,
   InsightInsert,
   InsightRow,
+  InsightStatus,
   Priority,
   PhaseName,
   ExerciseTemplate,
@@ -277,22 +278,40 @@ export function generateInsightsFromDiagnostic(
 
 /**
  * PLACEHOLDER — generates a basic 4-week Stability program.
- * Selects routines based on the P1 insight category.
+ * Selects routines based on the P1 insight (insights[0], highest priority).
  * Replace with ProgramDesignAgent in Prompt 3.
+ *
+ * Accepts the full ranked insight list so each exercise can be attributed to
+ * the insight that placed it (Shift 5 — the "why" surface in WorkoutScreen).
  */
 export function generateInitialProgram(
-  p1Category: string,
+  insights: InsightRow[],
   startDateStr: string,
 ): GeneratedProgram {
+  // P1 insight drives the whole Stability block.
+  const p1Insight = insights[0] ?? null
+  const p1Category = p1Insight?.category ?? 'Lower Chain'
+
   const retestDate = addDays(startDateStr, 28)
   const weekEnd = addDays(startDateStr, 27)
 
   const routineExercises = getRoutinesForCategory(p1Category)
 
+  // ──────────────────────────────────────────────────────────────────────────
+  // PROGRAM-DESIGN SEAM (TODO Prompt 3: ProgramDesignAgent)
+  // The deterministic Stability block only ever builds P1-category routines, so
+  // every exercise is attributed to the P1 insight. When the real
+  // ProgramDesignAgent lands it should write per-exercise insight_id here,
+  // mapping individual exercises to P2/P3 insights they address. This stamping
+  // is the single place to do that — screens read exercise.insight_id directly.
+  // ──────────────────────────────────────────────────────────────────────────
+  const stamp = (exs: ExerciseTemplate[]): ExerciseTemplate[] =>
+    p1Insight ? exs.map((ex) => ({ ...ex, insight_id: p1Insight.id })) : exs
+
   const routines = [
-    { name: 'Session A', session_type: 'strength', exercises: routineExercises[0], intent: `Primary address of ${p1Category} — pattern quality first.` },
-    { name: 'Session B', session_type: 'strength', exercises: routineExercises[1], intent: `${p1Category} variation — load exposure maintained low.` },
-    { name: 'Session C', session_type: 'strength', exercises: routineExercises[2], intent: `Integration session — patterns under mild fatigue.` },
+    { name: 'Session A', session_type: 'strength', exercises: stamp(routineExercises[0]), intent: `Primary address of ${p1Category} — pattern quality first.` },
+    { name: 'Session B', session_type: 'strength', exercises: stamp(routineExercises[1]), intent: `${p1Category} variation — load exposure maintained low.` },
+    { name: 'Session C', session_type: 'strength', exercises: stamp(routineExercises[2]), intent: `Integration session — patterns under mild fatigue.` },
   ]
 
   const nonNegotiables: Record<string, string[]> = {
@@ -406,8 +425,37 @@ export interface ObservationAction {
   existingInsightId: string | null
   updatedConfidence: number | null
   updatedEvidence: unknown[] | null
+  updatedStatus: InsightStatus | null  // null = leave status unchanged
   // create
   newInsight: InsightInsert | null
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// Status-advancement thresholds (DETERMINISTIC PLACEHOLDERS)
+// TODO Prompt 3: SessionReviewAgent replaces these with model-driven judgement.
+// Confidence thresholds at which an insight advances one tier:
+//   Hypothesis → Likely   at ≥ 0.50
+//   Likely     → Confirmed at ≥ 0.80
+//   Resolved / Disproved stay MANUAL (never auto-advanced here).
+// ────────────────────────────────────────────────────────────────────────────
+const STATUS_THRESHOLDS = {
+  likely: 0.50,
+  confirmed: 0.80,
+} as const
+
+/**
+ * Given a current status and a (possibly nudged) confidence, returns the new
+ * status if a threshold was crossed, otherwise null. Only advances forward
+ * through hypothesis → likely → confirmed. Resolved/disproved are terminal here.
+ */
+function advanceStatus(
+  current: InsightStatus,
+  confidence: number,
+): InsightStatus | null {
+  if (current === 'hypothesis' && confidence >= STATUS_THRESHOLDS.confirmed) return 'confirmed'
+  if (current === 'hypothesis' && confidence >= STATUS_THRESHOLDS.likely)    return 'likely'
+  if (current === 'likely'     && confidence >= STATUS_THRESHOLDS.confirmed) return 'confirmed'
+  return null
 }
 
 /**
@@ -448,12 +496,16 @@ export function resolveObservationAction(
     const updatedConfidence = Math.min(0.95, existing.confidence + delta)
     const updatedEvidence   = [...(Array.isArray(existing.evidence) ? existing.evidence : []), evidenceEntry]
 
+    // Advance status if the nudged confidence crosses a threshold (placeholder).
+    const updatedStatus = advanceStatus(existing.status, updatedConfidence)
+
     return {
       insightCategory,
       action:            'update',
       existingInsightId: existing.id,
       updatedConfidence,
       updatedEvidence,
+      updatedStatus,
       newInsight:        null,
     }
   }
@@ -470,6 +522,7 @@ export function resolveObservationAction(
     existingInsightId: null,
     updatedConfidence: null,
     updatedEvidence:   null,
+    updatedStatus:     null,
     newInsight: {
       athlete_id:     athleteId,
       source_id:      workoutId,
@@ -483,4 +536,127 @@ export function resolveObservationAction(
       program_impact: null,
     },
   }
+}
+
+// ============================================================================
+// Insight movement summary (Shift 4 panel + Shift 6 header metric)
+// DETERMINISTIC PLACEHOLDER — reads the trigger-maintained updated_at /
+// prev_status columns to describe what shifted this week.
+// TODO Prompt 3: WeeklyReviewAgent will narrate this with real language.
+// ============================================================================
+
+export type InsightMovementKind = 'transition' | 'evidence' | 'new'
+
+export interface InsightMovement {
+  insight: InsightRow
+  kind: InsightMovementKind
+  fromStatus: InsightStatus | null  // populated for 'transition'
+  toStatus: InsightStatus
+  label: string                     // e.g. "Hypothesis → Likely" | "New signal" | "+ evidence"
+}
+
+export interface InsightMovementSummary {
+  movements: InsightMovement[]
+  movedCount: number      // transitions + new insights this week
+  p1Progressing: number   // P1 insights that advanced status this week
+  headline: string | null // e.g. "2 insights moved · 1 P1 progressing"
+}
+
+function capStatus(s: InsightStatus): string {
+  return s.charAt(0).toUpperCase() + s.slice(1)
+}
+
+const PRIORITY_RANK: Record<Priority, number> = { P1: 0, P2: 1, P3: 2, P4: 3 }
+
+/**
+ * Classifies each insight's movement within the current week.
+ *   • new        — generated this week
+ *   • transition — status changed this week (prev_status set by the DB trigger)
+ *   • evidence   — touched this week (updated_at) but status held steady
+ * Insights untouched this week are omitted.
+ */
+export function summarizeInsightMovement(
+  insights: InsightRow[],
+  weekStart: Date,
+): InsightMovementSummary {
+  const startMs = weekStart.getTime()
+  const movements: InsightMovement[] = []
+
+  for (const insight of insights) {
+    const generatedMs = new Date(insight.generated_at).getTime()
+    const updatedMs   = new Date(insight.updated_at).getTime()
+
+    const isNew       = generatedMs >= startMs
+    const touched     = updatedMs >= startMs
+    const transitioned =
+      touched &&
+      insight.prev_status != null &&
+      insight.prev_status !== insight.status
+
+    if (isNew) {
+      movements.push({
+        insight,
+        kind: 'new',
+        fromStatus: null,
+        toStatus: insight.status,
+        label: 'New signal',
+      })
+    } else if (transitioned) {
+      movements.push({
+        insight,
+        kind: 'transition',
+        fromStatus: insight.prev_status,
+        toStatus: insight.status,
+        label: `${capStatus(insight.prev_status!)} → ${capStatus(insight.status)}`,
+      })
+    } else if (touched) {
+      movements.push({
+        insight,
+        kind: 'evidence',
+        fromStatus: null,
+        toStatus: insight.status,
+        label: '+ evidence',
+      })
+    }
+  }
+
+  // Rank: transitions first, then new, then evidence; within each, by priority.
+  const kindRank: Record<InsightMovementKind, number> = { transition: 0, new: 1, evidence: 2 }
+  movements.sort((a, b) =>
+    kindRank[a.kind] - kindRank[b.kind] ||
+    PRIORITY_RANK[a.insight.priority] - PRIORITY_RANK[b.insight.priority],
+  )
+
+  const movedCount = movements.filter((m) => m.kind === 'transition' || m.kind === 'new').length
+  const p1Progressing = movements.filter(
+    (m) => m.kind === 'transition' && m.insight.priority === 'P1',
+  ).length
+
+  let headline: string | null = null
+  if (movedCount > 0) {
+    const parts = [`${movedCount} insight${movedCount === 1 ? '' : 's'} moved`]
+    if (p1Progressing > 0) parts.push(`${p1Progressing} P1 progressing`)
+    headline = parts.join(' · ')
+  }
+
+  return { movements, movedCount, p1Progressing, headline }
+}
+
+// ============================================================================
+// Status counts (Shift 6 — ProfileScreen header)
+// ============================================================================
+
+export interface StatusCount {
+  status: InsightStatus
+  count: number
+}
+
+/**
+ * Counts insights by status, in display order. Returns only statuses with > 0.
+ */
+export function countInsightsByStatus(insights: InsightRow[]): StatusCount[] {
+  const order: InsightStatus[] = ['hypothesis', 'likely', 'confirmed', 'resolved', 'disproved']
+  return order
+    .map((status) => ({ status, count: insights.filter((i) => i.status === status).length }))
+    .filter((s) => s.count > 0)
 }

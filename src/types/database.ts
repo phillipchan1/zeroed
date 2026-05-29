@@ -53,6 +53,8 @@ export interface InsightRow {
   program_impact: string | null
   generated_at: string
   resolved_at: string | null
+  updated_at: string
+  prev_status: InsightStatus | null
 }
 
 export interface InsightDraftRow extends InsightRow {
@@ -150,6 +152,7 @@ export interface ExerciseTemplate {
   reps: string        // e.g. "8" | "8-10" | "30s"
   load?: string       // e.g. "light" | "moderate" | "bodyweight"
   cue?: string
+  insight_id?: string // the insight this exercise was placed to address (Shift 5)
 }
 
 export interface SetLog {
@@ -168,7 +171,7 @@ export type DiagnosticInsert = Omit<DiagnosticRow, 'id' | 'assessed_at'>
 
 export type InsightInsert = Omit<
   InsightRow,
-  'id' | 'generated_at' | 'resolved_at'
+  'id' | 'generated_at' | 'resolved_at' | 'updated_at' | 'prev_status'
 >
 
 export type AthleteProfileInsert = Omit<AthleteProfileRow, 'id' | 'last_updated'>

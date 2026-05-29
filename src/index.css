@@ -283,6 +283,14 @@ textarea.input {
   color: var(--signal);
 }
 
+/* Inline text-action button (e.g. "Test me" on the movement screen) */
+.link-button {
+  transition: color 0.15s ease;
+}
+.link-button:hover {
+  color: var(--text);
+}
+
 /* --- Priority badges ------------------------------------------------------ */
 
 .badge {
@@ -316,6 +324,41 @@ textarea.input {
 .status-dot--confirmed  { background: var(--signal); }
 .status-dot--resolved   { background: #2A2A2A; border: 1px solid #4A4A4A; }
 .status-dot--disproved  { background: transparent; border: 1px solid #4A4A4A; }
+
+/* --- Status counts (ProfileScreen header) -------------------------------- */
+.status-counts {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.status-counts__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.status-counts__sep {
+  margin-right: 3px;
+  color: var(--line);
+}
+
+/* --- Exercise info button (WorkoutScreen "why" surface) ------------------ */
+.exercise-info-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  margin: 0;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.exercise-info-btn:hover { color: var(--signal); }
 
 /* --- Divider -------------------------------------------------------------- */
 

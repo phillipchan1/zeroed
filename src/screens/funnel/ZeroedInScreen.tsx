@@ -20,6 +20,9 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
   const [insights, setInsights]     = useState<InsightRow[]>([])
   const [p1Category, setP1Category] = useState<string>('Lower Chain')
   const [programId, setProgramId]   = useState<string | null>(null)
+  const [athleteName, setAthleteName] = useState<string | null>(null)
+  const [sport, setSport]           = useState<string | null>(null)
+  const [goals, setGoals]           = useState<string | null>(null)
   const [error, setError]           = useState<string | null>(null)
 
   useEffect(() => {
@@ -29,6 +32,19 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
 
   async function buildProgram() {
     setBuildPhase('loading')
+
+    // 0. Load athlete so we can frame the result against their goal & sport
+    const { data: athleteRow } = await supabase
+      .from('athlete')
+      .select('name, sport, goals')
+      .eq('id', athleteId)
+      .maybeSingle()
+
+    if (athleteRow) {
+      setAthleteName(athleteRow.name ?? null)
+      setSport(athleteRow.sport ?? null)
+      setGoals(athleteRow.goals ?? null)
+    }
 
     // 1. Load insights to display
     const { data: insightRows, error: insightErr } = await supabase
@@ -63,12 +79,14 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
     setBuildPhase('building')
     await new Promise((r) => setTimeout(r, 1400))  // perceptible beat, not a fake delay
 
-    const p1 = insightRows[0]
+    const rows = insightRows as InsightRow[]
+    const p1 = rows[0]
     const category = p1?.category ?? 'Lower Chain'
     setP1Category(category)
 
     const today = new Date().toISOString().split('T')[0]
-    const plan  = generateInitialProgram(category, today)
+    // Pass the full ranked list so each exercise is stamped with its insight_id.
+    const plan  = generateInitialProgram(rows, today)
 
     // 4. Write program
     const { data: prog, error: progErr } = await supabase
@@ -215,12 +233,18 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
               letterSpacing: '-0.01em',
             }}
           >
-            You're Zeroed In.
+            {athleteName ? `You're Zeroed In, ${athleteName}.` : "You're Zeroed In."}
           </h1>
           <p className="text-dim" style={{ marginTop: 12, fontSize: 14, lineHeight: 1.6 }}>
+            {goals
+              ? `We screened how you move against your goal — ${goals.trim().replace(/\.$/, '')}.`
+              : sport
+                ? `We screened how you move against the demands of ${sport}.`
+                : 'We screened how you move.'}
+            {' '}
             {insights.length > 0
-              ? `${insights.length} weak link${insights.length > 1 ? 's' : ''} identified. Your Stability phase starts today.`
-              : 'No movement limiters detected. Your program is set for strength development.'}
+              ? `Here's what's standing in the way, ranked by what to fix first. Your Stability phase starts today and targets exactly these.`
+              : 'No movement limiters are holding you back — so your program goes straight to building strength.'}
           </p>
         </div>
 
