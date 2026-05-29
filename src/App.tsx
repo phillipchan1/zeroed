@@ -3,6 +3,7 @@ import { useAuth } from './hooks/useAuth'
 import { useAppState } from './hooks/useAppState'
 import { Spinner } from './components/ui'
 import { Nav } from './components/layout/Nav'
+import { DebugReset } from './components/DebugReset'
 
 // Funnel
 import { AuthScreen }       from './screens/funnel/AuthScreen'
@@ -152,6 +153,8 @@ export default function App() {
   return (
     <BrowserRouter>
       <AppRoutes />
+      {/* DEV-only: wipe onboarding state to re-test the funnel. No-op in prod. */}
+      <DebugReset onReset={() => { window.location.href = '/' }} />
     </BrowserRouter>
   )
 }
