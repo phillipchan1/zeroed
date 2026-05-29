@@ -18,6 +18,8 @@ interface RevelationState {
   previousConfidence: number | null
   newConfidence: number | null
   isNew: boolean
+  movedCount?: number          // how many insights the debrief moved this session
+  summary?: string | null      // the agent's warm one-line session summary
   durationMins: number
   setsLogged: number
   name: string | null
@@ -75,10 +77,15 @@ export function PostSessionRevelationScreen({ athleteId, onComplete }: Revelatio
 
   const { category, previousConfidence, newConfidence, isNew, durationMins, setsLogged, name } = state
   const lowerCategory = category.toLowerCase()
+  const movedCount = state.movedCount ?? 1
 
-  const characterization = isNew
-    ? `Your ${lowerCategory} just showed up in the read — one data point so far. Every session sharpens it.`
-    : `Your ${lowerCategory} now has 2 data points behind it. That's how this works — every session sharpens the read.`
+  // The agent's own read of the session leads when present; otherwise the
+  // deterministic characterization. With multiple signals, name the count.
+  const characterization = state.summary
+    ? state.summary
+    : isNew
+      ? `Your ${lowerCategory} just showed up in the read — one data point so far. Every session sharpens it.`
+      : `Your ${lowerCategory} now has more behind it. That's how this works — every session sharpens the read.`
 
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
@@ -86,7 +93,7 @@ export function PostSessionRevelationScreen({ athleteId, onComplete }: Revelatio
         items={[
           { label: 'DURATION', value: `${durationMins}m` },
           { label: 'SETS', value: setsLogged },
-          { label: 'OBS', value: 1, signal: true },
+          { label: 'MOVED', value: movedCount, signal: true },
         ]}
       />
 
@@ -101,7 +108,7 @@ export function PostSessionRevelationScreen({ athleteId, onComplete }: Revelatio
           <p className="hero-telemetry" style={{ marginTop: 12 }}>
             DURATION <span className="num">{durationMins}</span> MIN ·{' '}
             <span className="num">{setsLogged}</span> SETS ·{' '}
-            <span className="num">1</span> OBSERVATION CAPTURED
+            <span className="num">{movedCount}</span> {movedCount === 1 ? 'INSIGHT' : 'INSIGHTS'} MOVED
             <br />
             {isNew || previousConfidence == null ? (
               <>

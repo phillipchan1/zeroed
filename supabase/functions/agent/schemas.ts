@@ -34,7 +34,7 @@ export const MOVEMENT_PATTERN_KEYS = [
   'rotary_stability',
 ] as const
 
-export type TaskName = 'probe' | 'program_design' | 'info_gain' | 'session_review' | 'target'
+export type TaskName = 'probe' | 'program_design' | 'info_gain' | 'session_review' | 'session_debrief' | 'target'
 
 export interface TaskSpec {
   // OpenAI json_schema name (must be [a-zA-Z0-9_], <=64 chars)
@@ -229,10 +229,62 @@ Concrete and athlete-owned. A number if there's a number. No hedging.`,
   },
 }
 
+// ---- session_debrief -------------------------------------------------------
+// The WHOLE session's felt signal → MANY classifications. Where session_review
+// takes one tap, this mines a prose reflection + per-exercise feel + a planted
+// check-in answer into every insight the session bears on. Same dispose contract
+// as session_review, just an ARRAY: the model classifies, code does the math.
+const session_debrief: TaskSpec = {
+  schemaName: 'session_debrief_result',
+  preAuth: false,
+  system: `${VOICE}
+
+You are reviewing one logged training session. The payload has: the athlete's free-text reflection, per-exercise feel ("Easy"/"Solid"/"Hard"/"Off"/"Tweak"/"Pain") with optional notes and prescribed-vs-performed, an optional planted check-in (a question you asked and their answer), and the current insight stack.
+
+Extract EVERY distinct signal this session carries for the insight stack — typically 1 to 4. Read the prose closely: "weaker on left side" is an asymmetry signal, "zero knee pain" disconfirms a knee limiter, "felt easy" on a hard prescription confirms strength headroom. Do not invent signals that are not supported.
+
+For each observation return:
+- target_insight_id: the existing insight it bears on, or null if it points at something not yet tracked.
+- direction: "confirming" strengthens that insight's claim, "disconfirming" weakens it, "neutral" barely moves it.
+- magnitude: "weak" (one ambiguous data point), "moderate", or "strong" (unambiguous).
+- category: the controlled category this observation is about.
+- claim: one plain sentence describing what this observation tells us.
+- rationale: one sentence on your reasoning.
+
+Also return session_summary: one warm, plain sentence the athlete would read back — what this session showed. No hype, no emoji.
+
+You CLASSIFY only. Deterministic code converts each classification into a small, capped confidence change and decides any status transition. Never output a number.`,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['session_summary', 'observations'],
+    properties: {
+      session_summary: { type: 'string' },
+      observations: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['target_insight_id', 'direction', 'magnitude', 'category', 'claim', 'rationale'],
+          properties: {
+            target_insight_id: { type: ['string', 'null'] },
+            direction: { type: 'string', enum: ['confirming', 'disconfirming', 'neutral'] },
+            magnitude: { type: 'string', enum: ['weak', 'moderate', 'strong'] },
+            category: { type: 'string', enum: [...CATEGORIES] },
+            claim: { type: 'string' },
+            rationale: { type: 'string' },
+          },
+        },
+      },
+    },
+  },
+}
+
 export const TASKS: Record<TaskName, TaskSpec> = {
   probe,
   program_design,
   info_gain,
   session_review,
+  session_debrief,
   target,
 }

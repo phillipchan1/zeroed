@@ -166,6 +166,20 @@ export interface DiagnosticResults {
   }
 }
 
+// How a movement is measured — drives which inputs the SetRow renders and what
+// "a rep" means to the engine. A CLOSED vocabulary: the agent never invents one.
+// tracking_type is resolved deterministically from the exercise library (with a
+// heuristic fallback) — see src/engine/exerciseLibrary.ts. "agent proposes the
+// exercise, code disposes the metric."
+export const TRACKING_TYPES = [
+  'weight_reps',      // external load × reps (barbell, DB, machine, cable)
+  'bodyweight_reps',  // reps, optional added load (push-up, BSS, pull-up)
+  'time',             // a held or worked duration in seconds (planks, carries, holds)
+  'distance',         // a measured length (broad jump, sprint, loaded carry)
+] as const
+
+export type TrackingType = typeof TRACKING_TYPES[number]
+
 export interface ExerciseTemplate {
   name: string
   sets: number
@@ -173,9 +187,12 @@ export interface ExerciseTemplate {
   load?: string       // e.g. "light" | "moderate" | "bodyweight"
   cue?: string
   insight_id?: string // the insight this exercise was placed to address (Shift 5)
+  // How this movement is logged. Optional on disk: legacy/agent routines omit it
+  // and the WorkoutScreen resolves an effective type from the library at render.
+  tracking_type?: TrackingType
   // Info-gain "test me" item — at most one per session. Marks the single
   // highest-info-gain pattern check, shown as a static computing-cyan READING
-  // tag with tap-to-see-why. Its observation feeds runSessionReviewAgent.
+  // tag with tap-to-see-why. Its observation feeds the session debrief.
   reading?: boolean
   pattern_key?: string   // MovementPatternKey this reading probes
   reading_why?: string   // info-gain rationale, shown on tap
@@ -187,6 +204,42 @@ export interface SetLog {
   reps: number | null
   rpe: number | null
   done: boolean
+  // Type-specific metrics — only the field for the exercise's tracking_type is
+  // ever populated. JSONB-backed (workout.actual_weights), so additive & safe.
+  duration?: number | null   // seconds, for tracking_type 'time'
+  distance?: number | null   // in the athlete's distance unit, for 'distance'
+}
+
+// ---- Per-session feedback (the loop's fuel) --------------------------------
+// Captured in the WorkoutScreen and written as session_observation rows (the
+// table's category is free-text), so NO migration is required. The session
+// debrief agent mines these into insight movement; a deterministic fallback
+// maps each felt chip to an observation if the agent is unavailable.
+
+// One-tap per-exercise "felt" signal — the Notion log's "Felt" column. severity
+// maps onto session_observation.severity (1–5).
+export const FELT_CHIPS = [
+  { label: 'Easy',   tone: 'good', severity: 1 },
+  { label: 'Solid',  tone: 'good', severity: 1 },
+  { label: 'Hard',   tone: 'mid',  severity: 3 },
+  { label: 'Off',    tone: 'mid',  severity: 2 },
+  { label: 'Tweak',  tone: 'bad',  severity: 4 },
+  { label: 'Pain',   tone: 'veto', severity: 5 },
+] as const
+
+export type FeltLabel = typeof FELT_CHIPS[number]['label']
+
+export interface ExerciseFeedback {
+  name: string             // exercise name, so the agent can attribute it
+  felt: FeltLabel | null
+  note: string             // optional free text ("weaker on left side")
+}
+
+// Pre-session readiness — JuggernautAI's gate. 1–5 quick taps, all optional.
+export interface Readiness {
+  sleep: number | null
+  energy: number | null
+  soreness: number | null
 }
 
 // ---- Insert types ----------------------------------------------------------

@@ -1,163 +1,312 @@
-import { useEffect, useState, useRef } from 'react'
+import { useEffect, useState, useRef, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ChevronLeft, Check, Plus, Info } from 'lucide-react'
+import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
-import { runSessionReviewAgent } from '../../engine'
+import { runSessionDebriefAgent, type DebriefInput } from '../../engine'
+import { resolveTrackingType } from '../../engine/exerciseLibrary'
+import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import {
   Button, Spinner, ExerciseInsightSheet, TelemetryStrip,
 } from '../../components/ui'
 import type {
-  RoutineRow, ExerciseTemplate, SetLog, InsightRow,
-  OBSERVATION_CATEGORIES, SessionObservationInsert, OnboardingStep,
+  RoutineRow, ExerciseTemplate, SetLog, InsightRow, TrackingType,
+  SessionObservationInsert, OnboardingStep, FeltLabel, ExerciseFeedback, Readiness,
 } from '../../types/database'
+import { FELT_CHIPS } from '../../types/database'
 
-type ObsCat = typeof OBSERVATION_CATEGORIES[number]
+// ---- small parse helpers ---------------------------------------------------
 
-// ---- Set row component -----------------------------------------------------
+// First integer in a prescription string: "8-10" → 8, "30s" → 30, "8 each side" → 8.
+function leadingInt(s: string | undefined): number | null {
+  if (!s) return null
+  const m = s.match(/\d+/)
+  return m ? parseInt(m[0], 10) : null
+}
+
+const REST_SECONDS = 90
+const RPE_SCALE = [6, 7, 8, 9, 10]
+
+// ---- Set row (tracking-type aware) -----------------------------------------
 
 interface SetRowProps {
   setNum: number
   log: SetLog
-  prevLog?: SetLog
+  trackingType: TrackingType
+  unit: string
+  distanceUnit: string
+  prescribedReps: number | null
+  prescribedDuration: number | null
   onChange: (updated: SetLog) => void
+  onComplete: () => void   // fires when a set is newly marked done (→ rest timer)
 }
 
-function SetRow({ setNum, log, prevLog, onChange }: SetRowProps) {
-  return (
-    <div className="set-row">
-      <span className="set-row__num">{setNum}</span>
+function SetRow({
+  setNum, log, trackingType, unit, distanceUnit,
+  prescribedReps, prescribedDuration, onChange, onComplete,
+}: SetRowProps) {
+  const [rpeOpen, setRpeOpen] = useState(false)
 
-      {/* Weight */}
-      <input
-        className="set-row__input"
-        type="number"
-        inputMode="decimal"
-        placeholder={prevLog?.weight != null ? String(prevLog.weight) : 'kg'}
-        value={log.weight ?? ''}
-        onChange={(e) => onChange({ ...log, weight: e.target.value ? parseFloat(e.target.value) : null })}
-      />
+  const num = (v: string) => (v === '' ? null : Number(v))
 
-      {/* Reps */}
-      <input
-        className="set-row__input"
-        type="number"
-        inputMode="numeric"
-        placeholder={prevLog?.reps != null ? String(prevLog.reps) : 'reps'}
-        value={log.reps ?? ''}
-        onChange={(e) => onChange({ ...log, reps: e.target.value ? parseInt(e.target.value) : null })}
-      />
+  // Tap-to-complete: toggling a set ON prefills the prescribed target into any
+  // empty metric, so "did it as written" is one tap (TrainHeroic pattern).
+  function toggleDone() {
+    if (log.done) {
+      onChange({ ...log, done: false })
+      return
+    }
+    const next: SetLog = { ...log, done: true }
+    if (trackingType === 'weight_reps' || trackingType === 'bodyweight_reps') {
+      if (next.reps == null && prescribedReps != null) next.reps = prescribedReps
+    } else if (trackingType === 'time') {
+      if (next.duration == null && prescribedDuration != null) next.duration = prescribedDuration
+    }
+    onChange(next)
+    onComplete()
+  }
 
-      {/* RPE */}
-      <input
-        className="set-row__input"
-        type="number"
-        inputMode="numeric"
-        min={1}
-        max={10}
-        placeholder="RPE"
-        value={log.rpe ?? ''}
-        onChange={(e) => onChange({ ...log, rpe: e.target.value ? parseInt(e.target.value) : null })}
-        style={{ fontSize: 12 }}
-      />
+  const doneBtn = (
+    <button
+      type="button"
+      className={`set-row__done${log.done ? ' set-row__done--checked' : ''}`}
+      onClick={toggleDone}
+      aria-label={log.done ? 'Mark set not done' : 'Complete set'}
+    >
+      {log.done && <Check size={14} strokeWidth={2.5} color="var(--signal)" />}
+    </button>
+  )
 
-      {/* Done check */}
+  // RPE cell — a tap-scale, not a keyboard (JuggernautAI). Shared by the loaded types.
+  const rpeCell = (
+    <div style={{ position: 'relative' }}>
       <button
         type="button"
-        className={`set-row__done${log.done ? ' set-row__done--checked' : ''}`}
-        onClick={() => onChange({ ...log, done: !log.done })}
+        className="set-row__rpe"
+        onClick={() => setRpeOpen((o) => !o)}
       >
-        {log.done && (
-          <Check size={14} strokeWidth={2.5} color="var(--signal)" />
-        )}
+        {log.rpe ?? 'RPE'}
       </button>
+      {rpeOpen && (
+        <div className="rpe-pop">
+          {RPE_SCALE.map((v) => (
+            <button
+              key={v}
+              type="button"
+              className={`rpe-pop__btn${log.rpe === v ? ' rpe-pop__btn--on' : ''}`}
+              onClick={() => { onChange({ ...log, rpe: v }); setRpeOpen(false) }}
+            >
+              {v}
+            </button>
+          ))}
+          <button
+            type="button"
+            className="rpe-pop__btn rpe-pop__btn--clear"
+            onClick={() => { onChange({ ...log, rpe: null }); setRpeOpen(false) }}
+          >
+            –
+          </button>
+        </div>
+      )}
+    </div>
+  )
+
+  const numInput = (
+    value: number | null | undefined,
+    placeholder: string,
+    onVal: (n: number | null) => void,
+    mode: 'decimal' | 'numeric' = 'numeric',
+  ) => (
+    <input
+      className="set-row__input"
+      type="number"
+      inputMode={mode}
+      placeholder={placeholder}
+      value={value ?? ''}
+      onChange={(e) => onVal(num(e.target.value))}
+    />
+  )
+
+  // Per-type column layouts. Done button + set number are constant.
+  let grid: string
+  let cells: ReactNode
+
+  if (trackingType === 'time') {
+    grid = '28px 1fr 52px 40px'
+    cells = (
+      <>
+        {numInput(log.duration, 'sec', (n) => onChange({ ...log, duration: n }))}
+        {rpeCell}
+      </>
+    )
+  } else if (trackingType === 'distance') {
+    grid = '28px 1fr 40px'
+    cells = numInput(log.distance, distanceUnit, (n) => onChange({ ...log, distance: n }), 'decimal')
+  } else if (trackingType === 'bodyweight_reps') {
+    grid = '28px 1fr 1fr 52px 40px'
+    cells = (
+      <>
+        {numInput(log.reps, 'reps', (n) => onChange({ ...log, reps: n }))}
+        {numInput(log.weight, `+${unit}`, (n) => onChange({ ...log, weight: n }), 'decimal')}
+        {rpeCell}
+      </>
+    )
+  } else {
+    // weight_reps (default)
+    grid = '28px 1fr 1fr 52px 40px'
+    cells = (
+      <>
+        {numInput(log.weight, unit, (n) => onChange({ ...log, weight: n }), 'decimal')}
+        {numInput(log.reps, 'reps', (n) => onChange({ ...log, reps: n }))}
+        {rpeCell}
+      </>
+    )
+  }
+
+  return (
+    <div className="set-row" style={{ gridTemplateColumns: grid }}>
+      <span className="set-row__num">{setNum}</span>
+      {cells}
+      {doneBtn}
     </div>
   )
 }
 
-// ---- Observation capture sheet ---------------------------------------------
+// ---- Per-exercise "felt" chips ---------------------------------------------
 
-const OBS_OPTIONS: Array<{ label: ObsCat; severity: number }> = [
-  { label: 'Felt strong',       severity: 1 },
-  { label: 'PR hit',            severity: 1 },
-  { label: 'Energy flag',       severity: 2 },
-  { label: 'Struggled with load', severity: 3 },
-  { label: 'Form breakdown',    severity: 4 },
-  { label: 'Pain signal',       severity: 5 },
-]
-
-interface ObsSheetProps {
-  onSave: (category: string, signal: string, severity: number) => void
-  onSkip: () => void
-  saving: boolean
+interface FeltChipsProps {
+  value: FeltLabel | null
+  note: string
+  onFelt: (f: FeltLabel | null) => void
+  onNote: (n: string) => void
 }
 
-function ObservationSheet({ onSave, onSkip, saving }: ObsSheetProps) {
-  const [selected, setSelected] = useState<typeof OBS_OPTIONS[number] | null>(null)
-  const [note, setNote]         = useState('')
+function FeltChips({ value, note, onFelt, onNote }: FeltChipsProps) {
+  return (
+    <div className="felt">
+      <div className="felt__row">
+        <span className="felt__label">Felt</span>
+        {FELT_CHIPS.map((c) => (
+          <button
+            key={c.label}
+            type="button"
+            className={`felt__chip felt__chip--${c.tone}${value === c.label ? ' felt__chip--on' : ''}`}
+            onClick={() => onFelt(value === c.label ? null : c.label)}
+          >
+            {c.label}
+          </button>
+        ))}
+      </div>
+      {value && (
+        <input
+          className="input felt__note"
+          type="text"
+          placeholder="Add a note — e.g. weaker on the left side"
+          value={note}
+          onChange={(e) => onNote(e.target.value)}
+        />
+      )}
+    </div>
+  )
+}
 
+// ---- Pre-session readiness gate (JuggernautAI) -----------------------------
+
+const READINESS_ROWS: Array<{ key: keyof Readiness; label: string }> = [
+  { key: 'sleep',    label: 'Sleep' },
+  { key: 'energy',   label: 'Energy' },
+  { key: 'soreness', label: 'Soreness' },
+]
+
+function ReadinessGate({
+  onStart, onSkip,
+}: { onStart: (r: Readiness) => void; onSkip: () => void }) {
+  const [r, setR] = useState<Readiness>({ sleep: null, energy: null, soreness: null })
   return (
     <div className="obs-sheet">
       <div className="obs-sheet__inner">
-        <p className="section-header" style={{ marginBottom: 4 }}>Observation</p>
+        <p className="section-header" style={{ marginBottom: 4 }}>Before you start</p>
         <p className="text-xs text-dim" style={{ marginBottom: 16, lineHeight: 1.5 }}>
-          One signal from this session.
+          A quick read on today — it tunes how I weigh what happens. All optional.
+        </p>
+        {READINESS_ROWS.map((row) => (
+          <div key={row.key} className="readiness__row">
+            <span className="readiness__label">{row.label}</span>
+            <div className="readiness__scale">
+              {[1, 2, 3, 4, 5].map((n) => (
+                <button
+                  key={n}
+                  type="button"
+                  className={`readiness__dot${r[row.key] === n ? ' readiness__dot--on' : ''}`}
+                  onClick={() => setR((prev) => ({ ...prev, [row.key]: n }))}
+                >
+                  {n}
+                </button>
+              ))}
+            </div>
+          </div>
+        ))}
+        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+          <Button variant="ghost" style={{ flex: 1 }} onClick={onSkip}>Skip</Button>
+          <Button variant="primary" style={{ flex: 2 }} onClick={() => onStart(r)}>Start session →</Button>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ---- Session debrief sheet (the prose the agent mines) ---------------------
+
+interface DebriefSheetProps {
+  reading: { name: string; question: string } | null
+  saving: boolean
+  onSave: (reflection: string, readingAnswer: string) => void
+  onSkip: () => void
+}
+
+function DebriefSheet({ reading, saving, onSave, onSkip }: DebriefSheetProps) {
+  const [reflection, setReflection] = useState('')
+  const [readingAnswer, setReadingAnswer] = useState('')
+  return (
+    <div className="obs-sheet">
+      <div className="obs-sheet__inner">
+        <p className="section-header" style={{ marginBottom: 4 }}>Debrief</p>
+        <p className="text-xs text-dim" style={{ marginBottom: 16, lineHeight: 1.5 }}>
+          How did that go? Talk freely — I read the whole thing, not just the numbers.
         </p>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
-          {OBS_OPTIONS.map((opt) => (
-            <button
-              key={opt.label}
-              type="button"
-              className={`btn${selected?.label === opt.label ? ' btn--outline' : ' btn--ghost'}`}
-              style={{
-                height: 40,
-                fontSize: 12,
-                borderColor: selected?.label === opt.label
-                  ? opt.severity >= 4 ? 'var(--veto)' : opt.severity >= 3 ? '#8A8A8A' : 'var(--signal)'
-                  : 'var(--line)',
-                color: selected?.label === opt.label
-                  ? opt.severity >= 4 ? 'var(--veto)' : opt.severity >= 3 ? 'var(--text)' : 'var(--signal)'
-                  : 'var(--text-dim)',
-              }}
-              onClick={() => setSelected(opt)}
-            >
-              {opt.label}
-            </button>
-          ))}
-        </div>
-
-        {selected && (
-          <div style={{ marginBottom: 16 }}>
+        {reading && (
+          <div style={{ marginBottom: 14 }}>
+            <p className="text-xs" style={{ color: 'var(--computing)', marginBottom: 6, lineHeight: 1.4 }}>
+              {reading.question}
+            </p>
             <input
               className="input"
               type="text"
-              placeholder="Optional: add a note (e.g. left knee, exercise name)"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-              autoFocus
+              placeholder={`On ${reading.name}…`}
+              value={readingAnswer}
+              onChange={(e) => setReadingAnswer(e.target.value)}
             />
           </div>
         )}
 
-        <div style={{ display: 'flex', gap: 8 }}>
-          <Button
-            variant="ghost"
-            style={{ flex: 1 }}
-            onClick={onSkip}
-            disabled={saving}
-          >
+        <textarea
+          className="input"
+          style={{ minHeight: 96, resize: 'none', lineHeight: 1.5 }}
+          placeholder="Felt strong on the second set, knee was quiet, left side still lagging…"
+          value={reflection}
+          onChange={(e) => setReflection(e.target.value)}
+          autoFocus
+        />
+
+        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
+          <Button variant="ghost" style={{ flex: 1 }} onClick={onSkip} disabled={saving}>
             Skip
           </Button>
           <Button
             variant="primary"
             style={{ flex: 2 }}
-            disabled={!selected || saving}
-            onClick={() => {
-              if (selected) {
-                const signal = [selected.label, note].filter(Boolean).join(' — ')
-                onSave(selected.label, signal, selected.severity)
-              }
-            }}
+            disabled={saving}
+            onClick={() => onSave(reflection.trim(), readingAnswer.trim())}
           >
             {saving ? <Spinner /> : 'Log it →'}
           </Button>
@@ -167,7 +316,7 @@ function ObservationSheet({ onSave, onSkip, saving }: ObsSheetProps) {
   )
 }
 
-// ---- Main component --------------------------------------------------------
+// ---- main ------------------------------------------------------------------
 
 function formatElapsed(seconds: number): string {
   const m = Math.floor(seconds / 60)
@@ -176,12 +325,25 @@ function formatElapsed(seconds: number): string {
 }
 
 function newSetLog(setNum: number): SetLog {
-  return { set: setNum, weight: null, reps: null, rpe: null, done: false }
+  return { set: setNum, weight: null, reps: null, rpe: null, done: false, duration: null, distance: null }
+}
+
+// Short "what they actually did" summary per exercise, for the debrief agent.
+function performedSummary(t: TrackingType, logs: SetLog[], unit: string, distanceUnit: string): string {
+  const done = logs.filter((l) => l.done || l.reps != null || l.duration != null || l.distance != null)
+  if (!done.length) return 'not logged'
+  if (t === 'time') return done.map((l) => `${l.duration ?? '?'}s`).join(', ')
+  if (t === 'distance') return done.map((l) => `${l.distance ?? '?'}${distanceUnit}`).join(', ')
+  if (t === 'bodyweight_reps') return done.map((l) => `${l.reps ?? '?'}${l.weight ? `+${l.weight}${unit}` : ''}`).join(', ')
+  return done.map((l) => `${l.reps ?? '?'}×${l.weight != null ? `${l.weight}${unit}` : 'BW'}`).join(', ')
 }
 
 export function WorkoutScreen() {
   const { routineId } = useParams<{ routineId: string }>()
   const navigate      = useNavigate()
+
+  const unit = getWeightUnit()
+  const distanceUnit = getDistanceUnit(unit)
 
   const [routine, setRoutine]     = useState<RoutineRow | null>(null)
   const [athleteId, setAthleteId] = useState<string | null>(null)
@@ -190,16 +352,26 @@ export function WorkoutScreen() {
   const [loading, setLoading]     = useState(true)
   const [elapsed, setElapsed]     = useState(0)
   const [saving, setSaving]       = useState(false)
-  const [showObs, setShowObs]     = useState(false)
-  const [savingObs, setSavingObs] = useState(false)
+  const [showDebrief, setShowDebrief] = useState(false)
+  const [savingDebrief, setSavingDebrief] = useState(false)
   const [workoutId, setWorkoutId] = useState<string | null>(null)
 
-  // insight_id → insight, for the per-exercise "why" surface (Shift 5)
+  // Readiness gate (shown once on open).
+  const [showReadiness, setShowReadiness] = useState(true)
+  const [readiness, setReadiness] = useState<Readiness | null>(null)
+
+  // Per-exercise felt signal (exIdx → feedback).
+  const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>({})
+
+  // Rest timer (epoch ms when rest ends, or null).
+  const [restEndsAt, setRestEndsAt] = useState<number | null>(null)
+  const [, setNowTick] = useState(0)
+
+  // insight_id → insight, for the per-exercise "why" surface
   const [insightMap, setInsightMap] = useState<Record<string, InsightRow>>({})
   const [openInsight, setOpenInsight] = useState<InsightRow | null>(null)
   const [openReading, setOpenReading] = useState<{ name: string; why: string } | null>(null)
 
-  // Set logs: exerciseIndex → SetLog[]
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -216,6 +388,16 @@ export function WorkoutScreen() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routineId])
 
+  // Rest-timer ticker — only runs while a rest is active.
+  useEffect(() => {
+    if (restEndsAt == null) return
+    const id = setInterval(() => {
+      setNowTick((t) => t + 1)
+      if (Date.now() >= restEndsAt) setRestEndsAt(null)
+    }, 250)
+    return () => clearInterval(id)
+  }, [restEndsAt])
+
   async function loadRoutine() {
     if (!routineId) return
     setLoading(true)
@@ -228,8 +410,6 @@ export function WorkoutScreen() {
     if (data) {
       const r = data as RoutineRow
       setRoutine(r)
-      // Grab athlete_id for the observation → insight writeback, plus the
-      // athlete's name + onboarding step (drives the Act 6 first-win redirect).
       const programData = (data as unknown as { program: { athlete_id: string } | null }).program
       if (programData) {
         setAthleteId(programData.athlete_id)
@@ -243,7 +423,6 @@ export function WorkoutScreen() {
           setOnboardingStep((ath as { onboarding_step: OnboardingStep }).onboarding_step)
         }
       }
-      // Initialise set logs
       const exs = r.exercises as ExerciseTemplate[]
       const initial: Record<number, SetLog[]> = {}
       exs.forEach((ex, i) => {
@@ -251,7 +430,6 @@ export function WorkoutScreen() {
       })
       setSetLogs(initial)
 
-      // Load the insights that placed these exercises, for the "why" surface
       const insightIds = [...new Set(exs.map((ex) => ex.insight_id).filter(Boolean))] as string[]
       if (insightIds.length > 0) {
         const { data: insightRows } = await supabase
@@ -281,10 +459,17 @@ export function WorkoutScreen() {
     })
   }
 
-  const allDone = Object.values(setLogs)
-    .flat()
-    .filter((s) => s.reps !== null)
-    .length > 0
+  function setFelt(exIdx: number, name: string, felt: FeltLabel | null) {
+    setFeedback((prev) => ({ ...prev, [exIdx]: { name, felt, note: prev[exIdx]?.note ?? '' } }))
+  }
+  function setFeltNote(exIdx: number, name: string, note: string) {
+    setFeedback((prev) => ({ ...prev, [exIdx]: { name, felt: prev[exIdx]?.felt ?? null, note } }))
+  }
+
+  const allSetsFlat = Object.values(setLogs).flat()
+  const hasAnyLog = allSetsFlat.some(
+    (s) => s.done || s.reps != null || s.duration != null || s.distance != null,
+  )
 
   async function handleCompleteWorkout() {
     if (!routine) return
@@ -293,14 +478,12 @@ export function WorkoutScreen() {
 
     const actualWeights: Record<string, SetLog[]> = {}
     const actualReps: Record<string, number[]>    = {}
-
     Object.entries(setLogs).forEach(([idx, logs]) => {
       actualWeights[idx] = logs
       actualReps[idx]    = logs.map((l) => l.reps ?? 0)
     })
 
-    // Average RPE across all logged sets
-    const rpeValues = Object.values(setLogs).flat().filter((s) => s.rpe !== null).map((s) => s.rpe!)
+    const rpeValues = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
     const avgRpe    = rpeValues.length ? Math.round(rpeValues.reduce((a, b) => a + b, 0) / rpeValues.length) : null
 
     const { data: workout, error } = await supabase
@@ -322,15 +505,32 @@ export function WorkoutScreen() {
     }
 
     setWorkoutId(workout.id)
+    setRestEndsAt(null)
     setSaving(false)
-    setShowObs(true)
+    setShowDebrief(true)
   }
 
-  async function handleObsSave(observationLabel: string, signal: string, severity: number) {
-    if (!workoutId || !athleteId) return
-    setSavingObs(true)
+  async function handleDebrief(reflection: string, readingAnswer: string) {
+    if (!workoutId || !athleteId || !routine) return
+    setSavingDebrief(true)
 
-    // 1. Load existing insights so the engine can decide update vs create
+    const exercises = routine.exercises as ExerciseTemplate[]
+    const readingEx = exercises.find((e) => e.reading)
+
+    // Build the debrief input from everything the session produced.
+    const debriefExercises: DebriefInput['exercises'] = exercises.map((ex, i) => {
+      const t = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
+      const fb = feedback[i]
+      return {
+        name: ex.name,
+        felt: fb?.felt ?? null,
+        note: fb?.note ?? '',
+        prescribed: `${ex.sets}×${ex.reps}${ex.load ? ` ${ex.load}` : ''}`,
+        performed: performedSummary(t, setLogs[i] ?? [], unit, distanceUnit),
+      }
+    })
+
+    // 1. Load existing insights so the engine can decide update vs create.
     const { data: existingInsights } = await supabase
       .from('insight')
       .select('*')
@@ -338,134 +538,153 @@ export function WorkoutScreen() {
       .neq('status', 'resolved')
       .neq('status', 'disproved')
 
-    // 2. Engine resolves the action — the agent CLASSIFIES the observation,
-    //    deterministic code applies the bounded confidence delta. Falls back to
-    //    the rule-based resolver on model failure (same return contract).
-    const action = await runSessionReviewAgent(
+    // 2. Agent classifies the whole session → many bounded actions (or fallback).
+    const debrief = await runSessionDebriefAgent(
       athleteId,
       workoutId,
-      observationLabel,
-      signal,
-      severity,
-      existingInsights ?? [],
+      {
+        reflection,
+        readiness,
+        exercises: debriefExercises,
+        reading: readingEx
+          ? { name: readingEx.name, question: readingEx.reading_why ?? '', answer: readingAnswer }
+          : null,
+      },
+      (existingInsights as InsightRow[]) ?? [],
     )
 
-    // 3. Save the observation using the resolved insight category
-    const obs: SessionObservationInsert = {
-      workout_id: workoutId,
-      category:   action.insightCategory,   // insight category, not the label
-      signal,
-      severity,
+    // 3. Persist the raw signal as append-only observation rows (durable record,
+    //    independent of the agent). Severity must be 1–5.
+    const obsRows: SessionObservationInsert[] = []
+    for (const ex of debriefExercises) {
+      if (!ex.felt) continue
+      const sev = FELT_CHIPS.find((c) => c.label === ex.felt)?.severity ?? 2
+      obsRows.push({
+        workout_id: workoutId,
+        category: 'Felt',
+        signal: `${ex.name} — ${ex.felt}${ex.note ? ` — ${ex.note}` : ''}`,
+        severity: sev,
+      })
     }
-    await supabase.from('session_observation').insert(obs)
+    if (reflection) obsRows.push({ workout_id: workoutId, category: 'Reflection', signal: reflection, severity: 1 })
+    if (readingAnswer && readingEx) {
+      obsRows.push({ workout_id: workoutId, category: 'Reading', signal: `${readingEx.name} — ${readingAnswer}`, severity: 2 })
+    }
+    if (readiness && (readiness.sleep || readiness.energy || readiness.soreness)) {
+      obsRows.push({
+        workout_id: workoutId,
+        category: 'Readiness',
+        signal: `sleep ${readiness.sleep ?? '–'} · energy ${readiness.energy ?? '–'} · soreness ${readiness.soreness ?? '–'}`,
+        severity: 1,
+      })
+    }
+    if (obsRows.length) await supabase.from('session_observation').insert(obsRows)
 
-    // 4. Execute update or create on the insight table. Capture the moved
-    //    insight + its confidence shift for the post-session revelation.
-    let movedInsightId: string | null = null
-    let previousConfidence: number | null = null
-    let newConfidence: number | null = null
+    // 4. Execute each insight action; collect candidates and pick the most-moved
+    //    insight for the reveal afterward (avoids closure-mutation narrowing).
+    interface Move {
+      movedInsightId: string | null
+      category: string
+      previousConfidence: number | null
+      newConfidence: number | null
+      isNew: boolean
+      delta: number
+    }
+    const moves: Move[] = []
 
-    if (action.action === 'update' && action.existingInsightId) {
-      const updatePayload: Record<string, unknown> = {
-        confidence: action.updatedConfidence,
-        evidence:   action.updatedEvidence,
-      }
-      // Advance status if the engine crossed a confidence threshold.
-      // (updated_at / prev_status are maintained by the DB trigger.)
-      if (action.updatedStatus) updatePayload.status = action.updatedStatus
+    for (const action of debrief.actions) {
+      if (action.action === 'update' && action.existingInsightId) {
+        const updatePayload: Record<string, unknown> = {
+          confidence: action.updatedConfidence,
+          evidence:   action.updatedEvidence,
+        }
+        if (action.updatedStatus) updatePayload.status = action.updatedStatus
+        await supabase.from('insight').update(updatePayload).eq('id', action.existingInsightId)
 
-      await supabase
-        .from('insight')
-        .update(updatePayload)
-        .eq('id', action.existingInsightId)
-
-      const prior = (existingInsights ?? []).find((i) => i.id === action.existingInsightId)
-      movedInsightId = action.existingInsightId
-      previousConfidence = prior?.confidence ?? null
-      newConfidence = action.updatedConfidence
-    } else if (action.action === 'create' && action.newInsight) {
-      const { data: created } = await supabase
-        .from('insight')
-        .insert(action.newInsight)
-        .select()
-        .single()
-      if (created) {
-        movedInsightId = (created as InsightRow).id
-        newConfidence = (created as InsightRow).confidence
+        const prior = ((existingInsights as InsightRow[]) ?? []).find((i) => i.id === action.existingInsightId)
+        moves.push({
+          movedInsightId: action.existingInsightId,
+          category: action.insightCategory,
+          previousConfidence: prior?.confidence ?? null,
+          newConfidence: action.updatedConfidence,
+          isNew: false,
+          delta: (action.updatedConfidence ?? 0) - (prior?.confidence ?? 0),
+        })
+      } else if (action.action === 'create' && action.newInsight) {
+        const { data: created } = await supabase.from('insight').insert(action.newInsight).select().single()
+        if (created) {
+          moves.push({
+            movedInsightId: (created as InsightRow).id,
+            category: action.insightCategory,
+            previousConfidence: null,
+            newConfidence: (created as InsightRow).confidence,
+            isNew: true,
+            delta: 0.0001, // new signals rank below a real positive move, above nothing
+          })
+        }
       }
     }
 
-    setSavingObs(false)
+    const best = moves.length
+      ? moves.reduce((a, b) => (b.delta > a.delta ? b : a))
+      : null
 
-    // 5. First session ever → the post-session revelation (Act 6, Screen 21).
-    //    Every session after → the existing profile pulse.
+    setSavingDebrief(false)
+
+    const movedCount = debrief.actions.length
+    const primaryCategory = best?.category ?? 'Recovery'
+
+    // 5. First session ever → the post-session revelation (Act 6). Else profile pulse.
     if (onboardingStep === 'first_session_pending') {
-      await supabase
-        .from('athlete')
-        .update({ onboarding_step: 'first_session_complete' })
-        .eq('id', athleteId)
-
+      await supabase.from('athlete').update({ onboarding_step: 'first_session_complete' }).eq('id', athleteId)
       navigate('/onboarding/revelation', {
         replace: true,
         state: {
-          movedInsightId,
-          category: action.insightCategory,
-          previousConfidence,
-          newConfidence,
-          isNew: action.action === 'create',
+          movedInsightId: best?.movedInsightId ?? null,
+          category: primaryCategory,
+          previousConfidence: best?.previousConfidence ?? null,
+          newConfidence: best?.newConfidence ?? null,
+          isNew: best?.isNew ?? true,
+          movedCount,
+          summary: debrief.summary,
           durationMins: Math.ceil(elapsed / 60),
-          setsLogged: Object.values(setLogs).flat().filter((s) => s.done).length,
+          setsLogged: allSetsFlat.filter((s) => s.done).length,
           name: athleteName,
         },
       })
       return
     }
 
-    navigate('/app/profile', {
-      state: { pulsedCategory: action.insightCategory },
-      replace: true,
-    })
+    navigate('/app/profile', { state: { pulsedCategory: primaryCategory }, replace: true })
   }
 
-  async function handleObsSkip() {
-    // First-session skip still completes onboarding — there's just no revelation.
+  async function handleDebriefSkip() {
     if (onboardingStep === 'first_session_pending' && athleteId) {
-      await supabase
-        .from('athlete')
-        .update({ onboarding_step: 'complete' })
-        .eq('id', athleteId)
+      await supabase.from('athlete').update({ onboarding_step: 'complete' }).eq('id', athleteId)
     }
     navigate('/app/today', { replace: true })
   }
 
-  // ---- Loading / error states ----------------------------------------------
+  // ---- loading / error ------------------------------------------------------
 
   if (loading) {
-    return (
-      <div className="screen--centered">
-        <Spinner />
-      </div>
-    )
+    return <div className="screen--centered"><Spinner /></div>
   }
-
   if (!routine) {
     return (
       <div className="screen--centered">
         <p className="text-dim">Session not found.</p>
-        <Button variant="ghost" onClick={() => navigate('/app/today')} style={{ marginTop: 16 }}>
-          Back
-        </Button>
+        <Button variant="ghost" onClick={() => navigate('/app/today')} style={{ marginTop: 16 }}>Back</Button>
       </div>
     )
   }
 
   const exercises = routine.exercises as ExerciseTemplate[]
+  const readingEx = exercises.find((e) => e.reading)
 
-  // Telemetry header values
-  const allSets   = Object.values(setLogs).flat()
-  const setsTotal = allSets.length
-  const setsDone  = allSets.filter((s) => s.done).length
-  const rpeLive   = allSets.filter((s) => s.rpe !== null).map((s) => s.rpe!)
+  const setsTotal = allSetsFlat.length
+  const setsDone  = allSetsFlat.filter((s) => s.done).length
+  const rpeLive   = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
   const avgRpeLive = rpeLive.length ? Math.round(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length) : null
 
   const workoutStripItems: Array<{ label: string; value: string | number }> = [
@@ -475,20 +694,14 @@ export function WorkoutScreen() {
   ]
   if (avgRpeLive !== null) workoutStripItems.push({ label: 'RPE', value: avgRpeLive })
 
-  // ---- Full-screen workout (no nav) ----------------------------------------
+  const restLeft = restEndsAt ? Math.max(0, Math.ceil((restEndsAt - Date.now()) / 1000)) : 0
 
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
-      {/* Header bar — back affordance + always-on telemetry strip */}
       <div
         style={{
-          display: 'flex',
-          alignItems: 'stretch',
-          borderBottom: '1px solid var(--line)',
-          position: 'sticky',
-          top: 0,
-          background: 'var(--ground)',
-          zIndex: 10,
+          display: 'flex', alignItems: 'stretch', borderBottom: '1px solid var(--line)',
+          position: 'sticky', top: 0, background: 'var(--ground)', zIndex: 10,
         }}
       >
         <button
@@ -500,48 +713,21 @@ export function WorkoutScreen() {
         >
           <ChevronLeft size={20} strokeWidth={1.5} />
         </button>
-
         <div style={{ flex: 1, minWidth: 0 }}>
           <TelemetryStrip items={workoutStripItems} lastSignalAt={new Date(startRef.current)} />
         </div>
       </div>
 
-      {/* Column headers */}
-      <div
-        style={{
-          display: 'grid',
-          gridTemplateColumns: '28px 1fr 1fr 52px 40px',
-          gap: 6,
-          padding: '6px 16px',
-          borderBottom: '1px solid var(--line)',
-        }}
-      >
-        {['Set', 'kg', 'Reps', 'RPE', ''].map((h, i) => (
-          <span
-            key={i}
-            className="text-xs text-dim"
-            style={{ fontFamily: 'var(--font-mono)', textAlign: 'center', fontSize: 10 }}
-          >
-            {h}
-          </span>
-        ))}
-      </div>
-
       {/* Exercise list */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 120px' }}>
+      <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 140px' }}>
         {exercises.map((ex, exIdx) => {
           const logs = setLogs[exIdx] ?? []
+          const trackingType = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
+          const pReps = leadingInt(ex.reps)
+          const pDur  = trackingType === 'time' ? leadingInt(ex.reps) : null
 
           return (
-            <div
-              key={exIdx}
-              style={{
-                paddingTop: 20,
-                paddingBottom: 12,
-                borderBottom: '1px solid var(--line)',
-              }}
-            >
-              {/* Exercise header */}
+            <div key={exIdx} style={{ paddingTop: 20, paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
               <div style={{ marginBottom: 10 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
                   <p style={{ fontWeight: 600, fontSize: 15 }}>{ex.name}</p>
@@ -567,27 +753,28 @@ export function WorkoutScreen() {
                   )}
                 </div>
                 {ex.cue && (
-                  <p className="text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.5 }}>
-                    {ex.cue}
-                  </p>
+                  <p className="text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.5 }}>{ex.cue}</p>
                 )}
                 <p className="num text-xs text-dim" style={{ marginTop: 3 }}>
-                  {ex.sets} × {ex.reps}
-                  {ex.load ? ` · ${ex.load}` : ''}
+                  {ex.sets} × {ex.reps}{ex.load ? ` · ${ex.load}` : ''}
                 </p>
               </div>
 
-              {/* Set rows */}
               {logs.map((log, setIdx) => (
                 <SetRow
                   key={setIdx}
                   setNum={setIdx + 1}
                   log={log}
+                  trackingType={trackingType}
+                  unit={unit}
+                  distanceUnit={distanceUnit}
+                  prescribedReps={pReps}
+                  prescribedDuration={pDur}
                   onChange={(updated) => handleSetChange(exIdx, setIdx, updated)}
+                  onComplete={() => setRestEndsAt(Date.now() + REST_SECONDS * 1000)}
                 />
               ))}
 
-              {/* Add set */}
               <button
                 type="button"
                 className="btn btn--ghost"
@@ -597,22 +784,33 @@ export function WorkoutScreen() {
                 <Plus size={12} strokeWidth={2} style={{ marginRight: 4 }} />
                 Add set
               </button>
+
+              <FeltChips
+                value={feedback[exIdx]?.felt ?? null}
+                note={feedback[exIdx]?.note ?? ''}
+                onFelt={(f) => setFelt(exIdx, ex.name, f)}
+                onNote={(n) => setFeltNote(exIdx, ex.name, n)}
+              />
             </div>
           )
         })}
       </div>
 
+      {/* Rest timer pill */}
+      {restEndsAt != null && restLeft > 0 && (
+        <button type="button" className="rest-pill" onClick={() => setRestEndsAt(null)}>
+          <span className="rest-pill__label">REST</span>
+          <span className="num rest-pill__time">{formatElapsed(restLeft)}</span>
+          <X size={13} strokeWidth={2} />
+        </button>
+      )}
+
       {/* Bottom complete bar */}
       <div
         style={{
-          position: 'fixed',
-          bottom: 0,
-          left: 0,
-          right: 0,
-          padding: '12px 16px',
-          paddingBottom: `calc(12px + env(safe-area-inset-bottom, 0px))`,
-          background: 'var(--ground)',
-          borderTop: '1px solid var(--line)',
+          position: 'fixed', bottom: 0, left: 0, right: 0, padding: '12px 16px',
+          paddingBottom: 'calc(12px + env(safe-area-inset-bottom, 0px))',
+          background: 'var(--ground)', borderTop: '1px solid var(--line)',
         }}
       >
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
@@ -622,56 +820,44 @@ export function WorkoutScreen() {
           </div>
           <div>
             <span className="text-xs text-dim">Sets logged  </span>
-            <span className="num text-xs">
-              {Object.values(setLogs).flat().filter((s) => s.done).length}
-            </span>
+            <span className="num text-xs">{setsDone}</span>
           </div>
         </div>
-        <Button
-          variant="primary"
-          full
-          onClick={handleCompleteWorkout}
-          disabled={saving || !allDone}
-        >
+        <Button variant="primary" full onClick={handleCompleteWorkout} disabled={saving || !hasAnyLog}>
           {saving ? (
-            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Spinner /> Saving…
-            </span>
-          ) : (
-            'Complete workout →'
-          )}
+            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Spinner /> Saving…</span>
+          ) : 'Complete workout →'}
         </Button>
       </div>
 
-      {/* Observation sheet (appears post-save) */}
-      {showObs && (
-        <ObservationSheet
-          onSave={handleObsSave}
-          onSkip={handleObsSkip}
-          saving={savingObs}
+      {/* Pre-session readiness gate */}
+      {showReadiness && (
+        <ReadinessGate
+          onStart={(r) => { setReadiness(r); setShowReadiness(false) }}
+          onSkip={() => setShowReadiness(false)}
         />
       )}
 
-      {/* Exercise "why" sheet (Shift 5) */}
-      {openInsight && (
-        <ExerciseInsightSheet
-          insight={openInsight}
-          onClose={() => setOpenInsight(null)}
+      {/* Debrief sheet (post-save) */}
+      {showDebrief && (
+        <DebriefSheet
+          reading={readingEx ? { name: readingEx.name, question: readingEx.reading_why ?? 'How did the read item feel?' } : null}
+          saving={savingDebrief}
+          onSave={handleDebrief}
+          onSkip={handleDebriefSkip}
         />
       )}
+
+      {/* Exercise "why" sheet */}
+      {openInsight && <ExerciseInsightSheet insight={openInsight} onClose={() => setOpenInsight(null)} />}
 
       {openReading && (
         <div className="obs-sheet" onClick={() => setOpenReading(null)}>
           <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
-            <p
-              className="section-header"
-              style={{ color: 'var(--computing)', marginBottom: 10 }}
-            >
+            <p className="section-header" style={{ color: 'var(--computing)', marginBottom: 10 }}>
               READING · {openReading.name}
             </p>
-            <p className="text-sm" style={{ lineHeight: 1.5, marginBottom: 12 }}>
-              {openReading.why}
-            </p>
+            <p className="text-sm" style={{ lineHeight: 1.5, marginBottom: 12 }}>{openReading.why}</p>
             <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
               How this one goes feeds the read — no need to score it, just train it honestly.
             </p>

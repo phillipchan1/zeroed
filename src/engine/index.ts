@@ -22,9 +22,10 @@ import type {
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
 import {
-  callProbe, callSessionReview, callProgramDesign, callInfoGain, callTarget,
+  callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callInfoGain, callTarget,
   type ProgramDesignResult, type InsightCategory,
 } from './agentClient'
+import { FELT_CHIPS, type FeltLabel } from '../types/database'
 import { validateProvisionalProgram } from './safety'
 
 // ---- Types -----------------------------------------------------------------
@@ -274,6 +275,226 @@ export async function runSessionReviewAgent(
       source: 'session_observation',
       program_impact: null,
     },
+  }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// SESSION DEBRIEF — the throughput upgrade (agent classifies MANY, code disposes)
+// Where runSessionReviewAgent took ONE tap, this mines the whole session's felt
+// signal (prose reflection + per-exercise feel + a planted check-in answer) into
+// every insight it bears on. Each classification gets the SAME bounded-delta
+// treatment; deltas compound on a working snapshot so two signals on one insight
+// don't both read stale confidence. On model failure we fall back to a
+// deterministic read of the per-exercise feel chips.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface DebriefExerciseInput {
+  name: string
+  felt: FeltLabel | null
+  note: string
+  prescribed: string
+  performed: string
+}
+
+export interface DebriefInput {
+  reflection: string
+  readiness: { sleep: number | null; energy: number | null; soreness: number | null } | null
+  exercises: DebriefExerciseInput[]
+  reading: { name: string; question: string; answer: string } | null
+}
+
+export interface DebriefOutcome {
+  source: 'agent' | 'fallback'
+  summary: string | null
+  actions: ObservationAction[]
+}
+
+function magnitudeToSeverity(
+  direction: 'confirming' | 'disconfirming' | 'neutral',
+  magnitude: 'weak' | 'moderate' | 'strong',
+): number {
+  if (direction === 'neutral') return 1
+  return magnitude === 'strong' ? 4 : magnitude === 'moderate' ? 3 : 2
+}
+
+// Collapse so the DB sees one write per insight: keep the last (compounded)
+// update per insight id, and at most one create per category.
+function collapseActions(actions: ObservationAction[]): ObservationAction[] {
+  const updates = new Map<string, ObservationAction>()
+  const createsByCat = new Map<string, ObservationAction>()
+  for (const a of actions) {
+    if (a.action === 'update' && a.existingInsightId) {
+      updates.set(a.existingInsightId, a)            // last wins (compounded value)
+    } else if (a.action === 'create' && a.newInsight) {
+      if (!createsByCat.has(a.insightCategory)) createsByCat.set(a.insightCategory, a)
+    }
+  }
+  return [...updates.values(), ...createsByCat.values()]
+}
+
+interface Classification {
+  target_insight_id: string | null
+  direction: 'confirming' | 'disconfirming' | 'neutral'
+  magnitude: 'weak' | 'moderate' | 'strong'
+  category: string
+  claim: string
+  rationale: string
+  signal: string
+}
+
+// Turn N classifications into N bounded, collapsed ObservationActions. Deltas
+// compound across classifications that touch the same insight.
+function disposeClassifications(
+  athleteId: string,
+  workoutId: string,
+  classifications: Classification[],
+  existingInsights: InsightRow[],
+): ObservationAction[] {
+  const working = new Map<string, { confidence: number; status: InsightStatus; evidence: unknown[] }>()
+  for (const i of existingInsights) {
+    working.set(i.id, {
+      confidence: i.confidence,
+      status: i.status,
+      evidence: Array.isArray(i.evidence) ? [...i.evidence] : [],
+    })
+  }
+
+  const raw: ObservationAction[] = []
+  for (const c of classifications) {
+    const severity = magnitudeToSeverity(c.direction, c.magnitude)
+    const evidenceEntry = {
+      workout_id: workoutId,
+      observation: c.signal,
+      signal: c.signal,
+      severity,
+      direction: c.direction,
+      magnitude: c.magnitude,
+      rationale: c.rationale,
+      logged_at: new Date().toISOString(),
+    }
+
+    const orig = c.target_insight_id ? existingInsights.find((i) => i.id === c.target_insight_id) ?? null : null
+    const canUpdate = !!orig && orig.status !== 'resolved' && orig.status !== 'disproved'
+
+    if (canUpdate && c.target_insight_id) {
+      const w = working.get(c.target_insight_id)!
+      const delta = boundedConfidenceDelta(c.direction, c.magnitude)
+      const updatedConfidence = clampConfidence(w.confidence + delta)
+      const updatedEvidence = [...w.evidence, evidenceEntry]
+      const updatedStatus = delta > 0 ? advanceStatus(w.status, updatedConfidence) : null
+      // Compound the working copy so the next classification on this insight
+      // reads the already-moved confidence/status.
+      w.confidence = updatedConfidence
+      w.evidence = updatedEvidence
+      if (updatedStatus) w.status = updatedStatus
+      raw.push({
+        insightCategory: c.category,
+        action: 'update',
+        existingInsightId: c.target_insight_id,
+        updatedConfidence,
+        updatedEvidence,
+        updatedStatus,
+        newInsight: null,
+      })
+    } else {
+      raw.push({
+        insightCategory: c.category,
+        action: 'create',
+        existingInsightId: null,
+        updatedConfidence: null,
+        updatedEvidence: null,
+        updatedStatus: null,
+        newInsight: {
+          athlete_id: athleteId,
+          source_id: workoutId,
+          claim: c.claim,
+          category: c.category,
+          priority: 'P3' as Priority,
+          confidence: clampConfidence(0.2 + boundedConfidenceDelta(c.direction, c.magnitude)),
+          status: 'hypothesis',
+          evidence: [evidenceEntry],
+          source: 'session_observation',
+          program_impact: null,
+        },
+      })
+    }
+  }
+  return collapseActions(raw)
+}
+
+// Deterministic floor: read each per-exercise feel chip as one observation via
+// the existing rule-based resolver. Prose is NOT parsed here (no model) — it's
+// still persisted as an observation row by the caller.
+const FELT_TO_OBSERVATION: Record<FeltLabel, string> = {
+  Easy:  'Felt strong',
+  Solid: 'Felt strong',
+  Hard:  'Struggled with load',
+  Off:   'Energy flag',
+  Tweak: 'Pain signal',
+  Pain:  'Pain signal',
+}
+
+function fallbackDebrief(
+  athleteId: string,
+  workoutId: string,
+  input: DebriefInput,
+  existingInsights: InsightRow[],
+): ObservationAction[] {
+  const raw: ObservationAction[] = []
+  for (const ex of input.exercises) {
+    if (!ex.felt) continue
+    const label = FELT_TO_OBSERVATION[ex.felt]
+    const severity = FELT_CHIPS.find((c) => c.label === ex.felt)?.severity ?? 2
+    const signal = `${ex.name} — felt ${ex.felt}${ex.note ? ` — ${ex.note}` : ''}`
+    raw.push(resolveObservationAction(athleteId, workoutId, label, signal, severity, existingInsights))
+  }
+  return collapseActions(raw)
+}
+
+/**
+ * Review a whole logged session. Agent proposes many classifications; code
+ * disposes each with a bounded delta. Returns collapsed actions for the caller
+ * to execute, plus a warm one-line summary when the agent produced one.
+ */
+export async function runSessionDebriefAgent(
+  athleteId: string,
+  workoutId: string,
+  input: DebriefInput,
+  existingInsights: InsightRow[],
+): Promise<DebriefOutcome> {
+  const res = await callSessionDebrief({
+    reflection: input.reflection,
+    readiness: input.readiness,
+    exercises: input.exercises.map((e) => ({
+      name: e.name, felt: e.felt, note: e.note, prescribed: e.prescribed, performed: e.performed,
+    })),
+    reading: input.reading,
+    insights: existingInsights.map((i) => ({
+      id: i.id, category: i.category, claim: i.claim, confidence: i.confidence, status: i.status,
+    })),
+  })
+
+  if (res.ok && res.data.observations.length > 0) {
+    const classifications: Classification[] = res.data.observations.map((o) => ({
+      target_insight_id: o.target_insight_id,
+      direction: o.direction,
+      magnitude: o.magnitude,
+      category: o.category,
+      claim: o.claim,
+      rationale: o.rationale,
+      signal: o.claim,
+    }))
+    return {
+      source: 'agent',
+      summary: res.data.session_summary?.trim() || null,
+      actions: disposeClassifications(athleteId, workoutId, classifications, existingInsights),
+    }
+  }
+
+  return {
+    source: 'fallback',
+    summary: null,
+    actions: fallbackDebrief(athleteId, workoutId, input, existingInsights),
   }
 }
 

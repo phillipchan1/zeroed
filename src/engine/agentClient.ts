@@ -77,6 +77,21 @@ export interface SessionReviewResult {
   rationale: string
 }
 
+// One classification inside a debrief — same shape as a single review, repeated.
+export interface DebriefObservation {
+  target_insight_id: string | null
+  direction: 'confirming' | 'disconfirming' | 'neutral'
+  magnitude: 'weak' | 'moderate' | 'strong'
+  category: InsightCategory
+  claim: string
+  rationale: string
+}
+
+export interface SessionDebriefResult {
+  session_summary: string
+  observations: DebriefObservation[]
+}
+
 export interface TargetResult {
   target_question: string
   suggested_target: string | null
@@ -178,4 +193,22 @@ export function callTarget(payload: {
   hypothesis: { claim: string; category: string } | null
 }): Promise<AgentResult<TargetResult>> {
   return invokeAgent<TargetResult>('target', payload)
+}
+
+/**
+ * Session debrief — post-auth. The whole session's felt signal (prose reflection
+ * + per-exercise feel + prescribed-vs-performed + a planted check-in answer) →
+ * MULTIPLE classifications. This is the throughput upgrade over a single
+ * observation: one session yields many signals, like the coach's hand-written
+ * notes. Each classification is disposed deterministically (bounded delta) in the
+ * engine — the model never returns a number or a status.
+ */
+export function callSessionDebrief(payload: {
+  reflection: string
+  readiness: { sleep: number | null; energy: number | null; soreness: number | null } | null
+  exercises: Array<{ name: string; felt: string | null; note: string; prescribed: string; performed: string }>
+  reading: { name: string; question: string; answer: string } | null
+  insights: Array<{ id: string; category: string; claim: string; confidence: number; status: string }>
+}): Promise<AgentResult<SessionDebriefResult>> {
+  return invokeAgent<SessionDebriefResult>('session_debrief', payload)
 }
