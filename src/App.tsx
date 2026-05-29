@@ -52,7 +52,7 @@ function LoopLayout({
 
 function AppRoutes() {
   const { user, loading: authLoading } = useAuth()
-  const { athlete, todayRoutine, loading: stateLoading, refresh } = useAppState(user?.id)
+  const { athlete, todayRoutine, week, loading: stateLoading, refresh } = useAppState(user?.id)
 
   if (authLoading || stateLoading) return <Splash />
 
@@ -95,14 +95,14 @@ function AppRoutes() {
         }
       >
         <Route index element={<Navigate to="today" replace />} />
-        <Route path="today"   element={<TodayScreen   athleteId={athleteId} todayRoutine={todayRoutine} onboardingStep={onboardingStep} />} />
+        <Route path="today"   element={<TodayScreen   athleteId={athleteId} todayRoutine={todayRoutine} week={week} onboardingStep={onboardingStep} />} />
         <Route path="profile" element={<ProfileScreen athleteId={athleteId} athleteName={athleteName} />} />
-        <Route path="program" element={<ProgramScreen athleteId={athleteId} />} />
+        <Route path="program" element={<ProgramScreen athleteId={athleteId} week={week} />} />
         <Route path="coach"   element={<CoachScreen athleteId={athleteId} />} />
       </Route>
 
       {/* Workout — full-screen, no nav */}
-      <Route path="/app/workout/:routineId" element={<WorkoutScreen />} />
+      <Route path="/app/workout/:routineId" element={<WorkoutScreen onLogged={refresh} />} />
 
       {/* Catch-all */}
       <Route path="*" element={<Navigate to="/app/today" replace />} />

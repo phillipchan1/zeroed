@@ -1101,6 +1101,22 @@ export async function buildProvisionalProgram(
     plan = generateInitialProgram(ranked, startDateStr)
   }
 
+  // Size the week to the athlete's cadence, capped low while confidence is low
+  // (the repeating weekly template — see lib/week.ts). The agent often returns
+  // one tailored session; pad with safe deterministic sessions so "this week"
+  // reads as a real plan, then cap.
+  const targetSessions = Math.min(Math.max(profile.sessions ?? 3, 1), 3)
+  if (plan.routines.length < targetSessions) {
+    const filler = generateInitialProgram(ranked, startDateStr).routines
+    for (const fr of filler) {
+      if (plan.routines.length >= targetSessions) break
+      if (!plan.routines.some((pr) => pr.name === fr.name)) plan.routines.push(fr)
+    }
+  }
+  if (plan.routines.length > targetSessions) {
+    plan.routines = plan.routines.slice(0, targetSessions)
+  }
+
   // One info-gain "test me" item (non-fatal).
   await tagInfoGainItem(plan, ranked, p1)
 

@@ -338,7 +338,7 @@ function performedSummary(t: TrackingType, logs: SetLog[], unit: string, distanc
   return done.map((l) => `${l.reps ?? '?'}×${l.weight != null ? `${l.weight}${unit}` : 'BW'}`).join(', ')
 }
 
-export function WorkoutScreen() {
+export function WorkoutScreen({ onLogged }: { onLogged?: () => void }) {
   const { routineId } = useParams<{ routineId: string }>()
   const navigate      = useNavigate()
 
@@ -634,9 +634,11 @@ export function WorkoutScreen() {
     const movedCount = debrief.actions.length
     const primaryCategory = best?.category ?? 'Recovery'
 
-    // 5. First session ever → the post-session revelation (Act 6). Else profile pulse.
+    // 5. First session ever → the post-session revelation (Act 6). Else back to
+    //    Today to see the week's progress. Mark onboarding 'complete' right here
+    //    (not a fragile intermediate that depends on tapping through revelation).
     if (onboardingStep === 'first_session_pending') {
-      await supabase.from('athlete').update({ onboarding_step: 'first_session_complete' }).eq('id', athleteId)
+      await supabase.from('athlete').update({ onboarding_step: 'complete' }).eq('id', athleteId)
       navigate('/onboarding/revelation', {
         replace: true,
         state: {
@@ -655,13 +657,17 @@ export function WorkoutScreen() {
       return
     }
 
-    navigate('/app/profile', { state: { pulsedCategory: primaryCategory }, replace: true })
+    // Ongoing session → back to Today to see the week tick forward. Refresh so
+    // this just-logged session shows as done and "next" advances immediately.
+    onLogged?.()
+    navigate('/app/today', { replace: true })
   }
 
   async function handleDebriefSkip() {
     if (onboardingStep === 'first_session_pending' && athleteId) {
       await supabase.from('athlete').update({ onboarding_step: 'complete' }).eq('id', athleteId)
     }
+    onLogged?.()
     navigate('/app/today', { replace: true })
   }
 

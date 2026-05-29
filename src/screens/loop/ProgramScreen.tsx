@@ -1,7 +1,9 @@
 import { Fragment, useEffect, useState } from 'react'
+import { Check } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { SectionHeader, Skeleton, Divider, BracketFrame } from '../../components/ui'
 import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName } from '../../types/database'
+import type { WeekState } from '../../lib/week'
 
 /**
  * PROGRAM — "you are here." The macro view (per the Notion Screen Architecture
@@ -17,7 +19,7 @@ import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName } f
 
 const PHASES: PhaseName[] = ['Stability', 'Strength', 'Power', 'Sport']
 
-export function ProgramScreen({ athleteId }: { athleteId: string }) {
+export function ProgramScreen({ athleteId, week }: { athleteId: string; week?: WeekState | null }) {
   const [program, setProgram] = useState<ProgramRow | null>(null)
   const [phase, setPhase]     = useState<PhaseRow | null>(null)
   const [routines, setRoutines] = useState<RoutineRow[]>([])
@@ -140,21 +142,38 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
               </div>
             )}
 
-            {/* SESSIONS — the work in this phase */}
+            {/* SESSIONS — the work in this phase, with this-week completion */}
             <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 28 }}>
-              <SectionHeader>Sessions</SectionHeader>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+                <SectionHeader>Sessions</SectionHeader>
+                {week && week.total > 0 && (
+                  <span className={`num text-xs${week.complete ? ' text-signal' : ' text-dim'}`} style={{ letterSpacing: '0.04em' }}>
+                    {week.doneCount}/{week.total} this week
+                  </span>
+                )}
+              </div>
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {routines.length > 0 ? routines.map((r) => (
-                  <div key={r.id} className="card">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                      <h3 style={{ fontSize: 15, fontWeight: 600 }}>{r.name}</h3>
-                      <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
-                        {(r.exercises as unknown[]).length} exercises
-                      </span>
+                {routines.length > 0 ? routines.map((r) => {
+                  const done = week?.sessions.find((s) => s.routine.id === r.id)?.done ?? false
+                  const isNext = week?.next?.id === r.id
+                  return (
+                    <div key={r.id} className="card" style={done ? { opacity: 0.6 } : undefined}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                        <h3 style={{ fontSize: 15, fontWeight: 600, display: 'flex', alignItems: 'center', gap: 8 }}>
+                          {done && <Check size={14} strokeWidth={2.5} color="var(--confirmed)" />}
+                          {r.name}
+                          {isNext && (
+                            <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.08em', color: 'var(--signal)' }}>NEXT</span>
+                          )}
+                        </h3>
+                        <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
+                          {(r.exercises as unknown[]).length} exercises
+                        </span>
+                      </div>
+                      {r.intent && <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{r.intent}</p>}
                     </div>
-                    {r.intent && <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{r.intent}</p>}
-                  </div>
-                )) : (
+                  )
+                }) : (
                   <p className="text-sm text-dim">No sessions in this phase yet.</p>
                 )}
               </div>
