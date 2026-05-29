@@ -1,14 +1,22 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 import { supabase } from '../../lib/supabaseClient'
-import { SectionHeader, Skeleton, Divider, BracketFrame, TelemetryStrip } from '../../components/ui'
-import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow } from '../../types/database'
+import { SectionHeader, Skeleton, Divider, BracketFrame } from '../../components/ui'
+import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName } from '../../types/database'
 
 /**
- * PROGRAM — the plan. The multi-week arc that governs training: current phase +
- * its objective, the session structure, the non-negotiable rules, and what
- * graduates you to the next phase. This is the "zoom out" from Train's "right
- * now"; the rules and structure that used to crowd Today live here.
+ * PROGRAM — "you are here." The macro view (per the Notion Screen Architecture
+ * spec): the phase arc Stability → Strength → Power → Sport, where you are in it,
+ * the gates that graduate you, the session structure, and the non-negotiables.
+ *
+ * Doctrine: this is an INSTRUMENT showing position, not a game. No streaks, no
+ * levels, no XP bar. The arc is static (a phase changes every ~5 weeks, not live
+ * — only the moment of advancement would earn a one-time pulse). Phase is
+ * data-driven from phase.name, so the arc moves on its own once the coach-driven
+ * advancement engine flips it. Gates show pending (amber) until that lands.
  */
+
+const PHASES: PhaseName[] = ['Stability', 'Strength', 'Power', 'Sport']
+
 export function ProgramScreen({ athleteId }: { athleteId: string }) {
   const [program, setProgram] = useState<ProgramRow | null>(null)
   const [phase, setPhase]     = useState<PhaseRow | null>(null)
@@ -43,26 +51,24 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
     ? Math.ceil((new Date(profile.retest_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
     : null
 
-  let weekStr: string | null = null
+  const phaseName = (phase?.name ?? profile?.current_phase ?? 'Stability') as PhaseName
+  const currentIdx = Math.max(0, PHASES.indexOf(phaseName))
+  const nextPhase = PHASES[currentIdx + 1] ?? null
+
+  let weekCurrent = 1
+  let weekTotal = 5
   if (phase?.week_start && phase?.week_end) {
     const dayMs = 1000 * 60 * 60 * 24
     const start = new Date(phase.week_start).getTime()
-    const total = Math.max(1, Math.round((new Date(phase.week_end).getTime() - start) / dayMs / 7) + 1)
-    const current = Math.min(total, Math.max(1, Math.floor((Date.now() - start) / dayMs / 7) + 1))
-    weekStr = `w${current}/${total}`
+    weekTotal = Math.max(1, Math.round((new Date(phase.week_end).getTime() - start) / dayMs / 7) + 1)
+    weekCurrent = Math.min(weekTotal, Math.max(1, Math.floor((Date.now() - start) / dayMs / 7) + 1))
   }
-
-  const telemetryItems: Array<{ label: string; value: string | number; signal?: boolean }> = []
-  if (phase?.name) telemetryItems.push({ label: 'PHASE', value: weekStr ? `${phase.name} ${weekStr}` : phase.name })
-  if (retestDays !== null) telemetryItems.push({ label: 'RETEST', value: `${Math.max(0, retestDays)}d`, signal: retestDays <= 7 })
 
   const nonNegotiables = (phase?.non_negotiables as string[] | null) ?? []
   const advancement    = (phase?.advancement_criteria as string[] | null) ?? []
 
   return (
     <div className="screen with-nav">
-      {!loading && telemetryItems.length > 0 && <TelemetryStrip items={telemetryItems} presence={false} />}
-
       <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
         <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
           The plan
@@ -70,8 +76,8 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
         <h2 style={{ fontSize: 22, fontWeight: 600, marginBottom: 24 }}>Program</h2>
 
         {loading ? (
-          <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-            <Skeleton height={10} width={80} /><Skeleton height={22} width={140} /><Skeleton height={12} width="90%" />
+          <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+            <Skeleton height={10} width={80} /><Skeleton height={28} width="100%" /><Skeleton height={22} width={140} />
           </div>
         ) : !program ? (
           <div className="card">
@@ -81,9 +87,9 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
           </div>
         ) : (
           <>
-            {/* Current phase + objective */}
-            <BracketFrame className="card fade-rise" style={{ marginBottom: 24 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            {/* THE "YOU ARE HERE" INSTRUMENT — the focal surface (bracket-framed) */}
+            <BracketFrame className="card fade-rise" style={{ marginBottom: 28 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 18 }}>
                 <SectionHeader>Current phase</SectionHeader>
                 {retestDays !== null && (
                   <span className={`num text-xs${retestDays <= 7 ? ' text-signal' : ' text-dim'}`}>
@@ -91,16 +97,51 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
                   </span>
                 )}
               </div>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 22, fontWeight: 600, color: 'var(--signal)' }}>
-                {phase?.name ?? profile?.current_phase ?? '—'}{weekStr ? ` · ${weekStr}` : ''}
-              </span>
+
+              {/* The arc */}
+              <PhaseArc currentIdx={currentIdx} />
+
+              {/* Phase name + week position */}
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 22 }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 600, color: 'var(--signal)', letterSpacing: '-0.01em' }}>
+                  {phaseName}
+                </span>
+                <div style={{ textAlign: 'right' }}>
+                  <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.08em', marginBottom: 6 }}>
+                    WEEK <span className="num text-signal">{weekCurrent}</span>/{weekTotal}
+                  </p>
+                  <WeekDots current={weekCurrent} total={weekTotal} />
+                </div>
+              </div>
+
               {program.goal && (
-                <p className="text-sm text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>{program.goal}</p>
+                <p className="text-sm text-dim" style={{ marginTop: 14, lineHeight: 1.5 }}>{program.goal}</p>
               )}
             </BracketFrame>
 
-            {/* Session structure */}
-            <div className="fade-rise fade-rise-delay-1" style={{ marginBottom: 24 }}>
+            {/* THE GATE — what graduates you (coach reads it; code disposes) */}
+            {advancement.length > 0 && (
+              <div className="fade-rise fade-rise-delay-1" style={{ marginBottom: 28 }}>
+                <SectionHeader>The gate</SectionHeader>
+                <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 12, lineHeight: 1.6 }}>
+                  What graduates you{nextPhase ? ` to ${nextPhase}` : ''}. Awaiting evidence.
+                </p>
+                <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {advancement.map((c, i) => (
+                    <li key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5 }}>
+                      <span
+                        title="Awaiting evidence"
+                        style={{ marginTop: 5, flexShrink: 0, width: 7, height: 7, borderRadius: '50%', border: '1px solid var(--pending)', background: 'transparent' }}
+                      />
+                      <span>{c}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
+            {/* SESSIONS — the work in this phase */}
+            <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 28 }}>
               <SectionHeader>Sessions</SectionHeader>
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {routines.length > 0 ? routines.map((r) => (
@@ -119,9 +160,10 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
               </div>
             </div>
 
-            {/* Non-negotiables — the rules that apply every session */}
+            {/* NON-NEGOTIABLES — the rules */}
             {nonNegotiables.length > 0 && (
-              <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 24 }}>
+              <div className="fade-rise fade-rise-delay-3">
+                <Divider />
                 <SectionHeader>Non-negotiables</SectionHeader>
                 <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 10, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
                   Rules — every session, no skips
@@ -136,25 +178,70 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
                 </ul>
               </div>
             )}
-
-            {/* Advancement criteria — what graduates you */}
-            {advancement.length > 0 && (
-              <div className="fade-rise fade-rise-delay-3">
-                <Divider />
-                <SectionHeader>Advancement criteria</SectionHeader>
-                <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 8, lineHeight: 1.6 }}>
-                  What graduates you to the next phase.
-                </p>
-                <ul style={{ paddingLeft: 16 }}>
-                  {advancement.map((c, i) => (
-                    <li key={i} className="text-sm text-dim" style={{ lineHeight: 1.7 }}>{c}</li>
-                  ))}
-                </ul>
-              </div>
-            )}
           </>
         )}
       </div>
+    </div>
+  )
+}
+
+// ---- Phase arc — the journey, static. done=green, current=signal, pending=amber.
+function PhaseArc({ currentIdx }: { currentIdx: number }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center' }}>
+      {PHASES.map((p, i) => {
+        const state = i < currentIdx ? 'done' : i === currentIdx ? 'current' : 'pending'
+        const last = i === PHASES.length - 1
+        const dot =
+          state === 'current'
+            ? { width: 12, height: 12, background: 'var(--signal)', border: 'none', boxShadow: '0 0 0 4px var(--signal-dim)' }
+            : state === 'done'
+            ? { width: 10, height: 10, background: 'var(--confirmed)', border: 'none', boxShadow: 'none' }
+            : { width: 10, height: 10, background: 'transparent', border: '1px solid var(--pending)', boxShadow: 'none' }
+        const labelColor = state === 'current' ? 'var(--signal)' : state === 'done' ? 'var(--confirmed)' : 'var(--text-dim)'
+        return (
+          <Fragment key={p}>
+            <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', flex: '0 0 auto' }}>
+              <span style={{ borderRadius: '50%', ...dot }} />
+              <span
+                style={{
+                  marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.08em',
+                  textTransform: 'uppercase', color: labelColor, opacity: state === 'pending' ? 0.6 : 1, whiteSpace: 'nowrap',
+                }}
+              >
+                {p}
+              </span>
+            </div>
+            {!last && (
+              <div
+                style={{
+                  flex: 1, height: 0, margin: '0 6px', marginBottom: 22,
+                  borderTop: i < currentIdx ? '1px solid var(--confirmed)' : '1px dashed var(--line)',
+                }}
+              />
+            )}
+          </Fragment>
+        )
+      })}
+    </div>
+  )
+}
+
+// ---- Week position within the phase — segmented, current week emphasised.
+function WeekDots({ current, total }: { current: number; total: number }) {
+  return (
+    <div style={{ display: 'flex', gap: 4, alignItems: 'center', justifyContent: 'flex-end' }}>
+      {Array.from({ length: total }).map((_, i) => (
+        <span
+          key={i}
+          style={{
+            width: i === current - 1 ? 16 : 8,
+            height: 4,
+            borderRadius: 2,
+            background: i < current ? 'var(--signal)' : 'var(--line)',
+          }}
+        />
+      ))}
     </div>
   )
 }
