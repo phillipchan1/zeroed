@@ -4,7 +4,7 @@ import { ChevronLeft, Check, Plus, Info } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { resolveObservationAction } from '../../engine'
 import {
-  Button, Spinner, ExerciseInsightSheet,
+  Button, Spinner, ExerciseInsightSheet, TelemetryStrip,
 } from '../../components/ui'
 import type {
   RoutineRow, ExerciseTemplate, SetLog, InsightRow,
@@ -98,9 +98,9 @@ function ObservationSheet({ onSave, onSkip, saving }: ObsSheetProps) {
   return (
     <div className="obs-sheet">
       <div className="obs-sheet__inner">
-        <p className="section-header" style={{ marginBottom: 4 }}>Session observation</p>
+        <p className="section-header" style={{ marginBottom: 4 }}>Observation</p>
         <p className="text-xs text-dim" style={{ marginBottom: 16, lineHeight: 1.5 }}>
-          One signal from this session. Under 10 seconds.
+          One signal from this session.
         </p>
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 16 }}>
@@ -113,10 +113,10 @@ function ObservationSheet({ onSave, onSkip, saving }: ObsSheetProps) {
                 height: 40,
                 fontSize: 12,
                 borderColor: selected?.label === opt.label
-                  ? opt.severity >= 4 ? '#E87070' : opt.severity >= 3 ? '#8A8A8A' : 'var(--signal)'
+                  ? opt.severity >= 4 ? 'var(--veto)' : opt.severity >= 3 ? '#8A8A8A' : 'var(--signal)'
                   : 'var(--line)',
                 color: selected?.label === opt.label
-                  ? opt.severity >= 4 ? '#E87070' : opt.severity >= 3 ? 'var(--text)' : 'var(--signal)'
+                  ? opt.severity >= 4 ? 'var(--veto)' : opt.severity >= 3 ? 'var(--text)' : 'var(--signal)'
                   : 'var(--text-dim)',
               }}
               onClick={() => setSelected(opt)}
@@ -395,17 +395,29 @@ export function WorkoutScreen() {
 
   const exercises = routine.exercises as ExerciseTemplate[]
 
+  // Telemetry header values
+  const allSets   = Object.values(setLogs).flat()
+  const setsTotal = allSets.length
+  const setsDone  = allSets.filter((s) => s.done).length
+  const rpeLive   = allSets.filter((s) => s.rpe !== null).map((s) => s.rpe!)
+  const avgRpeLive = rpeLive.length ? Math.round(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length) : null
+
+  const workoutStripItems: Array<{ label: string; value: string | number }> = [
+    { label: 'WORKOUT', value: routine.name },
+    { label: 'ELAPSED', value: formatElapsed(elapsed) },
+    { label: 'SETS', value: `${setsDone}/${setsTotal}` },
+  ]
+  if (avgRpeLive !== null) workoutStripItems.push({ label: 'RPE', value: avgRpeLive })
+
   // ---- Full-screen workout (no nav) ----------------------------------------
 
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
-      {/* Header bar */}
+      {/* Header bar — back affordance + always-on telemetry strip */}
       <div
         style={{
           display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          padding: '12px 16px',
+          alignItems: 'stretch',
           borderBottom: '1px solid var(--line)',
           position: 'sticky',
           top: 0,
@@ -416,26 +428,16 @@ export function WorkoutScreen() {
         <button
           type="button"
           className="btn btn--ghost"
-          style={{ padding: '0 4px', height: 36, minWidth: 36 }}
+          style={{ padding: '0 8px', height: 28, minWidth: 36 }}
           onClick={() => navigate(-1)}
+          aria-label="Back"
         >
           <ChevronLeft size={20} strokeWidth={1.5} />
         </button>
 
-        <div style={{ textAlign: 'center' }}>
-          <p style={{ fontWeight: 600, fontSize: 14 }}>{routine.name}</p>
-          <p className="num text-xs text-dim">{formatElapsed(elapsed)}</p>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <TelemetryStrip items={workoutStripItems} lastSignalAt={new Date(startRef.current)} />
         </div>
-
-        <button
-          type="button"
-          className="btn btn--ghost"
-          style={{ padding: '4px 8px', height: 36, fontSize: 12, color: 'var(--text-dim)' }}
-          onClick={handleCompleteWorkout}
-          disabled={saving || !allDone}
-        >
-          {saving ? <Spinner /> : 'Done'}
-        </button>
       </div>
 
       {/* Column headers */}

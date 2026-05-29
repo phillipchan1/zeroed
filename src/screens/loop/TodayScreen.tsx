@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
-import { Button, SectionHeader, Skeleton, InsightCard, InsightMovementRow } from '../../components/ui'
+import {
+  Button, SectionHeader, Skeleton, InsightCard, InsightMovementRow,
+  TelemetryStrip, TickingNumber, BracketFrame,
+} from '../../components/ui'
 import { summarizeInsightMovement, type InsightMovementSummary } from '../../engine'
 import type { RoutineRow, InsightRow } from '../../types/database'
 
@@ -45,10 +48,16 @@ export function TodayScreen({ athleteId, todayRoutine }: TodayScreenProps) {
   const [nonNegotiables, setNonNegotiables] = useState<string[]>([])
   const [activeInsights, setActiveInsights] = useState<InsightRow[]>([])
   const [movement, setMovement] = useState<InsightMovementSummary | null>(null)
+  const [totalInsights, setTotalInsights] = useState(0)
+  const [likelyCount, setLikelyCount]     = useState(0)
+  const [p1Count, setP1Count]             = useState(0)
+  const [lastSignalAt, setLastSignalAt]   = useState<string | null>(null)
+  const [phaseInfo, setPhaseInfo]         = useState<{ name: string; weekCurrent: number; weekTotal: number } | null>(null)
+  const [retestDays, setRetestDays]       = useState<number | null>(null)
 
   useEffect(() => {
     loadWeekData()
-    loadNonNegotiables()
+    loadPhaseAndProfile()
     loadInsights()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [athleteId])
@@ -66,19 +75,47 @@ export function TodayScreen({ athleteId, todayRoutine }: TodayScreenProps) {
     const active = all.filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
     setActiveInsights(active)
     setMovement(summarizeInsightMovement(all, getWeekDays()[0]))
+
+    // Telemetry strip counts (all statuses count toward the total).
+    setTotalInsights(all.length)
+    setLikelyCount(all.filter((i) => i.status === 'likely').length)
+    setP1Count(active.filter((i) => i.priority === 'P1').length)
+    const maxUpdated = all.reduce<string | null>((max, i) =>
+      !max || i.updated_at > max ? i.updated_at : max, null)
+    setLastSignalAt(maxUpdated)
   }
 
-  async function loadNonNegotiables() {
-    const { data } = await supabase
+  async function loadPhaseAndProfile() {
+    const { data: phase } = await supabase
       .from('phase')
-      .select('non_negotiables, program!inner(athlete_id, status)')
+      .select('name, week_start, week_end, non_negotiables, program!inner(athlete_id, status)')
       .eq('program.athlete_id', athleteId)
       .eq('program.status', 'active')
       .eq('status', 'active')
       .maybeSingle()
 
-    const list = (data?.non_negotiables as string[] | null) ?? []
-    setNonNegotiables(list)
+    setNonNegotiables((phase?.non_negotiables as string[] | null) ?? [])
+
+    if (phase?.week_start && phase?.week_end) {
+      const start = new Date(phase.week_start as string)
+      const end   = new Date(phase.week_end as string)
+      const dayMs = 1000 * 60 * 60 * 24
+      const weekTotal   = Math.max(1, Math.round((end.getTime() - start.getTime()) / dayMs / 7) + 1)
+      const elapsedDays = Math.floor((Date.now() - start.getTime()) / dayMs)
+      const weekCurrent = Math.min(weekTotal, Math.max(1, Math.floor(elapsedDays / 7) + 1))
+      setPhaseInfo({ name: phase.name as string, weekCurrent, weekTotal })
+    }
+
+    const { data: profile } = await supabase
+      .from('athlete_profile')
+      .select('retest_date')
+      .eq('athlete_id', athleteId)
+      .maybeSingle()
+
+    if (profile?.retest_date) {
+      const diff = Math.ceil((new Date(profile.retest_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+      setRetestDays(diff)
+    }
   }
 
   async function loadWeekData() {
@@ -119,9 +156,29 @@ export function TodayScreen({ athleteId, todayRoutine }: TodayScreenProps) {
   const p1Category = p1Insight?.category ?? null
   const movements  = movement?.movements ?? []
   const hasMovement = movements.length > 0
+  const movedCount  = movement?.movedCount ?? 0
+  const heroValue   = movedCount > 0 ? movedCount : p1Count
+  const heroLabel   = movedCount > 0 ? 'INSIGHTS MOVED' : 'P1 ACTIVE'
+
+  const telemetryItems: Array<{ label: string; value: string | number; signal?: boolean }> = [
+    { label: 'INSIGHTS', value: totalInsights },
+    { label: String(likelyCount), value: 'LIKELY' },
+    { label: String(p1Count), value: 'P1' },
+  ]
+  if (phaseInfo) {
+    telemetryItems.push({ label: 'PHASE', value: `${phaseInfo.name} w${phaseInfo.weekCurrent}/${phaseInfo.weekTotal}` })
+  }
+  if (retestDays !== null) {
+    telemetryItems.push({ label: 'RETEST', value: `${retestDays}d`, signal: retestDays <= 7 })
+  }
 
   return (
     <div className="screen with-nav">
+      {/* Telemetry strip — always-on system state (presence dot, one per screen) */}
+      {!loading && (
+        <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />
+      )}
+
       {/* Main content */}
       <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
 
@@ -134,6 +191,18 @@ export function TodayScreen({ athleteId, todayRoutine }: TodayScreenProps) {
             Today
           </h2>
         </div>
+
+        {/* Hero number — telemetric headline (always present) */}
+        {!loading && (
+          <div className="fade-rise" style={{ marginBottom: 16 }}>
+            <TickingNumber
+              value={heroValue}
+              className="hero-number text-signal"
+              style={{ fontSize: 32, display: 'block' }}
+            />
+            <span className="hero-number__label">{heroLabel}</span>
+          </div>
+        )}
 
         {/* Your zero this week — insights-first (Shift 4 / Shift 6) */}
         <div className="fade-rise" style={{ marginBottom: 24 }}>
@@ -152,21 +221,25 @@ export function TodayScreen({ athleteId, todayRoutine }: TodayScreenProps) {
               <Skeleton height={14} width="90%" />
               <Skeleton height={11} width="70%" />
             </div>
-          ) : hasMovement ? (
-            movements.slice(0, 3).map((m) => (
-              <InsightMovementRow key={m.insight.id} movement={m} />
-            ))
-          ) : p1Insight ? (
-            <>
-              <p className="text-xs text-dim" style={{ marginBottom: 10, lineHeight: 1.6 }}>
-                Holding the line. This is the limiter your program is built around — move it this week.
-              </p>
-              <InsightCard insight={p1Insight} />
-            </>
           ) : (
-            <p className="text-sm text-dim">
-              No weak links flagged — your program is building strength.
-            </p>
+            <BracketFrame style={{ padding: 8 }}>
+              {hasMovement ? (
+                movements.slice(0, 3).map((m) => (
+                  <InsightMovementRow key={m.insight.id} movement={m} />
+                ))
+              ) : p1Insight ? (
+                <>
+                  <p className="text-xs text-dim" style={{ marginBottom: 10, lineHeight: 1.6 }}>
+                    No movement this week. The P1 limiter is still the bottleneck.
+                  </p>
+                  <InsightCard insight={p1Insight} />
+                </>
+              ) : (
+                <p className="text-sm text-dim">
+                  No weak links flagged — your program is building strength.
+                </p>
+              )}
+            </BracketFrame>
           )}
         </div>
 
@@ -186,8 +259,17 @@ export function TodayScreen({ athleteId, todayRoutine }: TodayScreenProps) {
                   {todayRoutine.name}
                 </h3>
                 {p1Category && (
-                  <p className="text-sm text-signal" style={{ marginTop: 4, lineHeight: 1.5 }}>
-                    Targets your P1 limiter: {p1Category}
+                  <p
+                    className="text-dim"
+                    style={{
+                      marginTop: 6,
+                      fontFamily: 'var(--font-mono)',
+                      fontSize: 11,
+                      letterSpacing: '0.06em',
+                      textTransform: 'uppercase',
+                    }}
+                  >
+                    targeting P1 · {p1Category}
                   </p>
                 )}
                 {todayRoutine.intent && (
@@ -229,8 +311,17 @@ export function TodayScreen({ athleteId, todayRoutine }: TodayScreenProps) {
         {nonNegotiables.length > 0 && (
           <div className="fade-rise fade-rise-delay-2" style={{ marginTop: 20 }}>
             <SectionHeader>Non-negotiables</SectionHeader>
-            <p className="text-xs text-dim" style={{ marginTop: 8, lineHeight: 1.7 }}>
-              These apply every session regardless of energy level.
+            <p
+              className="text-dim"
+              style={{
+                marginTop: 8,
+                fontFamily: 'var(--font-mono)',
+                fontSize: 11,
+                letterSpacing: '0.06em',
+                textTransform: 'uppercase',
+              }}
+            >
+              RULES — every session, no skips
             </p>
             <ul style={{ marginTop: 12, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
               {nonNegotiables.map((rule, i) => (

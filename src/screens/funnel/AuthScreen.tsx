@@ -61,7 +61,7 @@ export function AuthScreen() {
               />
 
               {error && (
-                <p className="text-xs" style={{ color: '#E87070' }}>{error}</p>
+                <p className="text-xs" style={{ color: 'var(--veto)' }}>{error}</p>
               )}
 
               <Button
@@ -96,6 +96,20 @@ export function AuthScreen() {
             </button>
           </div>
         )}
+
+        {/* System status — cold telemetry footer */}
+        <p
+          style={{
+            textAlign: 'center',
+            marginTop: 48,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 10,
+            letterSpacing: '0.08em',
+            color: 'var(--text-dim)',
+          }}
+        >
+          SYSTEM READY · v0.1
+        </p>
       </div>
     </div>
   )

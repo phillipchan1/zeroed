@@ -109,7 +109,7 @@ function InsightReveal({ insight, index }: { insight: InsightRow; index: number 
   const delay = `fade-rise-delay-${Math.min(index + 1, 4) as 1 | 2 | 3 | 4}`
   return (
     <div className={`fade-rise ${delay}`}>
-      <InsightCard insight={insight} />
+      <InsightCard insight={insight} typeOn />
     </div>
   )
 }
@@ -183,10 +183,8 @@ function MovementStep({
     <div>
       <SectionHeader>{String(stepNo).padStart(2, '0')} // FIND YOUR WEAKNESSES</SectionHeader>
       <p className="text-dim" style={{ marginTop: 8, marginBottom: 16, fontSize: 13, lineHeight: 1.6 }}>
-        This is the part that makes your program yours. Before we load anything, we
-        find out how you move — because the limiter we miss here is the one that
-        stalls progress (or gets you hurt) later. Score each pattern, or tap
-        <span className="text-signal"> Test me</span> and we'll walk you through it.
+        How you move determines what you can load. Score each pattern. Tap
+        <span className="text-signal"> Test me</span> if you'd rather we walk you through it.
       </p>
 
       {/* Scoring rubric — the athlete is self-grading, so define the scale plainly */}
@@ -300,8 +298,7 @@ function StrengthStep({
     <div>
       <SectionHeader>{String(stepNo).padStart(2, '0')} // STRENGTH BASELINES</SectionHeader>
       <p className="text-dim" style={{ marginTop: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.6 }}>
-        Now the numbers. These tell us where you're starting so we can set loads that
-        challenge you without overshooting. Approximate is fine — leave at 0 if untested.
+        Strength baselines. Sets the starting load. Approximate is fine — leave at 0 if untested.
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -349,9 +346,7 @@ function ProfileStep({
     <div>
       <SectionHeader>{String(stepNo).padStart(2, '0')} // WHAT YOU'RE CHASING</SectionHeader>
       <p className="text-dim" style={{ marginTop: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.6 }}>
-        Start with the goal. Everything that follows exists to answer one question:
-        what's standing between you and this? Tell us where you're headed and we'll
-        build the right tests around it.
+        Start with the goal. Everything after this is built around it.
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -454,8 +449,7 @@ function SubjectiveStep({
     <div>
       <SectionHeader>{String(stepNo).padStart(2, '0')} // READINESS</SectionHeader>
       <p className="text-dim" style={{ marginTop: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.6 }}>
-        Last thing — how you're showing up today. This calibrates your starting load
-        so day one meets you where you actually are, not where a spreadsheet assumes.
+        Last input. Calibrates day-one load to where you actually are.
       </p>
 
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>

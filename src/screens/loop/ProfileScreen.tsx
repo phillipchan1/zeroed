@@ -3,6 +3,7 @@ import { useLocation } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import {
   InsightCard, SectionHeader, Skeleton, Divider, StatusCounts,
+  TelemetryStrip, TickingNumber, BracketFrame,
 } from '../../components/ui'
 import { countInsightsByStatus } from '../../engine'
 import type { InsightRow, AthleteProfileRow, ProgramRow, PhaseRow } from '../../types/database'
@@ -22,12 +23,13 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   const [profile, setProfile]     = useState<AthleteProfileRow | null>(null)
   const [program, setProgram]     = useState<ProgramRow | null>(null)
   const [phase, setPhase]         = useState<PhaseRow | null>(null)
+  const [athleteMeta, setAthleteMeta] = useState<{ sessions_per_week: number | null; training_age: number | null } | null>(null)
   const [loading, setLoading]     = useState(true)
 
   const load = useCallback(async () => {
     setLoading(true)
 
-    const [insightRes, profileRes, programRes] = await Promise.all([
+    const [insightRes, profileRes, programRes, athleteRes] = await Promise.all([
       // Load ALL statuses so the header can count by status (incl. resolved);
       // the weak-link stack filters to active ones client-side.
       supabase
@@ -46,11 +48,17 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
         .eq('athlete_id', athleteId)
         .eq('status', 'active')
         .maybeSingle(),
+      supabase
+        .from('athlete')
+        .select('sessions_per_week, training_age')
+        .eq('id', athleteId)
+        .maybeSingle(),
     ])
 
     setInsights((insightRes.data ?? []) as InsightRow[])
     setProfile(profileRes.data as AthleteProfileRow | null)
     setProgram(programRes.data as ProgramRow | null)
+    setAthleteMeta(athleteRes.data as { sessions_per_week: number | null; training_age: number | null } | null)
 
     if (programRes.data) {
       const { data: phaseData } = await supabase
@@ -91,23 +99,56 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     (i) => i.status !== 'resolved' && i.status !== 'disproved',
   )
 
+  const countBy = (s: string) => insights.filter((i) => i.status === s).length
+  const confirmedCount = countBy('confirmed')
+  const likelyCount    = countBy('likely')
+  const hypCount       = countBy('hypothesis')
+  const resolvedCount  = countBy('resolved')
+  const lastSignalAt   = insights.reduce<string | null>((max, i) =>
+    !max || i.updated_at > max ? i.updated_at : max, null)
+
+  // Hero number — highest-priority status count.
+  const heroIsConfirmed = confirmedCount > 0
+  const heroValue = heroIsConfirmed ? confirmedCount : likelyCount
+  const heroLabel = heroIsConfirmed ? 'CONFIRMED LIMITERS' : 'LIKELY LIMITERS'
+  const heroColor = heroIsConfirmed ? 'var(--confirmed)' : '#8A8A8A'
+
+  const telemetryItems: Array<{ label: string; value: string | number }> = [
+    { label: 'PROFILE', value: '' },
+    { label: String(confirmedCount), value: 'CONFIRMED' },
+    { label: String(likelyCount), value: 'LIKELY' },
+    { label: String(hypCount), value: 'HYP' },
+    { label: String(resolvedCount), value: 'RESOLVED' },
+  ]
+  if (profile?.current_phase) {
+    telemetryItems.push({ label: 'PHASE', value: profile.current_phase })
+  }
+
   return (
     <div className="screen with-nav">
+      {/* Telemetry strip — always-on system state (one presence dot per screen) */}
+      {!loading && (
+        <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />
+      )}
+
       <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
 
-        {/* Header */}
-        <div className="fade-rise" style={{ marginBottom: 28, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        {/* Header — colder treatment */}
+        <div className="fade-rise" style={{ marginBottom: 24, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
           <div>
-            <p className="text-xs text-dim" style={{
-              letterSpacing: '0.06em',
-              textTransform: 'uppercase',
-              fontFamily: 'var(--font-mono)',
-            }}>
-              Athlete profile
-            </p>
-            <h2 style={{ marginTop: 4, fontSize: 22, fontWeight: 600 }}>
+            <h2 style={{ fontSize: 18, fontWeight: 600 }}>
               {athleteName ?? 'Profile'}
             </h2>
+            <p className="text-dim" style={{
+              marginTop: 6,
+              fontFamily: 'var(--font-mono)',
+              fontSize: 11,
+              letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+            }}>
+              {athleteMeta?.sessions_per_week ? `${athleteMeta.sessions_per_week}× weekly` : 'athlete'}
+              {athleteMeta?.training_age != null && ` · training age ${athleteMeta.training_age}y`}
+            </p>
             {!loading && statusCounts.length > 0 && (
               <div style={{ marginTop: 10 }}>
                 <StatusCounts counts={statusCounts} />
@@ -123,6 +164,18 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
           </button>
         </div>
 
+        {/* Hero number — highest-priority status count */}
+        {!loading && (
+          <div className="fade-rise" style={{ marginBottom: 24 }}>
+            <TickingNumber
+              value={heroValue}
+              className="hero-number"
+              style={{ fontSize: 32, display: 'block', color: heroColor }}
+            />
+            <span className="hero-number__label">{heroLabel}</span>
+          </div>
+        )}
+
         {/* Program snapshot */}
         {loading ? (
           <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -131,7 +184,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
             <Skeleton height={10} width={100} />
           </div>
         ) : profile && (
-          <div className="card fade-rise fade-rise-delay-1" style={{ marginBottom: 24 }}>
+          <BracketFrame className="card fade-rise fade-rise-delay-1" style={{ marginBottom: 24 }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
               <SectionHeader>Current phase</SectionHeader>
               {retestDays !== null && (
@@ -174,7 +227,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
                 </ul>
               </>
             )}
-          </div>
+          </BracketFrame>
         )}
 
         {/* Insight stack */}

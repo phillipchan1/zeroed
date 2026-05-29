@@ -1,4 +1,7 @@
-import { type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes } from 'react'
+import {
+  type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes,
+  useEffect, useRef, useState,
+} from 'react'
 import { X } from 'lucide-react'
 
 // ---- Logo / Wordmark -------------------------------------------------------
@@ -168,18 +171,215 @@ export function ScorePicker({ value, onChange }: ScorePickerProps) {
   )
 }
 
+// ---- Ambient / telemetry primitives ----------------------------------------
+
+export function PresenceDot() {
+  return <span className="presence-dot" />
+}
+
+function toDate(d: Date | string | null | undefined): Date | null {
+  if (!d) return null
+  const date = d instanceof Date ? d : new Date(d)
+  return Number.isNaN(date.getTime()) ? null : date
+}
+
+function relativeFrom(anchor: Date): string {
+  const secs = Math.max(0, Math.floor((Date.now() - anchor.getTime()) / 1000))
+  if (secs < 60)    return `${secs}s ago`
+  const mins = Math.floor(secs / 60)
+  if (mins < 60)    return `${mins}m ago`
+  const hours = Math.floor(mins / 60)
+  if (hours < 24)   return `${hours}h ago`
+  return `${Math.floor(hours / 24)}d ago`
+}
+
+interface LatencyTickProps {
+  anchor: Date | string | null
+}
+
+export function LatencyTick({ anchor }: LatencyTickProps) {
+  const date = toDate(anchor)
+  const [, setNow] = useState(0)
+
+  useEffect(() => {
+    if (!date) return
+    const id = setInterval(() => setNow((n) => n + 1), 1000)
+    return () => clearInterval(id)
+  }, [date?.getTime()])
+
+  if (!date) return null
+  return <span>updated {relativeFrom(date)}</span>
+}
+
+interface TelemetryStripProps {
+  items: Array<{ label: string; value: string | number; signal?: boolean }>
+  presence?: boolean
+  lastSignalAt?: Date | string | null
+}
+
+export function TelemetryStrip({ items, presence = true, lastSignalAt }: TelemetryStripProps) {
+  const pills: ReactNode[] = []
+
+  if (presence) {
+    pills.push(
+      <span key="presence" className="telemetry-strip__item">
+        <PresenceDot />
+      </span>,
+    )
+  }
+
+  items.forEach((item, i) => {
+    if (pills.length > 0) pills.push(<span key={`sep-${i}`} className="telemetry-strip__sep">·</span>)
+    pills.push(
+      <span
+        key={`item-${i}`}
+        className={`telemetry-strip__item${item.signal ? ' telemetry-strip__signal' : ''}`}
+      >
+        {item.label} {item.value}
+      </span>,
+    )
+  })
+
+  if (toDate(lastSignalAt)) {
+    pills.push(<span key="sep-latency" className="telemetry-strip__sep">·</span>)
+    pills.push(
+      <span key="latency" className="telemetry-strip__item">
+        <LatencyTick anchor={lastSignalAt!} />
+      </span>,
+    )
+  }
+
+  return <div className="telemetry-strip">{pills}</div>
+}
+
+// ---- TypeOn — one-shot type-on reveal --------------------------------------
+
+interface TypeOnProps {
+  text: string
+  delay?: number
+  className?: string
+}
+
+export function TypeOn({ text, delay = 60, className }: TypeOnProps) {
+  const [count, setCount] = useState(0)
+
+  useEffect(() => {
+    setCount(0)
+    if (!text) return
+    let i = 0
+    const id = setInterval(() => {
+      i += 1
+      setCount(i)
+      if (i >= text.length) clearInterval(id)
+    }, delay)
+    return () => clearInterval(id)
+  }, [text, delay])
+
+  return <span className={className}>{text.slice(0, count)}</span>
+}
+
+// ---- TickingNumber — animates integer changes ------------------------------
+
+interface TickingNumberProps {
+  value: number
+  duration?: number
+  className?: string
+  style?: React.CSSProperties
+}
+
+export function TickingNumber({ value, duration = 350, className, style }: TickingNumberProps) {
+  const [display, setDisplay] = useState(value)
+  const prevRef = useRef(value)
+
+  useEffect(() => {
+    const from = prevRef.current
+    const to = value
+    prevRef.current = value
+    if (from === to) return
+
+    const start = performance.now()
+    let raf = 0
+    const tick = (now: number) => {
+      const t = Math.min(1, (now - start) / duration)
+      const eased = 1 - Math.pow(1 - t, 3)  // ease-out cubic
+      setDisplay(Math.round(from + (to - from) * eased))
+      if (t < 1) raf = requestAnimationFrame(tick)
+      else setDisplay(to)
+    }
+    raf = requestAnimationFrame(tick)
+    return () => cancelAnimationFrame(raf)
+  }, [value, duration])
+
+  return <span className={className} style={style}>{display}</span>
+}
+
+// ---- BracketFrame — subtle corner brackets ---------------------------------
+
+export function BracketFrame({ children, className = '', style }: { children: ReactNode; className?: string; style?: React.CSSProperties }) {
+  return (
+    <div className={`bracket-frame ${className}`} style={style}>
+      <span className="bracket-frame__tr" />
+      <span className="bracket-frame__bl" />
+      {children}
+    </div>
+  )
+}
+
 // ---- Insight card ----------------------------------------------------------
 
-import type { InsightRow } from '../../types/database'
+import type { InsightRow, InsightStatus } from '../../types/database'
 import type { InsightMovement, StatusCount } from '../../engine'
+
+// Attribution helpers — mono, dim, telemetric.
+const STATUS_ABBR: Record<InsightStatus, string> = {
+  hypothesis: 'HYP',
+  likely: 'LIKELY',
+  confirmed: 'CONF',
+  resolved: 'RSLV',
+  disproved: 'DISP',
+}
+
+const SOURCE_LABEL: Record<string, string> = {
+  diagnostic: 'DIAGNOSTIC',
+  session_observation: 'SESSION',
+}
+
+function attrTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return ''
+  const now = new Date()
+  const sameDay =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate()
+  if (sameDay) {
+    return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  }
+  return d.toLocaleDateString('en-US', { month: 'short', day: '2-digit' })
+}
+
+function InsightAttribution({ insight }: { insight: InsightRow }) {
+  const sourceLabel = insight.source
+    ? SOURCE_LABEL[insight.source] ?? insight.source.toUpperCase()
+    : '—'
+  const wasUpdated = new Date(insight.updated_at).getTime() - new Date(insight.generated_at).getTime() > 1000
+  return (
+    <p className="insight-attr">
+      generated {attrTime(insight.generated_at)} · {sourceLabel}
+      {wasUpdated && ` · updated ${attrTime(insight.updated_at)}`}
+    </p>
+  )
+}
 
 interface InsightCardProps {
   insight: InsightRow
   pulse?: boolean
+  typeOn?: boolean
 }
 
-export function InsightCard({ insight, pulse }: InsightCardProps) {
+export function InsightCard({ insight, pulse, typeOn }: InsightCardProps) {
   const priorityKey = insight.priority.toLowerCase() as 'p1' | 'p2' | 'p3' | 'p4'
+  const transitioned = insight.prev_status != null && insight.prev_status !== insight.status
 
   return (
     <Card
@@ -192,15 +392,24 @@ export function InsightCard({ insight, pulse }: InsightCardProps) {
         <span className="text-xs text-dim">{insight.category}</span>
         <div style={{ marginLeft: 'auto', display: 'flex', alignItems: 'center', gap: 4 }}>
           <StatusDot status={insight.status} />
-          <span className="text-xs text-dim" style={{ textTransform: 'capitalize' }}>
-            {insight.status}
-          </span>
+          {transitioned ? (
+            <span className="transition-pill">
+              {STATUS_ABBR[insight.prev_status!]} → {STATUS_ABBR[insight.status]}
+            </span>
+          ) : (
+            <span className="text-xs text-dim" style={{ textTransform: 'capitalize' }}>
+              {insight.status}
+            </span>
+          )}
         </div>
       </div>
-      <p className="text-sm" style={{ lineHeight: 1.5 }}>{insight.claim}</p>
+      <p className="text-sm" style={{ lineHeight: 1.5 }}>
+        {typeOn ? <TypeOn text={insight.claim} delay={18} /> : insight.claim}
+      </p>
       {insight.program_impact && (
         <p className="text-xs text-dim" style={{ marginTop: 6 }}>{insight.program_impact}</p>
       )}
+      <InsightAttribution insight={insight} />
     </Card>
   )
 }

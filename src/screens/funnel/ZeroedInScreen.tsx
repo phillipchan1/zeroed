@@ -3,13 +3,20 @@ import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { generateInitialProgram } from '../../engine'
 import {
-  Logo, Button, InsightCard, Spinner, SectionHeader,
+  Logo, Button, InsightCard, Spinner, SectionHeader, TypeOn, BracketFrame,
 } from '../../components/ui'
 import type { InsightRow } from '../../types/database'
 
 interface ZeroedInProps {
   athleteId: string
   onComplete: () => void
+}
+
+function weeksBetween(startStr: string, endStr: string): number {
+  const start = new Date(startStr).getTime()
+  const end   = new Date(endStr).getTime()
+  if (Number.isNaN(start) || Number.isNaN(end)) return 4
+  return Math.max(1, Math.round((end - start) / (1000 * 60 * 60 * 24) / 7) + 1)
 }
 
 type BuildPhase = 'loading' | 'building' | 'ready' | 'error'
@@ -21,8 +28,9 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
   const [p1Category, setP1Category] = useState<string>('Lower Chain')
   const [programId, setProgramId]   = useState<string | null>(null)
   const [athleteName, setAthleteName] = useState<string | null>(null)
-  const [sport, setSport]           = useState<string | null>(null)
-  const [goals, setGoals]           = useState<string | null>(null)
+  const [phaseName, setPhaseName]   = useState<string>('Stability')
+  const [retestDate, setRetestDate] = useState<string | null>(null)
+  const [weeksTotal, setWeeksTotal] = useState<number>(4)
   const [error, setError]           = useState<string | null>(null)
 
   useEffect(() => {
@@ -33,17 +41,15 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
   async function buildProgram() {
     setBuildPhase('loading')
 
-    // 0. Load athlete so we can frame the result against their goal & sport
+    // 0. Load athlete so we can address them by name in the warm headline
     const { data: athleteRow } = await supabase
       .from('athlete')
-      .select('name, sport, goals')
+      .select('name')
       .eq('id', athleteId)
       .maybeSingle()
 
     if (athleteRow) {
       setAthleteName(athleteRow.name ?? null)
-      setSport(athleteRow.sport ?? null)
-      setGoals(athleteRow.goals ?? null)
     }
 
     // 1. Load insights to display
@@ -61,16 +67,30 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
 
     setInsights(insightRows as InsightRow[])
 
+    const rankedRows = insightRows as InsightRow[]
+    setP1Category(rankedRows[0]?.category ?? 'Lower Chain')
+
     // 2. Check if program already exists (idempotent on re-render)
     const { data: existingProgram } = await supabase
       .from('program')
-      .select('id')
+      .select('id, retest_date')
       .eq('athlete_id', athleteId)
       .eq('status', 'active')
       .maybeSingle()
 
     if (existingProgram) {
       setProgramId(existingProgram.id)
+      setRetestDate(existingProgram.retest_date ?? null)
+      const { data: ph } = await supabase
+        .from('phase')
+        .select('name, week_start, week_end')
+        .eq('program_id', existingProgram.id)
+        .eq('status', 'active')
+        .maybeSingle()
+      if (ph) {
+        setPhaseName(ph.name as string)
+        setWeeksTotal(weeksBetween(ph.week_start as string, ph.week_end as string))
+      }
       setBuildPhase('ready')
       return
     }
@@ -79,14 +99,13 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
     setBuildPhase('building')
     await new Promise((r) => setTimeout(r, 1400))  // perceptible beat, not a fake delay
 
-    const rows = insightRows as InsightRow[]
-    const p1 = rows[0]
-    const category = p1?.category ?? 'Lower Chain'
-    setP1Category(category)
-
+    const rows = rankedRows
     const today = new Date().toISOString().split('T')[0]
     // Pass the full ranked list so each exercise is stamped with its insight_id.
     const plan  = generateInitialProgram(rows, today)
+    setPhaseName(plan.phase.name)
+    setRetestDate(plan.retest_date)
+    setWeeksTotal(weeksBetween(plan.phase.week_start, plan.phase.week_end))
 
     // 4. Write program
     const { data: prog, error: progErr } = await supabase
@@ -170,7 +189,11 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
   if (buildPhase === 'loading' || buildPhase === 'building') {
     return (
       <div className="screen--centered">
-        <div style={{ textAlign: 'center' }}>
+        {/* Thinking shimmer fires only here — a real generation event */}
+        <div
+          className={buildPhase === 'building' ? 'thinking-shimmer' : ''}
+          style={{ textAlign: 'center', padding: '24px 40px', borderRadius: 8 }}
+        >
           <Spinner />
           <p className="text-dim" style={{ marginTop: 16, fontSize: 13 }}>
             {buildPhase === 'building' ? 'Building your program…' : 'Loading…'}
@@ -192,6 +215,23 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
   // ---- Ready ---------------------------------------------------------------
 
   const p1Insight = insights[0] ?? null
+  const p2Insight = insights[1] ?? null
+
+  const daysToRetest = retestDate
+    ? Math.max(0, Math.ceil((new Date(retestDate).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
+    : 28
+
+  // Layer 3 — warm characterization, deterministic for now (Prompt 3: real agent).
+  let characterization: string
+  if (p1Insight && p2Insight && p1Insight.category !== p2Insight.category) {
+    characterization = `Your ${p1Insight.category.toLowerCase()}'s the bigger story than your ${p2Insight.category.toLowerCase()}. The program starts there.`
+  } else if (p1Insight) {
+    characterization = `${p1Insight.category} is the limiter. Everything builds from there.`
+  } else {
+    characterization = 'You move clean. Program goes straight to building strength.'
+  }
+
+  const weakLinkLabel = `${insights.length} weak link${insights.length === 1 ? '' : 's'}`
 
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
@@ -216,42 +256,51 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
           width: '100%',
         }}
       >
-        {/* Hero */}
+        {/* Hero — canonical 3-layer: warm headline → cold telemetry → warm characterization */}
         <div className="fade-rise" style={{ marginBottom: 40 }}>
-          <p
-            className="text-dim section-header"
-            style={{ marginBottom: 12 }}
-          >
-            Diagnostic complete
-          </p>
-          <h1
-            style={{
-              fontFamily: 'var(--font-mono)',
-              fontSize: 28,
-              fontWeight: 700,
-              lineHeight: 1.2,
-              letterSpacing: '-0.01em',
-            }}
-          >
-            {athleteName ? `You're Zeroed In, ${athleteName}.` : "You're Zeroed In."}
+          {/* Layer 1: warm headline */}
+          <h1 className="hero-headline">
+            You're zeroed in{athleteName ? `, ${athleteName}` : ''}.
           </h1>
-          <p className="text-dim" style={{ marginTop: 12, fontSize: 14, lineHeight: 1.6 }}>
-            {goals
-              ? `We screened how you move against your goal — ${goals.trim().replace(/\.$/, '')}.`
-              : sport
-                ? `We screened how you move against the demands of ${sport}.`
-                : 'We screened how you move.'}
-            {' '}
-            {insights.length > 0
-              ? `Here's what's standing in the way, ranked by what to fix first. Your Stability phase starts today and targets exactly these.`
-              : 'No movement limiters are holding you back — so your program goes straight to building strength.'}
+
+          {/* Layer 2: cold telemetry */}
+          <p className="hero-telemetry" style={{ marginTop: 12 }}>
+            {weakLinkLabel} · phase: {phaseName.toUpperCase()} · session 1 ready · {daysToRetest}d to retest
+          </p>
+
+          {/* Layer 3: warm characterization */}
+          <p className="hero-characterization" style={{ marginTop: 16 }}>
+            <TypeOn text={characterization} delay={40} />
           </p>
         </div>
 
-        {/* Weak link stack */}
+        {/* Phase assignment — telemetric, the one bracketed surface */}
+        <BracketFrame className="fade-rise fade-rise-delay-1" style={{ padding: 'var(--sp-4)', marginBottom: 32 }}>
+          <span
+            style={{
+              fontFamily: 'var(--font-mono)',
+              fontVariantNumeric: 'tabular-nums',
+              fontSize: 40,
+              fontWeight: 700,
+              lineHeight: 1,
+              color: 'var(--signal)',
+              display: 'block',
+            }}
+          >
+            {weeksTotal}
+          </span>
+          <span className="hero-number__label">
+            WEEKS · {phaseName.toUpperCase()} PHASE
+          </span>
+          <p className="text-xs text-dim" style={{ marginTop: 12, lineHeight: 1.6 }}>
+            3 sessions/week · gated on {p1Category} pattern improvement
+          </p>
+        </BracketFrame>
+
+        {/* Weak link stack — below the hero block */}
         {insights.length > 0 && (
-          <div className="fade-rise fade-rise-delay-1" style={{ marginBottom: 32 }}>
-            <SectionHeader>Weak links — ranked</SectionHeader>
+          <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 32 }}>
+            <SectionHeader>WEAK LINKS — RANKED</SectionHeader>
             <div style={{ marginTop: 12 }}>
               {insights.map((ins) => (
                 <InsightCard key={ins.id} insight={ins} />
@@ -259,32 +308,6 @@ export function ZeroedInScreen({ athleteId, onComplete }: ZeroedInProps) {
             </div>
           </div>
         )}
-
-        {/* Phase assignment */}
-        <div className="fade-rise fade-rise-delay-2 card" style={{ marginBottom: 32 }}>
-          <SectionHeader>Assigned phase</SectionHeader>
-          <div style={{ marginTop: 12, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span
-              style={{
-                fontFamily: 'var(--font-mono)',
-                fontSize: 18,
-                fontWeight: 600,
-                color: 'var(--signal)',
-              }}
-            >
-              Stability
-            </span>
-            <span className="text-dim text-sm">4 weeks · 3 sessions/week</span>
-          </div>
-          {p1Insight && (
-            <p className="text-xs text-dim" style={{ marginTop: 8, lineHeight: 1.6 }}>
-              Focus: {p1Category} quality. Load progression gated on pattern improvement.
-            </p>
-          )}
-        </div>
-
-        {/* Image slot — placeholder for Prompt 2 */}
-        {/* TODO: one diagnostic image slot goes here */}
 
         {/* Primary CTA */}
         <div className="fade-rise fade-rise-delay-3" style={{ marginTop: 8 }}>
