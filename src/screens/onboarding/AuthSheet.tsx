@@ -40,7 +40,7 @@ export function AuthSheet({ onClose }: { onClose: () => void }) {
     <div className="obs-sheet" onClick={onClose}>
       <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 4 }}>
-          <p className="section-header">Keep your read</p>
+          <p className="section-header">Unlock your first session</p>
           <button
             type="button"
             className="btn btn--ghost"
@@ -55,7 +55,7 @@ export function AuthSheet({ onClose }: { onClose: () => void }) {
         {phase !== 'sent' ? (
           <>
             <p className="text-dim" style={{ fontSize: 14, lineHeight: 1.5, marginBottom: 16 }}>
-              Drop your email — we'll keep your read for you. No password; a link arrives in your inbox.
+              Your read's done. Drop your email and I'll build your first session — no password, a link lands in your inbox.
             </p>
 
             <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -81,7 +81,7 @@ export function AuthSheet({ onClose }: { onClose: () => void }) {
           <div className="fade-rise">
             <p className="text-lg" style={{ marginBottom: 8 }}>Link sent.</p>
             <p className="text-dim" style={{ fontSize: 14, lineHeight: 1.6 }}>
-              Check {email} — open the link to pick up where you left off.
+              Check {email} — open it and your first session is ready.
             </p>
             <button
               className="btn btn--ghost"

@@ -20,7 +20,12 @@ import type {
   ExerciseTemplate,
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
-import { callProbe, callSessionReview } from './agentClient'
+import { supabase } from '../lib/supabaseClient'
+import {
+  callProbe, callSessionReview, callProgramDesign, callInfoGain,
+  type ProgramDesignResult, type InsightCategory,
+} from './agentClient'
+import { validateProvisionalProgram } from './safety'
 
 // ---- Types -----------------------------------------------------------------
 
@@ -525,6 +530,179 @@ export function generateInitialProgram(
     },
     routines,
   }
+}
+
+// ============================================================================
+// PROVISIONAL FIRST SESSION (Confidence-Driven Read)
+// Built from the probe hypothesis — NO diagnostic, NO movement screen. The agent
+// PROPOSES a session; the deterministic safety validator DISPOSES of load/volume;
+// on model failure we fall back to generateInitialProgram (the floor). Then one
+// info-gain "test me" item is tagged. Inserts mirror the legacy ComputeScreen.
+// ============================================================================
+
+export interface ProvisionalProfile {
+  name: string | null
+  trainingAge: number
+  sessions: number
+  obstacle: string | null
+}
+
+export interface ProvisionalBuildResult {
+  insightCount: number
+  p1Count: number
+}
+
+function programDesignToGenerated(
+  design: ProgramDesignResult,
+  startDateStr: string,
+  p1: InsightRow | null,
+): GeneratedProgram {
+  const retestDate = addDays(startDateStr, 28)
+  const weekEnd = addDays(startDateStr, 27)
+  const routines = design.sessions.map((s, i) => ({
+    name: s.name || `Session ${String.fromCharCode(65 + i)}`,
+    session_type: 'strength',
+    exercises: s.exercises.map((ex): ExerciseTemplate => ({
+      name: ex.name,
+      sets: ex.sets,
+      reps: ex.reps,
+      load: ex.load,
+      cue: ex.cue,
+      insight_id: p1?.id,
+    })),
+    intent: s.intent,
+  }))
+  return {
+    goal: design.goal,
+    retest_date: retestDate,
+    phase: {
+      name: 'Stability',
+      week_start: startDateStr,
+      week_end: weekEnd,
+      non_negotiables: design.non_negotiables.length
+        ? design.non_negotiables
+        : ['Move well before you move heavy', 'Log how each session felt'],
+      advancement_criteria: [
+        'Pattern quality holds across all sets',
+        'Zero pain signals for 3 consecutive sessions',
+      ],
+    },
+    routines,
+  }
+}
+
+// Tag ONE exercise (first routine) as the info-gain "test me" reading item.
+// Non-fatal: model failure → no tag (the session still ships).
+async function tagInfoGainItem(plan: GeneratedProgram, ranked: InsightRow[], p1: InsightRow | null) {
+  if (!plan.routines.length || !plan.routines[0].exercises.length) return
+  const res = await callInfoGain({
+    goal: plan.goal,
+    insights: ranked.map((i) => ({ category: i.category, confidence: i.confidence, status: i.status })),
+    already_screened: [],
+  })
+  if (!res.ok) return
+  const pattern = MOVEMENT_PATTERNS.find((p) => p.key === res.data.pattern_key)
+  const label = pattern?.label ?? 'a key pattern'
+  const ex = plan.routines[0].exercises[0]
+  ex.reading = true
+  ex.pattern_key = res.data.pattern_key
+  ex.reading_why =
+    `${res.data.rationale} Watching your ${label.toLowerCase()} here is the fastest way to ` +
+    `sharpen the read${p1 ? ` on your ${p1.category.toLowerCase()}` : ''}.`
+}
+
+/**
+ * Build the athlete's provisional first session from the probe hypothesis.
+ * Idempotent (skips if an active program already exists). Always produces a
+ * safe session: agent → safety validator → (on failure) deterministic floor.
+ */
+export async function buildProvisionalProgram(
+  athleteId: string,
+  profile: ProvisionalProfile,
+  startDateStr: string,
+): Promise<ProvisionalBuildResult> {
+  // Ranked insights — the probe P1 hypothesis is already here from bootstrap.
+  const { data: insightRows } = await supabase
+    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
+  const ranked = (insightRows ?? []) as InsightRow[]
+  const p1 = ranked[0] ?? null
+  const counts: ProvisionalBuildResult = {
+    insightCount: ranked.length,
+    p1Count: ranked.filter((i) => i.priority === 'P1').length,
+  }
+
+  // Idempotency: a reload mid-build must not double-write.
+  const { data: existing } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (existing) return counts
+
+  // Build the plan: agent proposes → safety disposes → deterministic floor.
+  let plan: GeneratedProgram
+  const designed = await callProgramDesign({
+    profile: {
+      name: profile.name,
+      training_age: profile.trainingAge,
+      sessions_per_week: profile.sessions,
+      obstacle: profile.obstacle,
+    },
+    hypothesis: p1
+      ? { claim: p1.claim, category: p1.category as InsightCategory, confidence: p1.confidence, rationale: '' }
+      : null,
+    insights: ranked.map((i) => ({ category: i.category, confidence: i.confidence, status: i.status, claim: i.claim })),
+  })
+
+  if (designed.ok) {
+    try {
+      const safe = validateProvisionalProgram(designed.data, { trainingAge: profile.trainingAge })
+      plan = programDesignToGenerated(safe, startDateStr, p1)
+    } catch {
+      plan = generateInitialProgram(ranked, startDateStr)
+    }
+  } else {
+    plan = generateInitialProgram(ranked, startDateStr)
+  }
+
+  // One info-gain "test me" item (non-fatal).
+  await tagInfoGainItem(plan, ranked, p1)
+
+  // Persist: program → phase → routines → profile.
+  const { data: prog } = await supabase
+    .from('program')
+    .insert({ athlete_id: athleteId, goal: plan.goal, start_date: startDateStr, retest_date: plan.retest_date, status: 'active' })
+    .select().single()
+  if (!prog) return counts
+
+  const { data: phase } = await supabase
+    .from('phase')
+    .insert({
+      program_id: prog.id,
+      name: plan.phase.name,
+      week_start: plan.phase.week_start,
+      week_end: plan.phase.week_end,
+      non_negotiables: plan.phase.non_negotiables,
+      advancement_criteria: plan.phase.advancement_criteria,
+      status: 'active',
+    })
+    .select().single()
+
+  const routineInserts = plan.routines.map((r) => ({
+    program_id: prog.id,
+    phase_id: phase?.id ?? null,
+    name: r.name,
+    session_type: r.session_type,
+    exercises: r.exercises,
+    intent: r.intent,
+  }))
+  await supabase.from('routine').insert(routineInserts)
+
+  await supabase.from('athlete_profile').upsert({
+    athlete_id: athleteId,
+    current_phase: plan.phase.name,
+    retest_date: plan.retest_date,
+    last_updated: new Date().toISOString(),
+  }, { onConflict: 'athlete_id' })
+
+  return counts
 }
 
 /**

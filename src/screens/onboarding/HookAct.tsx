@@ -1,20 +1,32 @@
 import { useState } from 'react'
 import { SplashScreen } from './SplashScreen'
 import { HookQuestionScreen } from './HookQuestionScreen'
-import { ReframeScreen } from './ReframeScreen'
+import { ProbeScreen } from './ProbeScreen'
 import { AuthSheet } from './AuthSheet'
+import type { ProbeOutcome } from '../../engine'
 
 export const OBSTACLE_STORAGE_KEY = 'zeroed.obstacle'
+export const PROBE_STORAGE_KEY = 'zeroed.probe'
 
-type HookSub = 'splash' | 'question' | 'reframe'
+export interface ProbeStash {
+  obstacle: string
+  followupAnswer: string | null
+  hypothesis: ProbeOutcome['hypothesis']
+}
+
+type HookSub = 'splash' | 'question' | 'probe'
 
 /**
- * Act 1 — Hook (Screens 01–03). Runs before auth for first-timers, and again
- * after a DebugReset for an already-authed athlete. The obstacle is stashed in
- * localStorage so it survives the magic-link round trip; on reframe → Start:
- *   • authed (e.g. post-reset)  → write obstacle + advance to orientation
- *   • not authed                → slide up the auth sheet; bootstrap picks up
- *                                 the stashed obstacle when they return
+ * Act 1+2 — Hook + Probe. Runs before auth for first-timers, and again after a
+ * DebugReset for an already-authed athlete. Sequencing (Confidence-Driven Read):
+ *   splash → obstacle question → PROBE (adaptive Q + hypothesis insight) → auth.
+ *
+ * The auth seam now fires AFTER the first insight, not before it. The obstacle
+ * and the probe read are stashed in localStorage so they survive the magic-link
+ * round trip; OnboardingRouter's bootstrap writes the hypothesis as the first
+ * insight once the athlete row exists.
+ *   • authed (e.g. post-reset)  → persist the read + advance to orientation
+ *   • not authed                → slide up the auth sheet; bootstrap picks it up
  */
 export function HookAct({
   authed,
@@ -32,10 +44,18 @@ export function HookAct({
   function handleQuestionSubmit(answer: string) {
     setObstacle(answer)
     try { localStorage.setItem(OBSTACLE_STORAGE_KEY, answer) } catch { /* private mode */ }
-    setSub('reframe')
+    setSub('probe')
   }
 
-  function handleStart() {
+  function handleSaveRead(outcome: ProbeOutcome, followupAnswer: string | null) {
+    // Stash the read so it survives auth / the magic-link reload. The athlete
+    // row may not exist yet (pre-auth), so the actual insight write happens in
+    // OnboardingRouter (bootstrap, or the authed-advance path).
+    try {
+      const stash: ProbeStash = { obstacle, followupAnswer, hypothesis: outcome.hypothesis }
+      localStorage.setItem(PROBE_STORAGE_KEY, JSON.stringify(stash))
+    } catch { /* private mode */ }
+
     if (authed) {
       onAuthedAdvance(obstacle)
     } else {
@@ -47,7 +67,7 @@ export function HookAct({
     <>
       {sub === 'splash'   && <SplashScreen onBegin={() => setSub('question')} />}
       {sub === 'question' && <HookQuestionScreen initial={obstacle} onSubmit={handleQuestionSubmit} />}
-      {sub === 'reframe'  && <ReframeScreen onStart={handleStart} />}
+      {sub === 'probe'    && <ProbeScreen obstacle={obstacle} onSaveRead={handleSaveRead} />}
 
       {showAuth && <AuthSheet onClose={() => setShowAuth(false)} />}
     </>

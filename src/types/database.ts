@@ -16,21 +16,22 @@ export type PhaseStatus = 'pending' | 'active' | 'completed' | 'skipped'
 
 export type ProgramStatus = 'draft' | 'active' | 'completed' | 'paused'
 
-// Six-act onboarding state machine — see migration 20260530000001 and App.tsx.
+// Onboarding state machine — Confidence-Driven Read (migration 20260601000001).
+// Gates the SESSION, not the read: no movement-screen gate. The probe is
+// pre-auth/ephemeral (no athlete row yet) so it lives in HookAct sub-state under
+// 'hook'; the provisional first session is built in an ephemeral "calibrating"
+// beat during the orientation → first_session_pending transition (no DB step).
 export type OnboardingStep =
-  | 'hook'                    // pre-Screen 03; no auth yet
-  | 'orientation'             // Screens 04-06
-  | 'screening'               // Screens 07-16
-  | 'computing'               // Screen 17 (transient, ~25s)
-  | 'zeroed_in'               // Screen 18 — pre-CTA
-  | 'first_session_pending'   // Screens 19-20
-  | 'first_session_complete'  // Screen 21 — pre-CTA
+  | 'hook'                    // pre-auth: splash → obstacle → probe → reveal (ephemeral sub-states)
+  | 'orientation'             // post-auth: trimmed calibrate fields + ephemeral build beat
+  | 'first_session_pending'   // session handed over, not yet logged
+  | 'first_session_complete'  // session logged; post-session revelation
   | 'complete'                // in the daily loop
 
 // Onboarding steps that render inside the OnboardingRouter (no nav, no URL).
-// The remaining steps render the daily loop.
+// first_session_pending onward render the daily loop (routed by App).
 export const ONBOARDING_FUNNEL_STEPS: ReadonlySet<OnboardingStep> = new Set([
-  'hook', 'orientation', 'screening', 'computing', 'zeroed_in',
+  'hook', 'orientation',
 ])
 
 // ---- Row types (returned by SELECT) ----------------------------------------
@@ -172,6 +173,12 @@ export interface ExerciseTemplate {
   load?: string       // e.g. "light" | "moderate" | "bodyweight"
   cue?: string
   insight_id?: string // the insight this exercise was placed to address (Shift 5)
+  // Info-gain "test me" item — at most one per session. Marks the single
+  // highest-info-gain pattern check, shown as a static computing-cyan READING
+  // tag with tap-to-see-why. Its observation feeds runSessionReviewAgent.
+  reading?: boolean
+  pattern_key?: string   // MovementPatternKey this reading probes
+  reading_why?: string   // info-gain rationale, shown on tap
 }
 
 export interface SetLog {

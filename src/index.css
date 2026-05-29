@@ -948,3 +948,53 @@ textarea.input {
 .kv-row:last-child { border-bottom: none; }
 .kv-row__label { font-size: 13px; color: var(--text-dim); }
 .kv-row__val   { font-family: var(--font-mono); font-size: 13px; }
+
+/* Confidence meter — the live read number (Probe + telemetry) */
+.confidence-meter__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  margin-bottom: 6px;
+}
+.confidence-meter__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+}
+.confidence-meter__pct {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--signal);
+}
+.confidence-meter__track {
+  height: 3px;
+  background: var(--line);
+  border-radius: 999px;
+  overflow: hidden;
+}
+.confidence-meter__fill {
+  height: 100%;
+  background: var(--signal);
+  border-radius: 999px;
+  transition: width 0.9s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Reading tag — the info-gain "test me" item. Computing-cyan instrument
+   register. STATIC by doctrine: motion lives only in the telemetry strip. */
+.reading-tag {
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 2px;
+  background: rgba(90, 143, 184, 0.12);
+  border: 1px solid rgba(90, 143, 184, 0.35);
+  color: var(--computing);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+.reading-tag:hover { border-color: var(--computing); }

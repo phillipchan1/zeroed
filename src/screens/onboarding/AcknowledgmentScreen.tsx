@@ -1,15 +1,14 @@
 import { Logo, Button, TypeOn } from '../../components/ui'
 
 /**
- * Screen 06 · The Acknowledgment
- * Where the system proves it READ what they entered, not just stored it. Built
- * deterministically — name + context + the verbatim obstacle quote. The opening
- * line and the quote type on for a beat of presence; the data and instruction
- * render plainly. (Prompt 3 replaces the concatenation with a real agent.)
+ * Orientation · The Acknowledgment
+ * Proves the system READ what they entered, then hands off to the provisional
+ * build. No movement screen — the next thing is a real session, calibrated to
+ * the training context and the early read. Built deterministically (name +
+ * context + the verbatim obstacle quote).
  */
 export function AcknowledgmentScreen({
   name,
-  sport,
   trainingAge,
   sessions,
   obstacle,
@@ -17,7 +16,6 @@ export function AcknowledgmentScreen({
   onBack,
 }: {
   name: string
-  sport: string
   trainingAge: number
   sessions: number
   obstacle: string
@@ -27,8 +25,7 @@ export function AcknowledgmentScreen({
   const opener = `OK${name.trim() ? ` ${name.trim()}` : ''}.`
   const ageStr = `${trainingAge} ${trainingAge === 1 ? 'year' : 'years'} training`
   const sessionStr = `${sessions} sessions/week`
-  const sportStr = sport.trim() ? `${sport.trim().toLowerCase()} right now` : ''
-  const dataSentence = [ageStr, sessionStr, sportStr].filter(Boolean).join(', ')
+  const dataSentence = [ageStr, sessionStr].join(', ')
   const obstacleQuote = obstacle.trim()
 
   return (
@@ -53,14 +50,14 @@ export function AcknowledgmentScreen({
           )}
 
           <p className="hero-characterization" style={{ marginTop: obstacleQuote ? 0 : 24 }}>
-            We're going to run 7 movement patterns next. Each one tells us something specific about how
-            you'd hold up under load. Score honest — the goal is to find what's limiting you, not to look good.
+            I'll build your first session around that — light, and aimed at the early read. You'll
+            train; I'll keep sharpening the read underneath. No screen to sit through first.
           </p>
         </div>
 
         <div className="fade-rise fade-rise-delay-2" style={{ marginTop: 36, display: 'flex', gap: 8 }}>
           <Button variant="ghost" onClick={onBack} style={{ flex: 1 }}>← Back</Button>
-          <Button variant="primary" onClick={onRun} style={{ flex: 2 }}>Run the screen →</Button>
+          <Button variant="primary" onClick={onRun} style={{ flex: 2 }}>Build my first session →</Button>
         </div>
       </div>
     </div>

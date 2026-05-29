@@ -56,6 +56,7 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
   const [lastSignalAt, setLastSignalAt]   = useState<string | null>(null)
   const [phaseInfo, setPhaseInfo]         = useState<{ name: string; weekCurrent: number; weekTotal: number } | null>(null)
   const [retestDays, setRetestDays]       = useState<number | null>(null)
+  const [goal, setGoal]                   = useState<string | null>(null)
 
   useEffect(() => {
     loadWeekData()
@@ -97,6 +98,25 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
       .maybeSingle()
 
     setNonNegotiables((phase?.non_negotiables as string[] | null) ?? [])
+
+    // The GOAL is the durable anchor — program.goal, falling back to the
+    // athlete's own obstacle. The read/confidence is the live thing underneath.
+    const { data: program } = await supabase
+      .from('program')
+      .select('goal')
+      .eq('athlete_id', athleteId)
+      .eq('status', 'active')
+      .maybeSingle()
+    let g = (program?.goal as string | null) ?? null
+    if (!g) {
+      const { data: ath } = await supabase
+        .from('athlete')
+        .select('obstacle')
+        .eq('id', athleteId)
+        .maybeSingle()
+      g = (ath?.obstacle as string | null) ?? null
+    }
+    setGoal(g)
 
     if (phase?.week_start && phase?.week_end) {
       const start = new Date(phase.week_start as string)
@@ -200,14 +220,21 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
       {/* Main content */}
       <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
 
-        {/* Date header */}
+        {/* Goal anchor — the durable thing at the top. The read/confidence is
+            the live thing moving underneath it. */}
         <div className="fade-rise" style={{ marginBottom: 20 }}>
           <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-            {dateStr}
+            {goal ? 'Your goal' : dateStr}
           </p>
-          <h2 style={{ marginTop: 4, fontSize: 22, fontWeight: 600, lineHeight: 1.2 }}>
-            Today
+          <h2 style={{ marginTop: goal ? 6 : 4, fontSize: goal ? 21 : 22, fontWeight: 600, lineHeight: 1.25 }}>
+            {goal ?? 'Today'}
           </h2>
+          {!loading && p1Insight && (
+            <p className="text-xs text-dim" style={{ marginTop: 8, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
+              THE READ UNDERNEATH · {(p1Category ?? '').toUpperCase()} ·{' '}
+              <span className="num text-signal">{Math.round(p1Insight.confidence * 100)}%</span> CONFIDENT
+            </p>
+          )}
         </div>
 
         {/* Hero number — telemetric headline (always present) */}

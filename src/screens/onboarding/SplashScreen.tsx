@@ -32,6 +32,21 @@ export function SplashScreen({ onBegin }: { onBegin: () => void }) {
           <PresenceDot />
           Instrument ready
         </p>
+        <p
+          style={{
+            marginTop: 18,
+            fontFamily: 'var(--font-mono)',
+            fontSize: 12,
+            lineHeight: 1.7,
+            letterSpacing: '0.02em',
+            color: 'var(--text-dim)',
+            maxWidth: 300,
+          }}
+        >
+          Tell me what's in your way.
+          <br />
+          A read in ~30 seconds — then your first session.
+        </p>
       </div>
 
       <p

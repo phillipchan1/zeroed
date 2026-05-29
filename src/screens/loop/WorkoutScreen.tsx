@@ -2,7 +2,7 @@ import { useEffect, useState, useRef } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ChevronLeft, Check, Plus, Info } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
-import { resolveObservationAction } from '../../engine'
+import { runSessionReviewAgent } from '../../engine'
 import {
   Button, Spinner, ExerciseInsightSheet, TelemetryStrip,
 } from '../../components/ui'
@@ -197,6 +197,7 @@ export function WorkoutScreen() {
   // insight_id → insight, for the per-exercise "why" surface (Shift 5)
   const [insightMap, setInsightMap] = useState<Record<string, InsightRow>>({})
   const [openInsight, setOpenInsight] = useState<InsightRow | null>(null)
+  const [openReading, setOpenReading] = useState<{ name: string; why: string } | null>(null)
 
   // Set logs: exerciseIndex → SetLog[]
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
@@ -337,8 +338,10 @@ export function WorkoutScreen() {
       .neq('status', 'resolved')
       .neq('status', 'disproved')
 
-    // 2. Engine resolves the correct insight category and action
-    const action = resolveObservationAction(
+    // 2. Engine resolves the action — the agent CLASSIFIES the observation,
+    //    deterministic code applies the bounded confidence delta. Falls back to
+    //    the rule-based resolver on model failure (same return contract).
+    const action = await runSessionReviewAgent(
       athleteId,
       workoutId,
       observationLabel,
@@ -552,6 +555,16 @@ export function WorkoutScreen() {
                       <Info size={12} strokeWidth={2} />
                     </button>
                   )}
+                  {ex.reading && (
+                    <button
+                      type="button"
+                      className="reading-tag"
+                      aria-label="Why we're reading this"
+                      onClick={() => setOpenReading({ name: ex.name, why: ex.reading_why ?? '' })}
+                    >
+                      READING
+                    </button>
+                  )}
                 </div>
                 {ex.cue && (
                   <p className="text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.5 }}>
@@ -645,6 +658,25 @@ export function WorkoutScreen() {
           insight={openInsight}
           onClose={() => setOpenInsight(null)}
         />
+      )}
+
+      {openReading && (
+        <div className="obs-sheet" onClick={() => setOpenReading(null)}>
+          <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
+            <p
+              className="section-header"
+              style={{ color: 'var(--computing)', marginBottom: 10 }}
+            >
+              READING · {openReading.name}
+            </p>
+            <p className="text-sm" style={{ lineHeight: 1.5, marginBottom: 12 }}>
+              {openReading.why}
+            </p>
+            <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
+              How this one goes feeds the read — no need to score it, just train it honestly.
+            </p>
+          </div>
+        </div>
       )}
     </div>
   )
