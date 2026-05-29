@@ -97,6 +97,35 @@ export interface TargetResult {
   suggested_target: string | null
 }
 
+// The scoped slice of the athlete the Coach is allowed to see. NOT the whole
+// profile — a curated read (the doctrine's "scoped read on demand"). Assembled
+// by the engine (gatherCoachContext) and passed in; the agent reads only this.
+export interface CoachContext {
+  name: string | null
+  target: string | null
+  obstacle: string | null
+  training_age: number | null
+  sessions_per_week: number | null
+  program: { goal: string | null; phase: string | null; week: string | null; non_negotiables: string[] } | null
+  // The prescribed week — the actual sessions and their exercises.
+  sessions: Array<{ name: string; intent: string | null; exercises: string[] }>
+  insights: Array<{ id: string; priority: string; category: string; claim: string; confidence: number; status: string }>
+  recent_observations: Array<{ signal: string; category: string; severity: number; logged_at: string }>
+  // What the athlete has actually logged recently — including per-set detail
+  // ("Bench Press: 225×5 @7, 245×3 @8") so the coach can talk specific numbers.
+  recent_workouts: Array<{ session: string; performed_at: string; rpe: number | null; sets: string[] }>
+}
+
+export interface CoachChatTurn {
+  role: 'athlete' | 'coach'
+  content: string
+}
+
+export interface CoachChatResult {
+  reply: string
+  followups: string[]
+}
+
 // ---- device id (pre-auth probe rate limiting) -------------------------------
 
 const DEVICE_KEY = 'zeroed_device_id'
@@ -211,4 +240,17 @@ export function callSessionDebrief(payload: {
   insights: Array<{ id: string; category: string; claim: string; confidence: number; status: string }>
 }): Promise<AgentResult<SessionDebriefResult>> {
   return invokeAgent<SessionDebriefResult>('session_debrief', payload)
+}
+
+/**
+ * Coach chat — post-auth, STRICTLY READ-ONLY. A scoped slice of the athlete +
+ * the conversation so far → a warm, declarative answer + suggested follow-ups.
+ * The agent writes nothing; it only narrates and routes (see schemas.ts).
+ */
+export function callCoachChat(payload: {
+  context: CoachContext
+  history: CoachChatTurn[]
+  question: string
+}): Promise<AgentResult<CoachChatResult>> {
+  return invokeAgent<CoachChatResult>('coach_chat', payload)
 }

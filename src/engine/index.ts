@@ -18,12 +18,15 @@ import type {
   Priority,
   PhaseName,
   ExerciseTemplate,
+  SetLog,
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
 import {
   callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callInfoGain, callTarget,
+  callCoachChat,
   type ProgramDesignResult, type InsightCategory,
+  type CoachContext, type CoachChatTurn,
 } from './agentClient'
 import { FELT_CHIPS, type FeltLabel } from '../types/database'
 import { validateProvisionalProgram } from './safety'
@@ -496,6 +499,190 @@ export async function runSessionDebriefAgent(
     summary: null,
     actions: fallbackDebrief(athleteId, workoutId, input, existingInsights),
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// COACH CHAT — the conversational layer (Agent #8). STRICTLY READ-ONLY.
+//
+// The athlete asks "why" (why this program, why this read, what's the limiter,
+// what's the prognosis). The coach answers from a SCOPED slice of the athlete —
+// never SELECT *. It writes NOTHING: it cannot move an insight, a confidence
+// number, a status, or a load. When the athlete reports something new, it directs
+// them to the session log (the only place a signal becomes evidence). On model
+// failure it falls back to a grounded, in-voice canned reply so the surface never
+// dead-ends.
+// ────────────────────────────────────────────────────────────────────────────
+
+// Compact one logged set: prefer the populated metric for its tracking type,
+// append RPE when present. "225×5 @8" | "12 reps" | "45s @7" | "18m".
+function formatSet(s: SetLog): string | null {
+  let core: string | null = null
+  if (s.weight != null && s.reps != null) core = `${s.weight}×${s.reps}`
+  else if (s.reps != null)                core = `${s.reps} reps`
+  else if (s.duration != null)            core = `${s.duration}s`
+  else if (s.distance != null)            core = `${s.distance}m`
+  if (core == null) return null
+  return s.rpe != null ? `${core} @${s.rpe}` : core
+}
+
+// Turn a workout's per-exercise SetLog map into compact lines the coach can read
+// and quote — one line per exercise, only sets that carry data.
+function formatWorkoutSets(map: Record<string, SetLog[]> | null): string[] {
+  if (!map) return []
+  const lines: string[] = []
+  for (const [exercise, sets] of Object.entries(map)) {
+    if (!Array.isArray(sets)) continue
+    const cells = sets.map(formatSet).filter((c): c is string => c != null)
+    if (cells.length) lines.push(`${exercise}: ${cells.join(', ')}`)
+  }
+  return lines
+}
+
+/**
+ * Assemble the scoped read the Coach is allowed to see. This is the doctrine's
+ * "scoped read on demand": the active insight stack, the target, the current
+ * program/phase, and the few most recent observations — not the whole profile.
+ * Read once when the conversation opens; reused for every message in the thread.
+ */
+export async function gatherCoachContext(athleteId: string): Promise<CoachContext> {
+  const [{ data: athlete }, { data: insightRows }, { data: prog }] = await Promise.all([
+    supabase.from('athlete').select('name, goals, obstacle, training_age, sessions_per_week').eq('id', athleteId).maybeSingle(),
+    supabase.from('insight').select('*').eq('athlete_id', athleteId).order('priority'),
+    supabase.from('program').select('id, goal').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle(),
+  ])
+
+  const insights = ((insightRows ?? []) as InsightRow[])
+    .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
+    .map((i) => ({ id: i.id, priority: i.priority, category: i.category, claim: i.claim, confidence: i.confidence, status: i.status }))
+
+  // Current phase (non-negotiables) for the active program, if any.
+  let phase: { name: string | null; week: string | null; non_negotiables: string[] } | null = null
+  if (prog?.id) {
+    const { data: phaseRow } = await supabase
+      .from('phase').select('name, week_start, week_end, non_negotiables, status')
+      .eq('program_id', prog.id).eq('status', 'active').maybeSingle()
+    if (phaseRow) {
+      phase = {
+        name: phaseRow.name ?? null,
+        week: phaseRow.week_start && phaseRow.week_end ? `${phaseRow.week_start} → ${phaseRow.week_end}` : null,
+        non_negotiables: Array.isArray(phaseRow.non_negotiables) ? phaseRow.non_negotiables : [],
+      }
+    }
+  }
+
+  // The prescribed week — the actual sessions + their exercises. This is what
+  // lets the coach answer "what's my workout this week" concretely.
+  let sessions: CoachContext['sessions'] = []
+  if (prog?.id) {
+    const { data: routineRows } = await supabase
+      .from('routine').select('name, intent, exercises').eq('program_id', prog.id)
+    if (Array.isArray(routineRows)) {
+      sessions = (routineRows as Array<{ name: string; intent: string | null; exercises: ExerciseTemplate[] | null }>).map((r) => ({
+        name: r.name,
+        intent: r.intent ?? null,
+        exercises: (Array.isArray(r.exercises) ? r.exercises : []).map(
+          (ex) => `${ex.name} — ${ex.sets}×${ex.reps}${ex.load ? ` (${ex.load})` : ''}`,
+        ),
+      }))
+    }
+  }
+
+  // The most recent session observations (append-only event log). Best-effort —
+  // joins through workout→routine→program; an empty result is fine (early days).
+  let recent_observations: CoachContext['recent_observations'] = []
+  const { data: obs } = await supabase
+    .from('session_observation')
+    .select('signal, category, severity, logged_at, workout!inner(routine!inner(program!inner(athlete_id)))')
+    .eq('workout.routine.program.athlete_id', athleteId)
+    .order('logged_at', { ascending: false })
+    .limit(5)
+  if (Array.isArray(obs)) {
+    recent_observations = obs.map((o) => ({
+      signal: (o as { signal: string }).signal,
+      category: (o as { category: string }).category,
+      severity: (o as { severity: number }).severity,
+      logged_at: (o as { logged_at: string }).logged_at,
+    }))
+  }
+
+  // What the athlete has actually logged recently — the week's real activity,
+  // down to the set ("Bench Press: 225×5 @7, 245×3 @8"). Per-set grain lives in
+  // workout.actual_weights (Record<exerciseName, SetLog[]>).
+  let recent_workouts: CoachContext['recent_workouts'] = []
+  const { data: workouts } = await supabase
+    .from('workout')
+    .select('performed_at, rpe, actual_weights, routine!inner(name, program!inner(athlete_id))')
+    .eq('routine.program.athlete_id', athleteId)
+    .order('performed_at', { ascending: false })
+    .limit(5)
+  if (Array.isArray(workouts)) {
+    recent_workouts = workouts.map((w) => ({
+      session: (w as { routine?: { name?: string } }).routine?.name ?? 'Session',
+      performed_at: (w as { performed_at: string }).performed_at,
+      rpe: (w as { rpe: number | null }).rpe ?? null,
+      sets: formatWorkoutSets((w as { actual_weights: Record<string, SetLog[]> | null }).actual_weights),
+    }))
+  }
+
+  return {
+    name: athlete?.name ?? null,
+    target: athlete?.goals ?? null,
+    obstacle: athlete?.obstacle ?? null,
+    training_age: athlete?.training_age ?? null,
+    sessions_per_week: athlete?.sessions_per_week ?? null,
+    program: prog ? { goal: prog.goal ?? null, phase: phase?.name ?? null, week: phase?.week ?? null, non_negotiables: phase?.non_negotiables ?? [] } : null,
+    sessions,
+    insights,
+    recent_observations,
+    recent_workouts,
+  }
+}
+
+/**
+ * Deterministic starter prompts, grounded in the athlete's own context. Shown as
+ * tappable suggestion bubbles BEFORE any message — instant, no model call, always
+ * relevant to what the system actually believes about this athlete.
+ */
+export function coachStarterPrompts(ctx: CoachContext): string[] {
+  // Short, tappable — these are chips, not sentences.
+  const prompts: string[] = []
+  const p1 = ctx.insights[0] ?? null
+  if (p1) prompts.push(`Why my ${p1.category.toLowerCase()}?`)
+  if (ctx.program?.goal) prompts.push('Why this program?')
+  if (p1) prompts.push('What moves this read?')
+  if (ctx.target) prompts.push("What's in my way?")
+  prompts.push('What are you least sure of?')
+  return prompts.slice(0, 3)
+}
+
+export interface CoachReply {
+  source: 'agent' | 'fallback'
+  reply: string
+  followups: string[]
+}
+
+/**
+ * Ask the Coach a question. agent proposes (the prose) → there is nothing to
+ * dispose because it's read-only, but the call can still fail, so we fall back to
+ * a grounded, in-voice reply built from the scoped context.
+ */
+export async function runCoachChat(
+  context: CoachContext,
+  history: CoachChatTurn[],
+  question: string,
+): Promise<CoachReply> {
+  const res = await callCoachChat({ context, history, question })
+  if (res.ok) {
+    return { source: 'agent', reply: res.data.reply, followups: res.data.followups ?? [] }
+  }
+
+  // Deterministic floor — never dead-end the surface. Stay in voice, route
+  // correctly, and lean on the real read in context.
+  const p1 = context.insights[0] ?? null
+  const reply = p1
+    ? `Can't reach my full read this second. The short version stands: your ${p1.category.toLowerCase()} is the working limiter — ${p1.claim} It's at ${Math.round(p1.confidence * 100)}% and sharpens every session you log.`
+    : `Can't reach my full read this second. Log a session and I'll have something concrete to work from.`
+  return { source: 'fallback', reply, followups: [] }
 }
 
 /**

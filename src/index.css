@@ -1124,3 +1124,141 @@ textarea.input {
   color: var(--computing);
 }
 .rest-pill__time { font-size: 14px; }
+
+/* Stack expand/collapse toggle — quiet mono, the read is secondary to the chat */
+.stack-toggle {
+  margin-top: 2px;
+  padding: 6px 0;
+  background: transparent;
+  border: none;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color var(--dur-fast) var(--ease-out);
+}
+.stack-toggle:hover { color: var(--text); }
+
+/* --- Coach chat (the warm layer — read-only conversation) ----------------- */
+.coach-chat {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.coach-msg {
+  display: flex;
+  flex-direction: column;
+  max-width: 88%;
+}
+/* Coach speaks from the left; the athlete's questions sit right-aligned.
+   Speaker is read from alignment + fill — no labels, no per-message dot. */
+.coach-msg--coach   { align-self: flex-start; }
+.coach-msg--athlete { align-self: flex-end; align-items: flex-end; }
+
+.coach-msg__body {
+  font-size: 14px;
+  line-height: 1.55;
+  padding: 10px 13px;
+  border-radius: 10px;
+}
+/* Coach output is the signal — a solid surface bubble. */
+.coach-msg--coach .coach-msg__body {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-top-left-radius: 3px;
+  color: var(--text);
+}
+/* The athlete's own words stay quiet and neutral — never a second accent.
+   (Doctrine: one signal-yellow per screen; that belongs to the read.) */
+.coach-msg--athlete .coach-msg__body {
+  background: transparent;
+  border: 1px solid var(--line);
+  border-top-right-radius: 3px;
+  color: var(--text-dim);
+}
+
+/* Generating placeholder — the thinking shimmer is the real-computation signal */
+.coach-msg__thinking {
+  height: 38px;
+  width: 200px;
+  border-radius: 10px;
+  border-top-left-radius: 3px;
+  border: 1px solid var(--line);
+}
+
+/* Suggestion bubbles — grounded prompts, tap to ask. Quiet chips, not buttons:
+   they offer a path without competing with the read or the reply. */
+.coach-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.coach-suggestion {
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.25;
+  padding: 5px 10px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-dim);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+.coach-suggestion::before {
+  content: '→ ';
+  color: var(--line);
+}
+.coach-suggestion:hover {
+  border-color: var(--computing);
+  color: var(--text);
+}
+
+/* Input row */
+.coach-input {
+  display: flex;
+  gap: 8px;
+  margin-top: 16px;
+}
+.coach-input input {
+  flex: 1;
+  min-width: 0;
+  padding: 10px 13px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 14px;
+}
+.coach-input input:focus {
+  outline: none;
+  border-color: var(--computing);
+}
+.coach-input input::placeholder { color: var(--text-dim); }
+.coach-input button {
+  padding: 0 16px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out),
+              color var(--dur-fast) var(--ease-out);
+}
+.coach-input button:not(:disabled):hover {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+.coach-input button:disabled,
+.coach-input input:disabled { opacity: 0.5; cursor: default; }
