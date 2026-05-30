@@ -16,6 +16,7 @@ import { ProfileScreen } from './screens/loop/ProfileScreen'
 import { WorkoutScreen } from './screens/loop/WorkoutScreen'
 import { ProgramScreen } from './screens/loop/ProgramScreen'
 import { CoachScreen }   from './screens/loop/CoachScreen'
+import { RetestScreen }  from './screens/loop/RetestScreen'
 
 // ---- Splash ----------------------------------------------------------------
 
@@ -106,6 +107,9 @@ function AppRoutes() {
 
       {/* Workout — full-screen, no nav */}
       <Route path="/app/workout/:routineId" element={<WorkoutScreen />} />
+
+      {/* Retest — full-screen rescreen (program cadence, §6) */}
+      <Route path="/app/retest" element={<RetestScreen athleteId={athleteId} onDone={refresh} />} />
 
       {/* Catch-all */}
       <Route path="*" element={<Navigate to="/app/today" replace />} />

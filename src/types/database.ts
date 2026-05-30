@@ -143,8 +143,40 @@ export interface WeeklyReviewRow {
   program_id: string
   week_ending: string
   coach_notes: string | null
-  adjustments: unknown | null
-  next_week_prescription: unknown | null
+  adjustments: WeeklyReviewAdjustments | null
+  next_week_prescription: WeeklyPrescription | null
+}
+
+export type CoachMessageRole = 'coach' | 'athlete'
+export type CoachMessageKind = 'note' | 'weekly_review' | 'phase_change' | 'retest' | 'chat'
+
+export interface CoachMessageRow {
+  id: string
+  athlete_id: string
+  role: CoachMessageRole
+  kind: CoachMessageKind
+  body: string
+  ref_id: string | null
+  created_at: string
+}
+
+// ---- Weekly review value types (deterministic autoregulation, §4.3) --------
+
+export type WeeklyDirective = 'PROGRESS' | 'DELOAD' | 'HOLD' | 'HOLD (missed)'
+
+export interface WeeklyReviewAdjustments {
+  avgRPE: number | null
+  adherence: number
+  painCount: number
+  positiveCount: number
+  flagged_categories: string[]
+}
+
+export interface WeeklyPrescription {
+  directive: WeeklyDirective
+  load_delta_pct: number
+  rpe_target: number
+  rationale: string
 }
 
 // ---- Domain value types ----------------------------------------------------
@@ -264,6 +296,10 @@ export type RoutineInsert = Omit<RoutineRow, 'id'>
 export type WorkoutInsert = Omit<WorkoutRow, 'id' | 'performed_at'>
 
 export type SessionObservationInsert = Omit<SessionObservationRow, 'id' | 'logged_at'>
+
+export type WeeklyReviewInsert = Omit<WeeklyReviewRow, 'id'>
+
+export type CoachMessageInsert = Omit<CoachMessageRow, 'id' | 'created_at'>
 
 // ---- Movement screen constants ---------------------------------------------
 

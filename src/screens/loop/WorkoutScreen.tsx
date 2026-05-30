@@ -556,6 +556,14 @@ export function WorkoutScreen() {
         ;(insightRows ?? []).forEach((ins) => { map[(ins as InsightRow).id] = ins as InsightRow })
         setInsightMap(map)
       }
+
+      // Prescription hints — best-effort; the session loads regardless.
+      if (programData && routineId) {
+        try {
+          const presc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, unit)
+          setPrescription(presc)
+        } catch { /* non-fatal */ }
+      }
     }
     setLoading(false)
   }
@@ -876,6 +884,14 @@ export function WorkoutScreen() {
                 </div>
                 {ex.cue && (
                   <p className="text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.5 }}>{ex.cue}</p>
+                )}
+                {prescription?.hints[exIdx] && (
+                  <p
+                    className="num text-xs text-signal"
+                    style={{ marginTop: 4, letterSpacing: '0.02em' }}
+                  >
+                    {prescription.hints[exIdx]}
+                  </p>
                 )}
               </div>
 
