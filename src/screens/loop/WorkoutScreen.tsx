@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
-import { runSessionDebriefAgent, type DebriefInput } from '../../engine'
+import { runSessionDebriefAgent, gatherSessionPrescription, type DebriefInput, type SessionPrescription } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import {
@@ -467,6 +467,9 @@ export function WorkoutScreen() {
   const [openReading, setOpenReading] = useState<{ name: string; why: string } | null>(null)
 
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
+
+  // Per-exercise prescription — last week's top set + the week's directive (§4.4).
+  const [prescription, setPrescription] = useState<SessionPrescription | null>(null)
 
   // Last session's results per exercise index, for the desktop Previous column.
   const [prevByExercise, setPrevByExercise] = useState<Record<number, SetLog[]>>({})
