@@ -3,6 +3,7 @@ import { SplashScreen } from './SplashScreen'
 import { HookQuestionScreen } from './HookQuestionScreen'
 import { ProbeScreen } from './ProbeScreen'
 import { AuthSheet } from './AuthSheet'
+import { FunnelFrame } from '../../components/layout/FunnelFrame'
 import type { ProbeOutcome } from '../../engine'
 
 export const OBSTACLE_STORAGE_KEY = 'zeroed.obstacle'
@@ -66,7 +67,9 @@ export function HookAct({
   return (
     <>
       {sub === 'splash'   && <SplashScreen onBegin={() => setSub('question')} />}
-      {sub === 'question' && <HookQuestionScreen initial={obstacle} onSubmit={handleQuestionSubmit} />}
+      {sub === 'question' && (
+        <FunnelFrame><HookQuestionScreen initial={obstacle} onSubmit={handleQuestionSubmit} /></FunnelFrame>
+      )}
       {sub === 'probe'    && <ProbeScreen obstacle={obstacle} onSaveRead={handleSaveRead} />}
 
       {showAuth && <AuthSheet onClose={() => setShowAuth(false)} />}

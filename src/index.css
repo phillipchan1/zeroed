@@ -141,6 +141,52 @@ body {
   padding: 0 var(--sp-4);
 }
 
+@media (min-width: 1000px) {
+  .screen--centered { padding: var(--sp-12); }
+}
+
+/* --- Onboarding funnel frame ---------------------------------------------- */
+/* Mobile: a transparent wrapper — each step renders full-bleed as before, the
+   brand panel hidden. Desktop: a fixed brand panel on the left (the instrument
+   identity) beside the focused step on the right. Single-purpose screens aren't
+   spread into columns; they're framed, so they read as placed, not floating. */
+.funnel-frame__brand { display: none; }
+
+@media (min-width: 1000px) {
+  .funnel-frame { display: flex; min-height: 100dvh; }
+  .funnel-frame__brand {
+    display: flex;
+    flex-direction: column;
+    width: 36%;
+    max-width: 480px;
+    flex-shrink: 0;
+    padding: 56px 56px 48px;
+    border-right: 1px solid var(--line);
+    background: var(--ground);
+  }
+  .funnel-frame__content { flex: 1; min-width: 0; }
+  .funnel-frame__content > .screen--centered { min-height: 100dvh; }
+}
+
+.funnel-brand__tag {
+  margin-top: 22px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.7;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+.funnel-brand__sys {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+}
+
 /* --- Cards ---------------------------------------------------------------- */
 
 .card {
