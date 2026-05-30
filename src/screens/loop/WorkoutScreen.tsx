@@ -26,6 +26,74 @@ function leadingInt(s: string | undefined): number | null {
 const REST_SECONDS = 90
 const RPE_SCALE = [6, 7, 8, 9, 10]
 
+// Column layout per tracking type. Shared by the header and every set row so
+// the prescribed-target column lines up exactly over the input it describes.
+function gridFor(t: TrackingType): string {
+  if (t === 'time')     return '30px 1fr 56px 44px'
+  if (t === 'distance') return '30px 1fr 44px'
+  return '30px 1fr 1fr 56px 44px' // weight_reps & bodyweight_reps
+}
+
+// ---- Column header (prescribed target as a labelled column) ----------------
+
+interface SetHeaderProps {
+  trackingType: TrackingType
+  unit: string
+  distanceUnit: string
+  prescribedReps: string         // raw prescription, e.g. "8-10" or "30s"
+  prescribedLoad: string | null  // raw load, e.g. "225 lbs" or "bodyweight"
+}
+
+function headCell(label: string, target: string | null) {
+  return (
+    <div className="set-head__cell">
+      <span className="set-head__label">{label}</span>
+      <span className="set-head__target">{target || '—'}</span>
+    </div>
+  )
+}
+
+// A header that labels each input column and parks the prescribed target right
+// above the field you type into — so "what to hit" sits next to "what you did".
+function SetHeader({
+  trackingType, unit, distanceUnit, prescribedReps, prescribedLoad,
+}: SetHeaderProps) {
+  let cells: ReactNode
+  if (trackingType === 'time') {
+    cells = (
+      <>
+        {headCell('Time', prescribedReps)}
+        {headCell('RPE', null)}
+      </>
+    )
+  } else if (trackingType === 'distance') {
+    cells = headCell(distanceUnit, prescribedReps)
+  } else if (trackingType === 'bodyweight_reps') {
+    cells = (
+      <>
+        {headCell('Reps', prescribedReps)}
+        {headCell(`+${unit}`, prescribedLoad)}
+        {headCell('RPE', null)}
+      </>
+    )
+  } else {
+    cells = (
+      <>
+        {headCell(unit, prescribedLoad)}
+        {headCell('Reps', prescribedReps)}
+        {headCell('RPE', null)}
+      </>
+    )
+  }
+  return (
+    <div className="set-head" style={{ gridTemplateColumns: gridFor(trackingType) }}>
+      <span className="set-head__set">Set</span>
+      {cells}
+      <span aria-hidden />
+    </div>
+  )
+}
+
 // ---- Set row (tracking-type aware) -----------------------------------------
 
 interface SetRowProps {
@@ -126,12 +194,11 @@ function SetRow({
     />
   )
 
-  // Per-type column layouts. Done button + set number are constant.
-  let grid: string
+  // Per-type column contents. Set number + done button are constant; the grid
+  // template itself is shared with the header via gridFor().
   let cells: ReactNode
 
   if (trackingType === 'time') {
-    grid = '28px 1fr 52px 40px'
     cells = (
       <>
         {numInput(log.duration, 'sec', (n) => onChange({ ...log, duration: n }))}
@@ -139,10 +206,8 @@ function SetRow({
       </>
     )
   } else if (trackingType === 'distance') {
-    grid = '28px 1fr 40px'
     cells = numInput(log.distance, distanceUnit, (n) => onChange({ ...log, distance: n }), 'decimal')
   } else if (trackingType === 'bodyweight_reps') {
-    grid = '28px 1fr 1fr 52px 40px'
     cells = (
       <>
         {numInput(log.reps, 'reps', (n) => onChange({ ...log, reps: n }))}
@@ -152,7 +217,6 @@ function SetRow({
     )
   } else {
     // weight_reps (default)
-    grid = '28px 1fr 1fr 52px 40px'
     cells = (
       <>
         {numInput(log.weight, unit, (n) => onChange({ ...log, weight: n }), 'decimal')}
@@ -163,7 +227,7 @@ function SetRow({
   }
 
   return (
-    <div className="set-row" style={{ gridTemplateColumns: grid }}>
+    <div className="set-row" style={{ gridTemplateColumns: gridFor(trackingType) }}>
       <span className="set-row__num">{setNum}</span>
       {cells}
       {doneBtn}
@@ -755,10 +819,15 @@ export function WorkoutScreen() {
                 {ex.cue && (
                   <p className="text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.5 }}>{ex.cue}</p>
                 )}
-                <p className="num text-xs text-dim" style={{ marginTop: 3 }}>
-                  {ex.sets} × {ex.reps}{ex.load ? ` · ${ex.load}` : ''}
-                </p>
               </div>
+
+              <SetHeader
+                trackingType={trackingType}
+                unit={unit}
+                distanceUnit={distanceUnit}
+                prescribedReps={ex.reps}
+                prescribedLoad={ex.load ?? null}
+              />
 
               {logs.map((log, setIdx) => (
                 <SetRow
@@ -778,7 +847,7 @@ export function WorkoutScreen() {
               <button
                 type="button"
                 className="btn btn--ghost"
-                style={{ marginTop: 6, height: 32, fontSize: 12, padding: '0 4px', color: 'var(--text-dim)' }}
+                style={{ marginTop: 8, height: 44, fontSize: 13, padding: '0 8px', color: 'var(--text-dim)' }}
                 onClick={() => addSet(exIdx)}
               >
                 <Plus size={12} strokeWidth={2} style={{ marginRight: 4 }} />

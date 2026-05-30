@@ -790,12 +790,61 @@ textarea.input {
 
 /* --- Exercise set row ----------------------------------------------------- */
 
+/* Column header — labels each input column and shows the prescribed target
+   directly above the field it describes (what to hit, next to what you did). */
+.set-head {
+  display: grid;
+  gap: 8px;
+  align-items: end;
+  padding-bottom: 8px;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
+.set-head__set {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.set-head__cell {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+}
+
+.set-head__label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.set-head__target {
+  max-width: 100%;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.1;
+  /* Instrument layer — prescription reads as cold data, never the screen's
+     scarce signal-yellow (reserved for the primary CTA). */
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
 .set-row {
   display: grid;
-  grid-template-columns: 28px 1fr 1fr 52px 40px;
-  gap: 6px;
+  grid-template-columns: 30px 1fr 1fr 56px 44px;
+  gap: 8px;
   align-items: center;
-  padding: 6px 0;
+  padding: 5px 0;
   border-bottom: 1px solid var(--line);
 }
 
@@ -803,35 +852,37 @@ textarea.input {
 
 .set-row__num {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: 13px;
   color: var(--text-dim);
   text-align: center;
 }
 
 .set-row__input {
   width: 100%;
-  height: 36px;
+  height: 44px;
   padding: 0 8px;
   background: var(--ground);
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 14px;
+  /* 16px keeps iOS Safari from auto-zooming when a field is focused. */
+  font-size: 16px;
   text-align: center;
   outline: none;
   -webkit-appearance: none;
   -moz-appearance: textfield;
 }
 
+/* Gray brightening for the focused field — yellow is reserved for signal. */
 .set-row__input:focus { border-color: #4A4A4A; }
 .set-row__input::placeholder { color: var(--text-dim); }
 .set-row__input::-webkit-inner-spin-button,
 .set-row__input::-webkit-outer-spin-button { -webkit-appearance: none; }
 
 .set-row__done {
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1002,13 +1053,13 @@ textarea.input {
 /* --- RPE tap-scale (set row) ---------------------------------------------- */
 .set-row__rpe {
   width: 100%;
-  height: 36px;
+  height: 44px;
   background: var(--ground);
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--text);
   font-family: var(--font-mono);
-  font-size: 12px;
+  font-size: 13px;
   text-align: center;
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
@@ -1029,15 +1080,16 @@ textarea.input {
   box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
 }
 .rpe-pop__btn {
-  width: 30px;
-  height: 32px;
+  width: 42px;
+  height: 42px;
   background: var(--ground);
   border: 1px solid var(--line);
   border-radius: 4px;
   color: var(--text-dim);
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: 15px;
   cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
 }
 .rpe-pop__btn--on { border-color: var(--signal); color: var(--signal); background: var(--signal-dim); }
 .rpe-pop__btn--clear { color: var(--text-dim); }
