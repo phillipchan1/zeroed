@@ -2,7 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom
 import { useAuth } from './hooks/useAuth'
 import { useAppState } from './hooks/useAppState'
 import { Spinner } from './components/ui'
-import { Nav } from './components/layout/Nav'
+import { Nav, Sidebar } from './components/layout/Nav'
 import { DebugReset } from './components/DebugReset'
 import { ONBOARDING_FUNNEL_STEPS } from './types/database'
 
@@ -41,10 +41,13 @@ function LoopLayout({
   refresh: () => void
 }) {
   return (
-    <>
-      <Outlet context={{ athleteId, athleteName, todayRoutine, refresh }} />
+    <div className="app-shell">
+      <Sidebar />
+      <main className="app-main">
+        <Outlet context={{ athleteId, athleteName, todayRoutine, refresh }} />
+      </main>
       <Nav />
-    </>
+    </div>
   )
 }
 

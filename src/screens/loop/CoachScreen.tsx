@@ -103,7 +103,8 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     <div className="screen with-nav">
       {!loading && <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />}
 
-      <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
+      <div className="page page--split">
+       <div className="page__main">
         <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
           The read
         </p>
@@ -138,10 +139,11 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             </p>
           )}
         </div>
+       </div>
 
-        {/* Conversation — the warm layer, now the primary surface. Read-only:
-            the coach narrates and routes. */}
-        <div className="fade-rise fade-rise-delay-1" style={{ marginTop: 28, paddingTop: 24, borderTop: '1px solid var(--line)' }}>
+        {/* Conversation — the warm layer. Right pane on desktop, stacked below
+            the read on mobile (with a separator). Read-only: narrate and route. */}
+        <div className="fade-rise fade-rise-delay-1 page__main coach-convo">
           <SectionHeader>Ask why</SectionHeader>
 
           <div className="coach-chat" style={{ marginTop: 12 }}>
