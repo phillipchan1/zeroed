@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { runLoopTriggers, isRetestDue } from '../../engine'
@@ -14,6 +14,11 @@ interface TodayScreenProps {
 interface LoopContext {
   refresh: () => void
 }
+
+// Athletes whose lazy triggers have already run this page-session. Module-level
+// (not a ref) so it survives the brief unmount/remount a refresh() causes —
+// otherwise the trigger effect would re-fire on every remount and loop.
+const triggeredThisSession = new Set<string>()
 
 interface WeekDayStatus {
   date: Date
@@ -62,7 +67,6 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
   const [goal, setGoal]                   = useState<string | null>(null)
   const [p1, setP1] = useState<{ category: string; confidence: number } | null>(null)
   const [retestDue, setRetestDue] = useState(false)
-  const triggersRan = useRef(false)
 
   useEffect(() => {
     loadWeekData()
@@ -73,14 +77,19 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
   }, [athleteId])
 
   // Lazy outer-cadence triggers (§4.2, §5): run the weekly review + phase
-  // advancement on first open, once, then refresh so any change surfaces.
+  // advancement once per page-session, then refresh ONLY if something changed.
+  // (refresh() flips global loading → remounts this screen; an unconditional
+  // refresh would reset a local guard and loop, so the guard is module-level and
+  // we refresh only on a real change.)
   useEffect(() => {
-    if (triggersRan.current) return
-    triggersRan.current = true
+    if (triggeredThisSession.has(athleteId)) return
+    triggeredThisSession.add(athleteId)
     void (async () => {
-      await runLoopTriggers(athleteId)
-      loadRetestStatus()
-      refresh()
+      const changed = await runLoopTriggers(athleteId)
+      if (changed) {
+        loadRetestStatus()
+        refresh()
+      }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [athleteId])

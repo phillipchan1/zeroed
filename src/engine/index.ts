@@ -819,7 +819,7 @@ function weeklyCoachNotes(weekEnding: string, t: WeeklyTally, p: WeeklyPrescript
  * Mon–Sun week that has ≥1 workout and no review yet into a weekly_review row +
  * a coach_message. Idempotent: one review per (program_id, week_ending).
  */
-export async function runWeeklyReviewAgent(athleteId: string, programId: string): Promise<void> {
+export async function runWeeklyReviewAgent(athleteId: string, programId: string): Promise<number> {
   const [{ data: ath }, { data: existingReviews }, { data: workoutRows }, { data: obsRows }] = await Promise.all([
     supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle(),
     supabase.from('weekly_review').select('week_ending').eq('program_id', programId),
@@ -831,7 +831,7 @@ export async function runWeeklyReviewAgent(athleteId: string, programId: string)
   const reviewed = new Set((existingReviews ?? []).map((r) => r.week_ending as string))
   const workouts = (workoutRows ?? []) as unknown as WeekWorkout[]
   const observations = (obsRows ?? []) as unknown as WeekObservation[]
-  if (workouts.length === 0) return
+  if (workouts.length === 0) return 0
 
   const thisMonday = startOfWeekMonday(new Date())
 
@@ -852,6 +852,7 @@ export async function runWeeklyReviewAgent(athleteId: string, programId: string)
     .filter(([key, wk]) => wk.monday.getTime() < thisMonday.getTime() && wk.workouts.length > 0 && !reviewed.has(key))
     .sort((a, b) => a[1].monday.getTime() - b[1].monday.getTime())
 
+  let created = 0
   for (const [weekEnding, wk] of pending) {
     const tally = tallyWeek(planned, wk.workouts, wk.observations)
     const prescription = decidePrescription(tally)
@@ -871,9 +872,11 @@ export async function runWeeklyReviewAgent(athleteId: string, programId: string)
       .single()
 
     if (review) {
+      created++
       await insertCoachMessage(athleteId, { kind: 'weekly_review', body: coach_notes, ref_id: (review as { id: string }).id })
     }
   }
+  return created
 }
 
 /**
@@ -2395,11 +2398,15 @@ export async function runRetest(athleteId: string, newResults: DiagnosticResults
  * Run the weekly + phase cadences for the athlete's active program. Safe to call
  * on every TodayScreen mount: weekly review is idempotent per week, phase
  * advancement only acts past a phase end. Errors are swallowed (best-effort).
+ * Returns true iff something actually changed (so callers refresh only then —
+ * an unconditional refresh would remount the screen and loop).
  */
-export async function runLoopTriggers(athleteId: string): Promise<void> {
+export async function runLoopTriggers(athleteId: string): Promise<boolean> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
-  if (!prog?.id) return
-  try { await runWeeklyReviewAgent(athleteId, prog.id) } catch (e) { console.error('[loop] weekly review failed', e) }
-  try { await runPhaseAdvancement(athleteId) } catch (e) { console.error('[loop] phase advancement failed', e) }
+  if (!prog?.id) return false
+  let changed = false
+  try { changed = (await runWeeklyReviewAgent(athleteId, prog.id)) > 0 || changed } catch (e) { console.error('[loop] weekly review failed', e) }
+  try { changed = (await runPhaseAdvancement(athleteId)) || changed } catch (e) { console.error('[loop] phase advancement failed', e) }
+  return changed
 }
