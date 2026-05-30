@@ -759,7 +759,12 @@ export function WorkoutScreen() {
     // The living loop: read this session as evidence on the P1 weak link. Strong,
     // pain-free P1 work disconfirms the limiter → confidence falls, may resolve,
     // and a grounded coach note is written (surfaced on the Coach tab).
-    await recordSessionAdaptation(athleteId, workoutId)
+    // Best-effort — a logged session must never hang on this.
+    try {
+      await recordSessionAdaptation(athleteId, workoutId)
+    } catch (e) {
+      console.error('[loop] session adaptation failed', e)
+    }
 
     setSavingDebrief(false)
 
