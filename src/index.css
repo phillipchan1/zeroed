@@ -841,7 +841,6 @@ textarea.input {
 
 .set-row {
   display: grid;
-  grid-template-columns: 30px 1fr 1fr 56px 44px;
   gap: 8px;
   align-items: center;
   padding: 5px 0;
@@ -849,6 +848,34 @@ textarea.input {
 }
 
 .set-row:last-child { border-bottom: none; }
+
+/* Column templates per tracking type. Mobile omits the Previous column; the
+   ≥720px override slots it in (the cell itself is display:none until then). */
+.set-grid--wr   { grid-template-columns: 30px 1fr 1fr 56px 44px; }
+.set-grid--time { grid-template-columns: 30px 1fr 56px 44px; }
+.set-grid--dist { grid-template-columns: 30px 1fr 44px; }
+
+@media (min-width: 720px) {
+  .set-grid--wr   { grid-template-columns: 30px 84px 1fr 1fr 56px 44px; }
+  .set-grid--time { grid-template-columns: 30px 84px 1fr 56px 44px; }
+  .set-grid--dist { grid-template-columns: 30px 84px 1fr 44px; }
+}
+
+/* Last session's result — ghosted reference, revealed only when there's room. */
+.set-row__prev,
+.set-head__prev {
+  display: none;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (min-width: 720px) {
+  .set-row__prev  { display: block; }
+  .set-head__prev { display: block; }
+}
 
 .set-row__num {
   font-family: var(--font-mono);
@@ -1176,6 +1203,74 @@ textarea.input {
   color: var(--computing);
 }
 .rest-pill__time { font-size: 14px; }
+
+/* --- Workout desktop layout ---------------------------------------------- */
+/* Mobile: a single scrolling column, exactly as before. Desktop: the column
+   is capped and centered (no more edge-to-edge stretch) with a context rail. */
+.workout-panes {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.workout-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 16px 140px;
+}
+
+.workout-col {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.workout-rail { display: none; }
+
+.workout-footer__inner {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+@media (min-width: 720px) {
+  .workout-col { max-width: 600px; }
+}
+
+@media (min-width: 1000px) {
+  /* Context rail: live rest clock + why-this-exercise, instead of the floating
+     pill and modal sheet. The instrument's side panel. */
+  .workout-rail {
+    display: block;
+    width: 300px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--line);
+    padding: 24px 20px;
+    overflow-y: auto;
+  }
+  .rest-pill { display: none; }  /* the rail owns rest state on desktop */
+}
+
+.rail__block {
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.rail__block:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+.rail__head {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.rail__timer {
+  font-size: 32px;
+  line-height: 1;
+  color: var(--computing);
+  margin-bottom: 10px;
+}
 
 /* Stack expand/collapse toggle — quiet mono, the read is secondary to the chat */
 .stack-toggle {
