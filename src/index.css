@@ -831,7 +831,9 @@ textarea.input {
   font-family: var(--font-mono);
   font-size: 13px;
   line-height: 1.1;
-  color: var(--signal);
+  /* Instrument layer — prescription reads as cold data, never the screen's
+     scarce signal-yellow (reserved for the primary CTA). */
+  color: var(--text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -861,7 +863,7 @@ textarea.input {
   padding: 0 8px;
   background: var(--ground);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
   color: var(--text);
   font-family: var(--font-mono);
   /* 16px keeps iOS Safari from auto-zooming when a field is focused. */
@@ -872,7 +874,8 @@ textarea.input {
   -moz-appearance: textfield;
 }
 
-.set-row__input:focus { border-color: var(--signal); }
+/* Gray brightening for the focused field — yellow is reserved for signal. */
+.set-row__input:focus { border-color: #4A4A4A; }
 .set-row__input::placeholder { color: var(--text-dim); }
 .set-row__input::-webkit-inner-spin-button,
 .set-row__input::-webkit-outer-spin-button { -webkit-appearance: none; }
@@ -885,7 +888,7 @@ textarea.input {
   justify-content: center;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
   cursor: pointer;
   transition: background var(--dur-fast), border-color var(--dur-fast);
   -webkit-tap-highlight-color: transparent;
@@ -1053,7 +1056,7 @@ textarea.input {
   height: 44px;
   background: var(--ground);
   border: 1px solid var(--line);
-  border-radius: 6px;
+  border-radius: 4px;
   color: var(--text);
   font-family: var(--font-mono);
   font-size: 13px;
