@@ -3,6 +3,7 @@ import { TargetScreen } from './TargetScreen'
 import { IdentityScreen } from './IdentityScreen'
 import { TrainingContextScreen } from './TrainingContextScreen'
 import { AcknowledgmentScreen } from './AcknowledgmentScreen'
+import { FunnelFrame } from '../../components/layout/FunnelFrame'
 import type { AthleteRow } from '../../types/database'
 
 export interface OrientationFields {
@@ -38,7 +39,7 @@ export function OrientationAct({
   })
 
   return (
-    <>
+    <FunnelFrame>
       {sub === 'target' && (
         <TargetScreen
           obstacle={obstacle}
@@ -75,6 +76,6 @@ export function OrientationAct({
           onBack={() => setSub('context')}
         />
       )}
-    </>
+    </FunnelFrame>
   )
 }

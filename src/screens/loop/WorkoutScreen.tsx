@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
-import { runSessionDebriefAgent, gatherSessionPrescription, type DebriefInput, type SessionPrescription } from '../../engine'
+import { runSessionDebriefAgent, type DebriefInput } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import {
@@ -26,12 +26,36 @@ function leadingInt(s: string | undefined): number | null {
 const REST_SECONDS = 90
 const RPE_SCALE = [6, 7, 8, 9, 10]
 
-// Column layout per tracking type. Shared by the header and every set row so
-// the prescribed-target column lines up exactly over the input it describes.
-function gridFor(t: TrackingType): string {
-  if (t === 'time')     return '30px 1fr 56px 44px'
-  if (t === 'distance') return '30px 1fr 44px'
-  return '30px 1fr 1fr 56px 44px' // weight_reps & bodyweight_reps
+// Column layout per tracking type, as a CSS class so the grid template can be
+// overridden by media query (desktop slots in an extra "Previous" column that
+// mobile hides). Shared by the header and every set row so columns stay aligned.
+function gridClass(t: TrackingType): string {
+  if (t === 'time')     return 'set-grid--time'
+  if (t === 'distance') return 'set-grid--dist'
+  return 'set-grid--wr' // weight_reps & bodyweight_reps
+}
+
+// Compact "what you hit last session" string for the desktop Previous column.
+function formatPrev(
+  t: TrackingType, prev: SetLog | undefined, unit: string, distanceUnit: string,
+): string | null {
+  if (!prev) return null
+  if (t === 'time')     return prev.duration != null ? `${prev.duration}s` : null
+  if (t === 'distance') return prev.distance != null ? `${prev.distance}${distanceUnit}` : null
+  if (t === 'bodyweight_reps') {
+    if (prev.reps == null) return null
+    return prev.weight ? `${prev.reps}+${prev.weight}` : `${prev.reps}`
+  }
+  if (prev.weight == null && prev.reps == null) return null
+  return `${prev.weight != null ? `${prev.weight}${unit}` : 'BW'}×${prev.reps ?? '?'}`
+}
+
+// Enter flies the cursor to the next numeric field, across rows and exercises —
+// spreadsheet-speed entry on a physical keyboard, harmless under a thumb.
+function advanceField(el: EventTarget & HTMLInputElement) {
+  const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('.set-row__input'))
+  const i = inputs.indexOf(el)
+  if (i >= 0 && i + 1 < inputs.length) inputs[i + 1].focus()
 }
 
 // ---- Column header (prescribed target as a labelled column) ----------------
@@ -86,8 +110,9 @@ function SetHeader({
     )
   }
   return (
-    <div className="set-head" style={{ gridTemplateColumns: gridFor(trackingType) }}>
+    <div className={`set-head ${gridClass(trackingType)}`}>
       <span className="set-head__set">Set</span>
+      <span className="set-head__label set-head__prev">Prev</span>
       {cells}
       <span aria-hidden />
     </div>
@@ -104,13 +129,15 @@ interface SetRowProps {
   distanceUnit: string
   prescribedReps: number | null
   prescribedDuration: number | null
+  prevText: string | null  // last session's result for this set (desktop column)
   onChange: (updated: SetLog) => void
   onComplete: () => void   // fires when a set is newly marked done (→ rest timer)
+  onActivate: () => void   // a field here was focused → drives the desktop rail
 }
 
 function SetRow({
   setNum, log, trackingType, unit, distanceUnit,
-  prescribedReps, prescribedDuration, onChange, onComplete,
+  prescribedReps, prescribedDuration, prevText, onChange, onComplete, onActivate,
 }: SetRowProps) {
   const [rpeOpen, setRpeOpen] = useState(false)
 
@@ -191,6 +218,8 @@ function SetRow({
       placeholder={placeholder}
       value={value ?? ''}
       onChange={(e) => onVal(num(e.target.value))}
+      onFocus={onActivate}
+      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); advanceField(e.currentTarget) } }}
     />
   )
 
@@ -227,8 +256,9 @@ function SetRow({
   }
 
   return (
-    <div className="set-row" style={{ gridTemplateColumns: gridFor(trackingType) }}>
+    <div className={`set-row ${gridClass(trackingType)}`}>
       <span className="set-row__num">{setNum}</span>
+      <span className="set-row__prev num">{prevText ?? '·'}</span>
       {cells}
       {doneBtn}
     </div>
@@ -438,8 +468,10 @@ export function WorkoutScreen() {
 
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
 
-  // Per-exercise prescription — last week's top set + the week's directive (§4.4).
-  const [prescription, setPrescription] = useState<SessionPrescription | null>(null)
+  // Last session's results per exercise index, for the desktop Previous column.
+  const [prevByExercise, setPrevByExercise] = useState<Record<number, SetLog[]>>({})
+  // Which exercise is in focus — drives the "why" panel in the desktop rail.
+  const [activeExIdx, setActiveExIdx] = useState(0)
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const startRef = useRef<number>(Date.now())
@@ -496,6 +528,23 @@ export function WorkoutScreen() {
         initial[i] = Array.from({ length: ex.sets }, (_, j) => newSetLog(j + 1))
       })
       setSetLogs(initial)
+
+      // Most recent prior session of this same routine → the Previous column.
+      // Same routine_id means the exercise list (and ordering) matches, so the
+      // index keys line up with this session's exercises.
+      const { data: prevWorkout } = await supabase
+        .from('workout')
+        .select('actual_weights')
+        .eq('routine_id', routineId)
+        .order('performed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      const prevWeights = (prevWorkout as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
+      if (prevWeights) {
+        const map: Record<number, SetLog[]> = {}
+        Object.entries(prevWeights).forEach(([k, v]) => { map[Number(k)] = v })
+        setPrevByExercise(map)
+      }
 
       const insightIds = [...new Set(exs.map((ex) => ex.insight_id).filter(Boolean))] as string[]
       if (insightIds.length > 0) {
@@ -771,6 +820,10 @@ export function WorkoutScreen() {
 
   const restLeft = restEndsAt ? Math.max(0, Math.ceil((restEndsAt - Date.now()) / 1000)) : 0
 
+  // Desktop rail context: the exercise whose field was last focused.
+  const activeEx = exercises[activeExIdx]
+  const activeInsight = activeEx?.insight_id ? insightMap[activeEx.insight_id] : undefined
+
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
       <div
@@ -793,8 +846,10 @@ export function WorkoutScreen() {
         </div>
       </div>
 
-      {/* Exercise list */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 140px' }}>
+      {/* Exercise list (left) + desktop context rail (right) */}
+      <div className="workout-panes">
+       <div className="workout-list">
+        <div className="workout-col">
         {exercises.map((ex, exIdx) => {
           const logs = setLogs[exIdx] ?? []
           const trackingType = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
@@ -858,8 +913,10 @@ export function WorkoutScreen() {
                   distanceUnit={distanceUnit}
                   prescribedReps={pReps}
                   prescribedDuration={pDur}
+                  prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], unit, distanceUnit)}
                   onChange={(updated) => handleSetChange(exIdx, setIdx, updated)}
                   onComplete={() => setRestEndsAt(Date.now() + REST_SECONDS * 1000)}
+                  onActivate={() => setActiveExIdx(exIdx)}
                 />
               ))}
 
@@ -882,9 +939,55 @@ export function WorkoutScreen() {
             </div>
           )
         })}
+        </div>
+       </div>
+
+       {/* Desktop-only context rail: live rest clock + why-this-exercise.
+           Hidden under the breakpoint, where these stay as the pill + sheet. */}
+       <aside className="workout-rail">
+         <div className="rail__block">
+           <p className="rail__head">Rest</p>
+           {restEndsAt != null && restLeft > 0 ? (
+             <>
+               <p className="num rail__timer">{formatElapsed(restLeft)}</p>
+               <button
+                 type="button"
+                 className="btn btn--ghost"
+                 style={{ height: 32, fontSize: 12, padding: '0 8px', color: 'var(--text-dim)' }}
+                 onClick={() => setRestEndsAt(null)}
+               >
+                 Skip rest
+               </button>
+             </>
+           ) : (
+             <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
+               Idle. Completing a set starts the {REST_SECONDS}s clock.
+             </p>
+           )}
+         </div>
+
+         {activeEx && (
+           <div className="rail__block">
+             <p className="rail__head">Why this</p>
+             <p className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>{activeEx.name}</p>
+             {activeEx.cue && (
+               <p className="text-xs text-dim" style={{ lineHeight: 1.5, marginBottom: activeInsight ? 10 : 0 }}>
+                 {activeEx.cue}
+               </p>
+             )}
+             {activeInsight ? (
+               <p className="text-sm" style={{ lineHeight: 1.5 }}>{activeInsight.claim}</p>
+             ) : !activeEx.cue ? (
+               <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
+                 Tap into a set to see the read on that lift.
+               </p>
+             ) : null}
+           </div>
+         )}
+       </aside>
       </div>
 
-      {/* Rest timer pill */}
+      {/* Rest timer pill (mobile; desktop surfaces it in the rail instead) */}
       {restEndsAt != null && restLeft > 0 && (
         <button type="button" className="rest-pill" onClick={() => setRestEndsAt(null)}>
           <span className="rest-pill__label">REST</span>
@@ -901,21 +1004,23 @@ export function WorkoutScreen() {
           background: 'var(--ground)', borderTop: '1px solid var(--line)',
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <div>
-            <span className="text-xs text-dim">Duration  </span>
-            <span className="num text-xs">{formatElapsed(elapsed)}</span>
+        <div className="workout-footer__inner">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div>
+              <span className="text-xs text-dim">Duration  </span>
+              <span className="num text-xs">{formatElapsed(elapsed)}</span>
+            </div>
+            <div>
+              <span className="text-xs text-dim">Sets logged  </span>
+              <span className="num text-xs">{setsDone}</span>
+            </div>
           </div>
-          <div>
-            <span className="text-xs text-dim">Sets logged  </span>
-            <span className="num text-xs">{setsDone}</span>
-          </div>
+          <Button variant="primary" full onClick={handleCompleteWorkout} disabled={saving || !hasAnyLog}>
+            {saving ? (
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Spinner /> Saving…</span>
+            ) : 'Complete workout →'}
+          </Button>
         </div>
-        <Button variant="primary" full onClick={handleCompleteWorkout} disabled={saving || !hasAnyLog}>
-          {saving ? (
-            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Spinner /> Saving…</span>
-          ) : 'Complete workout →'}
-        </Button>
       </div>
 
       {/* Pre-session readiness gate */}

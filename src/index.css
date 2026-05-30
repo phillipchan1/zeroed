@@ -141,6 +141,52 @@ body {
   padding: 0 var(--sp-4);
 }
 
+@media (min-width: 1000px) {
+  .screen--centered { padding: var(--sp-12); }
+}
+
+/* --- Onboarding funnel frame ---------------------------------------------- */
+/* Mobile: a transparent wrapper — each step renders full-bleed as before, the
+   brand panel hidden. Desktop: a fixed brand panel on the left (the instrument
+   identity) beside the focused step on the right. Single-purpose screens aren't
+   spread into columns; they're framed, so they read as placed, not floating. */
+.funnel-frame__brand { display: none; }
+
+@media (min-width: 1000px) {
+  .funnel-frame { display: flex; min-height: 100dvh; }
+  .funnel-frame__brand {
+    display: flex;
+    flex-direction: column;
+    width: 36%;
+    max-width: 480px;
+    flex-shrink: 0;
+    padding: 56px 56px 48px;
+    border-right: 1px solid var(--line);
+    background: var(--ground);
+  }
+  .funnel-frame__content { flex: 1; min-width: 0; }
+  .funnel-frame__content > .screen--centered { min-height: 100dvh; }
+}
+
+.funnel-brand__tag {
+  margin-top: 22px;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.7;
+  letter-spacing: 0.02em;
+  color: var(--text-dim);
+}
+.funnel-brand__sys {
+  margin-top: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+}
+
 /* --- Cards ---------------------------------------------------------------- */
 
 .card {
@@ -708,6 +754,125 @@ textarea.input {
   padding-bottom: calc(60px + env(safe-area-inset-bottom, 0px));
 }
 
+/* --- Responsive app shell ------------------------------------------------- */
+/* Mobile: a plain column with the fixed bottom nav (unchanged). Desktop: a
+   left sidebar + scrolling main, reclaiming the bottom of the screen. */
+.app-shell { min-height: 100dvh; }
+.app-sidebar { display: none; }
+
+.sidebar__brand { padding: 4px 12px 0; }
+
+.sidebar__nav {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 28px;
+}
+
+.sidebar__item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-btn);
+  border-left: 2px solid transparent;
+  color: var(--text-dim);
+  text-decoration: none;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  transition: color var(--dur-fast), background var(--dur-fast);
+}
+.sidebar__item:hover { color: var(--text); background: var(--surface); }
+.sidebar__item--active {
+  color: var(--text);
+  background: var(--surface);
+  border-left-color: var(--signal);
+}
+
+.sidebar__spacer { flex: 1; }
+
+.sidebar__system {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+}
+
+@media (min-width: 1000px) {
+  .app-shell { display: flex; height: 100dvh; overflow: hidden; }
+  .app-sidebar {
+    display: flex;
+    flex-direction: column;
+    width: 232px;
+    flex-shrink: 0;
+    padding: 24px 14px;
+    border-right: 1px solid var(--line);
+    background: var(--ground);
+  }
+  .app-main { flex: 1; min-width: 0; overflow-y: auto; }
+  .app-main > .screen { max-width: 1280px; margin: 0 auto; }
+  .nav { display: none; }       /* bottom bar is mobile-only */
+  .with-nav { padding-bottom: 0; }
+}
+
+/* --- Page content wrapper + desktop layouts ------------------------------- */
+/* `.page` replaces the per-screen inline max-width:480 column. Desktop widens
+   the measure and the layout modifiers turn the stacked blocks into columns —
+   all of them are plain block flow (single column) below the breakpoint, so the
+   fast mobile experience is byte-for-byte unchanged. */
+.page {
+  width: 100%;
+  max-width: 480px;
+  margin: 0 auto;
+  padding: 24px 20px;
+}
+.page__main { min-width: 0; }
+.page__rail { min-width: 0; }
+
+.today-week { margin-top: 28px; }
+@media (min-width: 1000px) { .today-week { margin-top: 0; } }
+
+/* Coach conversation — separator below the read on mobile, side pane on desktop. */
+.coach-convo { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+@media (min-width: 1000px) {
+  .coach-convo { margin-top: 0; padding-top: 0; border-top: none; }
+}
+
+/* Program non-negotiables — separator on mobile, flush in the desktop rail. */
+.program-rules { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
+@media (min-width: 1000px) {
+  .program-rules { margin-top: 0; padding-top: 0; border-top: none; }
+}
+
+@media (min-width: 1000px) {
+  .page { max-width: 760px; padding: 40px 40px 64px; }
+
+  .page--rail {
+    max-width: 1100px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    gap: 48px;
+    align-items: start;
+  }
+  .page--split {
+    max-width: 1100px;
+    display: grid;
+    grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+    gap: 48px;
+    align-items: start;
+  }
+  .two-up {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 40px;
+    align-items: start;
+  }
+}
+
 /* --- Step indicator (funnel) ---------------------------------------------- */
 
 .step-indicator {
@@ -841,7 +1006,6 @@ textarea.input {
 
 .set-row {
   display: grid;
-  grid-template-columns: 30px 1fr 1fr 56px 44px;
   gap: 8px;
   align-items: center;
   padding: 5px 0;
@@ -849,6 +1013,34 @@ textarea.input {
 }
 
 .set-row:last-child { border-bottom: none; }
+
+/* Column templates per tracking type. Mobile omits the Previous column; the
+   ≥720px override slots it in (the cell itself is display:none until then). */
+.set-grid--wr   { grid-template-columns: 30px 1fr 1fr 56px 44px; }
+.set-grid--time { grid-template-columns: 30px 1fr 56px 44px; }
+.set-grid--dist { grid-template-columns: 30px 1fr 44px; }
+
+@media (min-width: 720px) {
+  .set-grid--wr   { grid-template-columns: 30px 84px 1fr 1fr 56px 44px; }
+  .set-grid--time { grid-template-columns: 30px 84px 1fr 56px 44px; }
+  .set-grid--dist { grid-template-columns: 30px 84px 1fr 44px; }
+}
+
+/* Last session's result — ghosted reference, revealed only when there's room. */
+.set-row__prev,
+.set-head__prev {
+  display: none;
+  font-size: 12px;
+  color: var(--text-dim);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+@media (min-width: 720px) {
+  .set-row__prev  { display: block; }
+  .set-head__prev { display: block; }
+}
 
 .set-row__num {
   font-family: var(--font-mono);
@@ -1176,6 +1368,74 @@ textarea.input {
   color: var(--computing);
 }
 .rest-pill__time { font-size: 14px; }
+
+/* --- Workout desktop layout ---------------------------------------------- */
+/* Mobile: a single scrolling column, exactly as before. Desktop: the column
+   is capped and centered (no more edge-to-edge stretch) with a context rail. */
+.workout-panes {
+  flex: 1;
+  display: flex;
+  min-height: 0;
+}
+
+.workout-list {
+  flex: 1;
+  overflow-y: auto;
+  padding: 0 16px 140px;
+}
+
+.workout-col {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.workout-rail { display: none; }
+
+.workout-footer__inner {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+@media (min-width: 720px) {
+  .workout-col { max-width: 600px; }
+}
+
+@media (min-width: 1000px) {
+  /* Context rail: live rest clock + why-this-exercise, instead of the floating
+     pill and modal sheet. The instrument's side panel. */
+  .workout-rail {
+    display: block;
+    width: 300px;
+    flex-shrink: 0;
+    border-left: 1px solid var(--line);
+    padding: 24px 20px;
+    overflow-y: auto;
+  }
+  .rest-pill { display: none; }  /* the rail owns rest state on desktop */
+}
+
+.rail__block {
+  padding-bottom: 20px;
+  margin-bottom: 20px;
+  border-bottom: 1px solid var(--line);
+}
+.rail__block:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+.rail__head {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+
+.rail__timer {
+  font-size: 32px;
+  line-height: 1;
+  color: var(--computing);
+  margin-bottom: 10px;
+}
 
 /* Stack expand/collapse toggle — quiet mono, the read is secondary to the chat */
 .stack-toggle {

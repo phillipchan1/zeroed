@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState } from 'react'
 import { supabase } from '../../lib/supabaseClient'
-import { SectionHeader, Skeleton, Divider, BracketFrame } from '../../components/ui'
+import { SectionHeader, Skeleton, BracketFrame } from '../../components/ui'
 import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName } from '../../types/database'
 
 /**
@@ -77,7 +77,8 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
 
   return (
     <div className="screen with-nav">
-      <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
+      <div className="page page--rail">
+       <div className="page__main">
         <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
           The plan
         </p>
@@ -168,26 +169,30 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
               </div>
             </div>
 
-            {/* NON-NEGOTIABLES — the rules */}
-            {nonNegotiables.length > 0 && (
-              <div className="fade-rise fade-rise-delay-3">
-                <Divider />
-                <SectionHeader>Non-negotiables</SectionHeader>
-                <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 10, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                  Rules — every session, no skips
-                </p>
-                <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {nonNegotiables.map((rule, i) => (
-                    <li key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5 }}>
-                      <span className="num text-signal" style={{ fontSize: 13, flexShrink: 0 }}>{String(i + 1).padStart(2, '0')}</span>
-                      <span>{rule}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
           </>
         )}
+       </div>
+
+       {/* NON-NEGOTIABLES — the rules. Desktop rail; stacked under sessions on
+           mobile with a separator. */}
+       <aside className="page__rail">
+        {!loading && program && nonNegotiables.length > 0 && (
+          <div className="fade-rise fade-rise-delay-3 program-rules">
+            <SectionHeader>Non-negotiables</SectionHeader>
+            <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 10, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+              Rules — every session, no skips
+            </p>
+            <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {nonNegotiables.map((rule, i) => (
+                <li key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5 }}>
+                  <span className="num text-signal" style={{ fontSize: 13, flexShrink: 0 }}>{String(i + 1).padStart(2, '0')}</span>
+                  <span>{rule}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+       </aside>
       </div>
     </div>
   )

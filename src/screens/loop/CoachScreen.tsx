@@ -7,7 +7,7 @@ import {
   countInsightsByStatus, gatherCoachContext, coachStarterPrompts, runCoachChat,
 } from '../../engine'
 import type { CoachContext, CoachChatTurn } from '../../engine/agentClient'
-import type { InsightRow, CoachMessageRow, WeeklyPrescription } from '../../types/database'
+import type { InsightRow } from '../../types/database'
 
 /**
  * COACH — the intelligence, and now the conversation. The top half is the cold
@@ -24,29 +24,9 @@ interface ChatTurn {
   fresh?: boolean          // true for the just-arrived coach reply → type-on it
 }
 
-// The coach's event memory (§4.5) — weekly reviews, phase changes, retests.
-const KIND_LABEL: Record<string, string> = {
-  weekly_review: 'WEEKLY REVIEW',
-  phase_change:  'PHASE',
-  retest:        'RETEST',
-  note:          'NOTE',
-  chat:          'CHAT',
-}
-
-function relativeTime(iso: string): string {
-  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000))
-  if (secs < 3600) return `${Math.max(1, Math.floor(secs / 60))}m ago`
-  if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`
-  return `${Math.floor(secs / 86400)}d ago`
-}
-
 export function CoachScreen({ athleteId }: { athleteId: string }) {
   const [insights, setInsights] = useState<InsightRow[]>([])
   const [loading, setLoading]   = useState(true)
-
-  // Coach log — the event feed (weekly reviews etc.), newest-first.
-  const [messages, setMessages] = useState<CoachMessageRow[]>([])
-  const [directiveByRef, setDirectiveByRef] = useState<Record<string, string>>({})
 
   // ---- conversation state ----
   const [context, setContext]       = useState<CoachContext | null>(null)
@@ -67,31 +47,6 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
         .order('priority')
       setInsights((data ?? []) as InsightRow[])
       setLoading(false)
-
-      // The coach log — event memory, newest-first.
-      const { data: msgs } = await supabase
-        .from('coach_message')
-        .select('*')
-        .eq('athlete_id', athleteId)
-        .order('created_at', { ascending: false })
-        .limit(30)
-      const msgRows = (msgs ?? []) as CoachMessageRow[]
-      setMessages(msgRows)
-
-      // Pull the directive for any weekly-review messages so the card can chip it.
-      const reviewRefs = msgRows.filter((m) => m.kind === 'weekly_review' && m.ref_id).map((m) => m.ref_id as string)
-      if (reviewRefs.length) {
-        const { data: reviews } = await supabase
-          .from('weekly_review')
-          .select('id, next_week_prescription')
-          .in('id', reviewRefs)
-        const map: Record<string, string> = {}
-        ;(reviews ?? []).forEach((r) => {
-          const presc = (r as { next_week_prescription: WeeklyPrescription | null }).next_week_prescription
-          if (presc?.directive) map[(r as { id: string }).id] = presc.directive
-        })
-        setDirectiveByRef(map)
-      }
 
       // Gather the scoped read for the conversation (separate from the display
       // stack above — this is the trimmed slice the coach is allowed to see).
@@ -148,7 +103,8 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     <div className="screen with-nav">
       {!loading && <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />}
 
-      <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
+      <div className="page page--split">
+       <div className="page__main">
         <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
           The read
         </p>
@@ -183,41 +139,11 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             </p>
           )}
         </div>
+       </div>
 
-        {/* Coach log — the event feed (§4.5): weekly reviews, phase changes,
-            retests. The reward surface for the outer cadences. */}
-        {!loading && messages.length > 0 && (
-          <div className="fade-rise fade-rise-delay-1" style={{ marginTop: 28, paddingTop: 24, borderTop: '1px solid var(--line)' }}>
-            <SectionHeader>Coach log</SectionHeader>
-            <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {messages.map((m) => {
-                const directive = m.ref_id ? directiveByRef[m.ref_id] : undefined
-                return (
-                  <div key={m.id} className="card">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
-                      <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                        <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.08em', color: 'var(--text-dim)' }}>
-                          {KIND_LABEL[m.kind] ?? m.kind.toUpperCase()}
-                        </span>
-                        {directive && (
-                          <span className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em' }}>
-                            {directive}
-                          </span>
-                        )}
-                      </span>
-                      <span className="text-xs text-dim num">{relativeTime(m.created_at)}</span>
-                    </div>
-                    <p className="text-sm" style={{ lineHeight: 1.5 }}>{m.body}</p>
-                  </div>
-                )
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* Conversation — the warm layer, now the primary surface. Read-only:
-            the coach narrates and routes. */}
-        <div className="fade-rise fade-rise-delay-1" style={{ marginTop: 28, paddingTop: 24, borderTop: '1px solid var(--line)' }}>
+        {/* Conversation — the warm layer. Right pane on desktop, stacked below
+            the read on mobile (with a separator). Read-only: narrate and route. */}
+        <div className="fade-rise fade-rise-delay-1 page__main coach-convo">
           <SectionHeader>Ask why</SectionHeader>
 
           <div className="coach-chat" style={{ marginTop: 12 }}>
