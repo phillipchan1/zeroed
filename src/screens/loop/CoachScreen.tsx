@@ -29,7 +29,7 @@ const KIND_LABEL: Record<string, string> = {
   weekly_review: 'WEEKLY REVIEW',
   phase_change:  'PHASE',
   retest:        'RETEST',
-  note:          'NOTE',
+  note:          'ADAPTED',
   chat:          'CHAT',
 }
 
@@ -155,6 +155,18 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
         </p>
         <h2 style={{ fontSize: 22, fontWeight: 600, marginBottom: 12 }}>Coach</h2>
 
+        {/* Headline moment — the freshest adaptation, grounded in real data. This
+            is the "it changed because of what I did" beat a static program can't
+            produce. */}
+        {!loading && messages[0] && (
+          <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
+            <p className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
+              {KIND_LABEL[messages[0].kind] ?? 'UPDATE'} · {relativeTime(messages[0].created_at)}
+            </p>
+            <p style={{ fontSize: 15, lineHeight: 1.5 }}>{messages[0].body}</p>
+          </div>
+        )}
+
         {/* The read — demoted to a compact header. P1 (the anchor the
             conversation is about) stays visible; the rest of the stack is one
             tap away. Conversation leads below. */}
@@ -186,12 +198,12 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
         </div>
 
         {/* Coach log — the event feed (§4.5): weekly reviews, phase changes,
-            retests. Sits under the read in the instrument column. */}
-        {!loading && messages.length > 0 && (
-          <div className="fade-rise" style={{ marginTop: 28, paddingTop: 24, borderTop: '1px solid var(--line)' }}>
+            retests. The freshest is in the headline above; the rest log here. */}
+        {!loading && messages.length > 1 && (
+          <div className="fade-rise fade-rise-delay-1" style={{ marginTop: 28, paddingTop: 24, borderTop: '1px solid var(--line)' }}>
             <SectionHeader>Coach log</SectionHeader>
             <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {messages.map((m) => {
+              {messages.slice(1).map((m) => {
                 const directive = m.ref_id ? directiveByRef[m.ref_id] : undefined
                 return (
                   <div key={m.id} className="card">
