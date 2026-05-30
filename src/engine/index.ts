@@ -1917,12 +1917,19 @@ export function computeWeekSchedule(
 // prescribes a delta on the athlete's ACTUAL logged load, not the template.
 // ════════════════════════════════════════════════════════════════════════════
 
+export interface IntelligenceRule {
+  name: string
+  reasoning: string   // shown out loud — the felt difference vs a static program
+}
+
 export interface SessionPrescription {
   directive: WeeklyDirective | null
   loadDeltaPct: number
   rpeTarget: number | null
   rationale: string | null
   hints: Record<number, string>   // exercise index → one-line hint ('' = none)
+  held: Record<number, boolean>   // exercise index → load cap held (rule fired)
+  rule: IntelligenceRule | null   // standing rule in effect this session, or null
 }
 
 function buildHint(top: SetLog | null, unit: string, directive: WeeklyDirective | null, delta: number, rpe: number | null): string {
@@ -1945,6 +1952,10 @@ function buildHint(top: SetLog | null, unit: string, directive: WeeklyDirective 
 /**
  * Per-exercise prescription for a session: the active week's directive applied
  * to each exercise's last logged top set (index-aligned to THIS routine).
+ *
+ * Intelligence Rule — "Never load over instability": while the P1 weak link is
+ * unresolved, the load cap is HELD on the lifts that address it, and the reason
+ * is stated out loud. A static program can't say "not yet, and here's why."
  */
 export async function gatherSessionPrescription(
   athleteId: string,
@@ -1972,18 +1983,159 @@ export async function gatherSessionPrescription(
     }
   }
 
+  // The P1 weak link — top-priority active insight. Drives the load-cap rule.
+  const { data: insightRows } = await supabase
+    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
+  const p1 = ((insightRows ?? []) as InsightRow[])
+    .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
+  const p1Unresolved = !!p1
+  const rule: IntelligenceRule | null = p1Unresolved
+    ? {
+        name: 'Never load over instability',
+        reasoning:
+          `Your ${p1!.category} is still the P1 limiter (${Math.round(p1!.confidence * 100)}% confident, ${p1!.status}). ` +
+          `Load stays capped on the work that addresses it until the pattern clears — earn the load, don't force it.`,
+      }
+    : null
+
   const { data: lastWorkout } = await supabase
     .from('workout').select('actual_weights, performed_at')
     .eq('routine_id', routineId).order('performed_at', { ascending: false }).limit(1).maybeSingle()
   const lastWeights = (lastWorkout?.actual_weights as Record<string, SetLog[]> | null) ?? null
 
   const hints: Record<number, string> = {}
-  exercises.forEach((_, i) => {
+  const held: Record<number, boolean> = {}
+  exercises.forEach((ex, i) => {
     const top = lastWeights ? topWorkingSet(lastWeights[String(i)]) : null
-    hints[i] = buildHint(top, unit, directive, loadDeltaPct, rpeTarget)
+    // Held when the rule is in effect AND this lift addresses the P1 insight.
+    const isHeld = p1Unresolved && !!ex.insight_id && ex.insight_id === p1!.id
+    held[i] = isHeld
+    if (isHeld && directive === 'PROGRESS') {
+      // Suppress the +5%: state the hold and why, grounded in the last load.
+      hints[i] = top && top.weight != null
+        ? `Hold ${top.weight}${unit} — cap stays until ${p1!.category} clears`
+        : `Hold steady — ${p1!.category} not cleared yet`
+    } else {
+      hints[i] = buildHint(top, unit, directive, loadDeltaPct, rpeTarget)
+    }
   })
 
-  return { directive, loadDeltaPct, rpeTarget, rationale, hints }
+  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, rule }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE LIVING LOOP — P1 resolution from session evidence (the differentiator)
+//
+// Stages 5–6 of the Diagnostic Loop made real on ONE weak link: a session's
+// felt signal on the P1-linked work is read as evidence FOR or AGAINST the
+// limiter. Strong, pain-free work DISCONFIRMS the limiter (a static program
+// can't do this — improvement there would just mean "do more"). Confidence
+// falls; at the floor the weak link RESOLVES, which lifts its load cap. The
+// move is disposed deterministically here so it holds even with no LLM key;
+// the agent path (runSessionDebriefAgent) layers nuance on top when available.
+// ════════════════════════════════════════════════════════════════════════════
+
+const P1_RESOLVE_THRESHOLD = 0.30   // limiter confidence at/below this → resolved
+const P1_DISCONFIRM_STEP = 0.15     // bounded step per strong, pain-free session
+
+export interface SessionAdaptation {
+  note: string
+  insightId: string
+  category: string
+  resolved: boolean
+  previousConfidence: number
+  newConfidence: number
+}
+
+/**
+ * Read one logged session as evidence on the P1 weak link and adapt it. Returns
+ * the grounded coach note (also persisted as a coach_message) when the session
+ * moved the limiter, or null when there's nothing worth surfacing. Idempotent
+ * per workout. Screens call this; they never compute the disposition themselves.
+ */
+export async function recordSessionAdaptation(athleteId: string, workoutId: string): Promise<SessionAdaptation | null> {
+  const { data: workout } = await supabase
+    .from('workout').select('routine_id, performed_at').eq('id', workoutId).maybeSingle()
+  if (!workout) return null
+
+  const { data: routine } = await supabase
+    .from('routine').select('exercises').eq('id', workout.routine_id).maybeSingle()
+  const exercises = (routine?.exercises as ExerciseTemplate[] | null) ?? []
+
+  // P1 weak link — top-priority active insight.
+  const { data: insightRows } = await supabase
+    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
+  const p1 = ((insightRows ?? []) as InsightRow[])
+    .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
+  if (!p1) return null
+
+  // The lifts that address P1 (stamped at program build).
+  const p1Names = new Set(exercises.filter((ex) => ex.insight_id === p1.id).map((ex) => ex.name))
+  if (p1Names.size === 0) return null
+
+  // Idempotency — one adaptation note per workout for this insight.
+  const { data: existing } = await supabase
+    .from('coach_message').select('id')
+    .eq('athlete_id', athleteId).eq('kind', 'note').eq('ref_id', p1.id)
+    .gte('created_at', workout.performed_at).limit(1)
+  if (existing && existing.length) return null
+
+  // Defer if another path (the LLM debrief) already moved P1 from this session —
+  // its evidence entries carry workout_id. Prevents a double move per session.
+  if (Array.isArray(p1.evidence) && p1.evidence.some((e) => (e as { workout_id?: string } | null)?.workout_id === workoutId)) {
+    return null
+  }
+
+  // This session's felt signal on the P1-linked work (severity: ≤1 strong, ≥4 pain).
+  const { data: obs } = await supabase
+    .from('session_observation').select('signal, severity, category').eq('workout_id', workoutId)
+  const felt = ((obs ?? []) as Array<{ signal: string; severity: number; category: string }>)
+    .filter((o) => o.category === 'Felt')
+  let strong = 0
+  let pain = 0
+  let exemplar: string | null = null
+  for (const o of felt) {
+    const name = o.signal.split('—')[0].trim()
+    if (!p1Names.has(name)) continue
+    if (o.severity >= 4) pain++
+    else if (o.severity <= 1) { strong++; if (!exemplar) exemplar = name }
+  }
+
+  // The rule: strong, pain-free P1 work disconfirms the limiter. Anything else
+  // (pain, or no strong signal) → no surfaced moment; the limiter stands.
+  if (strong < 1 || pain > 0) return null
+
+  const previousConfidence = p1.confidence
+  const newConfidence = clampConfidence(previousConfidence - P1_DISCONFIRM_STEP)
+  const resolved = newConfidence <= P1_RESOLVE_THRESHOLD
+
+  const evidence = [
+    ...(Array.isArray(p1.evidence) ? p1.evidence : []),
+    {
+      workout_id: workoutId,
+      kind: 'p1_progress',
+      direction: 'disconfirming',
+      strong_sets: strong,
+      logged_at: new Date().toISOString(),
+    },
+  ]
+  const update: Record<string, unknown> = { confidence: newConfidence, evidence }
+  if (resolved) {
+    update.status = 'resolved'
+    update.resolved_at = new Date().toISOString()
+  }
+  await supabase.from('insight').update(update).eq('id', p1.id)
+
+  const prevPct = Math.round(previousConfidence * 100)
+  const newPct = Math.round(newConfidence * 100)
+  const where = exemplar ?? 'your P1 work'
+  const sets = `${strong} strong set${strong === 1 ? '' : 's'}`
+  const note = resolved
+    ? `${p1.category} is clearing. ${sets} on ${where} with no pain dropped the limiter to ${newPct}% — I'm calling it resolved. The load cap on that pattern lifts now.`
+    : `${p1.category} is resolving. ${sets} on ${where}, no pain — limiter confidence ${prevPct}%→${newPct}% because of what you just did. Keep this up and we clear it.`
+
+  await insertCoachMessage(athleteId, { kind: 'note', body: note, ref_id: p1.id })
+  return { note, insightId: p1.id, category: p1.category, resolved, previousConfidence, newConfidence }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

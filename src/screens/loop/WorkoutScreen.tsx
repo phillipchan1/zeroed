@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
-import { runSessionDebriefAgent, gatherSessionPrescription, type DebriefInput, type SessionPrescription } from '../../engine'
+import { runSessionDebriefAgent, gatherSessionPrescription, recordSessionAdaptation, type DebriefInput, type SessionPrescription } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import {
@@ -704,6 +704,11 @@ export function WorkoutScreen() {
       ? moves.reduce((a, b) => (b.delta > a.delta ? b : a))
       : null
 
+    // The living loop: read this session as evidence on the P1 weak link. Strong,
+    // pain-free P1 work disconfirms the limiter → confidence falls, may resolve,
+    // and a grounded coach note is written (surfaced on the Coach tab).
+    await recordSessionAdaptation(athleteId, workoutId)
+
     setSavingDebrief(false)
 
     const movedCount = debrief.actions.length
@@ -795,6 +800,21 @@ export function WorkoutScreen() {
 
       {/* Exercise list */}
       <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 140px' }}>
+        {/* Intelligence Rule in effect — stated out loud (the felt difference) */}
+        {prescription?.rule && (
+          <div
+            style={{
+              marginTop: 16, padding: '12px 14px', borderRadius: 8,
+              background: 'var(--surface)', border: '1px solid var(--signal)',
+            }}
+          >
+            <p className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
+              RULE · {prescription.rule.name}
+            </p>
+            <p className="text-sm" style={{ lineHeight: 1.5 }}>{prescription.rule.reasoning}</p>
+          </div>
+        )}
+
         {exercises.map((ex, exIdx) => {
           const logs = setLogs[exIdx] ?? []
           const trackingType = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
@@ -832,8 +852,11 @@ export function WorkoutScreen() {
                 )}
                 {prescription?.hints[exIdx] && (
                   <p
-                    className="num text-xs text-signal"
-                    style={{ marginTop: 4, letterSpacing: '0.02em' }}
+                    className="num text-xs"
+                    style={{
+                      marginTop: 4, letterSpacing: '0.02em',
+                      color: prescription.held[exIdx] ? 'var(--pending)' : 'var(--signal)',
+                    }}
                   >
                     {prescription.hints[exIdx]}
                   </p>
