@@ -36,11 +36,19 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
       setProfile(profileRes.data as AthleteProfileRow | null)
 
       if (prog) {
-        const [phaseRes, routineRes] = await Promise.all([
-          supabase.from('phase').select('*').eq('program_id', prog.id).eq('status', 'active').maybeSingle(),
-          supabase.from('routine').select('*').eq('program_id', prog.id).order('name'),
-        ])
-        setPhase(phaseRes.data as PhaseRow | null)
+        const phaseRes = await supabase
+          .from('phase').select('*').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
+        const activePhase = phaseRes.data as PhaseRow | null
+        setPhase(activePhase)
+
+        // Sessions belong to the ACTIVE phase only (a completed phase's routines
+        // stay on the program but must not surface), falling back to all.
+        let routineRes = activePhase
+          ? await supabase.from('routine').select('*').eq('program_id', prog.id).eq('phase_id', activePhase.id).order('name')
+          : await supabase.from('routine').select('*').eq('program_id', prog.id).order('name')
+        if (activePhase && (!routineRes.data || routineRes.data.length === 0)) {
+          routineRes = await supabase.from('routine').select('*').eq('program_id', prog.id).order('name')
+        }
         setRoutines((routineRes.data ?? []) as RoutineRow[])
       }
       setLoading(false)

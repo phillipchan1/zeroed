@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useEffect, useRef, useState } from 'react'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
+import { runLoopTriggers, isRetestDue } from '../../engine'
 import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
 
@@ -8,6 +9,10 @@ interface TodayScreenProps {
   athleteId: string
   todayRoutine: RoutineRow | null
   onboardingStep?: OnboardingStep
+}
+
+interface LoopContext {
+  refresh: () => void
 }
 
 interface WeekDayStatus {
@@ -46,6 +51,7 @@ function isSameDay(a: Date, b: Date) {
  */
 export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
+  const { refresh } = (useOutletContext<LoopContext>() ?? { refresh: () => {} })
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [weekDays, setWeekDays] = useState<WeekDayStatus[]>([])
   const [loading, setLoading]   = useState(true)
@@ -55,13 +61,38 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
   const [lastSignalAt, setLastSignalAt]   = useState<string | null>(null)
   const [goal, setGoal]                   = useState<string | null>(null)
   const [p1, setP1] = useState<{ category: string; confidence: number } | null>(null)
+  const [retestDue, setRetestDue] = useState(false)
+  const triggersRan = useRef(false)
 
   useEffect(() => {
     loadWeekData()
     loadGoal()
     loadInsights()
+    loadRetestStatus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [athleteId])
+
+  // Lazy outer-cadence triggers (§4.2, §5): run the weekly review + phase
+  // advancement on first open, once, then refresh so any change surfaces.
+  useEffect(() => {
+    if (triggersRan.current) return
+    triggersRan.current = true
+    void (async () => {
+      await runLoopTriggers(athleteId)
+      loadRetestStatus()
+      refresh()
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [athleteId])
+
+  async function loadRetestStatus() {
+    const { data } = await supabase
+      .from('athlete_profile')
+      .select('retest_date')
+      .eq('athlete_id', athleteId)
+      .maybeSingle()
+    setRetestDue(isRetestDue((data?.retest_date as string | null) ?? null))
+  }
 
   async function loadInsights() {
     const { data } = await supabase
@@ -162,6 +193,19 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
             </button>
           )}
         </div>
+
+        {/* Retest due — the program cadence CTA (§6). Routes into the rescreen. */}
+        {!loading && retestDue && (
+          <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
+            <SectionHeader>Retest due</SectionHeader>
+            <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>
+              Time to re-read where you are. A quick movement rescreen shows what's moved since baseline and re-scopes the program.
+            </p>
+            <Button variant="primary" full style={{ marginTop: 14 }} onClick={() => navigate('/app/retest')}>
+              Start retest →
+            </Button>
+          </div>
+        )}
 
         {/* Session card — the one action */}
         {loading ? (

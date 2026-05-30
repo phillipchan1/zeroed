@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
-import { runSessionDebriefAgent, type DebriefInput } from '../../engine'
+import { runSessionDebriefAgent, gatherSessionPrescription, type DebriefInput, type SessionPrescription } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import {
@@ -374,6 +374,9 @@ export function WorkoutScreen() {
 
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
 
+  // Per-exercise prescription — last week's top set + the week's directive (§4.4).
+  const [prescription, setPrescription] = useState<SessionPrescription | null>(null)
+
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const startRef = useRef<number>(Date.now())
 
@@ -439,6 +442,14 @@ export function WorkoutScreen() {
         const map: Record<string, InsightRow> = {}
         ;(insightRows ?? []).forEach((ins) => { map[(ins as InsightRow).id] = ins as InsightRow })
         setInsightMap(map)
+      }
+
+      // Prescription hints — best-effort; the session loads regardless.
+      if (programData && routineId) {
+        try {
+          const presc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, unit)
+          setPrescription(presc)
+        } catch { /* non-fatal */ }
       }
     }
     setLoading(false)
@@ -758,6 +769,14 @@ export function WorkoutScreen() {
                 <p className="num text-xs text-dim" style={{ marginTop: 3 }}>
                   {ex.sets} × {ex.reps}{ex.load ? ` · ${ex.load}` : ''}
                 </p>
+                {prescription?.hints[exIdx] && (
+                  <p
+                    className="num text-xs text-signal"
+                    style={{ marginTop: 4, letterSpacing: '0.02em' }}
+                  >
+                    {prescription.hints[exIdx]}
+                  </p>
+                )}
               </div>
 
               {logs.map((log, setIdx) => (
