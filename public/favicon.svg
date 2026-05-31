@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
   <!-- JetBrains Mono-style slashed zero -->
   <!-- Oval outline -->
-  <ellipse cx="50" cy="50" rx="27" ry="35" fill="none" stroke="#E8CC0A" stroke-width="7.5"/>
+  <ellipse cx="50" cy="50" rx="27" ry="35" fill="none" stroke="#F5F5F5" stroke-width="7.5"/>
   <!-- Forward slash through the zero -->
-  <line x1="36" y1="74" x2="64" y2="26" stroke="#E8CC0A" stroke-width="4" stroke-linecap="butt"/>
+  <line x1="36" y1="74" x2="64" y2="26" stroke="#F5F5F5" stroke-width="4" stroke-linecap="butt"/>
 </svg>
