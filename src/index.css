@@ -358,6 +358,16 @@ textarea.input {
   text-transform: uppercase;
 }
 
+/* The persistent Convergence reticle in the sidebar (Phase F) — replaces the
+   static MONITOR marker; tappable (routes to Coach). */
+.sidebar__system.monitor-reticle {
+  text-decoration: none;
+  cursor: pointer;
+  gap: 8px;
+  transition: color .15s ease;
+}
+.sidebar__system.monitor-reticle:hover { color: var(--text); }
+
 .badge--p1 { background: var(--signal-dim); color: var(--signal); border: 1px solid rgba(232,204,10,0.3); }
 .badge--p2 { background: rgba(106,106,106,0.12); color: #8A8A8A; border: 1px solid rgba(106,106,106,0.2); }
 .badge--p3 { background: rgba(74,74,74,0.12);  color: #6A6A6A; border: 1px solid rgba(74,74,74,0.2); }

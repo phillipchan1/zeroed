@@ -36,6 +36,10 @@ import {
 } from './agentClient'
 import { FELT_CHIPS, type FeltLabel } from '../types/database'
 import { validateProvisionalProgram } from './safety'
+import {
+  OBSTACLE_CATEGORY_HINTS, buildReadSkeleton, READ_FLOORS,
+  type ReadAxis, type ArenaType,
+} from './demandTables'
 
 // ---- Types -----------------------------------------------------------------
 
@@ -109,15 +113,9 @@ export interface ProbeOutcome {
   }
 }
 
-const OBSTACLE_CATEGORY_HINTS: Array<{ test: RegExp; category: string }> = [
-  { test: /knee|ankle|squat|lunge|calf|shin|quad|hip(?!\s*flex)/i, category: 'Lower Chain' },
-  { test: /shoulder|elbow|wrist|press|overhead|rotator|pec|bench/i, category: 'Upper Chain' },
-  { test: /hamstring|glute|deadlift|hinge|rdl|posterior|sprint|run/i, category: 'Posterior Chain' },
-  { test: /back|spine|core|ab|lumbar|brace|rotation/i, category: 'Core' },
-  { test: /tired|sleep|energy|recover|stress|burn|fatigue/i, category: 'Recovery' },
-  { test: /weak|strong|stall|plateau|stuck|1rm|max/i, category: 'Strength' },
-]
-
+// Obstacle keyword hints are owned by the demand tables (Convergence §4c — one
+// source, extended to also name a limiter). The probe fallback uses the
+// category-only view; the read synthesis (Phase D) uses the richer prior.
 function deterministicProbe(obstacle: string): ProbeOutcome {
   const category =
     OBSTACLE_CATEGORY_HINTS.find((h) => h.test.test(obstacle))?.category ?? 'Lower Chain'
@@ -155,6 +153,108 @@ export async function runDiagnosticAnalysisAgent(
 
   // Model failed / rate-limited / offline → deterministic floor.
   return deterministicProbe(obstacle)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// READ SYNTHESIS (Phase D) — the multi-axis first read.
+//
+// agent PROPOSES (claim language) → code DISPOSES (which axes, categories, P1/P2,
+// confidence floors + clamps, aggregate). The structure comes from the demand
+// tables (buildReadSkeleton, pure + deterministic); the agent only rewrites the
+// claim sentences in a warmer voice. On model failure the table read stands
+// alone — coherent, S&C-valid, confidence clamped. Never presented as certainty.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface ReadSynthesis {
+  source: 'agent' | 'fallback'
+  followupQuestion: string | null
+  axes: ReadAxis[]
+  aggregateConfidence: number
+  // Back-compat single hypothesis (= the P1 axis) for existing consumers
+  // (persist, Today anchor, Target). The stack lives in `axes`.
+  hypothesis: { claim: string; category: string; confidence: number; rationale: string }
+}
+
+export interface ReadInput {
+  arenaType: ArenaType
+  arenaRaw: string | null
+  limiterChoice: string | null
+  obstacle: string
+  trainingAge?: number | null
+  arenaConfidence?: 'high' | 'low'
+  followupAnswer?: string
+}
+
+function aggregate(axes: ReadAxis[]): number {
+  const mean = axes.reduce((s, a) => s + a.confidence, 0) / Math.max(1, axes.length)
+  return clampConfidence(Math.min(READ_FLOORS.aggregateCap, mean))
+}
+
+export async function synthesizeRead(input: ReadInput): Promise<ReadSynthesis> {
+  // 1. CODE builds the structure — this alone is a valid read (the fallback floor).
+  const skeleton = buildReadSkeleton({
+    arenaType: input.arenaType,
+    arenaRaw: input.arenaRaw,
+    limiterChoice: input.limiterChoice,
+    obstacle: input.obstacle,
+    trainingAge: input.trainingAge ?? null,
+    arenaConfidence: input.arenaConfidence ?? 'high',
+  })
+  const axes: ReadAxis[] = skeleton.axes.map((a) => ({ ...a }))
+  const p1 = axes.find((a) => a.id === 'limiter_p1')!
+
+  // 2. AGENT drafts language on top. Pass the code-built skeleton so a redeployed
+  //    probe can fill every axis; the live probe just returns hypothesis (→ P1).
+  const res = await callProbe({
+    obstacle: input.obstacle,
+    followup_answer: input.followupAnswer,
+    arena: { type: input.arenaType, raw: input.arenaRaw },
+    limiter: { choice: input.limiterChoice, label: p1.label, category: p1.category },
+    axes: axes.map((a) => ({ axis_id: a.id, label: a.label, category: a.category })),
+  })
+
+  if (!res.ok) {
+    return {
+      source: 'fallback',
+      followupQuestion: null,
+      axes,
+      aggregateConfidence: aggregate(axes),
+      hypothesis: {
+        claim: p1.claim,
+        category: p1.category,
+        confidence: p1.confidence,
+        rationale: 'Inferred from your answers and the demand tables; unverified until you train.',
+      },
+    }
+  }
+
+  // Agent succeeded — override LANGUAGE only. Code keeps category + structure.
+  // P1 gets the agent's hypothesis claim; its confidence is the agent's read,
+  // floored at the table floor and CAPPED so the read never overstates itself.
+  const h = res.data.hypothesis
+  p1.claim = h.claim
+  p1.confidence = clampConfidence(
+    Math.min(READ_FLOORS.limiterP1Cap, Math.max(READ_FLOORS.limiterP1, h.confidence)),
+  )
+
+  // Any per-axis claims the (redeployed) probe drafted → map by id. Language only.
+  for (const ac of res.data.axis_claims ?? []) {
+    const ax = axes.find((a) => a.id === ac.axis_id && a.id !== 'limiter_p1')
+    if (ax && ac.claim.trim()) ax.claim = ac.claim.trim()
+  }
+
+  return {
+    source: 'agent',
+    followupQuestion: res.data.followup_question,
+    axes,
+    aggregateConfidence: aggregate(axes),
+    hypothesis: {
+      claim: p1.claim,
+      category: p1.category,
+      confidence: p1.confidence,
+      rationale: h.rationale,
+    },
+  }
 }
 
 /**

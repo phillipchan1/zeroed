@@ -44,9 +44,21 @@ export interface ProbeHypothesis {
   rationale: string
 }
 
+// One agent-drafted claim sentence for a code-chosen read axis. The engine
+// decides WHICH axes exist (and their categories/confidence); the agent only
+// writes language. Optional on the wire: the currently-deployed probe returns
+// just {followup_question, hypothesis}; until it's redeployed with the extended
+// schema, axis_claims is absent and the engine uses table-derived claims for the
+// non-P1 axes (P1 still gets the agent's hypothesis.claim). Fully graceful.
+export interface ProbeAxisClaim {
+  axis_id: string
+  claim: string
+}
+
 export interface ProbeResult {
   followup_question: string | null
   hypothesis: ProbeHypothesis
+  axis_claims?: ProbeAxisClaim[]
 }
 
 export interface ProgramExercise {
@@ -182,10 +194,20 @@ async function invokeAgent<T>(
 
 // ---- typed task callers -----------------------------------------------------
 
-/** The Probe — pre-auth. obstacle (+ optional follow-up answer) → Q + hypothesis. */
+/**
+ * The Probe — pre-auth. obstacle (+ optional follow-up answer) → Q + hypothesis.
+ *
+ * Convergence read context is OPTIONAL and additive: arena + limiter + the
+ * code-built axis skeleton let the (redeployed) probe draft warmer, arena-aware
+ * language and fill axis_claims. The currently-deployed function ignores the
+ * extra fields and returns the base shape — the engine handles both.
+ */
 export function callProbe(payload: {
   obstacle: string
   followup_answer?: string
+  arena?: { type: string; raw: string | null } | null
+  limiter?: { choice: string | null; label: string; category: string } | null
+  axes?: Array<{ axis_id: string; label: string; category: string }>
 }): Promise<AgentResult<ProbeResult>> {
   return invokeAgent<ProbeResult>('probe', payload, { deviceId: getDeviceId() })
 }

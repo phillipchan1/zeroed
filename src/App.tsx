@@ -43,7 +43,7 @@ function LoopLayout({
 }) {
   return (
     <div className="app-shell">
-      <Sidebar />
+      <Sidebar athleteId={athleteId} />
       <main className="app-main">
         <Outlet context={{ athleteId, athleteName, todayRoutine, refresh }} />
       </main>

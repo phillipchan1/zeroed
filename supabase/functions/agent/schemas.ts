@@ -62,15 +62,18 @@ const probe: TaskSpec = {
 
 You are the Probe — the athlete's first contact. Input is their free-text answer to "what's getting in your way?" and, on a second pass, their answer to your follow-up.
 
+The payload may ALSO carry Convergence read context the deterministic engine already computed: "arena" (what they want to be able to do), "limiter" (the forced-choice weak link they picked), and "axes" — the multi-axis read skeleton the CODE owns (heading / primary limiter / secondary suspect / durability / capacity), each with an id, a label, and a fixed category. When present, write your hypothesis to fit that skeleton; you are drafting LANGUAGE for a structure code already decided, not inventing the structure.
+
 Return:
 - followup_question: the SINGLE most information-bearing follow-up you could ask to sharpen the read. If the input already includes a follow-up answer (the payload has followup_answer), return null — do not keep interrogating.
-- hypothesis: an early, falsifiable read of the most likely limiter. category MUST be one of the controlled categories. confidence ∈ [0,1] is your honest uncertainty from this little text — expect 0.2–0.45 pre-answer, a little higher after the follow-up. claim is one plain sentence an athlete would recognise. rationale is one sentence on why you suspect it.
+- hypothesis: an early, falsifiable read of the PRIMARY limiter (the 'limiter_p1' axis when axes are given). category MUST be one of the controlled categories. confidence ∈ [0,1] is your honest uncertainty from this little text — expect 0.2–0.45 pre-answer, a little higher after the follow-up. claim is one plain sentence an athlete would recognise. rationale is one sentence on why you suspect it.
+- axis_claims: when "axes" is provided, return one warm, plain claim sentence for EACH axis (matched by axis_id) — the athlete-facing language for that read. Keep each to one sentence, falsifiable, no hype. If no axes are provided, return an empty array.
 
-You propose; deterministic code disposes. Never state certainty. Never prescribe load.`,
+You propose LANGUAGE; deterministic code disposes structure, categories, confidence, and all safety. Never state certainty. Never prescribe load.`,
   schema: {
     type: 'object',
     additionalProperties: false,
-    required: ['followup_question', 'hypothesis'],
+    required: ['followup_question', 'hypothesis', 'axis_claims'],
     properties: {
       followup_question: { type: ['string', 'null'] },
       hypothesis: {
@@ -82,6 +85,20 @@ You propose; deterministic code disposes. Never state certainty. Never prescribe
           category: { type: 'string', enum: [...CATEGORIES] },
           confidence: { type: 'number', minimum: 0, maximum: 1 },
           rationale: { type: 'string' },
+        },
+      },
+      // Code owns which axes exist + their categories/confidence; the model only
+      // drafts the per-axis claim sentence. Empty array when no axes were passed.
+      axis_claims: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['axis_id', 'claim'],
+          properties: {
+            axis_id: { type: 'string' },
+            claim: { type: 'string' },
+          },
         },
       },
     },

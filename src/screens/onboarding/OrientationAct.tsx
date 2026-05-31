@@ -24,10 +24,12 @@ type OrientationSub = 'target' | 'identity' | 'context' | 'acknowledgment'
 export function OrientationAct({
   athlete,
   obstacle,
+  hypothesis,
   onComplete,
 }: {
   athlete: AthleteRow
   obstacle: string
+  hypothesis?: { claim: string; category: string } | null
   onComplete: (fields: OrientationFields) => void
 }) {
   const [sub, setSub] = useState<OrientationSub>('target')
@@ -43,6 +45,7 @@ export function OrientationAct({
       {sub === 'target' && (
         <TargetScreen
           obstacle={obstacle}
+          hypothesis={hypothesis}
           initial={fields.target}
           onNext={(target) => { setFields((f) => ({ ...f, target })); setSub('identity') }}
         />

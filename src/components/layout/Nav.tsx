@@ -1,6 +1,7 @@
 import { NavLink } from 'react-router-dom'
 import { Activity, User, LayoutGrid, MessageSquare } from 'lucide-react'
-import { Logo, PresenceDot } from '../ui'
+import { Logo } from '../ui'
+import { MonitorReticle } from '../convergence/MonitorReticle'
 
 const ITEMS = [
   { to: '/app/today',   label: 'Train',   Icon: Activity    },
@@ -38,9 +39,11 @@ export function Nav() {
 }
 
 // Left rail — the desktop surface. Hidden on mobile (CSS). Carries the wordmark,
-// the four destinations, and a persistent MONITOR line so the "system is
-// watching" signal lives on every screen, not just a strip that scrolls away.
-export function Sidebar() {
+// the four destinations, and the persistent Convergence reticle (Phase F) — the
+// MONITOR marker is now the live read organism: its tightness IS the program
+// fit, it breathes off real session state, and it taps through to the Coach
+// stack. Falls back to the static dot until the stack loads / nothing tracked.
+export function Sidebar({ athleteId }: { athleteId: string }) {
   return (
     <aside className="app-sidebar">
       <div className="sidebar__brand"><Logo /></div>
@@ -70,10 +73,7 @@ export function Sidebar() {
 
       <div className="sidebar__spacer" />
 
-      <div className="sidebar__system">
-        <PresenceDot />
-        <span>MONITOR</span>
-      </div>
+      <MonitorReticle athleteId={athleteId} variant="sidebar" />
     </aside>
   )
 }
