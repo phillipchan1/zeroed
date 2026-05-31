@@ -116,10 +116,13 @@ const program_design: TaskSpec = {
 
 You design a single safe, relevant training session (or short week) from the athlete's profile and the current working hypothesis about their limiter.
 
+This is the athlete's FIRST session. It must feel like real training, not an assessment — half workout, half diagnostic. Open with ONE primary movement the hypothesised limiter can train at honest effort, then 2–4 supporting movements, and weave pattern/mobility work in so the session also reads the limiter.
+
 Hard rules:
-- This is an EARLY, low-confidence session. Prefer mobility, activation, and bodyweight or light patterns. Do NOT prescribe heavy or maximal load.
+- Match effort to training age (profile.training_age, in years): true novices (under ~1 year) stay bodyweight; still-green lifters (1–2 years) stay light; experienced lifters (~2 years or more) may work the primary movement at MODERATE load so it feels like training.
+- NEVER prescribe heavy, maximal, ballistic, or barbell-max lifts (no barbell back squat, conventional deadlift, snatch, clean, jerk, 1RM, jumps, sprints) on an unscreened athlete — a deterministic validator will clamp or reject these, but design within these bounds.
 - Every exercise must plausibly serve the hypothesised limiter or be a safe general pattern.
-- sets is an integer; reps is a short string ("8", "8-10", "30s"); load is one of "bodyweight", "light", "moderate"; cue is one short coaching sentence.
+- sets is an integer; reps is a short string ("8", "6-8", "30s"); load is one of "bodyweight", "light", "moderate"; cue is one short coaching sentence.
 
 A deterministic safety validator will clamp or reject your output — design honestly, but know that code is the last line of defence, not you.`,
   schema: {

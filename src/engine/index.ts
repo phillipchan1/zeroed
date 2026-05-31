@@ -1466,6 +1466,49 @@ async function tagInfoGainItem(plan: GeneratedProgram, ranked: InsightRow[], p1:
     `sharpen the read${p1 ? ` on your ${p1.category.toLowerCase()}` : ''}.`
 }
 
+// Training age (years) at/above which the first session is allowed to feel like
+// real training — mirrors the safety ceiling in safety.ts. Below this we keep the
+// light pattern-quality build; moving load on an unwatched novice is the one
+// thing we won't do.
+const FIRST_SESSION_WORKING_AGE = 2
+
+/**
+ * Make the FIRST session read as training, not an assessment (the "half workout,
+ * half diagnostic" ask). For an athlete with real history we promote the lead
+ * loadable movement to genuine working sets — the workout half — while the
+ * supporting work and the planted read stay as they are — the diagnostic half.
+ * Novices are left on the light build. Bounded to 'moderate', so it never escapes
+ * the safety ceiling the validator already enforces. Mutates the plan in place.
+ */
+function strengthenFirstSession(
+  plan: GeneratedProgram,
+  trainingAge: number,
+  p1Category: string | null,
+): void {
+  if (trainingAge < FIRST_SESSION_WORKING_AGE) return
+  const first = plan.routines[0]
+  if (!first || !first.exercises.length) return
+
+  // The lead loadable strength movement: first counted-rep, non-bodyweight lift.
+  // Holds, carries, and mobility (bodyweight / time / distance) are left alone —
+  // they're movement quality, not the working set.
+  const idx = first.exercises.findIndex(
+    (ex) => isCountedReps(ex.reps) && !!ex.load && ex.load !== 'bodyweight',
+  )
+  if (idx < 0) return
+
+  const ex = first.exercises[idx]
+  first.exercises[idx] = {
+    ...ex,
+    sets: 4,
+    reps: /each side/i.test(ex.reps) ? '6-8 each side' : '6-8',
+    load: 'moderate',
+  }
+  first.intent = p1Category
+    ? `Your first working session — ${p1Category}. One primary lift at honest effort; the rest builds the pattern and reads the limiter.`
+    : `Your first working session. One primary lift at honest effort; the rest builds the pattern and reads the limiter.`
+}
+
 /**
  * Build the athlete's provisional first session from the probe hypothesis.
  * Idempotent (skips if an active program already exists). Always produces a
@@ -1517,7 +1560,10 @@ export async function buildProvisionalProgram(
     plan = generateInitialProgram(ranked, startDateStr)
   }
 
-  // One info-gain "test me" item (non-fatal).
+  // Make it feel like a workout for experienced lifters (the "workout half").
+  strengthenFirstSession(plan, profile.trainingAge, p1?.category ?? null)
+
+  // One info-gain "test me" item — the "diagnostic half" (non-fatal).
   await tagInfoGainItem(plan, ranked, p1)
 
   // Persist: program → phase → routines → profile.

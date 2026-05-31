@@ -10,7 +10,7 @@ import {
 } from '../../components/ui'
 import type {
   RoutineRow, ExerciseTemplate, SetLog, InsightRow, TrackingType,
-  SessionObservationInsert, OnboardingStep, FeltLabel, ExerciseFeedback, Readiness,
+  SessionObservationInsert, OnboardingStep, FeltLabel, ExerciseFeedback,
 } from '../../types/database'
 import { FELT_CHIPS } from '../../types/database'
 
@@ -303,46 +303,74 @@ function FeltChips({ value, note, onFelt, onNote }: FeltChipsProps) {
   )
 }
 
-// ---- Pre-session readiness gate (JuggernautAI) -----------------------------
+// ---- "Why this session" brief — the coach's pep talk before you train --------
+// Replaces the old readiness questionnaire: instead of asking for input at the
+// door, the coach explains, in voice, why today looks the way it does. Composed
+// deterministically from real data (the read, the prescription, the planted
+// check-in) so it's instant — no model latency at the start of a session.
 
-const READINESS_ROWS: Array<{ key: keyof Readiness; label: string }> = [
-  { key: 'sleep',    label: 'Sleep' },
-  { key: 'energy',   label: 'Energy' },
-  { key: 'soreness', label: 'Soreness' },
-]
+function sessionBriefLines(opts: {
+  routine: RoutineRow
+  primaryInsight: InsightRow | null
+  leadExercise: ExerciseTemplate | undefined
+  readingWhy: string | null
+  isFirst: boolean
+}): string[] {
+  const { routine, primaryInsight, leadExercise, readingWhy, isFirst } = opts
+  const lines: string[] = []
+  const opener = isFirst ? 'Your first real session. ' : ''
 
-function ReadinessGate({
-  onStart, onSkip,
-}: { onStart: (r: Readiness) => void; onSkip: () => void }) {
-  const [r, setR] = useState<Readiness>({ sleep: null, energy: null, soreness: null })
+  // 1. The read this session is built around.
+  if (primaryInsight) {
+    const pct = Math.round(primaryInsight.confidence * 100)
+    lines.push(
+      `${opener}I built this around your ${primaryInsight.category.toLowerCase()} — ${pct}% confident, ${primaryInsight.status}. It's the read I'm watching closest, so it's where the training teaches us the most.`,
+    )
+  } else if (routine.intent) {
+    lines.push(`${opener}${routine.intent}`)
+  } else if (opener) {
+    lines.push(opener.trim())
+  }
+
+  // 2. The working half — what the opener actually is.
+  if (leadExercise) {
+    const working = leadExercise.load === 'moderate' || leadExercise.sets >= 4
+    lines.push(
+      working
+        ? `Open with ${leadExercise.name} — real working sets, not a warm-up. Own the pattern, then we keep loading it.`
+        : `Open with ${leadExercise.name} — controlled and clean. We earn the pattern before we pile on load.`,
+    )
+  }
+
+  // 3. The diagnostic half — the planted read, already written in voice.
+  if (readingWhy) lines.push(readingWhy)
+
+  // 4. The close — what makes today count.
+  lines.push(
+    isFirst
+      ? `At the end I'll ask how it went — that's what turns today into a read.`
+      : `Log how it felt at the end — honest signal is what moves the read.`,
+  )
+
+  return lines
+}
+
+function SessionBrief({
+  lines, ctaLabel, onClose,
+}: { lines: string[]; ctaLabel: string; onClose: () => void }) {
   return (
-    <div className="obs-sheet">
-      <div className="obs-sheet__inner">
-        <p className="section-header" style={{ marginBottom: 4 }}>Before you start</p>
-        <p className="text-xs text-dim" style={{ marginBottom: 16, lineHeight: 1.5 }}>
-          A quick read on today — it tunes how I weigh what happens. All optional.
+    <div className="obs-sheet" onClick={onClose}>
+      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
+        <p className="section-header" style={{ color: 'var(--computing)', marginBottom: 4 }}>Why this session</p>
+        <p className="text-xs text-dim" style={{ marginBottom: 14, lineHeight: 1.5 }}>
+          The thinking behind today — read it or jump straight in.
         </p>
-        {READINESS_ROWS.map((row) => (
-          <div key={row.key} className="readiness__row">
-            <span className="readiness__label">{row.label}</span>
-            <div className="readiness__scale">
-              {[1, 2, 3, 4, 5].map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  className={`readiness__dot${r[row.key] === n ? ' readiness__dot--on' : ''}`}
-                  onClick={() => setR((prev) => ({ ...prev, [row.key]: n }))}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
-          </div>
-        ))}
-        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-          <Button variant="ghost" style={{ flex: 1 }} onClick={onSkip}>Skip</Button>
-          <Button variant="primary" style={{ flex: 2 }} onClick={() => onStart(r)}>Start session →</Button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {lines.map((l, i) => (
+            <p key={i} className="text-sm" style={{ lineHeight: 1.55 }}>{l}</p>
+          ))}
         </div>
+        <Button variant="primary" full style={{ marginTop: 18 }} onClick={onClose}>{ctaLabel}</Button>
       </div>
     </div>
   )
@@ -450,9 +478,10 @@ export function WorkoutScreen() {
   const [savingDebrief, setSavingDebrief] = useState(false)
   const [workoutId, setWorkoutId] = useState<string | null>(null)
 
-  // Readiness gate (shown once on open).
-  const [showReadiness, setShowReadiness] = useState(true)
-  const [readiness, setReadiness] = useState<Readiness | null>(null)
+  // "Why this session" brief — auto-shown on open (the slot the readiness gate
+  // used to hold), re-openable any time from the header.
+  const [briefOpen, setBriefOpen] = useState(true)
+  const [hasStarted, setHasStarted] = useState(false)
 
   // Per-exercise felt signal (exIdx → feedback).
   const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>({})
@@ -671,7 +700,7 @@ export function WorkoutScreen() {
       workoutId,
       {
         reflection,
-        readiness,
+        readiness: null,
         exercises: debriefExercises,
         reading: readingEx
           ? { name: readingEx.name, question: readingEx.reading_why ?? '', answer: readingAnswer }
@@ -696,14 +725,6 @@ export function WorkoutScreen() {
     if (reflection) obsRows.push({ workout_id: workoutId, category: 'Reflection', signal: reflection, severity: 1 })
     if (readingAnswer && readingEx) {
       obsRows.push({ workout_id: workoutId, category: 'Reading', signal: `${readingEx.name} — ${readingAnswer}`, severity: 2 })
-    }
-    if (readiness && (readiness.sleep || readiness.energy || readiness.soreness)) {
-      obsRows.push({
-        workout_id: workoutId,
-        category: 'Readiness',
-        signal: `sleep ${readiness.sleep ?? '–'} · energy ${readiness.energy ?? '–'} · soreness ${readiness.soreness ?? '–'}`,
-        severity: 1,
-      })
     }
     if (obsRows.length) await supabase.from('session_observation').insert(obsRows)
 
@@ -819,6 +840,22 @@ export function WorkoutScreen() {
   const exercises = routine.exercises as ExerciseTemplate[]
   const readingEx = exercises.find((e) => e.reading)
 
+  // The read this session is built around — the insight the most exercises point
+  // at, for the "why this session" brief.
+  const primaryInsight =
+    exercises.map((e) => (e.insight_id ? insightMap[e.insight_id] : undefined)).find(Boolean) ?? null
+  const isFirstSession = onboardingStep === 'first_session_pending'
+  const briefLines = sessionBriefLines({
+    routine,
+    primaryInsight,
+    leadExercise: exercises[0],
+    readingWhy: readingEx?.reading_why ?? null,
+    isFirst: isFirstSession,
+  })
+  const briefCta = hasStarted
+    ? 'Back to training →'
+    : isFirstSession ? 'Start training →' : 'Start session →'
+
   const setsTotal = allSetsFlat.length
   const setsDone  = allSetsFlat.filter((s) => s.done).length
   const rpeLive   = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
@@ -857,6 +894,15 @@ export function WorkoutScreen() {
         <div style={{ flex: 1, minWidth: 0 }}>
           <TelemetryStrip items={workoutStripItems} lastSignalAt={new Date(startRef.current)} />
         </div>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          style={{ padding: '0 10px', height: 28, fontSize: 12, color: 'var(--computing)', whiteSpace: 'nowrap' }}
+          onClick={() => setBriefOpen(true)}
+          aria-label="Why this session"
+        >
+          <Info size={13} strokeWidth={2} style={{ marginRight: 4 }} /> Why
+        </button>
       </div>
 
       {/* Exercise list (left) + desktop context rail (right) */}
@@ -1054,11 +1100,12 @@ export function WorkoutScreen() {
         </div>
       </div>
 
-      {/* Pre-session readiness gate */}
-      {showReadiness && (
-        <ReadinessGate
-          onStart={(r) => { setReadiness(r); setShowReadiness(false) }}
-          onSkip={() => setShowReadiness(false)}
+      {/* "Why this session" brief — the coach's pep talk, shown on open */}
+      {briefOpen && (
+        <SessionBrief
+          lines={briefLines}
+          ctaLabel={briefCta}
+          onClose={() => { setBriefOpen(false); setHasStarted(true) }}
         />
       )}
 
