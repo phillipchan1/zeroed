@@ -46,7 +46,8 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
 
   return (
     <div className="screen with-nav">
-      <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
+      <div className="page page--split">
+       <div className="page__main">
 
         {/* Header */}
         <div className="fade-rise" style={{ marginBottom: 28, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
@@ -67,8 +68,10 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
             Sign out
           </button>
         </div>
+       </div>
 
-        {/* Target — the durable anchor, editable */}
+       {/* Target — the durable anchor, editable. Right column on desktop. */}
+       <div className="page__main">
         <div className="fade-rise" style={{ marginBottom: 24 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
             <SectionHeader>Chasing</SectionHeader>
@@ -108,6 +111,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
             </h3>
           )}
         </div>
+       </div>
       </div>
     </div>
   )

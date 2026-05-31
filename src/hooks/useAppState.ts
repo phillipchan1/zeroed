@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { supabase } from '../lib/supabaseClient'
+import { computeWeekSchedule } from '../engine'
 import type { AthleteRow, AthleteProfileRow, RoutineRow } from '../types/database'
 
 export interface AppState {
@@ -73,25 +74,60 @@ export function useAppState(userId: string | undefined): AppState {
       if (cancelled) return
       setProfile(profileData as AthleteProfileRow | null)
 
-      // 4. Today's routine (first routine from active program, cycle through A/B/C)
+      // 4. Today's routine — derived from this week's plan (§4.1). Routines come
+      //    from the ACTIVE phase only (a completed phase's routines stay on the
+      //    program but must not surface), falling back to all program routines.
       if (profileData) {
-        const { data: routines } = await supabase
-          .from('routine')
-          .select('*, program!inner(athlete_id, status)')
-          .eq('program.athlete_id', athleteData.id)
-          .eq('program.status', 'active')
-          .order('name')
+        const { data: prog } = await supabase
+          .from('program')
+          .select('id')
+          .eq('athlete_id', athleteData.id)
+          .eq('status', 'active')
+          .maybeSingle()
 
-        if (!cancelled && routines && routines.length > 0) {
-          // Pick the next routine based on workout count
-          const { count: workoutCount } = await supabase
-            .from('workout')
-            .select('id', { count: 'exact', head: true })
-            .in('routine_id', routines.map((r) => r.id))
+        if (!cancelled && prog) {
+          const { data: activePhase } = await supabase
+            .from('phase')
+            .select('id')
+            .eq('program_id', prog.id)
+            .eq('status', 'active')
+            .maybeSingle()
 
-          if (!cancelled) {
-            const idx = (workoutCount ?? 0) % routines.length
-            setTodayRoutine(routines[idx] as unknown as RoutineRow)
+          let routineQuery = supabase
+            .from('routine')
+            .select('*')
+            .eq('program_id', prog.id)
+            .order('name')
+          if (activePhase) routineQuery = routineQuery.eq('phase_id', activePhase.id)
+
+          let { data: routines } = await routineQuery
+          // Fallback: a program whose routines predate phase wiring.
+          if (activePhase && (!routines || routines.length === 0)) {
+            const all = await supabase.from('routine').select('*').eq('program_id', prog.id).order('name')
+            routines = all.data
+          }
+
+          if (!cancelled && routines && routines.length > 0) {
+            // This week's workouts for these routines (Mon–Sun), for scheduling.
+            const monday = new Date()
+            monday.setHours(0, 0, 0, 0)
+            monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7))
+            const { data: weekWorkouts } = await supabase
+              .from('workout')
+              .select('routine_id, performed_at')
+              .in('routine_id', routines.map((r) => r.id))
+              .gte('performed_at', monday.toISOString())
+
+            if (!cancelled) {
+              const schedule = computeWeekSchedule(
+                routines as unknown as RoutineRow[],
+                (weekWorkouts ?? []) as Array<{ routine_id: string; performed_at: string }>,
+                (athleteData as AthleteRow).sessions_per_week ?? 3,
+              )
+              setTodayRoutine(schedule.todayRoutine)
+            }
+          } else if (!cancelled) {
+            setTodayRoutine(null)
           }
         }
       }

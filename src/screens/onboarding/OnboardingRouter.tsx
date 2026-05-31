@@ -4,9 +4,10 @@ import type { User } from '@supabase/supabase-js'
 import { supabase } from '../../lib/supabaseClient'
 import { Spinner } from '../../components/ui'
 import { HookAct, OBSTACLE_STORAGE_KEY, PROBE_STORAGE_KEY, type ProbeStash } from './HookAct'
+import type { ArenaAnswer } from './ArenaScreen'
 import { OrientationAct, type OrientationFields } from './OrientationAct'
 import { CalibrateScreen } from './CalibrateScreen'
-import type { AthleteRow, OnboardingStep } from '../../types/database'
+import type { AthleteRow, OnboardingStep, Priority } from '../../types/database'
 import type { ProvisionalProfile } from '../../engine'
 
 /**
@@ -29,6 +30,10 @@ export function OnboardingRouter({
   // Ephemeral "calibrating your first session" beat — holds the orientation
   // fields while buildProvisionalProgram runs. Not a DB step.
   const [calibrating, setCalibrating] = useState<ProvisionalProfile | null>(null)
+  // The athlete's current P1 read (claim+category), threaded into orientation so
+  // the Target question is inferred from the actual hypothesis, not raw obstacle
+  // text. Stays null until loaded — orientation never blocks on it.
+  const [hypothesis, setHypothesis] = useState<{ claim: string; category: string } | null>(null)
   const bootstrappedRef = useRef(false)
 
   // --- Bootstrap: just signed in, no athlete row yet -------------------------
@@ -38,11 +43,19 @@ export function OnboardingRouter({
     if (!user || athlete || bootstrappedRef.current) return
     bootstrappedRef.current = true
     void (async () => {
-      let obstacle: string | null = null
-      try { obstacle = localStorage.getItem(OBSTACLE_STORAGE_KEY) } catch { /* ignore */ }
+      const stash = readProbeStash()
+      let obstacle: string | null = stash?.obstacle ?? null
+      try { obstacle = obstacle ?? localStorage.getItem(OBSTACLE_STORAGE_KEY) } catch { /* ignore */ }
       const { data: created } = await supabase
         .from('athlete')
-        .insert({ auth_user_id: user.id, obstacle, onboarding_step: 'orientation' })
+        .insert({
+          auth_user_id: user.id,
+          obstacle,
+          arena_type: stash?.arenaType ?? null,
+          arena_raw: stash?.arenaRaw ?? null,
+          limiter_choice: stash?.limiterChoice ?? null,
+          onboarding_step: 'orientation',
+        })
         .select('id')
         .single()
       try { localStorage.removeItem(OBSTACLE_STORAGE_KEY) } catch { /* ignore */ }
@@ -51,41 +64,104 @@ export function OnboardingRouter({
     })()
   }, [user, athlete, refresh])
 
+  // --- Load the current P1 read for orientation -----------------------------
+  // The highest-priority active insight (the same one persistProbeInsight wrote).
+  // Fire-and-forget: orientation renders with hypothesis=null until this lands,
+  // and a null result (model fell back / not yet readable) is a fine final state.
+  useEffect(() => {
+    if (!athlete) return
+    void (async () => {
+      const { data } = await supabase
+        .from('insight')
+        .select('claim, category')
+        .eq('athlete_id', athlete.id)
+        .not('status', 'in', '(resolved,disproved)')
+        .order('priority')
+        .limit(1)
+        .maybeSingle()
+      if (data) setHypothesis({ claim: data.claim, category: data.category })
+    })()
+  }, [athlete])
+
   async function advance(step: OnboardingStep, fields?: Partial<AthleteRow>) {
     if (!athlete) return
     await supabase.from('athlete').update({ onboarding_step: step, ...fields }).eq('id', athlete.id)
     refresh()
   }
 
-  // Write the stashed Probe hypothesis as the athlete's first insight (P1,
-  // hypothesis status, low confidence). Clears the stash after, so it runs once.
-  async function persistProbeInsight(athleteId: string) {
-    let stash: ProbeStash | null = null
+  // Read the single pre-auth carry (arena + obstacle + hypothesis). Pure read —
+  // does NOT clear; persistProbeInsight owns the one-time clear.
+  function readProbeStash(): ProbeStash | null {
     try {
       const raw = localStorage.getItem(PROBE_STORAGE_KEY)
-      stash = raw ? (JSON.parse(raw) as ProbeStash) : null
-    } catch { stash = null }
+      return raw ? (JSON.parse(raw) as ProbeStash) : null
+    } catch { return null }
+  }
+
+  // Write the stashed multi-axis read as the athlete's first insight STACK. The
+  // limiter axes + durability become tracked insights (P1/P2/P3); heading and
+  // capacity are read-display/visual only, not weak-link insights. Status
+  // 'hypothesis', confidence from the (clamped) read. Clears the stash after.
+  async function persistProbeInsight(athleteId: string) {
+    const stash = readProbeStash()
     if (!stash) return
 
-    try {
-      await supabase.from('insight').insert({
+    // Map read axes → insight rows. Order fixes priority; only the persisted
+    // axes (limiter_p1 → P1, limiter_p2 → P2, durability → P3) are weak links.
+    const PRIORITY_BY_AXIS: Record<string, Priority> = {
+      limiter_p1: 'P1', limiter_p2: 'P2', durability: 'P3',
+    }
+    const loggedAt = new Date().toISOString()
+    const rows = (stash.read?.axes ?? [])
+      .filter((a) => a.id in PRIORITY_BY_AXIS)
+      .map((a) => ({
         athlete_id: athleteId,
         source_id: null,
-        claim: stash.hypothesis.claim,
-        category: stash.hypothesis.category,
-        priority: 'P1',
-        confidence: stash.hypothesis.confidence,
-        status: 'hypothesis',
+        claim: a.claim,
+        category: a.category as string,
+        priority: PRIORITY_BY_AXIS[a.id],
+        confidence: a.confidence,
+        status: 'hypothesis' as const,
         evidence: [{
           source: 'probe',
+          axis: a.id,
+          arena_type: stash.arenaType,
+          arena_raw: stash.arenaRaw,
+          limiter_choice: stash.limiterChoice,
           obstacle: stash.obstacle,
           followup_answer: stash.followupAnswer,
-          rationale: stash.hypothesis.rationale,
-          logged_at: new Date().toISOString(),
+          rationale: a.id === 'limiter_p1' ? stash.read.hypothesis.rationale : a.tilt,
+          read_source: stash.read.source,
+          logged_at: loggedAt,
+        }],
+        source: 'probe',
+        program_impact: a.tilt ?? null,
+      }))
+
+    // Fallback: a stash with no axes (legacy/edge) still writes the P1 hypothesis.
+    if (rows.length === 0 && stash.read?.hypothesis) {
+      rows.push({
+        athlete_id: athleteId,
+        source_id: null,
+        claim: stash.read.hypothesis.claim,
+        category: stash.read.hypothesis.category,
+        priority: 'P1',
+        confidence: stash.read.hypothesis.confidence,
+        status: 'hypothesis' as const,
+        evidence: [{
+          source: 'probe', axis: 'limiter_p1',
+          arena_type: stash.arenaType, arena_raw: stash.arenaRaw,
+          limiter_choice: stash.limiterChoice, obstacle: stash.obstacle,
+          followup_answer: stash.followupAnswer, rationale: stash.read.hypothesis.rationale,
+          read_source: stash.read.source, logged_at: loggedAt,
         }],
         source: 'probe',
         program_impact: null,
       })
+    }
+
+    try {
+      if (rows.length) await supabase.from('insight').insert(rows)
     } catch (e) {
       console.error('probe insight write failed', e)
     }
@@ -116,12 +192,21 @@ export function OnboardingRouter({
         <HookAct
           authed={false}
           initialObstacle=""
+          initialArena={null}
+          initialLimiterChoice={null}
           onAuthedAdvance={() => { /* unreachable while unauthenticated */ }}
         />
       )
     }
     return <div className="screen--centered"><Spinner /></div>
   }
+
+  // Rehydrate the Arena + Limiter into HookAct on re-entry (e.g. an authed 'hook'
+  // user). Both survive the magic-link reload via the row, not just the stash.
+  const initialArena: ArenaAnswer | null = athlete.arena_type
+    ? { type: athlete.arena_type, raw: athlete.arena_raw ?? '', confidence: 'high' }
+    : null
+  const initialLimiterChoice: string | null = athlete.limiter_choice ?? null
 
   // --- Funnel steps ----------------------------------------------------------
   switch (athlete.onboarding_step) {
@@ -130,10 +215,19 @@ export function OnboardingRouter({
         <HookAct
           authed={!!user}
           initialObstacle={athlete.obstacle ?? ''}
+          initialArena={initialArena}
+          initialLimiterChoice={initialLimiterChoice}
           onAuthedAdvance={(obstacle) => {
             void (async () => {
+              // Read the carry BEFORE persistProbeInsight clears it.
+              const stash = readProbeStash()
               await persistProbeInsight(athlete.id)
-              await advance('orientation', { obstacle })
+              await advance('orientation', {
+                obstacle,
+                arena_type: stash?.arenaType ?? null,
+                arena_raw: stash?.arenaRaw ?? null,
+                limiter_choice: stash?.limiterChoice ?? null,
+              })
             })()
           }}
         />
@@ -157,6 +251,7 @@ export function OnboardingRouter({
         <OrientationAct
           athlete={athlete}
           obstacle={athlete.obstacle ?? ''}
+          hypothesis={hypothesis}
           onComplete={handleOrientationComplete}
         />
       )

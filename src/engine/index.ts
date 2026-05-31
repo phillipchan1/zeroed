@@ -19,6 +19,12 @@ import type {
   PhaseName,
   ExerciseTemplate,
   SetLog,
+  RoutineRow,
+  PhaseRow,
+  WeeklyDirective,
+  WeeklyPrescription,
+  WeeklyReviewAdjustments,
+  CoachMessageInsert,
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
@@ -30,6 +36,10 @@ import {
 } from './agentClient'
 import { FELT_CHIPS, type FeltLabel } from '../types/database'
 import { validateProvisionalProgram } from './safety'
+import {
+  OBSTACLE_CATEGORY_HINTS, buildReadSkeleton, READ_FLOORS,
+  type ReadAxis, type ArenaType,
+} from './demandTables'
 
 // ---- Types -----------------------------------------------------------------
 
@@ -103,15 +113,9 @@ export interface ProbeOutcome {
   }
 }
 
-const OBSTACLE_CATEGORY_HINTS: Array<{ test: RegExp; category: string }> = [
-  { test: /knee|ankle|squat|lunge|calf|shin|quad|hip(?!\s*flex)/i, category: 'Lower Chain' },
-  { test: /shoulder|elbow|wrist|press|overhead|rotator|pec|bench/i, category: 'Upper Chain' },
-  { test: /hamstring|glute|deadlift|hinge|rdl|posterior|sprint|run/i, category: 'Posterior Chain' },
-  { test: /back|spine|core|ab|lumbar|brace|rotation/i, category: 'Core' },
-  { test: /tired|sleep|energy|recover|stress|burn|fatigue/i, category: 'Recovery' },
-  { test: /weak|strong|stall|plateau|stuck|1rm|max/i, category: 'Strength' },
-]
-
+// Obstacle keyword hints are owned by the demand tables (Convergence §4c — one
+// source, extended to also name a limiter). The probe fallback uses the
+// category-only view; the read synthesis (Phase D) uses the richer prior.
 function deterministicProbe(obstacle: string): ProbeOutcome {
   const category =
     OBSTACLE_CATEGORY_HINTS.find((h) => h.test.test(obstacle))?.category ?? 'Lower Chain'
@@ -149,6 +153,108 @@ export async function runDiagnosticAnalysisAgent(
 
   // Model failed / rate-limited / offline → deterministic floor.
   return deterministicProbe(obstacle)
+}
+
+// ────────────────────────────────────────────────────────────────────────────
+// READ SYNTHESIS (Phase D) — the multi-axis first read.
+//
+// agent PROPOSES (claim language) → code DISPOSES (which axes, categories, P1/P2,
+// confidence floors + clamps, aggregate). The structure comes from the demand
+// tables (buildReadSkeleton, pure + deterministic); the agent only rewrites the
+// claim sentences in a warmer voice. On model failure the table read stands
+// alone — coherent, S&C-valid, confidence clamped. Never presented as certainty.
+// ────────────────────────────────────────────────────────────────────────────
+
+export interface ReadSynthesis {
+  source: 'agent' | 'fallback'
+  followupQuestion: string | null
+  axes: ReadAxis[]
+  aggregateConfidence: number
+  // Back-compat single hypothesis (= the P1 axis) for existing consumers
+  // (persist, Today anchor, Target). The stack lives in `axes`.
+  hypothesis: { claim: string; category: string; confidence: number; rationale: string }
+}
+
+export interface ReadInput {
+  arenaType: ArenaType
+  arenaRaw: string | null
+  limiterChoice: string | null
+  obstacle: string
+  trainingAge?: number | null
+  arenaConfidence?: 'high' | 'low'
+  followupAnswer?: string
+}
+
+function aggregate(axes: ReadAxis[]): number {
+  const mean = axes.reduce((s, a) => s + a.confidence, 0) / Math.max(1, axes.length)
+  return clampConfidence(Math.min(READ_FLOORS.aggregateCap, mean))
+}
+
+export async function synthesizeRead(input: ReadInput): Promise<ReadSynthesis> {
+  // 1. CODE builds the structure — this alone is a valid read (the fallback floor).
+  const skeleton = buildReadSkeleton({
+    arenaType: input.arenaType,
+    arenaRaw: input.arenaRaw,
+    limiterChoice: input.limiterChoice,
+    obstacle: input.obstacle,
+    trainingAge: input.trainingAge ?? null,
+    arenaConfidence: input.arenaConfidence ?? 'high',
+  })
+  const axes: ReadAxis[] = skeleton.axes.map((a) => ({ ...a }))
+  const p1 = axes.find((a) => a.id === 'limiter_p1')!
+
+  // 2. AGENT drafts language on top. Pass the code-built skeleton so a redeployed
+  //    probe can fill every axis; the live probe just returns hypothesis (→ P1).
+  const res = await callProbe({
+    obstacle: input.obstacle,
+    followup_answer: input.followupAnswer,
+    arena: { type: input.arenaType, raw: input.arenaRaw },
+    limiter: { choice: input.limiterChoice, label: p1.label, category: p1.category },
+    axes: axes.map((a) => ({ axis_id: a.id, label: a.label, category: a.category })),
+  })
+
+  if (!res.ok) {
+    return {
+      source: 'fallback',
+      followupQuestion: null,
+      axes,
+      aggregateConfidence: aggregate(axes),
+      hypothesis: {
+        claim: p1.claim,
+        category: p1.category,
+        confidence: p1.confidence,
+        rationale: 'Inferred from your answers and the demand tables; unverified until you train.',
+      },
+    }
+  }
+
+  // Agent succeeded — override LANGUAGE only. Code keeps category + structure.
+  // P1 gets the agent's hypothesis claim; its confidence is the agent's read,
+  // floored at the table floor and CAPPED so the read never overstates itself.
+  const h = res.data.hypothesis
+  p1.claim = h.claim
+  p1.confidence = clampConfidence(
+    Math.min(READ_FLOORS.limiterP1Cap, Math.max(READ_FLOORS.limiterP1, h.confidence)),
+  )
+
+  // Any per-axis claims the (redeployed) probe drafted → map by id. Language only.
+  for (const ac of res.data.axis_claims ?? []) {
+    const ax = axes.find((a) => a.id === ac.axis_id && a.id !== 'limiter_p1')
+    if (ax && ac.claim.trim()) ax.claim = ac.claim.trim()
+  }
+
+  return {
+    source: 'agent',
+    followupQuestion: res.data.followup_question,
+    axes,
+    aggregateConfidence: aggregate(axes),
+    hypothesis: {
+      claim: p1.claim,
+      category: p1.category,
+      confidence: p1.confidence,
+      rationale: h.rationale,
+    },
+  }
 }
 
 /**
@@ -685,28 +791,241 @@ export async function runCoachChat(
   return { source: 'fallback', reply, followups: [] }
 }
 
-/**
- * TODO (Prompt 3): WeeklyReviewAgent
- * Real behavior: synthesizes week of sessions into a WeeklyReview row,
- * adjusts next-week prescription.
- */
-export async function runWeeklyReviewAgent(
-  _athleteId: string,
-  _programId: string,
-): Promise<void> {
-  // no-op until Prompt 3
+// ════════════════════════════════════════════════════════════════════════════
+// THE OUTER CADENCES (deterministic — agent CLASSIFIES later, code DISPOSES now)
+//
+// Weekly review, phase advancement, retest. Each closes a nested loop in §1.
+// These implement the S&C decision rules deterministically behind the same
+// signatures the LLM agents will later fill. Triggers are lazy (on app open) —
+// no cron. See runLoopTriggers() for the single entry point screens call.
+// ════════════════════════════════════════════════════════════════════════════
+
+// ---- shared week math (local time; Mon–Sun weeks) --------------------------
+
+function isoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+function startOfWeekMonday(d: Date): Date {
+  const r = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  r.setDate(r.getDate() - ((r.getDay() + 6) % 7)) // back up to Monday
+  return r
+}
+
+function weekEndingISO(monday: Date): string {
+  const sun = new Date(monday)
+  sun.setDate(monday.getDate() + 6)
+  return isoDate(sun)
+}
+
+// The max-weight (or, for unloaded work, the last) logged set in a set list.
+function topWorkingSet(sets: SetLog[] | undefined): SetLog | null {
+  if (!Array.isArray(sets) || sets.length === 0) return null
+  const loaded = sets.filter((s) => s.weight != null)
+  if (loaded.length) return loaded.reduce((a, b) => ((b.weight ?? 0) > (a.weight ?? 0) ? b : a))
+  const logged = sets.filter((s) => s.done || s.reps != null || s.duration != null || s.distance != null)
+  return logged.length ? logged[logged.length - 1] : null
+}
+
+interface WeekWorkout {
+  performed_at: string
+  rpe: number | null
+  actual_weights: Record<string, SetLog[]> | null
+}
+interface WeekObservation {
+  severity: number
+  signal: string
+  logged_at: string
+}
+
+interface WeeklyTally {
+  planned: number
+  done: number
+  adherence: number
+  avgRPE: number | null
+  painCount: number
+  positiveCount: number
+  flagged_categories: string[]
+}
+
+const POSITIVE_SIGNAL = /\b(easy|solid|strong|pr)\b/i
+
+function tallyWeek(planned: number, workouts: WeekWorkout[], observations: WeekObservation[]): WeeklyTally {
+  const done = workouts.length
+  const adherence = planned > 0 ? done / planned : 0
+
+  const rpes: number[] = []
+  for (const w of workouts) {
+    const sets = w.actual_weights ? Object.values(w.actual_weights).flat() : []
+    const setRpes = sets.map((s) => s.rpe).filter((r): r is number => r != null)
+    if (setRpes.length) rpes.push(...setRpes)
+    else if (w.rpe != null) rpes.push(w.rpe) // fall back to the session-level RPE
+  }
+  const avgRPE = rpes.length ? Math.round((rpes.reduce((a, b) => a + b, 0) / rpes.length) * 10) / 10 : null
+
+  const painObs = observations.filter((o) => o.severity >= 3)
+  const positiveCount = observations.filter((o) => POSITIVE_SIGNAL.test(o.signal)).length
+  const flagged_categories = [
+    ...new Set(painObs.map((o) => o.signal.split('—')[0].trim()).filter(Boolean)),
+  ].slice(0, 5)
+
+  return { planned, done, adherence, avgRPE, painCount: painObs.length, positiveCount, flagged_categories }
+}
+
+// The §4.3 decision tree — the only place a directive is chosen.
+function decidePrescription(t: WeeklyTally): WeeklyPrescription {
+  if (t.painCount >= 2 || (t.avgRPE != null && t.avgRPE >= 8.5)) {
+    return {
+      directive: 'DELOAD',
+      load_delta_pct: -10,
+      rpe_target: 6,
+      rationale: t.painCount >= 2
+        ? `${t.painCount} pain flags this week — backing load off 10% to let the pattern settle.`
+        : `Average RPE ${t.avgRPE} is into the red — backing off 10% to recover.`,
+    }
+  }
+  if (t.adherence >= 0.8 && t.avgRPE != null && t.avgRPE <= 6.5 && t.painCount === 0) {
+    return {
+      directive: 'PROGRESS',
+      load_delta_pct: 5,
+      rpe_target: 7,
+      rationale: `Adherence ${Math.round(t.adherence * 100)}% and RPE ${t.avgRPE} with no pain — adding 5%.`,
+    }
+  }
+  if (t.adherence < 0.5) {
+    return {
+      directive: 'HOLD (missed)',
+      load_delta_pct: 0,
+      rpe_target: 7,
+      rationale: `Only ${t.done}/${t.planned} sessions logged — holding load and resetting the week.`,
+    }
+  }
+  return {
+    directive: 'HOLD',
+    load_delta_pct: 0,
+    rpe_target: 7,
+    rationale: 'Holding load — not enough signal to push or back off yet.',
+  }
+}
+
+function weeklyCoachNotes(weekEnding: string, t: WeeklyTally, p: WeeklyPrescription): string {
+  const rpeStr = t.avgRPE != null ? `avg RPE ${t.avgRPE}` : 'RPE not logged'
+  const tally = `Week to ${weekEnding}: ${t.done}/${t.planned} sessions · ${rpeStr} · ${t.painCount} pain flag${t.painCount === 1 ? '' : 's'} · ${t.positiveCount} strong set${t.positiveCount === 1 ? '' : 's'}.`
+  return `${tally} ${p.rationale}`
 }
 
 /**
- * TODO (Prompt 3): PhaseAdvancementAgent
- * Real behavior: checks advancement_criteria against accumulated session data,
- * triggers phase promotion if criteria are met.
+ * WeeklyReviewAgent (deterministic, §4.2–4.3). Synthesizes every COMPLETED
+ * Mon–Sun week that has ≥1 workout and no review yet into a weekly_review row +
+ * a coach_message. Idempotent: one review per (program_id, week_ending).
  */
-export async function checkPhaseAdvancement(
-  _athleteId: string,
-  _phaseId: string,
-): Promise<boolean> {
-  return false
+export async function runWeeklyReviewAgent(athleteId: string, programId: string): Promise<number> {
+  const [{ data: ath }, { data: existingReviews }, { data: workoutRows }, { data: obsRows }] = await Promise.all([
+    supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle(),
+    supabase.from('weekly_review').select('week_ending').eq('program_id', programId),
+    supabase.from('workout').select('performed_at, rpe, actual_weights, routine!inner(program_id)').eq('routine.program_id', programId),
+    supabase.from('session_observation').select('severity, signal, logged_at, workout!inner(routine!inner(program_id))').eq('workout.routine.program_id', programId),
+  ])
+
+  const planned = (ath?.sessions_per_week as number | null) ?? 3
+  const reviewed = new Set((existingReviews ?? []).map((r) => r.week_ending as string))
+  const workouts = (workoutRows ?? []) as unknown as WeekWorkout[]
+  const observations = (obsRows ?? []) as unknown as WeekObservation[]
+  if (workouts.length === 0) return 0
+
+  const thisMonday = startOfWeekMonday(new Date())
+
+  // Bucket workouts + observations by their week-ending Sunday.
+  const weeks = new Map<string, { monday: Date; workouts: WeekWorkout[]; observations: WeekObservation[] }>()
+  const bucketFor = (dateStr: string) => {
+    const monday = startOfWeekMonday(new Date(dateStr))
+    const key = weekEndingISO(monday)
+    if (!weeks.has(key)) weeks.set(key, { monday, workouts: [], observations: [] })
+    return weeks.get(key)!
+  }
+  for (const w of workouts) bucketFor(w.performed_at).workouts.push(w)
+  for (const o of observations) bucketFor(o.logged_at).observations.push(o)
+
+  // Process each completed week (its Monday strictly before this week's Monday)
+  // that has ≥1 workout and no review yet — oldest first.
+  const pending = [...weeks.entries()]
+    .filter(([key, wk]) => wk.monday.getTime() < thisMonday.getTime() && wk.workouts.length > 0 && !reviewed.has(key))
+    .sort((a, b) => a[1].monday.getTime() - b[1].monday.getTime())
+
+  let created = 0
+  for (const [weekEnding, wk] of pending) {
+    const tally = tallyWeek(planned, wk.workouts, wk.observations)
+    const prescription = decidePrescription(tally)
+    const adjustments: WeeklyReviewAdjustments = {
+      avgRPE: tally.avgRPE,
+      adherence: Math.round(tally.adherence * 100) / 100,
+      painCount: tally.painCount,
+      positiveCount: tally.positiveCount,
+      flagged_categories: tally.flagged_categories,
+    }
+    const coach_notes = weeklyCoachNotes(weekEnding, tally, prescription)
+
+    const { data: review } = await supabase
+      .from('weekly_review')
+      .insert({ program_id: programId, week_ending: weekEnding, coach_notes, adjustments, next_week_prescription: prescription })
+      .select()
+      .single()
+
+    if (review) {
+      created++
+      await insertCoachMessage(athleteId, { kind: 'weekly_review', body: coach_notes, ref_id: (review as { id: string }).id })
+    }
+  }
+  return created
+}
+
+/**
+ * PhaseAdvancementAgent gate (deterministic proxy, §5.2). Returns true only when
+ * ALL hold: duration elapsed, ≥70% adherence over the phase, and no severity-≥3
+ * observation in the last 3 logged sessions. Pure read — side effects (advance
+ * or extend) live in runPhaseAdvancement so this signature matches the LLM swap.
+ */
+export async function checkPhaseAdvancement(athleteId: string, phaseId: string): Promise<boolean> {
+  const { data: phaseRow } = await supabase
+    .from('phase')
+    .select('week_start, week_end, program_id, status')
+    .eq('id', phaseId)
+    .maybeSingle()
+  if (!phaseRow) return false
+
+  // 1. Duration — the phase's scheduled end has passed.
+  const todayIso = isoDate(new Date())
+  if (todayIso < (phaseRow.week_end as string)) return false
+
+  // 2. Adherence — ≥70% of the planned sessions across the phase window.
+  const { data: ath } = await supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle()
+  const perWeek = (ath?.sessions_per_week as number | null) ?? 3
+  const start = new Date(phaseRow.week_start as string)
+  const end = new Date(phaseRow.week_end as string)
+  const weeks = Math.max(1, Math.round((end.getTime() - start.getTime()) / (1000 * 60 * 60 * 24) / 7) + 1)
+  const planned = perWeek * weeks
+
+  const { data: phaseWorkouts } = await supabase
+    .from('workout')
+    .select('performed_at, routine!inner(phase_id)')
+    .eq('routine.phase_id', phaseId)
+    .order('performed_at', { ascending: false })
+  const done = (phaseWorkouts ?? []).length
+  if (planned > 0 && done / planned < 0.7) return false
+
+  // 3. Safety — no severity-≥3 observation in the last 3 logged sessions.
+  const lastThree = (phaseWorkouts ?? []).slice(0, 3) as Array<{ performed_at: string }>
+  if (lastThree.length) {
+    const since = lastThree[lastThree.length - 1].performed_at
+    const { data: recentObs } = await supabase
+      .from('session_observation')
+      .select('severity, workout!inner(routine!inner(phase_id))')
+      .eq('workout.routine.phase_id', phaseId)
+      .gte('logged_at', since)
+    if ((recentObs ?? []).some((o) => (o as { severity: number }).severity >= 3)) return false
+  }
+
+  return true
 }
 
 // ---- Deterministic placeholder functions (used NOW) ------------------------
@@ -890,85 +1209,182 @@ export function generateInsightsFromDiagnostic(
   return insights
 }
 
-/**
- * PLACEHOLDER — generates a basic 4-week Stability program.
- * Selects routines based on the P1 insight (insights[0], highest priority).
- * Replace with ProgramDesignAgent in Prompt 3.
- *
- * Accepts the full ranked insight list so each exercise can be attributed to
- * the insight that placed it (Shift 5 — the "why" surface in WorkoutScreen).
- */
-export function generateInitialProgram(
-  insights: InsightRow[],
-  startDateStr: string,
-): GeneratedProgram {
-  // P1 insight drives the whole Stability block.
-  const p1Insight = insights[0] ?? null
-  const p1Category = p1Insight?.category ?? 'Lower Chain'
+// ────────────────────────────────────────────────────────────────────────────
+// PHASE SCHEMES (§5.1) — same movement pool, different prescription.
+// The exercise pool is fixed per category; the phase reassigns sets/reps/load
+// intent so the SAME pattern is trained for stability, then strength, then
+// power, then sport. Deterministic by design — the LLM ProgramDesignAgent will
+// later personalise the pool; this just re-scores it per block.
+// ────────────────────────────────────────────────────────────────────────────
 
-  const retestDate = addDays(startDateStr, 28)
-  const weekEnd = addDays(startDateStr, 27)
+interface PhaseScheme {
+  sets: number
+  reps: string                 // numeric-rep default; holds/carries keep their own
+  rpeLabel: string             // athlete-facing intent
+  intentVerb: string
+  loadFloor: 'keep' | 'moderate'   // 'moderate' bumps non-bodyweight loads up
+}
+
+const PHASE_SCHEMES: Record<PhaseName, PhaseScheme> = {
+  Stability: { sets: 3, reps: '8-12', rpeLabel: 'RPE 5–6 · control the pattern', intentVerb: 'Pattern quality', loadFloor: 'keep' },
+  Strength:  { sets: 4, reps: '4-6',  rpeLabel: 'RPE 7–8 · moderate–heavy',       intentVerb: 'Build strength', loadFloor: 'moderate' },
+  Power:     { sets: 4, reps: '2-3',  rpeLabel: 'RPE 7 · move it fast',           intentVerb: 'Express power',  loadFloor: 'moderate' },
+  Sport:     { sets: 3, reps: '3-5',  rpeLabel: 'RPE 6–8 · sport-specific',       intentVerb: 'Integrate for sport', loadFloor: 'keep' },
+}
+
+// One jump/throw added to each Power session — the velocity intent the table
+// calls for. Cycled so the three sessions aren't identical.
+const POWER_EXPRESSIONS: ExerciseTemplate[] = [
+  { name: 'Box Jump', sets: 4, reps: '3', load: 'bodyweight', cue: 'Land soft — reset every rep, max height' },
+  { name: 'Med Ball Slam', sets: 4, reps: '3', load: 'moderate', cue: 'Full overhead — drive through the floor' },
+  { name: 'Broad Jump', sets: 4, reps: '3', load: 'bodyweight', cue: 'Stick the landing — quality over distance' },
+]
+
+// Keep holds/carries/mobility on their native prescription; only re-rep true
+// counted-rep lifts. Detects seconds, metres, breaths, and "each direction".
+function isCountedReps(reps: string): boolean {
+  return /^\d/.test(reps) && !/s\b|sec|m\b|min|breath|direction|hold/i.test(reps)
+}
+
+function applyScheme(ex: ExerciseTemplate, scheme: PhaseScheme): ExerciseTemplate {
+  const next: ExerciseTemplate = { ...ex }
+  if (isCountedReps(ex.reps)) {
+    next.sets = scheme.sets
+    next.reps = /each side/i.test(ex.reps) ? `${scheme.reps} each side` : scheme.reps
+  }
+  if (scheme.loadFloor === 'moderate' && ex.load && ex.load !== 'bodyweight' && ex.load === 'light') {
+    next.load = 'moderate'
+  }
+  return next
+}
+
+const NON_NEGOTIABLES_BY_CATEGORY: Record<string, string[]> = {
+  'Lower Chain': [
+    'Single-leg work each session',
+    'Hip hinge pattern daily',
+    'Ankle mobility 5 min pre-session',
+  ],
+  'Upper Chain': [
+    'Shoulder CARs daily (2 sets)',
+    'Scapular control cues before pressing',
+    'Pulling:Pressing ratio minimum 2:1',
+  ],
+  'Core': [
+    'Bracing cue on every loaded exercise',
+    'Anti-rotation work before loaded compound',
+    'No heavy spinal loading until pattern clears',
+  ],
+  'Posterior Chain': [
+    'Hamstring lengthening sequence pre-session',
+    'Hip flexor mobilisation daily',
+    'Foot position and shin angle awareness',
+  ],
+}
+
+// Phase length in days (week_end is inclusive of the last day → length - 1).
+const PHASE_LENGTH_DAYS = 28
+
+/**
+ * Build one phase (any of Stability → Strength → Power → Sport) over the same
+ * category pool, re-scored to the phase scheme. The single place that turns a
+ * phase name + a weak-link category into a phase row + its routines, so phase
+ * N+1 (§5) and the initial Stability block share one generator.
+ */
+export function generatePhase(
+  phaseName: PhaseName,
+  p1Category: string,
+  startDateStr: string,
+  opts?: { p1InsightId?: string | null },
+): GeneratedProgram {
+  const scheme = PHASE_SCHEMES[phaseName]
+  const retestDate = addDays(startDateStr, PHASE_LENGTH_DAYS)
+  const weekEnd = addDays(startDateStr, PHASE_LENGTH_DAYS - 1)
+  const p1InsightId = opts?.p1InsightId ?? null
 
   const routineExercises = getRoutinesForCategory(p1Category)
 
   // ──────────────────────────────────────────────────────────────────────────
   // PROGRAM-DESIGN SEAM (TODO Prompt 3: ProgramDesignAgent)
-  // The deterministic Stability block only ever builds P1-category routines, so
-  // every exercise is attributed to the P1 insight. When the real
-  // ProgramDesignAgent lands it should write per-exercise insight_id here,
-  // mapping individual exercises to P2/P3 insights they address. This stamping
-  // is the single place to do that — screens read exercise.insight_id directly.
+  // Every exercise is attributed to the P1 insight; the real agent will map
+  // individual exercises to P2/P3 insights. Stamping happens only here.
   // ──────────────────────────────────────────────────────────────────────────
-  const stamp = (exs: ExerciseTemplate[]): ExerciseTemplate[] =>
-    p1Insight ? exs.map((ex) => ({ ...ex, insight_id: p1Insight.id })) : exs
+  const stamp = (exs: ExerciseTemplate[]): ExerciseTemplate[] => {
+    const scored = exs.map((ex) => applyScheme(ex, scheme))
+    return p1InsightId ? scored.map((ex) => ({ ...ex, insight_id: p1InsightId })) : scored
+  }
+
+  const sessionExercises = (i: number): ExerciseTemplate[] => {
+    const base = stamp(routineExercises[i])
+    if (phaseName === 'Power') {
+      const expr = { ...POWER_EXPRESSIONS[i % POWER_EXPRESSIONS.length] }
+      if (p1InsightId) expr.insight_id = p1InsightId
+      return [expr, ...base]   // express power fresh, before fatigue
+    }
+    return base
+  }
 
   const routines = [
-    { name: 'Session A', session_type: 'strength', exercises: stamp(routineExercises[0]), intent: `Primary address of ${p1Category} — pattern quality first.` },
-    { name: 'Session B', session_type: 'strength', exercises: stamp(routineExercises[1]), intent: `${p1Category} variation — load exposure maintained low.` },
-    { name: 'Session C', session_type: 'strength', exercises: stamp(routineExercises[2]), intent: `Integration session — patterns under mild fatigue.` },
+    { name: 'Session A', session_type: 'strength', exercises: sessionExercises(0), intent: `${scheme.intentVerb} — ${p1Category}. ${scheme.rpeLabel}.` },
+    { name: 'Session B', session_type: 'strength', exercises: sessionExercises(1), intent: `${p1Category} variation. ${scheme.rpeLabel}.` },
+    { name: 'Session C', session_type: 'strength', exercises: sessionExercises(2), intent: `Integration under fatigue. ${scheme.rpeLabel}.` },
   ]
 
-  const nonNegotiables: Record<string, string[]> = {
-    'Lower Chain': [
-      'Single-leg work each session',
-      'Hip hinge pattern daily',
-      'Ankle mobility 5 min pre-session',
+  const goalByPhase: Record<PhaseName, string> = {
+    Stability: `Address ${p1Category} weakness. Establish movement quality before loading.`,
+    Strength:  `${p1Category} pattern owns load now — build the strength base.`,
+    Power:     `Convert ${p1Category} strength into speed and expression.`,
+    Sport:     `Integrate ${p1Category} into sport-specific, mixed-quality work.`,
+  }
+
+  const advancementByPhase: Record<PhaseName, string[]> = {
+    Stability: [
+      `Movement screen score ≥ 2 on ${p1Category} pattern`,
+      'Zero pain signals in 3 consecutive sessions',
+      'Strength baseline retest within 5% of initial',
     ],
-    'Upper Chain': [
-      'Shoulder CARs daily (2 sets)',
-      'Scapular control cues before pressing',
-      'Pulling:Pressing ratio minimum 2:1',
+    Strength: [
+      'Top working sets progressing week over week',
+      'RPE holding ≤ 8 at the prescribed load',
+      'Zero pain signals in 3 consecutive sessions',
     ],
-    'Core': [
-      'Bracing cue on every loaded exercise',
-      'Anti-rotation work before loaded compound',
-      'No heavy spinal loading until pattern clears',
+    Power: [
+      'Velocity maintained across all working sets',
+      'Landing mechanics clean on jumps/throws',
+      'Zero pain signals in 3 consecutive sessions',
     ],
-    'Posterior Chain': [
-      'Hamstring lengthening sequence pre-session',
-      'Hip flexor mobilisation daily',
-      'Foot position and shin angle awareness',
+    Sport: [
+      'Mixed qualities holding within a session',
+      'Conditioning tolerated without breakdown',
+      'Zero pain signals in 3 consecutive sessions',
     ],
   }
 
-  const advancementCriteria = [
-    `Movement screen score ≥ 2 on ${p1Category} pattern`,
-    'Zero pain signals in 3 consecutive sessions',
-    'Strength baseline retest within 5% of initial',
-  ]
-
   return {
-    goal: `Address ${p1Category} weakness. Establish movement quality before loading.`,
+    goal: goalByPhase[phaseName],
     retest_date: retestDate,
     phase: {
-      name: 'Stability',
+      name: phaseName,
       week_start: startDateStr,
       week_end: weekEnd,
-      non_negotiables: nonNegotiables[p1Category] ?? nonNegotiables['Lower Chain'],
-      advancement_criteria: advancementCriteria,
+      non_negotiables: NON_NEGOTIABLES_BY_CATEGORY[p1Category] ?? NON_NEGOTIABLES_BY_CATEGORY['Lower Chain'],
+      advancement_criteria: advancementByPhase[phaseName],
     },
     routines,
   }
+}
+
+/**
+ * The initial Stability block. Thin wrapper over generatePhase so the LLM swap
+ * is a body-only change later. Accepts the full ranked insight list so each
+ * exercise is stamped with its insight_id (Shift 5 — the "why" surface).
+ */
+export function generateInitialProgram(
+  insights: InsightRow[],
+  startDateStr: string,
+): GeneratedProgram {
+  const p1Insight = insights[0] ?? null
+  const p1Category = p1Insight?.category ?? 'Lower Chain'
+  return generatePhase('Stability', p1Category, startDateStr, { p1InsightId: p1Insight?.id ?? null })
 }
 
 // ============================================================================
@@ -1050,6 +1466,49 @@ async function tagInfoGainItem(plan: GeneratedProgram, ranked: InsightRow[], p1:
     `sharpen the read${p1 ? ` on your ${p1.category.toLowerCase()}` : ''}.`
 }
 
+// Training age (years) at/above which the first session is allowed to feel like
+// real training — mirrors the safety ceiling in safety.ts. Below this we keep the
+// light pattern-quality build; moving load on an unwatched novice is the one
+// thing we won't do.
+const FIRST_SESSION_WORKING_AGE = 2
+
+/**
+ * Make the FIRST session read as training, not an assessment (the "half workout,
+ * half diagnostic" ask). For an athlete with real history we promote the lead
+ * loadable movement to genuine working sets — the workout half — while the
+ * supporting work and the planted read stay as they are — the diagnostic half.
+ * Novices are left on the light build. Bounded to 'moderate', so it never escapes
+ * the safety ceiling the validator already enforces. Mutates the plan in place.
+ */
+function strengthenFirstSession(
+  plan: GeneratedProgram,
+  trainingAge: number,
+  p1Category: string | null,
+): void {
+  if (trainingAge < FIRST_SESSION_WORKING_AGE) return
+  const first = plan.routines[0]
+  if (!first || !first.exercises.length) return
+
+  // The lead loadable strength movement: first counted-rep, non-bodyweight lift.
+  // Holds, carries, and mobility (bodyweight / time / distance) are left alone —
+  // they're movement quality, not the working set.
+  const idx = first.exercises.findIndex(
+    (ex) => isCountedReps(ex.reps) && !!ex.load && ex.load !== 'bodyweight',
+  )
+  if (idx < 0) return
+
+  const ex = first.exercises[idx]
+  first.exercises[idx] = {
+    ...ex,
+    sets: 4,
+    reps: /each side/i.test(ex.reps) ? '6-8 each side' : '6-8',
+    load: 'moderate',
+  }
+  first.intent = p1Category
+    ? `Your first working session — ${p1Category}. One primary lift at honest effort; the rest builds the pattern and reads the limiter.`
+    : `Your first working session. One primary lift at honest effort; the rest builds the pattern and reads the limiter.`
+}
+
 /**
  * Build the athlete's provisional first session from the probe hypothesis.
  * Idempotent (skips if an active program already exists). Always produces a
@@ -1101,7 +1560,10 @@ export async function buildProvisionalProgram(
     plan = generateInitialProgram(ranked, startDateStr)
   }
 
-  // One info-gain "test me" item (non-fatal).
+  // Make it feel like a workout for experienced lifters (the "workout half").
+  strengthenFirstSession(plan, profile.trainingAge, p1?.category ?? null)
+
+  // One info-gain "test me" item — the "diagnostic half" (non-fatal).
   await tagInfoGainItem(plan, ranked, p1)
 
   // Persist: program → phase → routines → profile.
@@ -1521,4 +1983,576 @@ export function countInsightsByStatus(insights: InsightRow[]): StatusCount[] {
   return order
     .map((status) => ({ status, count: insights.filter((i) => i.status === status).length }))
     .filter((s) => s.count > 0)
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// SCHEDULING (§4.1) — derived, no schema. A Mon–Sun plan of sessions_per_week
+// training days (routines assigned A,B,C,A…), the rest are rest. Pure function so
+// it's testable and the same plan drives Today, the week strip, and Program.
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface ScheduleDay {
+  date: Date
+  offset: number            // 0=Mon … 6=Sun
+  logged: boolean
+  isToday: boolean
+}
+
+export interface WeekSchedule {
+  days: ScheduleDay[]
+  todayRoutine: RoutineRow | null  // routine to train today, or null (rest / already trained / week done)
+  planned: number
+  done: number
+  weekComplete: boolean
+}
+
+function sameCalendarDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+}
+
+/**
+ * This week's plan (§4.1). The plan is `sessionsPerWeek` sessions across the
+ * Mon–Sun week, routines assigned in order (A, B, C, A…). Today's routine is the
+ * NEXT routine not yet done this week — unless a workout is already logged today
+ * (no double-log) or the week's sessions are all done (→ null = rest). Count-based
+ * (not weekday-pinned) so the athlete can train whenever they show up and the
+ * first-ever session is always Session A.
+ */
+export function computeWeekSchedule(
+  routines: RoutineRow[],
+  weekWorkouts: Array<{ routine_id: string; performed_at: string }>,
+  sessionsPerWeek: number,
+  now: Date = new Date(),
+): WeekSchedule {
+  const ordered = [...routines].sort((a, b) => a.name.localeCompare(b.name))
+  const planned = Math.max(1, sessionsPerWeek || 3)
+  const monday = startOfWeekMonday(now)
+  const todayOffset = (now.getDay() + 6) % 7
+
+  const inThisWeek = weekWorkouts.filter((w) => {
+    const d = new Date(w.performed_at)
+    return d >= monday && d.getTime() < monday.getTime() + 7 * 24 * 60 * 60 * 1000
+  })
+
+  // Count distinct calendar days trained this week (no-double-log makes this the
+  // session count); the next session is the done-th routine in order.
+  const trainedDayKeys = new Set(inThisWeek.map((w) => isoDate(new Date(w.performed_at))))
+  const done = trainedDayKeys.size
+  const loggedToday = inThisWeek.some((w) => sameCalendarDay(new Date(w.performed_at), now))
+  const weekComplete = done >= planned
+
+  let todayRoutine: RoutineRow | null = null
+  if (!loggedToday && !weekComplete && ordered.length) {
+    todayRoutine = ordered[done % ordered.length]
+  }
+
+  const days: ScheduleDay[] = Array.from({ length: 7 }, (_, off) => {
+    const date = new Date(monday)
+    date.setDate(monday.getDate() + off)
+    return {
+      date,
+      offset: off,
+      logged: inThisWeek.some((w) => sameCalendarDay(new Date(w.performed_at), date)),
+      isToday: off === todayOffset,
+    }
+  })
+
+  return { days, todayRoutine, planned, done, weekComplete }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// APPLY THE PRESCRIPTION (§4.4) — last week's top working set + the week's
+// directive, shown per exercise in the Workout screen. Deterministic v1
+// prescribes a delta on the athlete's ACTUAL logged load, not the template.
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface IntelligenceRule {
+  name: string
+  reasoning: string   // shown out loud — the felt difference vs a static program
+}
+
+export interface SessionPrescription {
+  directive: WeeklyDirective | null
+  loadDeltaPct: number
+  rpeTarget: number | null
+  rationale: string | null
+  hints: Record<number, string>   // exercise index → one-line hint ('' = none)
+  held: Record<number, boolean>   // exercise index → load cap held (rule fired)
+  rule: IntelligenceRule | null   // standing rule in effect this session, or null
+}
+
+function buildHint(top: SetLog | null, unit: string, directive: WeeklyDirective | null, delta: number, rpe: number | null): string {
+  const rpeStr = rpe != null ? `RPE ${rpe}` : null
+  if (top && top.weight != null) {
+    const last = `${top.weight}${unit} last`
+    if (directive === 'PROGRESS' || delta > 0) return `${last} → +${delta}%${rpeStr ? `, aim ${rpeStr}` : ''}`
+    if (directive === 'DELOAD' || delta < 0) return `${last} → back off ~${Math.abs(delta)}%${rpeStr ? `, ${rpeStr}` : ''}`
+    if (directive) return `${last} → repeat${rpeStr ? `, ${rpeStr}` : ''}`
+    return last
+  }
+  if (top && top.reps != null) return `${top.reps} reps last${rpeStr ? `, aim ${rpeStr}` : ''}`
+  if (top && top.duration != null) return `${top.duration}s last`
+  // No prior set for this exercise — surface the directive intent only.
+  if (directive === 'DELOAD') return `Ease in${rpeStr ? `, ${rpeStr}` : ''}`
+  if (directive === 'PROGRESS') return `Find a working weight${rpeStr ? `, aim ${rpeStr}` : ''}`
+  return ''
+}
+
+/**
+ * Per-exercise prescription for a session: the active week's directive applied
+ * to each exercise's last logged top set (index-aligned to THIS routine).
+ *
+ * Intelligence Rule — "Never load over instability": while the P1 weak link is
+ * unresolved, the load cap is HELD on the lifts that address it, and the reason
+ * is stated out loud. A static program can't say "not yet, and here's why."
+ */
+export async function gatherSessionPrescription(
+  athleteId: string,
+  routineId: string,
+  exercises: ExerciseTemplate[],
+  unit: string,
+): Promise<SessionPrescription> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+
+  let directive: WeeklyDirective | null = null
+  let loadDeltaPct = 0
+  let rpeTarget: number | null = null
+  let rationale: string | null = null
+  if (prog?.id) {
+    const { data: review } = await supabase
+      .from('weekly_review').select('next_week_prescription')
+      .eq('program_id', prog.id).order('week_ending', { ascending: false }).limit(1).maybeSingle()
+    const presc = (review?.next_week_prescription as WeeklyPrescription | null) ?? null
+    if (presc) {
+      directive = presc.directive
+      loadDeltaPct = presc.load_delta_pct
+      rpeTarget = presc.rpe_target
+      rationale = presc.rationale
+    }
+  }
+
+  // The P1 weak link — top-priority active insight. Drives the load-cap rule.
+  const { data: insightRows } = await supabase
+    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
+  const p1 = ((insightRows ?? []) as InsightRow[])
+    .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
+  const p1Unresolved = !!p1
+  const rule: IntelligenceRule | null = p1Unresolved
+    ? {
+        name: 'Never load over instability',
+        reasoning:
+          `Your ${p1!.category} is still the P1 limiter (${Math.round(p1!.confidence * 100)}% confident, ${p1!.status}). ` +
+          `Load stays capped on the work that addresses it until the pattern clears — earn the load, don't force it.`,
+      }
+    : null
+
+  const { data: lastWorkout } = await supabase
+    .from('workout').select('actual_weights, performed_at')
+    .eq('routine_id', routineId).order('performed_at', { ascending: false }).limit(1).maybeSingle()
+  const lastWeights = (lastWorkout?.actual_weights as Record<string, SetLog[]> | null) ?? null
+
+  const hints: Record<number, string> = {}
+  const held: Record<number, boolean> = {}
+  exercises.forEach((ex, i) => {
+    const top = lastWeights ? topWorkingSet(lastWeights[String(i)]) : null
+    // Held when the rule is in effect AND this lift addresses the P1 insight.
+    const isHeld = p1Unresolved && !!ex.insight_id && ex.insight_id === p1!.id
+    held[i] = isHeld
+    if (isHeld && directive === 'PROGRESS') {
+      // Suppress the +5%: state the hold and why, grounded in the last load.
+      hints[i] = top && top.weight != null
+        ? `Hold ${top.weight}${unit} — cap stays until ${p1!.category} clears`
+        : `Hold steady — ${p1!.category} not cleared yet`
+    } else {
+      hints[i] = buildHint(top, unit, directive, loadDeltaPct, rpeTarget)
+    }
+  })
+
+  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, rule }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE LIVING LOOP — P1 resolution from session evidence (the differentiator)
+//
+// Stages 5–6 of the Diagnostic Loop made real on ONE weak link: a session's
+// felt signal on the P1-linked work is read as evidence FOR or AGAINST the
+// limiter. Strong, pain-free work DISCONFIRMS the limiter (a static program
+// can't do this — improvement there would just mean "do more"). Confidence
+// falls; at the floor the weak link RESOLVES, which lifts its load cap. The
+// move is disposed deterministically here so it holds even with no LLM key;
+// the agent path (runSessionDebriefAgent) layers nuance on top when available.
+// ════════════════════════════════════════════════════════════════════════════
+
+const P1_RESOLVE_THRESHOLD = 0.30   // limiter confidence at/below this → resolved
+const P1_DISCONFIRM_STEP = 0.15     // bounded step per strong, pain-free session
+
+export interface SessionAdaptation {
+  note: string
+  insightId: string
+  category: string
+  resolved: boolean
+  previousConfidence: number
+  newConfidence: number
+}
+
+/**
+ * Read one logged session as evidence on the P1 weak link and adapt it. Returns
+ * the grounded coach note (also persisted as a coach_message) when the session
+ * moved the limiter, or null when there's nothing worth surfacing. Idempotent
+ * per workout. Screens call this; they never compute the disposition themselves.
+ */
+export async function recordSessionAdaptation(athleteId: string, workoutId: string): Promise<SessionAdaptation | null> {
+  const { data: workout } = await supabase
+    .from('workout').select('routine_id, performed_at').eq('id', workoutId).maybeSingle()
+  if (!workout) return null
+
+  const { data: routine } = await supabase
+    .from('routine').select('exercises').eq('id', workout.routine_id).maybeSingle()
+  const exercises = (routine?.exercises as ExerciseTemplate[] | null) ?? []
+
+  // P1 weak link — top-priority active insight.
+  const { data: insightRows } = await supabase
+    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
+  const p1 = ((insightRows ?? []) as InsightRow[])
+    .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
+  if (!p1) return null
+
+  // The lifts that address P1 (stamped at program build).
+  const p1Names = new Set(exercises.filter((ex) => ex.insight_id === p1.id).map((ex) => ex.name))
+  if (p1Names.size === 0) return null
+
+  // Idempotency — one adaptation note per workout for this insight.
+  const { data: existing } = await supabase
+    .from('coach_message').select('id')
+    .eq('athlete_id', athleteId).eq('kind', 'note').eq('ref_id', p1.id)
+    .gte('created_at', workout.performed_at).limit(1)
+  if (existing && existing.length) return null
+
+  // Defer if another path (the LLM debrief) already moved P1 from this session —
+  // its evidence entries carry workout_id. Prevents a double move per session.
+  if (Array.isArray(p1.evidence) && p1.evidence.some((e) => (e as { workout_id?: string } | null)?.workout_id === workoutId)) {
+    return null
+  }
+
+  // This session's felt signal on the P1-linked work (severity: ≤1 strong, ≥4 pain).
+  const { data: obs } = await supabase
+    .from('session_observation').select('signal, severity, category').eq('workout_id', workoutId)
+  const felt = ((obs ?? []) as Array<{ signal: string; severity: number; category: string }>)
+    .filter((o) => o.category === 'Felt')
+  let strong = 0
+  let pain = 0
+  let exemplar: string | null = null
+  for (const o of felt) {
+    const name = o.signal.split('—')[0].trim()
+    if (!p1Names.has(name)) continue
+    if (o.severity >= 4) pain++
+    else if (o.severity <= 1) { strong++; if (!exemplar) exemplar = name }
+  }
+
+  // The rule: strong, pain-free P1 work disconfirms the limiter. Anything else
+  // (pain, or no strong signal) → no surfaced moment; the limiter stands.
+  if (strong < 1 || pain > 0) return null
+
+  const previousConfidence = p1.confidence
+  const newConfidence = clampConfidence(previousConfidence - P1_DISCONFIRM_STEP)
+  const resolved = newConfidence <= P1_RESOLVE_THRESHOLD
+
+  const evidence = [
+    ...(Array.isArray(p1.evidence) ? p1.evidence : []),
+    {
+      workout_id: workoutId,
+      kind: 'p1_progress',
+      direction: 'disconfirming',
+      strong_sets: strong,
+      logged_at: new Date().toISOString(),
+    },
+  ]
+  const update: Record<string, unknown> = { confidence: newConfidence, evidence }
+  if (resolved) {
+    update.status = 'resolved'
+    update.resolved_at = new Date().toISOString()
+  }
+  await supabase.from('insight').update(update).eq('id', p1.id)
+
+  const prevPct = Math.round(previousConfidence * 100)
+  const newPct = Math.round(newConfidence * 100)
+  const where = exemplar ?? 'your P1 work'
+  const sets = `${strong} strong set${strong === 1 ? '' : 's'}`
+  const note = resolved
+    ? `${p1.category} is clearing. ${sets} on ${where} with no pain dropped the limiter to ${newPct}% — I'm calling it resolved. The load cap on that pattern lifts now.`
+    : `${p1.category} is resolving. ${sets} on ${where}, no pain — limiter confidence ${prevPct}%→${newPct}% because of what you just did. Keep this up and we clear it.`
+
+  await insertCoachMessage(athleteId, { kind: 'note', body: note, ref_id: p1.id })
+  return { note, insightId: p1.id, category: p1.category, resolved, previousConfidence, newConfidence }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PHASE ADVANCEMENT ORCHESTRATION (§5.2) — the side effects checkPhaseAdvancement
+// stays out of (so its signature matches the LLM swap). Advances or extends.
+// ════════════════════════════════════════════════════════════════════════════
+
+const PHASE_SEQUENCE: PhaseName[] = ['Stability', 'Strength', 'Power', 'Sport']
+
+async function insertCoachMessage(
+  athleteId: string,
+  msg: { kind: CoachMessageInsert['kind']; body: string; ref_id?: string | null; role?: CoachMessageInsert['role'] },
+): Promise<void> {
+  await supabase.from('coach_message').insert({
+    athlete_id: athleteId,
+    role: msg.role ?? 'coach',
+    kind: msg.kind,
+    body: msg.body,
+    ref_id: msg.ref_id ?? null,
+  })
+}
+
+async function insertPhaseAndRoutines(programId: string, plan: GeneratedProgram): Promise<string | null> {
+  const { data: newPhase } = await supabase.from('phase').insert({
+    program_id: programId,
+    name: plan.phase.name,
+    week_start: plan.phase.week_start,
+    week_end: plan.phase.week_end,
+    non_negotiables: plan.phase.non_negotiables,
+    advancement_criteria: plan.phase.advancement_criteria,
+    status: 'active',
+  }).select().single()
+  if (!newPhase) return null
+  const phaseId = (newPhase as PhaseRow).id
+  const routineInserts = plan.routines.map((r) => ({
+    program_id: programId,
+    phase_id: phaseId,
+    name: r.name,
+    session_type: r.session_type,
+    exercises: r.exercises,
+    intent: r.intent,
+  }))
+  await supabase.from('routine').insert(routineInserts)
+  return phaseId
+}
+
+/**
+ * Drive the phase cadence. When the gate clears, complete the current phase and
+ * generate the next in sequence (+ routines, profile, coach_message). When the
+ * duration elapsed but adherence/safety failed, extend a week and HOLD. Returns
+ * true iff a phase advanced.
+ */
+export async function runPhaseAdvancement(athleteId: string): Promise<boolean> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return false
+
+  const { data: phaseRow } = await supabase
+    .from('phase').select('*').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
+  if (!phaseRow) return false
+  const phase = phaseRow as PhaseRow
+
+  // Only act once the scheduled phase end has passed.
+  if (isoDate(new Date()) < phase.week_end) return false
+
+  const advance = await checkPhaseAdvancement(athleteId, phase.id)
+
+  const { data: insightRows } = await supabase
+    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
+  const active = ((insightRows ?? []) as InsightRow[]).filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
+  const p1 = active[0] ?? null
+  const category = p1?.category ?? 'Lower Chain'
+
+  if (!advance) {
+    // Duration elapsed, gate failed → extend a week (week_end moves out, so this
+    // won't re-fire until the new end passes). HOLD with a note.
+    const newEnd = addDays(isoDate(new Date()), 7)
+    await supabase.from('phase').update({ week_end: newEnd }).eq('id', phase.id)
+    await insertCoachMessage(athleteId, {
+      kind: 'phase_change',
+      body: `Holding ${phase.name} another week — adherence or recovery wasn't there yet. Same plan, one more honest pass.`,
+      ref_id: phase.id,
+    })
+    return false
+  }
+
+  const nextName = PHASE_SEQUENCE[PHASE_SEQUENCE.indexOf(phase.name) + 1] ?? null
+  await supabase.from('phase').update({ status: 'completed' }).eq('id', phase.id)
+
+  if (!nextName) {
+    await insertCoachMessage(athleteId, {
+      kind: 'phase_change',
+      body: `You've cleared the full arc — Sport phase complete. A retest will re-scope what's next.`,
+      ref_id: phase.id,
+    })
+    return true
+  }
+
+  const today = isoDate(new Date())
+  const plan = generatePhase(nextName, category, today, { p1InsightId: p1?.id ?? null })
+  const newPhaseId = await insertPhaseAndRoutines(prog.id, plan)
+  await supabase.from('athlete_profile')
+    .update({ current_phase: nextName, last_updated: new Date().toISOString() })
+    .eq('athlete_id', athleteId)
+  await insertCoachMessage(athleteId, {
+    kind: 'phase_change',
+    body: `Phase up: ${phase.name} → ${nextName}. ${plan.goal}`,
+    ref_id: newPhaseId ?? phase.id,
+  })
+  return true
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// RETEST / RE-DIAGNOSTIC (§6) — the program cadence. New diagnostic (v+1, delta
+// vs baseline), insight resolution, new insights, re-scope, coach_message.
+// ════════════════════════════════════════════════════════════════════════════
+
+export function isRetestDue(retestDate: string | null): boolean {
+  if (!retestDate) return false
+  return isoDate(new Date()) >= retestDate
+}
+
+function patternKeyOf(ins: InsightRow): string | null {
+  if (Array.isArray(ins.evidence)) {
+    for (const e of ins.evidence) {
+      const p = (e as { pattern?: string } | null)?.pattern
+      if (p && MOVEMENT_PATTERNS.some((m) => m.key === p)) return p
+    }
+  }
+  return null
+}
+
+function labelOfPattern(key: string): string {
+  return MOVEMENT_PATTERNS.find((m) => m.key === key)?.label ?? key
+}
+
+export interface RetestSummary {
+  version: number
+  resolvedCount: number
+  improved: Array<{ pattern: string; from: number; to: number }>
+}
+
+// Re-scope the program after a retest: clean → advance the phase; otherwise a
+// fresh Stability block on the new P1 weakness. New retest_date either way.
+async function rescopeAfterRetest(athleteId: string): Promise<void> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return
+
+  const { data: phaseRow } = await supabase
+    .from('phase').select('*').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
+  const currentName = (phaseRow as PhaseRow | null)?.name ?? 'Stability'
+
+  const { data: insightRows } = await supabase
+    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
+  const active = ((insightRows ?? []) as InsightRow[]).filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
+  const p1 = active[0] ?? null
+
+  const today = isoDate(new Date())
+  let nextName: PhaseName = 'Stability'
+  const category = p1?.category ?? 'Lower Chain'
+  if (!p1) {
+    // Moves clean — advance the arc instead of re-running Stability.
+    nextName = PHASE_SEQUENCE[PHASE_SEQUENCE.indexOf(currentName) + 1] ?? 'Sport'
+  }
+
+  if (phaseRow) await supabase.from('phase').update({ status: 'completed' }).eq('id', (phaseRow as PhaseRow).id)
+
+  const plan = generatePhase(nextName, category, today, { p1InsightId: p1?.id ?? null })
+  await insertPhaseAndRoutines(prog.id, plan)
+
+  const newRetest = addDays(today, 28)
+  await supabase.from('program').update({ retest_date: newRetest }).eq('id', prog.id)
+  await supabase.from('athlete_profile')
+    .update({ current_phase: nextName, retest_date: newRetest, last_updated: new Date().toISOString() })
+    .eq('athlete_id', athleteId)
+}
+
+/**
+ * Run a retest. Writes the new diagnostic, resolves cleared weak links, mints
+ * any new ones, re-scopes the program, and records a coach_message. All loop
+ * logic lives here; the screen only collects the rescreen results.
+ */
+export async function runRetest(athleteId: string, newResults: DiagnosticResults): Promise<RetestSummary> {
+  const { data: priorDiags } = await supabase
+    .from('diagnostic').select('id, version, raw_results').eq('athlete_id', athleteId).order('version', { ascending: true })
+  const diags = (priorDiags ?? []) as Array<{ id: string; version: number; raw_results: DiagnosticResults | null }>
+  const baseline = diags[0] ?? null
+  const newVersion = diags.reduce((m, d) => Math.max(m, d.version), 0) + 1
+
+  // Delta vs baseline (per movement pattern).
+  const baseMove = baseline?.raw_results?.movement ?? {}
+  const delta: Record<string, number> = {}
+  const improved: Array<{ pattern: string; from: number; to: number }> = []
+  for (const p of MOVEMENT_PATTERNS) {
+    const from = baseMove[p.key]
+    const to = newResults.movement[p.key]
+    if (from != null && to != null) {
+      delta[p.key] = to - from
+      if (to > from) improved.push({ pattern: p.key, from, to })
+    }
+  }
+
+  const { data: newDiag } = await supabase.from('diagnostic').insert({
+    athlete_id: athleteId,
+    raw_results: newResults,
+    delta_from_prior: delta,
+    version: newVersion,
+    test_battery: { mode: 'retest' },
+  }).select().single()
+  const newDiagId = (newDiag as { id: string } | null)?.id ?? null
+
+  // Resolve insights whose pattern improved to ≥ 2.
+  const { data: insightRows } = await supabase.from('insight').select('*').eq('athlete_id', athleteId)
+  const insights = (insightRows ?? []) as InsightRow[]
+  let resolvedCount = 0
+  const nowIso = new Date().toISOString()
+  for (const ins of insights) {
+    if (ins.status === 'resolved' || ins.status === 'disproved') continue
+    const key = patternKeyOf(ins)
+    if (key && (newResults.movement[key] ?? 0) >= 2) {
+      await supabase.from('insight').update({ status: 'resolved', resolved_at: nowIso }).eq('id', ins.id)
+      resolvedCount++
+    }
+  }
+
+  // Mint new insights from the retest for categories not already tracked.
+  if (newDiagId) {
+    const generated = generateInsightsFromDiagnostic(athleteId, newDiagId, newResults)
+    const stillActive = new Set(
+      insights.filter((i) => i.status !== 'resolved' && i.status !== 'disproved' && !(patternKeyOf(i) && (newResults.movement[patternKeyOf(i)!] ?? 0) >= 2)).map((i) => i.category),
+    )
+    const toInsert = generated.filter((g) => !stillActive.has(g.category))
+    if (toInsert.length) await supabase.from('insight').insert(toInsert)
+  }
+
+  await rescopeAfterRetest(athleteId)
+
+  const deltaSummary = improved.length
+    ? improved.map((i) => `${labelOfPattern(i.pattern)} ${i.from}→${i.to}`).join(', ')
+    : 'no pattern gains yet'
+  await insertCoachMessage(athleteId, {
+    kind: 'retest',
+    body: `Retest v${newVersion}: ${deltaSummary}. ${resolvedCount > 0 ? `Cleared ${resolvedCount} weak link${resolvedCount === 1 ? '' : 's'}.` : 'Holding the line — block re-scoped.'}`,
+    ref_id: newDiagId,
+  })
+
+  return { version: newVersion, resolvedCount, improved }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// LAZY TRIGGERS (§4.2, §5, §9) — the single entry point screens call on open.
+// No cron; everything fires on app open and is idempotent.
+// ════════════════════════════════════════════════════════════════════════════
+
+/**
+ * Run the weekly + phase cadences for the athlete's active program. Safe to call
+ * on every TodayScreen mount: weekly review is idempotent per week, phase
+ * advancement only acts past a phase end. Errors are swallowed (best-effort).
+ * Returns true iff something actually changed (so callers refresh only then —
+ * an unconditional refresh would remount the screen and loop).
+ */
+export async function runLoopTriggers(athleteId: string): Promise<boolean> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return false
+  let changed = false
+  try { changed = (await runWeeklyReviewAgent(athleteId, prog.id)) > 0 || changed } catch (e) { console.error('[loop] weekly review failed', e) }
+  try { changed = (await runPhaseAdvancement(athleteId)) || changed } catch (e) { console.error('[loop] phase advancement failed', e) }
+  return changed
 }

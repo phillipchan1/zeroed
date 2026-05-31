@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
-import { runSessionDebriefAgent, type DebriefInput } from '../../engine'
+import { runSessionDebriefAgent, gatherSessionPrescription, recordSessionAdaptation, type DebriefInput, type SessionPrescription } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import {
@@ -10,7 +10,7 @@ import {
 } from '../../components/ui'
 import type {
   RoutineRow, ExerciseTemplate, SetLog, InsightRow, TrackingType,
-  SessionObservationInsert, OnboardingStep, FeltLabel, ExerciseFeedback, Readiness,
+  SessionObservationInsert, OnboardingStep, FeltLabel, ExerciseFeedback,
 } from '../../types/database'
 import { FELT_CHIPS } from '../../types/database'
 
@@ -26,6 +26,99 @@ function leadingInt(s: string | undefined): number | null {
 const REST_SECONDS = 90
 const RPE_SCALE = [6, 7, 8, 9, 10]
 
+// Column layout per tracking type, as a CSS class so the grid template can be
+// overridden by media query (desktop slots in an extra "Previous" column that
+// mobile hides). Shared by the header and every set row so columns stay aligned.
+function gridClass(t: TrackingType): string {
+  if (t === 'time')     return 'set-grid--time'
+  if (t === 'distance') return 'set-grid--dist'
+  return 'set-grid--wr' // weight_reps & bodyweight_reps
+}
+
+// Compact "what you hit last session" string for the desktop Previous column.
+function formatPrev(
+  t: TrackingType, prev: SetLog | undefined, unit: string, distanceUnit: string,
+): string | null {
+  if (!prev) return null
+  if (t === 'time')     return prev.duration != null ? `${prev.duration}s` : null
+  if (t === 'distance') return prev.distance != null ? `${prev.distance}${distanceUnit}` : null
+  if (t === 'bodyweight_reps') {
+    if (prev.reps == null) return null
+    return prev.weight ? `${prev.reps}+${prev.weight}` : `${prev.reps}`
+  }
+  if (prev.weight == null && prev.reps == null) return null
+  return `${prev.weight != null ? `${prev.weight}${unit}` : 'BW'}×${prev.reps ?? '?'}`
+}
+
+// Enter flies the cursor to the next numeric field, across rows and exercises —
+// spreadsheet-speed entry on a physical keyboard, harmless under a thumb.
+function advanceField(el: EventTarget & HTMLInputElement) {
+  const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('.set-row__input'))
+  const i = inputs.indexOf(el)
+  if (i >= 0 && i + 1 < inputs.length) inputs[i + 1].focus()
+}
+
+// ---- Column header (prescribed target as a labelled column) ----------------
+
+interface SetHeaderProps {
+  trackingType: TrackingType
+  unit: string
+  distanceUnit: string
+  prescribedReps: string         // raw prescription, e.g. "8-10" or "30s"
+  prescribedLoad: string | null  // raw load, e.g. "225 lbs" or "bodyweight"
+}
+
+function headCell(label: string, target: string | null) {
+  return (
+    <div className="set-head__cell">
+      <span className="set-head__label">{label}</span>
+      <span className="set-head__target">{target || '—'}</span>
+    </div>
+  )
+}
+
+// A header that labels each input column and parks the prescribed target right
+// above the field you type into — so "what to hit" sits next to "what you did".
+function SetHeader({
+  trackingType, unit, distanceUnit, prescribedReps, prescribedLoad,
+}: SetHeaderProps) {
+  let cells: ReactNode
+  if (trackingType === 'time') {
+    cells = (
+      <>
+        {headCell('Time', prescribedReps)}
+        {headCell('RPE', null)}
+      </>
+    )
+  } else if (trackingType === 'distance') {
+    cells = headCell(distanceUnit, prescribedReps)
+  } else if (trackingType === 'bodyweight_reps') {
+    cells = (
+      <>
+        {headCell('Reps', prescribedReps)}
+        {headCell(`+${unit}`, prescribedLoad)}
+        {headCell('RPE', null)}
+      </>
+    )
+  } else {
+    cells = (
+      <>
+        {headCell(unit, prescribedLoad)}
+        {headCell('Reps', prescribedReps)}
+        {headCell('RPE', null)}
+      </>
+    )
+  }
+  return (
+    <div className={`set-head ${gridClass(trackingType)}`}>
+      <span className="set-head__set">Set</span>
+      <span className="set-head__label set-head__prev">Prev</span>
+      {cells}
+      <span aria-hidden />
+    </div>
+  )
+}
+
 // ---- Set row (tracking-type aware) -----------------------------------------
 
 interface SetRowProps {
@@ -36,13 +129,15 @@ interface SetRowProps {
   distanceUnit: string
   prescribedReps: number | null
   prescribedDuration: number | null
+  prevText: string | null  // last session's result for this set (desktop column)
   onChange: (updated: SetLog) => void
   onComplete: () => void   // fires when a set is newly marked done (→ rest timer)
+  onActivate: () => void   // a field here was focused → drives the desktop rail
 }
 
 function SetRow({
   setNum, log, trackingType, unit, distanceUnit,
-  prescribedReps, prescribedDuration, onChange, onComplete,
+  prescribedReps, prescribedDuration, prevText, onChange, onComplete, onActivate,
 }: SetRowProps) {
   const [rpeOpen, setRpeOpen] = useState(false)
 
@@ -123,15 +218,16 @@ function SetRow({
       placeholder={placeholder}
       value={value ?? ''}
       onChange={(e) => onVal(num(e.target.value))}
+      onFocus={onActivate}
+      onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); advanceField(e.currentTarget) } }}
     />
   )
 
-  // Per-type column layouts. Done button + set number are constant.
-  let grid: string
+  // Per-type column contents. Set number + done button are constant; the grid
+  // template itself is shared with the header via gridFor().
   let cells: ReactNode
 
   if (trackingType === 'time') {
-    grid = '28px 1fr 52px 40px'
     cells = (
       <>
         {numInput(log.duration, 'sec', (n) => onChange({ ...log, duration: n }))}
@@ -139,10 +235,8 @@ function SetRow({
       </>
     )
   } else if (trackingType === 'distance') {
-    grid = '28px 1fr 40px'
     cells = numInput(log.distance, distanceUnit, (n) => onChange({ ...log, distance: n }), 'decimal')
   } else if (trackingType === 'bodyweight_reps') {
-    grid = '28px 1fr 1fr 52px 40px'
     cells = (
       <>
         {numInput(log.reps, 'reps', (n) => onChange({ ...log, reps: n }))}
@@ -152,7 +246,6 @@ function SetRow({
     )
   } else {
     // weight_reps (default)
-    grid = '28px 1fr 1fr 52px 40px'
     cells = (
       <>
         {numInput(log.weight, unit, (n) => onChange({ ...log, weight: n }), 'decimal')}
@@ -163,8 +256,9 @@ function SetRow({
   }
 
   return (
-    <div className="set-row" style={{ gridTemplateColumns: grid }}>
+    <div className={`set-row ${gridClass(trackingType)}`}>
       <span className="set-row__num">{setNum}</span>
+      <span className="set-row__prev num">{prevText ?? '·'}</span>
       {cells}
       {doneBtn}
     </div>
@@ -209,46 +303,74 @@ function FeltChips({ value, note, onFelt, onNote }: FeltChipsProps) {
   )
 }
 
-// ---- Pre-session readiness gate (JuggernautAI) -----------------------------
+// ---- "Why this session" brief — the coach's pep talk before you train --------
+// Replaces the old readiness questionnaire: instead of asking for input at the
+// door, the coach explains, in voice, why today looks the way it does. Composed
+// deterministically from real data (the read, the prescription, the planted
+// check-in) so it's instant — no model latency at the start of a session.
 
-const READINESS_ROWS: Array<{ key: keyof Readiness; label: string }> = [
-  { key: 'sleep',    label: 'Sleep' },
-  { key: 'energy',   label: 'Energy' },
-  { key: 'soreness', label: 'Soreness' },
-]
+function sessionBriefLines(opts: {
+  routine: RoutineRow
+  primaryInsight: InsightRow | null
+  leadExercise: ExerciseTemplate | undefined
+  readingWhy: string | null
+  isFirst: boolean
+}): string[] {
+  const { routine, primaryInsight, leadExercise, readingWhy, isFirst } = opts
+  const lines: string[] = []
+  const opener = isFirst ? 'Your first real session. ' : ''
 
-function ReadinessGate({
-  onStart, onSkip,
-}: { onStart: (r: Readiness) => void; onSkip: () => void }) {
-  const [r, setR] = useState<Readiness>({ sleep: null, energy: null, soreness: null })
+  // 1. The read this session is built around.
+  if (primaryInsight) {
+    const pct = Math.round(primaryInsight.confidence * 100)
+    lines.push(
+      `${opener}I built this around your ${primaryInsight.category.toLowerCase()} — ${pct}% confident, ${primaryInsight.status}. It's the read I'm watching closest, so it's where the training teaches us the most.`,
+    )
+  } else if (routine.intent) {
+    lines.push(`${opener}${routine.intent}`)
+  } else if (opener) {
+    lines.push(opener.trim())
+  }
+
+  // 2. The working half — what the opener actually is.
+  if (leadExercise) {
+    const working = leadExercise.load === 'moderate' || leadExercise.sets >= 4
+    lines.push(
+      working
+        ? `Open with ${leadExercise.name} — real working sets, not a warm-up. Own the pattern, then we keep loading it.`
+        : `Open with ${leadExercise.name} — controlled and clean. We earn the pattern before we pile on load.`,
+    )
+  }
+
+  // 3. The diagnostic half — the planted read, already written in voice.
+  if (readingWhy) lines.push(readingWhy)
+
+  // 4. The close — what makes today count.
+  lines.push(
+    isFirst
+      ? `At the end I'll ask how it went — that's what turns today into a read.`
+      : `Log how it felt at the end — honest signal is what moves the read.`,
+  )
+
+  return lines
+}
+
+function SessionBrief({
+  lines, ctaLabel, onClose,
+}: { lines: string[]; ctaLabel: string; onClose: () => void }) {
   return (
-    <div className="obs-sheet">
-      <div className="obs-sheet__inner">
-        <p className="section-header" style={{ marginBottom: 4 }}>Before you start</p>
-        <p className="text-xs text-dim" style={{ marginBottom: 16, lineHeight: 1.5 }}>
-          A quick read on today — it tunes how I weigh what happens. All optional.
+    <div className="obs-sheet" onClick={onClose}>
+      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
+        <p className="section-header" style={{ color: 'var(--computing)', marginBottom: 4 }}>Why this session</p>
+        <p className="text-xs text-dim" style={{ marginBottom: 14, lineHeight: 1.5 }}>
+          The thinking behind today — read it or jump straight in.
         </p>
-        {READINESS_ROWS.map((row) => (
-          <div key={row.key} className="readiness__row">
-            <span className="readiness__label">{row.label}</span>
-            <div className="readiness__scale">
-              {[1, 2, 3, 4, 5].map((n) => (
-                <button
-                  key={n}
-                  type="button"
-                  className={`readiness__dot${r[row.key] === n ? ' readiness__dot--on' : ''}`}
-                  onClick={() => setR((prev) => ({ ...prev, [row.key]: n }))}
-                >
-                  {n}
-                </button>
-              ))}
-            </div>
-          </div>
-        ))}
-        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-          <Button variant="ghost" style={{ flex: 1 }} onClick={onSkip}>Skip</Button>
-          <Button variant="primary" style={{ flex: 2 }} onClick={() => onStart(r)}>Start session →</Button>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+          {lines.map((l, i) => (
+            <p key={i} className="text-sm" style={{ lineHeight: 1.55 }}>{l}</p>
+          ))}
         </div>
+        <Button variant="primary" full style={{ marginTop: 18 }} onClick={onClose}>{ctaLabel}</Button>
       </div>
     </div>
   )
@@ -356,9 +478,10 @@ export function WorkoutScreen() {
   const [savingDebrief, setSavingDebrief] = useState(false)
   const [workoutId, setWorkoutId] = useState<string | null>(null)
 
-  // Readiness gate (shown once on open).
-  const [showReadiness, setShowReadiness] = useState(true)
-  const [readiness, setReadiness] = useState<Readiness | null>(null)
+  // "Why this session" brief — auto-shown on open (the slot the readiness gate
+  // used to hold), re-openable any time from the header.
+  const [briefOpen, setBriefOpen] = useState(true)
+  const [hasStarted, setHasStarted] = useState(false)
 
   // Per-exercise felt signal (exIdx → feedback).
   const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>({})
@@ -373,6 +496,14 @@ export function WorkoutScreen() {
   const [openReading, setOpenReading] = useState<{ name: string; why: string } | null>(null)
 
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
+
+  // Per-exercise prescription — last week's top set + the week's directive (§4.4).
+  const [prescription, setPrescription] = useState<SessionPrescription | null>(null)
+
+  // Last session's results per exercise index, for the desktop Previous column.
+  const [prevByExercise, setPrevByExercise] = useState<Record<number, SetLog[]>>({})
+  // Which exercise is in focus — drives the "why" panel in the desktop rail.
+  const [activeExIdx, setActiveExIdx] = useState(0)
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const startRef = useRef<number>(Date.now())
@@ -430,6 +561,23 @@ export function WorkoutScreen() {
       })
       setSetLogs(initial)
 
+      // Most recent prior session of this same routine → the Previous column.
+      // Same routine_id means the exercise list (and ordering) matches, so the
+      // index keys line up with this session's exercises.
+      const { data: prevWorkout } = await supabase
+        .from('workout')
+        .select('actual_weights')
+        .eq('routine_id', routineId)
+        .order('performed_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      const prevWeights = (prevWorkout as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
+      if (prevWeights) {
+        const map: Record<number, SetLog[]> = {}
+        Object.entries(prevWeights).forEach(([k, v]) => { map[Number(k)] = v })
+        setPrevByExercise(map)
+      }
+
       const insightIds = [...new Set(exs.map((ex) => ex.insight_id).filter(Boolean))] as string[]
       if (insightIds.length > 0) {
         const { data: insightRows } = await supabase
@@ -439,6 +587,14 @@ export function WorkoutScreen() {
         const map: Record<string, InsightRow> = {}
         ;(insightRows ?? []).forEach((ins) => { map[(ins as InsightRow).id] = ins as InsightRow })
         setInsightMap(map)
+      }
+
+      // Prescription hints — best-effort; the session loads regardless.
+      if (programData && routineId) {
+        try {
+          const presc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, unit)
+          setPrescription(presc)
+        } catch { /* non-fatal */ }
       }
     }
     setLoading(false)
@@ -544,7 +700,7 @@ export function WorkoutScreen() {
       workoutId,
       {
         reflection,
-        readiness,
+        readiness: null,
         exercises: debriefExercises,
         reading: readingEx
           ? { name: readingEx.name, question: readingEx.reading_why ?? '', answer: readingAnswer }
@@ -569,14 +725,6 @@ export function WorkoutScreen() {
     if (reflection) obsRows.push({ workout_id: workoutId, category: 'Reflection', signal: reflection, severity: 1 })
     if (readingAnswer && readingEx) {
       obsRows.push({ workout_id: workoutId, category: 'Reading', signal: `${readingEx.name} — ${readingAnswer}`, severity: 2 })
-    }
-    if (readiness && (readiness.sleep || readiness.energy || readiness.soreness)) {
-      obsRows.push({
-        workout_id: workoutId,
-        category: 'Readiness',
-        signal: `sleep ${readiness.sleep ?? '–'} · energy ${readiness.energy ?? '–'} · soreness ${readiness.soreness ?? '–'}`,
-        severity: 1,
-      })
     }
     if (obsRows.length) await supabase.from('session_observation').insert(obsRows)
 
@@ -628,6 +776,16 @@ export function WorkoutScreen() {
     const best = moves.length
       ? moves.reduce((a, b) => (b.delta > a.delta ? b : a))
       : null
+
+    // The living loop: read this session as evidence on the P1 weak link. Strong,
+    // pain-free P1 work disconfirms the limiter → confidence falls, may resolve,
+    // and a grounded coach note is written (surfaced on the Coach tab).
+    // Best-effort — a logged session must never hang on this.
+    try {
+      await recordSessionAdaptation(athleteId, workoutId)
+    } catch (e) {
+      console.error('[loop] session adaptation failed', e)
+    }
 
     setSavingDebrief(false)
 
@@ -682,6 +840,22 @@ export function WorkoutScreen() {
   const exercises = routine.exercises as ExerciseTemplate[]
   const readingEx = exercises.find((e) => e.reading)
 
+  // The read this session is built around — the insight the most exercises point
+  // at, for the "why this session" brief.
+  const primaryInsight =
+    exercises.map((e) => (e.insight_id ? insightMap[e.insight_id] : undefined)).find(Boolean) ?? null
+  const isFirstSession = onboardingStep === 'first_session_pending'
+  const briefLines = sessionBriefLines({
+    routine,
+    primaryInsight,
+    leadExercise: exercises[0],
+    readingWhy: readingEx?.reading_why ?? null,
+    isFirst: isFirstSession,
+  })
+  const briefCta = hasStarted
+    ? 'Back to training →'
+    : isFirstSession ? 'Start training →' : 'Start session →'
+
   const setsTotal = allSetsFlat.length
   const setsDone  = allSetsFlat.filter((s) => s.done).length
   const rpeLive   = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
@@ -695,6 +869,10 @@ export function WorkoutScreen() {
   if (avgRpeLive !== null) workoutStripItems.push({ label: 'RPE', value: avgRpeLive })
 
   const restLeft = restEndsAt ? Math.max(0, Math.ceil((restEndsAt - Date.now()) / 1000)) : 0
+
+  // Desktop rail context: the exercise whose field was last focused.
+  const activeEx = exercises[activeExIdx]
+  const activeInsight = activeEx?.insight_id ? insightMap[activeEx.insight_id] : undefined
 
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
@@ -716,10 +894,36 @@ export function WorkoutScreen() {
         <div style={{ flex: 1, minWidth: 0 }}>
           <TelemetryStrip items={workoutStripItems} lastSignalAt={new Date(startRef.current)} />
         </div>
+        <button
+          type="button"
+          className="btn btn--ghost"
+          style={{ padding: '0 10px', height: 28, fontSize: 12, color: 'var(--computing)', whiteSpace: 'nowrap' }}
+          onClick={() => setBriefOpen(true)}
+          aria-label="Why this session"
+        >
+          <Info size={13} strokeWidth={2} style={{ marginRight: 4 }} /> Why
+        </button>
       </div>
 
-      {/* Exercise list */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '0 16px 140px' }}>
+      {/* Exercise list (left) + desktop context rail (right) */}
+      <div className="workout-panes">
+       <div className="workout-list">
+        <div className="workout-col">
+        {/* Intelligence Rule in effect — stated out loud (the felt difference) */}
+        {prescription?.rule && (
+          <div
+            style={{
+              marginTop: 16, padding: '12px 14px', borderRadius: 8,
+              background: 'var(--surface)', border: '1px solid var(--signal)',
+            }}
+          >
+            <p className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
+              RULE · {prescription.rule.name}
+            </p>
+            <p className="text-sm" style={{ lineHeight: 1.5 }}>{prescription.rule.reasoning}</p>
+          </div>
+        )}
+
         {exercises.map((ex, exIdx) => {
           const logs = setLogs[exIdx] ?? []
           const trackingType = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
@@ -755,10 +959,26 @@ export function WorkoutScreen() {
                 {ex.cue && (
                   <p className="text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.5 }}>{ex.cue}</p>
                 )}
-                <p className="num text-xs text-dim" style={{ marginTop: 3 }}>
-                  {ex.sets} × {ex.reps}{ex.load ? ` · ${ex.load}` : ''}
-                </p>
+                {prescription?.hints[exIdx] && (
+                  <p
+                    className="num text-xs"
+                    style={{
+                      marginTop: 4, letterSpacing: '0.02em',
+                      color: prescription.held[exIdx] ? 'var(--pending)' : 'var(--signal)',
+                    }}
+                  >
+                    {prescription.hints[exIdx]}
+                  </p>
+                )}
               </div>
+
+              <SetHeader
+                trackingType={trackingType}
+                unit={unit}
+                distanceUnit={distanceUnit}
+                prescribedReps={ex.reps}
+                prescribedLoad={ex.load ?? null}
+              />
 
               {logs.map((log, setIdx) => (
                 <SetRow
@@ -770,15 +990,17 @@ export function WorkoutScreen() {
                   distanceUnit={distanceUnit}
                   prescribedReps={pReps}
                   prescribedDuration={pDur}
+                  prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], unit, distanceUnit)}
                   onChange={(updated) => handleSetChange(exIdx, setIdx, updated)}
                   onComplete={() => setRestEndsAt(Date.now() + REST_SECONDS * 1000)}
+                  onActivate={() => setActiveExIdx(exIdx)}
                 />
               ))}
 
               <button
                 type="button"
                 className="btn btn--ghost"
-                style={{ marginTop: 6, height: 32, fontSize: 12, padding: '0 4px', color: 'var(--text-dim)' }}
+                style={{ marginTop: 8, height: 44, fontSize: 13, padding: '0 8px', color: 'var(--text-dim)' }}
                 onClick={() => addSet(exIdx)}
               >
                 <Plus size={12} strokeWidth={2} style={{ marginRight: 4 }} />
@@ -794,9 +1016,55 @@ export function WorkoutScreen() {
             </div>
           )
         })}
+        </div>
+       </div>
+
+       {/* Desktop-only context rail: live rest clock + why-this-exercise.
+           Hidden under the breakpoint, where these stay as the pill + sheet. */}
+       <aside className="workout-rail">
+         <div className="rail__block">
+           <p className="rail__head">Rest</p>
+           {restEndsAt != null && restLeft > 0 ? (
+             <>
+               <p className="num rail__timer">{formatElapsed(restLeft)}</p>
+               <button
+                 type="button"
+                 className="btn btn--ghost"
+                 style={{ height: 32, fontSize: 12, padding: '0 8px', color: 'var(--text-dim)' }}
+                 onClick={() => setRestEndsAt(null)}
+               >
+                 Skip rest
+               </button>
+             </>
+           ) : (
+             <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
+               Idle. Completing a set starts the {REST_SECONDS}s clock.
+             </p>
+           )}
+         </div>
+
+         {activeEx && (
+           <div className="rail__block">
+             <p className="rail__head">Why this</p>
+             <p className="text-sm" style={{ fontWeight: 600, marginBottom: 4 }}>{activeEx.name}</p>
+             {activeEx.cue && (
+               <p className="text-xs text-dim" style={{ lineHeight: 1.5, marginBottom: activeInsight ? 10 : 0 }}>
+                 {activeEx.cue}
+               </p>
+             )}
+             {activeInsight ? (
+               <p className="text-sm" style={{ lineHeight: 1.5 }}>{activeInsight.claim}</p>
+             ) : !activeEx.cue ? (
+               <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
+                 Tap into a set to see the read on that lift.
+               </p>
+             ) : null}
+           </div>
+         )}
+       </aside>
       </div>
 
-      {/* Rest timer pill */}
+      {/* Rest timer pill (mobile; desktop surfaces it in the rail instead) */}
       {restEndsAt != null && restLeft > 0 && (
         <button type="button" className="rest-pill" onClick={() => setRestEndsAt(null)}>
           <span className="rest-pill__label">REST</span>
@@ -813,28 +1081,31 @@ export function WorkoutScreen() {
           background: 'var(--ground)', borderTop: '1px solid var(--line)',
         }}
       >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-          <div>
-            <span className="text-xs text-dim">Duration  </span>
-            <span className="num text-xs">{formatElapsed(elapsed)}</span>
+        <div className="workout-footer__inner">
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <div>
+              <span className="text-xs text-dim">Duration  </span>
+              <span className="num text-xs">{formatElapsed(elapsed)}</span>
+            </div>
+            <div>
+              <span className="text-xs text-dim">Sets logged  </span>
+              <span className="num text-xs">{setsDone}</span>
+            </div>
           </div>
-          <div>
-            <span className="text-xs text-dim">Sets logged  </span>
-            <span className="num text-xs">{setsDone}</span>
-          </div>
+          <Button variant="primary" full onClick={handleCompleteWorkout} disabled={saving || !hasAnyLog}>
+            {saving ? (
+              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Spinner /> Saving…</span>
+            ) : 'Complete workout →'}
+          </Button>
         </div>
-        <Button variant="primary" full onClick={handleCompleteWorkout} disabled={saving || !hasAnyLog}>
-          {saving ? (
-            <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Spinner /> Saving…</span>
-          ) : 'Complete workout →'}
-        </Button>
       </div>
 
-      {/* Pre-session readiness gate */}
-      {showReadiness && (
-        <ReadinessGate
-          onStart={(r) => { setReadiness(r); setShowReadiness(false) }}
-          onSkip={() => setShowReadiness(false)}
+      {/* "Why this session" brief — the coach's pep talk, shown on open */}
+      {briefOpen && (
+        <SessionBrief
+          lines={briefLines}
+          ctaLabel={briefCta}
+          onClose={() => { setBriefOpen(false); setHasStarted(true) }}
         />
       )}
 

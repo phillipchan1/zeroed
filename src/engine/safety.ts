@@ -47,10 +47,19 @@ const MAX_TIME_HOLD = 60 // seconds
 
 type Load = 'bodyweight' | 'light' | 'moderate'
 
-// The provisional ceiling. trainingAge < 1yr (true novice) → bodyweight only.
-// Everyone else → light max. There is no path to heavy on an unscreened session.
+// The provisional ceiling, scaled to training history so the first session can
+// feel like real training without gambling on a body we haven't watched move:
+//   < 1yr  (true novice)  → bodyweight only
+//   1–2yr  (still green)  → light max
+//   ≥ 2yr  (experienced)  → moderate max
+// There is no path to HEAVY on an unscreened session at any training age, and the
+// CONTRAINDICATED list still bans maximal/ballistic/barbell-max patterns outright.
+const EXPERIENCED_TRAINING_AGE = 2
+
 function loadCeiling(trainingAge: number): Load {
-  return trainingAge < 1 ? 'bodyweight' : 'light'
+  if (trainingAge < 1) return 'bodyweight'
+  if (trainingAge < EXPERIENCED_TRAINING_AGE) return 'light'
+  return 'moderate'
 }
 
 const LOAD_RANK: Record<Load, number> = { bodyweight: 0, light: 1, moderate: 2 }

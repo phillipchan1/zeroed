@@ -2,7 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom
 import { useAuth } from './hooks/useAuth'
 import { useAppState } from './hooks/useAppState'
 import { Spinner } from './components/ui'
-import { Nav } from './components/layout/Nav'
+import { Nav, Sidebar } from './components/layout/Nav'
 import { DebugReset } from './components/DebugReset'
 import { ONBOARDING_FUNNEL_STEPS } from './types/database'
 
@@ -16,6 +16,7 @@ import { ProfileScreen } from './screens/loop/ProfileScreen'
 import { WorkoutScreen } from './screens/loop/WorkoutScreen'
 import { ProgramScreen } from './screens/loop/ProgramScreen'
 import { CoachScreen }   from './screens/loop/CoachScreen'
+import { RetestScreen }  from './screens/loop/RetestScreen'
 
 // ---- Splash ----------------------------------------------------------------
 
@@ -41,10 +42,13 @@ function LoopLayout({
   refresh: () => void
 }) {
   return (
-    <>
-      <Outlet context={{ athleteId, athleteName, todayRoutine, refresh }} />
+    <div className="app-shell">
+      <Sidebar athleteId={athleteId} />
+      <main className="app-main">
+        <Outlet context={{ athleteId, athleteName, todayRoutine, refresh }} />
+      </main>
       <Nav />
-    </>
+    </div>
   )
 }
 
@@ -103,6 +107,9 @@ function AppRoutes() {
 
       {/* Workout — full-screen, no nav */}
       <Route path="/app/workout/:routineId" element={<WorkoutScreen />} />
+
+      {/* Retest — full-screen rescreen (program cadence, §6) */}
+      <Route path="/app/retest" element={<RetestScreen athleteId={athleteId} onDone={refresh} />} />
 
       {/* Catch-all */}
       <Route path="*" element={<Navigate to="/app/today" replace />} />

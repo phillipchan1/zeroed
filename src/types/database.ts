@@ -12,6 +12,17 @@ export type InsightStatus =
 
 export type PhaseName = 'Stability' | 'Strength' | 'Power' | 'Sport'
 
+// Arena archetype — Convergence Move 1 ("what do you want to be able to do?").
+// The persisted enum (athlete.arena_type, migration 20260602000001). The rich
+// demand-table logic in engine/demandTables.ts imports this as its source.
+export type ArenaType =
+  | 'sport'        // "Excel at basketball"
+  | 'number'       // "285 bench", "first pull-up"
+  | 'body'         // "Get jacked", "lean down"
+  | 'durability'   // "Stop getting hurt", "pain-free at 45"
+  | 'event'        // "Spartan in October", "marathon"
+  | 'all_around'   // "Be a complete athlete" — the default wide cloud
+
 export type PhaseStatus = 'pending' | 'active' | 'completed' | 'skipped'
 
 export type ProgramStatus = 'draft' | 'active' | 'completed' | 'paused'
@@ -47,6 +58,9 @@ export interface AthleteRow {
   created_at: string
   onboarding_step: OnboardingStep
   obstacle: string | null
+  arena_type: ArenaType | null
+  arena_raw: string | null
+  limiter_choice: string | null
 }
 
 export interface DiagnosticRow {
@@ -143,8 +157,40 @@ export interface WeeklyReviewRow {
   program_id: string
   week_ending: string
   coach_notes: string | null
-  adjustments: unknown | null
-  next_week_prescription: unknown | null
+  adjustments: WeeklyReviewAdjustments | null
+  next_week_prescription: WeeklyPrescription | null
+}
+
+export type CoachMessageRole = 'coach' | 'athlete'
+export type CoachMessageKind = 'note' | 'weekly_review' | 'phase_change' | 'retest' | 'chat'
+
+export interface CoachMessageRow {
+  id: string
+  athlete_id: string
+  role: CoachMessageRole
+  kind: CoachMessageKind
+  body: string
+  ref_id: string | null
+  created_at: string
+}
+
+// ---- Weekly review value types (deterministic autoregulation, §4.3) --------
+
+export type WeeklyDirective = 'PROGRESS' | 'DELOAD' | 'HOLD' | 'HOLD (missed)'
+
+export interface WeeklyReviewAdjustments {
+  avgRPE: number | null
+  adherence: number
+  painCount: number
+  positiveCount: number
+  flagged_categories: string[]
+}
+
+export interface WeeklyPrescription {
+  directive: WeeklyDirective
+  load_delta_pct: number
+  rpe_target: number
+  rationale: string
 }
 
 // ---- Domain value types ----------------------------------------------------
@@ -264,6 +310,10 @@ export type RoutineInsert = Omit<RoutineRow, 'id'>
 export type WorkoutInsert = Omit<WorkoutRow, 'id' | 'performed_at'>
 
 export type SessionObservationInsert = Omit<SessionObservationRow, 'id' | 'logged_at'>
+
+export type WeeklyReviewInsert = Omit<WeeklyReviewRow, 'id'>
+
+export type CoachMessageInsert = Omit<CoachMessageRow, 'id' | 'created_at'>
 
 // ---- Movement screen constants ---------------------------------------------
 

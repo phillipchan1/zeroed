@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
+import { runLoopTriggers, isRetestDue } from '../../engine'
 import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
 
@@ -9,6 +10,15 @@ interface TodayScreenProps {
   todayRoutine: RoutineRow | null
   onboardingStep?: OnboardingStep
 }
+
+interface LoopContext {
+  refresh: () => void
+}
+
+// Athletes whose lazy triggers have already run this page-session. Module-level
+// (not a ref) so it survives the brief unmount/remount a refresh() causes —
+// otherwise the trigger effect would re-fire on every remount and loop.
+const triggeredThisSession = new Set<string>()
 
 interface WeekDayStatus {
   date: Date
@@ -46,6 +56,7 @@ function isSameDay(a: Date, b: Date) {
  */
 export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
+  const { refresh } = (useOutletContext<LoopContext>() ?? { refresh: () => {} })
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [weekDays, setWeekDays] = useState<WeekDayStatus[]>([])
   const [loading, setLoading]   = useState(true)
@@ -55,13 +66,42 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
   const [lastSignalAt, setLastSignalAt]   = useState<string | null>(null)
   const [goal, setGoal]                   = useState<string | null>(null)
   const [p1, setP1] = useState<{ category: string; confidence: number } | null>(null)
+  const [retestDue, setRetestDue] = useState(false)
 
   useEffect(() => {
     loadWeekData()
     loadGoal()
     loadInsights()
+    loadRetestStatus()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [athleteId])
+
+  // Lazy outer-cadence triggers (§4.2, §5): run the weekly review + phase
+  // advancement once per page-session, then refresh ONLY if something changed.
+  // (refresh() flips global loading → remounts this screen; an unconditional
+  // refresh would reset a local guard and loop, so the guard is module-level and
+  // we refresh only on a real change.)
+  useEffect(() => {
+    if (triggeredThisSession.has(athleteId)) return
+    triggeredThisSession.add(athleteId)
+    void (async () => {
+      const changed = await runLoopTriggers(athleteId)
+      if (changed) {
+        loadRetestStatus()
+        refresh()
+      }
+    })()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [athleteId])
+
+  async function loadRetestStatus() {
+    const { data } = await supabase
+      .from('athlete_profile')
+      .select('retest_date')
+      .eq('athlete_id', athleteId)
+      .maybeSingle()
+    setRetestDue(isRetestDue((data?.retest_date as string | null) ?? null))
+  }
 
   async function loadInsights() {
     const { data } = await supabase
@@ -135,7 +175,8 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
 
       {!loading && <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />}
 
-      <div style={{ padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
+      <div className="page page--rail">
+       <div className="page__main">
 
         {/* Goal anchor — the durable thing. The read moves underneath, and taps
             through to Coach for the why. */}
@@ -162,6 +203,19 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
             </button>
           )}
         </div>
+
+        {/* Retest due — the program cadence CTA (§6). Routes into the rescreen. */}
+        {!loading && retestDue && (
+          <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
+            <SectionHeader>Retest due</SectionHeader>
+            <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>
+              Time to re-read where you are. A quick movement rescreen shows what's moved since baseline and re-scopes the program.
+            </p>
+            <Button variant="primary" full style={{ marginTop: 14 }} onClick={() => navigate('/app/retest')}>
+              Start retest →
+            </Button>
+          </div>
+        )}
 
         {/* Session card — the one action */}
         {loading ? (
@@ -201,9 +255,11 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
             <p className="text-dim" style={{ fontSize: 14 }}>No session scheduled today. Rest day.</p>
           </div>
         )}
+       </div>
 
-        {/* Week strip — cadence, de-emphasised */}
-        <div className="fade-rise fade-rise-delay-2" style={{ marginTop: 28 }}>
+       {/* Week strip — cadence, de-emphasised. Right rail on desktop. */}
+       <aside className="page__rail">
+        <div className="fade-rise fade-rise-delay-2 today-week">
           <SectionHeader>This week</SectionHeader>
           <div className="week-strip" style={{ marginTop: 10, opacity: 0.7, padding: 0 }}>
             {loading
@@ -227,6 +283,7 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
             }
           </div>
         </div>
+       </aside>
       </div>
     </div>
   )

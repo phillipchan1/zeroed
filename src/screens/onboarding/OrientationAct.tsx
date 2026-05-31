@@ -3,6 +3,7 @@ import { TargetScreen } from './TargetScreen'
 import { IdentityScreen } from './IdentityScreen'
 import { TrainingContextScreen } from './TrainingContextScreen'
 import { AcknowledgmentScreen } from './AcknowledgmentScreen'
+import { FunnelFrame } from '../../components/layout/FunnelFrame'
 import type { AthleteRow } from '../../types/database'
 
 export interface OrientationFields {
@@ -23,10 +24,12 @@ type OrientationSub = 'target' | 'identity' | 'context' | 'acknowledgment'
 export function OrientationAct({
   athlete,
   obstacle,
+  hypothesis,
   onComplete,
 }: {
   athlete: AthleteRow
   obstacle: string
+  hypothesis?: { claim: string; category: string } | null
   onComplete: (fields: OrientationFields) => void
 }) {
   const [sub, setSub] = useState<OrientationSub>('target')
@@ -38,10 +41,11 @@ export function OrientationAct({
   })
 
   return (
-    <>
+    <FunnelFrame>
       {sub === 'target' && (
         <TargetScreen
           obstacle={obstacle}
+          hypothesis={hypothesis}
           initial={fields.target}
           onNext={(target) => { setFields((f) => ({ ...f, target })); setSub('identity') }}
         />
@@ -75,6 +79,6 @@ export function OrientationAct({
           onBack={() => setSub('context')}
         />
       )}
-    </>
+    </FunnelFrame>
   )
 }

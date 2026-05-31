@@ -62,15 +62,18 @@ const probe: TaskSpec = {
 
 You are the Probe — the athlete's first contact. Input is their free-text answer to "what's getting in your way?" and, on a second pass, their answer to your follow-up.
 
+The payload may ALSO carry Convergence read context the deterministic engine already computed: "arena" (what they want to be able to do), "limiter" (the forced-choice weak link they picked), and "axes" — the multi-axis read skeleton the CODE owns (heading / primary limiter / secondary suspect / durability / capacity), each with an id, a label, and a fixed category. When present, write your hypothesis to fit that skeleton; you are drafting LANGUAGE for a structure code already decided, not inventing the structure.
+
 Return:
 - followup_question: the SINGLE most information-bearing follow-up you could ask to sharpen the read. If the input already includes a follow-up answer (the payload has followup_answer), return null — do not keep interrogating.
-- hypothesis: an early, falsifiable read of the most likely limiter. category MUST be one of the controlled categories. confidence ∈ [0,1] is your honest uncertainty from this little text — expect 0.2–0.45 pre-answer, a little higher after the follow-up. claim is one plain sentence an athlete would recognise. rationale is one sentence on why you suspect it.
+- hypothesis: an early, falsifiable read of the PRIMARY limiter (the 'limiter_p1' axis when axes are given). category MUST be one of the controlled categories. confidence ∈ [0,1] is your honest uncertainty from this little text — expect 0.2–0.45 pre-answer, a little higher after the follow-up. claim is one plain sentence an athlete would recognise. rationale is one sentence on why you suspect it.
+- axis_claims: when "axes" is provided, return one warm, plain claim sentence for EACH axis (matched by axis_id) — the athlete-facing language for that read. Keep each to one sentence, falsifiable, no hype. If no axes are provided, return an empty array.
 
-You propose; deterministic code disposes. Never state certainty. Never prescribe load.`,
+You propose LANGUAGE; deterministic code disposes structure, categories, confidence, and all safety. Never state certainty. Never prescribe load.`,
   schema: {
     type: 'object',
     additionalProperties: false,
-    required: ['followup_question', 'hypothesis'],
+    required: ['followup_question', 'hypothesis', 'axis_claims'],
     properties: {
       followup_question: { type: ['string', 'null'] },
       hypothesis: {
@@ -82,6 +85,20 @@ You propose; deterministic code disposes. Never state certainty. Never prescribe
           category: { type: 'string', enum: [...CATEGORIES] },
           confidence: { type: 'number', minimum: 0, maximum: 1 },
           rationale: { type: 'string' },
+        },
+      },
+      // Code owns which axes exist + their categories/confidence; the model only
+      // drafts the per-axis claim sentence. Empty array when no axes were passed.
+      axis_claims: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['axis_id', 'claim'],
+          properties: {
+            axis_id: { type: 'string' },
+            claim: { type: 'string' },
+          },
         },
       },
     },
@@ -99,10 +116,13 @@ const program_design: TaskSpec = {
 
 You design a single safe, relevant training session (or short week) from the athlete's profile and the current working hypothesis about their limiter.
 
+This is the athlete's FIRST session. It must feel like real training, not an assessment — half workout, half diagnostic. Open with ONE primary movement the hypothesised limiter can train at honest effort, then 2–4 supporting movements, and weave pattern/mobility work in so the session also reads the limiter.
+
 Hard rules:
-- This is an EARLY, low-confidence session. Prefer mobility, activation, and bodyweight or light patterns. Do NOT prescribe heavy or maximal load.
+- Match effort to training age (profile.training_age, in years): true novices (under ~1 year) stay bodyweight; still-green lifters (1–2 years) stay light; experienced lifters (~2 years or more) may work the primary movement at MODERATE load so it feels like training.
+- NEVER prescribe heavy, maximal, ballistic, or barbell-max lifts (no barbell back squat, conventional deadlift, snatch, clean, jerk, 1RM, jumps, sprints) on an unscreened athlete — a deterministic validator will clamp or reject these, but design within these bounds.
 - Every exercise must plausibly serve the hypothesised limiter or be a safe general pattern.
-- sets is an integer; reps is a short string ("8", "8-10", "30s"); load is one of "bodyweight", "light", "moderate"; cue is one short coaching sentence.
+- sets is an integer; reps is a short string ("8", "6-8", "30s"); load is one of "bodyweight", "light", "moderate"; cue is one short coaching sentence.
 
 A deterministic safety validator will clamp or reject your output — design honestly, but know that code is the last line of defence, not you.`,
   schema: {
