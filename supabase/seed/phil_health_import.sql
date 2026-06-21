@@ -137,6 +137,15 @@ BEGIN
         "sport": "Basketball",
         "goals": "Bench 285, stable OHP 155, hip IR + lateral quickness, pain-free knees",
         "training_age": 15, "sessions_per_week": 5
+      },
+      "field_metrics": {
+        "broad_jump_in": 76,
+        "broad_jump_best_in": 79,
+        "vertical_in": null,
+        "gas_tank_bball": 3,
+        "knee_pain": 3,
+        "ohp_shaking": true,
+        "note": "Baseline reference for the Jun 28 retest. Broad jump first measured May 30 (~6'4\", best ~6'7\") — not captured at the May 17 screen, recorded here as the anchor. Gas tank started low (\"conditioning sucks\") and rose to ~7 (full hour of half-court without gassing) by Week 2."
       }
     }$json$::jsonb
   );
