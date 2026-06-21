@@ -63,6 +63,31 @@ supabase db push
 
 Migrations live in `supabase/migrations/`. Create new ones with `supabase migration new <name>`.
 
+## Install as a PWA (iOS / Add to Home Screen)
+
+Zeroed ships as an installable Progressive Web App — no App Store needed.
+
+1. Deploy the app (see **Deploy to Vercel** above) so it's served over HTTPS.
+   The service worker only registers on a production build, not in `npm run dev`.
+2. On your iPhone/iPad, open the deployed URL in **Safari** (PWA install on iOS
+   only works from Safari).
+3. Tap the **Share** button → **Add to Home Screen** → **Add**.
+4. Launch "Zeroed" from your home screen — it opens full-screen (standalone),
+   with offline support via the service worker.
+
+### PWA assets
+
+- `public/manifest.webmanifest` — app name, theme, icons, standalone display.
+- `public/sw.js` — service worker (network-first navigations, runtime caching).
+- `public/icons/` + `public/apple-touch-icon.png` — generated icons.
+
+Regenerate the icons (e.g. after a brand change) with:
+
+```bash
+pip install Pillow
+python3 scripts/gen-icons.py
+```
+
 ## iOS (Capacitor)
 
 The Capacitor config is committed (`capacitor.config.ts`). Add the iOS platform when ready:
