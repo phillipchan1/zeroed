@@ -32,7 +32,7 @@ import {
   callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callInfoGain, callTarget,
   callCoachChat,
   type ProgramDesignResult, type InsightCategory,
-  type CoachContext, type CoachChatTurn,
+  type CoachContext, type CoachChatTurn, type CoachAction,
 } from './agentClient'
 import { FELT_CHIPS, type FeltLabel } from '../types/database'
 import { validateProvisionalProgram } from './safety'
@@ -765,12 +765,16 @@ export interface CoachReply {
   source: 'agent' | 'fallback'
   reply: string
   followups: string[]
+  // Proposed changes — NEVER applied here. Surfaced for the athlete to confirm in
+  // CoachScreen, then disposed by applyCoachActions. Always [] on the fallback path.
+  actions: CoachAction[]
 }
 
 /**
- * Ask the Coach a question. agent proposes (the prose) → there is nothing to
- * dispose because it's read-only, but the call can still fail, so we fall back to
- * a grounded, in-voice reply built from the scoped context.
+ * Ask the Coach a question. The agent proposes (prose + optional change actions);
+ * the actions are not applied until the athlete confirms them. The call can fail,
+ * so we fall back to a grounded, in-voice reply built from the scoped context
+ * (and never any actions).
  */
 export async function runCoachChat(
   context: CoachContext,
@@ -779,16 +783,127 @@ export async function runCoachChat(
 ): Promise<CoachReply> {
   const res = await callCoachChat({ context, history, question })
   if (res.ok) {
-    return { source: 'agent', reply: res.data.reply, followups: res.data.followups ?? [] }
+    return {
+      source: 'agent',
+      reply: res.data.reply,
+      followups: res.data.followups ?? [],
+      actions: Array.isArray(res.data.actions) ? res.data.actions : [],
+    }
   }
 
   // Deterministic floor — never dead-end the surface. Stay in voice, route
-  // correctly, and lean on the real read in context.
+  // correctly, and lean on the real read in context. No actions on this path.
   const p1 = context.insights[0] ?? null
   const reply = p1
     ? `Can't reach my full read this second. The short version stands: your ${p1.category.toLowerCase()} is the working limiter — ${p1.claim} It's at ${Math.round(p1.confidence * 100)}% and sharpens every session you log.`
     : `Can't reach my full read this second. Log a session and I'll have something concrete to work from.`
-  return { source: 'fallback', reply, followups: [] }
+  return { source: 'fallback', reply, followups: [], actions: [] }
+}
+
+// ---- Coach write actions (proposal-gated) ----------------------------------
+// The coach can PROPOSE changes; these appliers DISPOSE them — but only after the
+// athlete taps Apply. Every write is RLS-scoped to the athlete (the agent / OpenAI
+// key is never involved). Each applier is defensive: bad refs fail soft with a
+// readable error rather than throwing.
+
+/** One-line human summary of a proposed/applied action, for the confirm card. */
+export function describeCoachAction(a: CoachAction): string {
+  switch (a.type) {
+    case 'update_insight': {
+      const bits: string[] = []
+      if (a.set_status) bits.push(`status → ${a.set_status}`)
+      if (a.set_confidence != null) bits.push(`confidence → ${Math.round(a.set_confidence * 100)}%`)
+      if (a.set_priority) bits.push(`priority → ${a.set_priority}`)
+      if (a.set_claim) bits.push(`claim → "${a.set_claim}"`)
+      return `Update read — ${bits.join(', ') || 'no change'}`
+    }
+    case 'update_exercise': {
+      const bits: string[] = []
+      if (a.set_load) bits.push(`load → ${a.set_load}`)
+      if (a.set_sets != null) bits.push(`sets → ${a.set_sets}`)
+      if (a.set_reps) bits.push(`reps → ${a.set_reps}`)
+      if (a.set_cue) bits.push(`cue → "${a.set_cue}"`)
+      return `${a.exercise_name ?? 'Exercise'} (${a.routine_name ?? 'routine'}) — ${bits.join(', ') || 'no change'}`
+    }
+    case 'add_note':
+      return `Coach note — "${a.note ?? ''}"`
+    default:
+      return 'Change'
+  }
+}
+
+export interface AppliedAction {
+  ok: boolean
+  label: string
+  error?: string
+}
+
+/**
+ * Apply a batch of coach-proposed actions. Called from CoachScreen ONLY after the
+ * athlete confirms. Returns a per-action result so the UI can report what landed.
+ */
+export async function applyCoachActions(
+  athleteId: string,
+  actions: CoachAction[],
+): Promise<AppliedAction[]> {
+  const results: AppliedAction[] = []
+
+  // Resolve the active program once (needed for exercise edits).
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+
+  for (const a of actions) {
+    const label = describeCoachAction(a)
+    try {
+      if (a.type === 'update_insight') {
+        if (!a.insight_id) { results.push({ ok: false, label, error: 'no insight id' }); continue }
+        const VALID_STATUS = ['hypothesis', 'likely', 'confirmed', 'resolved', 'disproved']
+        const VALID_PRIORITY = ['P1', 'P2', 'P3', 'P4']
+        const patch: Record<string, unknown> = {}
+        if (a.set_confidence != null) patch.confidence = Math.max(0, Math.min(1, a.set_confidence))
+        if (a.set_status && VALID_STATUS.includes(a.set_status)) patch.status = a.set_status
+        if (a.set_priority && VALID_PRIORITY.includes(a.set_priority)) patch.priority = a.set_priority
+        if (a.set_claim) patch.claim = a.set_claim
+        if (Object.keys(patch).length === 0) { results.push({ ok: false, label, error: 'nothing to change' }); continue }
+        const { error } = await supabase
+          .from('insight').update(patch).eq('id', a.insight_id).eq('athlete_id', athleteId)
+        results.push({ ok: !error, label, error: error?.message })
+
+      } else if (a.type === 'update_exercise') {
+        if (!prog?.id) { results.push({ ok: false, label, error: 'no active program' }); continue }
+        if (!a.routine_name || !a.exercise_name) { results.push({ ok: false, label, error: 'missing routine/exercise' }); continue }
+        const { data: routines } = await supabase
+          .from('routine').select('id, exercises').eq('program_id', prog.id).ilike('name', `%${a.routine_name}%`).limit(1)
+        const routine = routines?.[0] as { id: string; exercises: ExerciseTemplate[] | null } | undefined
+        if (!routine) { results.push({ ok: false, label, error: `routine "${a.routine_name}" not found` }); continue }
+        const exs = Array.isArray(routine.exercises) ? [...routine.exercises] : []
+        const want = a.exercise_name.toLowerCase()
+        const idx = exs.findIndex((e) => (e.name ?? '').toLowerCase().includes(want))
+        if (idx < 0) { results.push({ ok: false, label, error: `exercise "${a.exercise_name}" not found` }); continue }
+        const ex: ExerciseTemplate = { ...exs[idx] }
+        if (a.set_load) ex.load = a.set_load
+        if (a.set_sets != null) ex.sets = a.set_sets
+        if (a.set_reps) ex.reps = a.set_reps
+        if (a.set_cue) ex.cue = a.set_cue
+        exs[idx] = ex
+        const { error } = await supabase.from('routine').update({ exercises: exs }).eq('id', routine.id)
+        results.push({ ok: !error, label, error: error?.message })
+
+      } else if (a.type === 'add_note') {
+        if (!a.note) { results.push({ ok: false, label, error: 'empty note' }); continue }
+        const { error } = await supabase
+          .from('coach_message').insert({ athlete_id: athleteId, role: 'coach', kind: 'note', body: a.note })
+        results.push({ ok: !error, label, error: error?.message })
+
+      } else {
+        results.push({ ok: false, label, error: 'unknown action type' })
+      }
+    } catch (e) {
+      results.push({ ok: false, label, error: String(e) })
+    }
+  }
+
+  return results
 }
 
 // ════════════════════════════════════════════════════════════════════════════

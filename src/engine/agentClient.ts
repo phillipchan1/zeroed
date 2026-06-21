@@ -133,9 +133,30 @@ export interface CoachChatTurn {
   content: string
 }
 
+// A change the coach PROPOSES. Never auto-applied — surfaced in CoachScreen for
+// the athlete to confirm, then disposed by RLS-scoped client writes. Unused
+// fields are null (the model fills every field; only the relevant ones are set).
+export interface CoachAction {
+  type: 'update_insight' | 'update_exercise' | 'add_note'
+  rationale: string
+  insight_id: string | null
+  routine_name: string | null
+  exercise_name: string | null
+  set_confidence: number | null
+  set_status: 'hypothesis' | 'likely' | 'confirmed' | 'resolved' | 'disproved' | null
+  set_priority: 'P1' | 'P2' | 'P3' | 'P4' | null
+  set_claim: string | null
+  set_load: string | null
+  set_sets: number | null
+  set_reps: string | null
+  set_cue: string | null
+  note: string | null
+}
+
 export interface CoachChatResult {
   reply: string
   followups: string[]
+  actions: CoachAction[]
 }
 
 // ---- device id (pre-auth probe rate limiting) -------------------------------

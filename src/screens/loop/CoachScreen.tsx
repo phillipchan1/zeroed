@@ -5,8 +5,9 @@ import {
 } from '../../components/ui'
 import {
   countInsightsByStatus, gatherCoachContext, coachStarterPrompts, runCoachChat,
+  applyCoachActions, describeCoachAction,
 } from '../../engine'
-import type { CoachContext, CoachChatTurn } from '../../engine/agentClient'
+import type { CoachContext, CoachChatTurn, CoachAction } from '../../engine/agentClient'
 import type { InsightRow, CoachMessageRow, WeeklyPrescription } from '../../types/database'
 
 /**
@@ -57,6 +58,12 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   const [stackOpen, setStackOpen]   = useState(false)   // full read collapsed by default
   const threadEndRef = useRef<HTMLDivElement | null>(null)
 
+  // Coach-proposed changes awaiting the athlete's confirmation, plus a key that
+  // forces a re-pull of the read after an apply so the screen reflects the write.
+  const [proposed, setProposed]   = useState<CoachAction[]>([])
+  const [applying, setApplying]   = useState(false)
+  const [refreshKey, setRefreshKey] = useState(0)
+
   useEffect(() => {
     void (async () => {
       setLoading(true)
@@ -99,7 +106,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
       setContext(ctx)
       setSuggestions(coachStarterPrompts(ctx))
     })()
-  }, [athleteId])
+  }, [athleteId, refreshKey])
 
   // Keep the latest turn in view as the thread grows.
   useEffect(() => {
@@ -132,6 +139,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     if (!q || pending || !context) return
     setDraft('')
     setSuggestions([])
+    setProposed([])   // a new question supersedes any un-applied proposal
     // Mark prior coach turns stale so only the new reply types on.
     const history: CoachChatTurn[] = turns.map((t) => ({ role: t.role, content: t.content }))
     setTurns((prev) => [...prev.map((t) => ({ ...t, fresh: false })), { role: 'athlete', content: q }])
@@ -141,7 +149,25 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
 
     setTurns((prev) => [...prev, { role: 'coach', content: res.reply, fresh: true }])
     setSuggestions(res.followups.length ? res.followups : [])
+    setProposed(res.actions ?? [])
     setPending(false)
+  }
+
+  // Apply the coach's proposed changes — the only place the conversation writes,
+  // and only on an explicit tap. Reports what landed, then re-pulls the read.
+  async function applyProposed() {
+    if (!proposed.length || applying) return
+    setApplying(true)
+    const results = await applyCoachActions(athleteId, proposed)
+    const okCount = results.filter((r) => r.ok).length
+    const fails = results.filter((r) => !r.ok)
+    const summary = fails.length === 0
+      ? `Done — applied ${okCount} change${okCount === 1 ? '' : 's'}.`
+      : `Applied ${okCount}/${results.length}. Couldn't apply: ${fails.map((f) => `${f.label} (${f.error ?? 'failed'})`).join('; ')}`
+    setTurns((prev) => [...prev.map((t) => ({ ...t, fresh: false })), { role: 'coach', content: summary, fresh: true }])
+    setProposed([])
+    setApplying(false)
+    setRefreshKey((k) => k + 1)   // re-pull insights + log so the read reflects the write
   }
 
   return (
@@ -277,6 +303,39 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
                 ))}
               </div>
             )}
+
+            {/* Proposed changes — the coach can write, but only behind this gate.
+                Nothing is persisted until the athlete taps Apply. */}
+            {!pending && proposed.length > 0 && (
+              <div className="card fade-rise" style={{ marginTop: 12, borderColor: 'var(--signal)' }}>
+                <p className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
+                  Proposed changes · confirm to apply
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 12 }}>
+                  {proposed.map((a, i) => (
+                    <div key={i}>
+                      <p className="text-sm" style={{ lineHeight: 1.4 }}>{describeCoachAction(a)}</p>
+                      {a.rationale && (
+                        <p className="text-xs text-dim" style={{ lineHeight: 1.4, marginTop: 2 }}>{a.rationale}</p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div style={{ display: 'flex', gap: 8 }}>
+                  <button type="button" onClick={() => void applyProposed()} disabled={applying}>
+                    {applying ? 'Applying…' : 'Apply'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setProposed([])}
+                    disabled={applying}
+                    style={{ background: 'transparent', color: 'var(--text-dim)' }}
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Input */}
@@ -296,7 +355,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
           </form>
 
           <p className="text-xs text-dim" style={{ marginTop: 8, lineHeight: 1.5, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
-            Read-only. Noticed something? Log it in your next session — that's where it counts.
+            The coach can propose changes — you approve each before anything is written. Noticed something mid-session? Still log it next session; that's where it counts as evidence.
           </p>
         </div>
       </div>
