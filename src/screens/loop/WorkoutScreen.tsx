@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react'
-import { useParams, useNavigate } from 'react-router-dom'
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import {
@@ -455,6 +455,17 @@ function newSetLog(setNum: number): SetLog {
   return { set: setNum, weight: null, reps: null, rpe: null, done: false, duration: null, distance: null }
 }
 
+// <input type="date"> wants local yyyy-mm-dd; we anchor the stored timestamp at
+// local noon so the day never slips across a timezone boundary.
+function toDateInput(d: Date): string {
+  const m = `${d.getMonth() + 1}`.padStart(2, '0')
+  const day = `${d.getDate()}`.padStart(2, '0')
+  return `${d.getFullYear()}-${m}-${day}`
+}
+function dateInputToISO(s: string): string {
+  return new Date(`${s}T12:00:00`).toISOString()
+}
+
 // A set counts as "logged" once it carries any real signal — the trigger for
 // autosaving the draft (so we never persist an untouched, empty session).
 function isLogged(s: SetLog): boolean {
@@ -474,9 +485,17 @@ function performedSummary(t: TrackingType, logs: SetLog[], unit: string, distanc
 export function WorkoutScreen() {
   const { routineId } = useParams<{ routineId: string }>()
   const navigate      = useNavigate()
+  const [searchParams] = useSearchParams()
+  // ?w=<id> → editing an already-logged session (re-runs the coach on save).
+  const editWorkoutId = searchParams.get('w')
+  const isEdit = !!editWorkoutId
 
   const unit = getWeightUnit()
   const distanceUnit = getDistanceUnit(unit)
+
+  // The day the session happened — defaults to today, editable so a forgotten
+  // session can be backdated. Stored as a yyyy-mm-dd input string.
+  const [performedAt, setPerformedAt] = useState<string>(() => toDateInput(new Date()))
 
   const [routine, setRoutine]     = useState<RoutineRow | null>(null)
   const [athleteId, setAthleteId] = useState<string | null>(null)
@@ -674,11 +693,33 @@ export function WorkoutScreen() {
         } catch { /* non-fatal */ }
       }
 
-      // Resume an in-progress session if one was autosaved this week. We overlay
-      // the draft onto the fresh template by exercise index, so a routine that has
-      // since gained/lost an exercise still loads cleanly. The timer continues
-      // from the saved elapsed (true stop/continue — time away isn't counted).
-      if (programData && routineId) {
+      if (isEdit && editWorkoutId) {
+        // Editing a logged session: hydrate from the workout row, not a draft.
+        // No autosave (completedRef), no brief — straight into the numbers.
+        completedRef.current = true
+        const { data: w } = await supabase
+          .from('workout')
+          .select('actual_weights, duration_mins, performed_at')
+          .eq('id', editWorkoutId)
+          .maybeSingle()
+        const aw = (w as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
+        if (aw) {
+          const merged: Record<number, SetLog[]> = { ...initial }
+          Object.entries(aw).forEach(([k, v]) => { if (v && v.length) merged[Number(k)] = v })
+          setSetLogs(merged)
+        }
+        const dur = (w as { duration_mins: number | null } | null)?.duration_mins ?? 0
+        setElapsed(dur * 60)
+        startRef.current = Date.now() - dur * 60 * 1000
+        const performed = (w as { performed_at: string | null } | null)?.performed_at
+        if (performed) setPerformedAt(toDateInput(new Date(performed)))
+        setHasStarted(true)
+        setBriefOpen(false)
+      } else if (programData && routineId) {
+        // Resume an in-progress session if one was autosaved this week. We overlay
+        // the draft onto the fresh template by exercise index, so a routine that has
+        // since gained/lost an exercise still loads cleanly. The timer continues
+        // from the saved elapsed (true stop/continue — time away isn't counted).
         const draft = await restoreDraft(programData.athlete_id, routineId)
         if (draft) {
           const merged: Record<number, SetLog[]> = { ...initial }
@@ -760,9 +801,34 @@ export function WorkoutScreen() {
       durationMins: Math.ceil(finalElapsedRef.current / 60),
       setsDone: allSetsFlat.filter((s) => s.done).length,
       athleteName,
-      onboardingTransition,
+      onboardingTransition: isEdit ? null : onboardingTransition,
       debrief,
+      editWorkoutId: isEdit ? editWorkoutId : null,
+      performedAt: dateInputToISO(performedAt),
       queuedAt: new Date().toISOString(),
+    }
+  }
+
+  // Build the debrief payload from the per-exercise feedback + performed numbers.
+  function buildDebrief(reflection: string, readingAnswer: string): PendingDebrief {
+    const exercises = (routine!.exercises as ExerciseTemplate[])
+    const readingEx = exercises.find((e) => e.reading)
+    const debriefExercises: DebriefExerciseInput[] = exercises.map((ex, i) => {
+      const t = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
+      const fb = feedback[i]
+      return {
+        name: ex.name,
+        felt: fb?.felt ?? null,
+        note: fb?.note ?? '',
+        prescribed: `${ex.sets}×${ex.reps}${ex.load ? ` ${ex.load}` : ''}`,
+        performed: performedSummary(t, setLogs[i] ?? [], unit, distanceUnit),
+      }
+    })
+    return {
+      reflection,
+      readingAnswer,
+      exercises: debriefExercises,
+      reading: readingEx ? { name: readingEx.name, readingWhy: readingEx.reading_why ?? '' } : null,
     }
   }
 
@@ -776,7 +842,7 @@ export function WorkoutScreen() {
 
     const pending = buildPending(debrief)
     enqueueSession(pending)                       // durable before any network
-    clearDraft(athleteId, routineId!)             // the outbox is its home now
+    if (!isEdit) clearDraft(athleteId, routineId!) // the outbox is its home now
 
     let result
     try {
@@ -785,6 +851,12 @@ export function WorkoutScreen() {
       result = null                                // offline / failed — stays queued
     }
     setSavingDebrief(false)
+
+    // Editing an existing session → back to Today (no revelation / pulse).
+    if (isEdit) {
+      navigate('/app/today', { replace: true, state: { queuedOffline: result === null } })
+      return
+    }
 
     if (result && result.firstSession) {
       navigate('/onboarding/revelation', {
@@ -817,31 +889,15 @@ export function WorkoutScreen() {
 
   function handleDebrief(reflection: string, readingAnswer: string) {
     if (!routine) return
-    const exercises = routine.exercises as ExerciseTemplate[]
-    const readingEx = exercises.find((e) => e.reading)
-
-    const debriefExercises: DebriefExerciseInput[] = exercises.map((ex, i) => {
-      const t = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
-      const fb = feedback[i]
-      return {
-        name: ex.name,
-        felt: fb?.felt ?? null,
-        note: fb?.note ?? '',
-        prescribed: `${ex.sets}×${ex.reps}${ex.load ? ` ${ex.load}` : ''}`,
-        performed: performedSummary(t, setLogs[i] ?? [], unit, distanceUnit),
-      }
-    })
-
-    void finishSession({
-      reflection,
-      readingAnswer,
-      exercises: debriefExercises,
-      reading: readingEx ? { name: readingEx.name, readingWhy: readingEx.reading_why ?? '' } : null,
-    })
+    void finishSession(buildDebrief(reflection, readingAnswer))
   }
 
+  // Skipping still re-runs the coach on an edit (the chosen behaviour: every edit
+  // re-reads the session), just with no fresh reflection text. A brand-new
+  // session skips the debrief entirely (workout numbers only).
   function handleDebriefSkip() {
-    void finishSession(null)
+    if (!routine) return
+    void finishSession(isEdit ? buildDebrief('', '') : null)
   }
 
   // ---- loading / error ------------------------------------------------------
@@ -1108,17 +1164,27 @@ export function WorkoutScreen() {
       >
         <div className="workout-footer__inner">
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span className="text-xs text-dim">Day</span>
+              <input
+                type="date"
+                className="num text-xs"
+                value={performedAt}
+                max={toDateInput(new Date())}
+                onChange={(e) => setPerformedAt(e.target.value || toDateInput(new Date()))}
+                style={{
+                  background: 'transparent', border: '1px solid var(--line)', borderRadius: 6,
+                  color: 'var(--text)', padding: '2px 6px', fontSize: 12,
+                }}
+              />
+            </label>
             <div>
-              <span className="text-xs text-dim">Duration  </span>
-              <span className="num text-xs">{formatElapsed(elapsed)}</span>
-            </div>
-            <div>
-              <span className="text-xs text-dim">Sets logged  </span>
+              <span className="text-xs text-dim">Sets  </span>
               <span className="num text-xs">{setsDone}</span>
             </div>
           </div>
           <Button variant="primary" full onClick={handleCompleteWorkout} disabled={!hasAnyLog}>
-            Complete workout →
+            {isEdit ? 'Save changes →' : 'Complete workout →'}
           </Button>
         </div>
       </div>

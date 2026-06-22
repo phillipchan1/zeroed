@@ -3,7 +3,7 @@ import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
 import { runLoopTriggers, isRetestDue } from '../../engine'
-import { loadActiveDraft, type ActiveDraft } from '../../lib/workoutDraft'
+import { loadDraftRoutineIds } from '../../lib/workoutDraft'
 import { pendingCount } from '../../lib/workoutOutbox'
 import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
@@ -52,31 +52,18 @@ function isSameDay(a: Date, b: Date) {
   )
 }
 
-// A quiet, link-styled toggle that reveals the session picker. Kept subtle so the
-// recommended session stays the focal action and picking another is a deliberate,
-// secondary move.
-function PickerToggle({ open, onClick, label }: { open: boolean; onClick: () => void; label: string }) {
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      style={{
-        marginTop: 12, padding: 0, background: 'none', border: 'none', cursor: 'pointer',
-        fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em',
-        color: 'var(--text-dim)', display: 'inline-flex', alignItems: 'center', gap: 6,
-      }}
-    >
-      {label}
-      <span style={{ opacity: 0.6 }}>{open ? '▴' : '▾'}</span>
-    </button>
-  )
-}
+const shortDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short' })
 
 // The cached Today view. Everything here is serializable (ISO strings, plain
 // numbers) so it round-trips through localStorage; the date-derived week strip
-// is recomputed at render from `loggedDates` against "now".
+// is recomputed at render from the workouts against "now".
+interface WeekWorkout {
+  id: string
+  routineId: string
+  performedAt: string
+}
 interface TodayView {
-  loggedDates: string[]          // ISO timestamps of workouts logged this week
+  weekWorkouts: WeekWorkout[]    // every workout logged this week (for status + strip)
   totalInsights: number
   likelyCount: number
   p1Count: number
@@ -93,7 +80,7 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
   const [workoutRes, insightRes, athRes, profileRes] = await Promise.all([
     supabase
       .from('workout')
-      .select('performed_at, routine_id, routine!inner(program!inner(athlete_id))')
+      .select('id, performed_at, routine_id, routine!inner(program!inner(athlete_id))')
       .gte('performed_at', days[0].toISOString())
       .lte('performed_at', weekEnd.toISOString()),
     supabase.from('insight').select('*').eq('athlete_id', athleteId).order('priority'),
@@ -111,7 +98,11 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
   const ath = athRes.data as { goals: string | null; obstacle: string | null } | null
 
   return {
-    loggedDates: (workoutRes.data ?? []).map((w) => w.performed_at as string),
+    weekWorkouts: (workoutRes.data ?? []).map((w) => ({
+      id: w.id as string,
+      routineId: w.routine_id as string,
+      performedAt: w.performed_at as string,
+    })),
     totalInsights: all.length,
     likelyCount: all.filter((i) => i.status === 'likely').length,
     p1Count: active.filter((i) => i.priority === 'P1').length,
@@ -122,18 +113,93 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
   }
 }
 
+// ---- one session row in the week list -------------------------------------
+
+type SessionState =
+  | { kind: 'todo' }
+  | { kind: 'in_progress' }
+  | { kind: 'done'; lastWorkout: WeekWorkout; count: number }
+
+function SessionCard({
+  routine, recommended, state, onStart, onResume, onEdit, onLogAgain,
+}: {
+  routine: RoutineRow
+  recommended: boolean
+  state: SessionState
+  onStart: () => void
+  onResume: () => void
+  onEdit: () => void
+  onLogAgain: () => void
+}) {
+  const exCount = (routine.exercises as unknown[]).length
+  const done = state.kind === 'done'
+  const inProg = state.kind === 'in_progress'
+  const borderColor = inProg ? 'var(--signal)' : done ? 'var(--confirmed)' : undefined
+
+  return (
+    <div className="card fade-rise" style={{ marginBottom: 10, borderColor }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+        <h3 style={{ fontSize: 15, fontWeight: 600, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+          {routine.name}
+          {recommended && state.kind === 'todo' && (
+            <span className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+              Recommended
+            </span>
+          )}
+        </h3>
+        <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{exCount} ex</span>
+      </div>
+
+      {/* Status line */}
+      <p
+        className="text-xs"
+        style={{
+          marginTop: 6, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', textTransform: 'uppercase',
+          color: done ? 'var(--confirmed)' : inProg ? 'var(--signal)' : 'var(--text-dim)',
+        }}
+      >
+        {state.kind === 'done'
+          ? `✓ Logged · ${shortDay(state.lastWorkout.performedAt)}${state.count > 1 ? ` · ×${state.count}` : ''}`
+          : inProg ? '● In progress' : '○ To do'}
+      </p>
+
+      {routine.intent && state.kind === 'todo' && (
+        <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{routine.intent}</p>
+      )}
+
+      {/* Action */}
+      <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 12 }}>
+        {state.kind === 'todo' && (
+          <Button variant={recommended ? 'primary' : 'ghost'} full onClick={onStart}>
+            Start session →
+          </Button>
+        )}
+        {state.kind === 'in_progress' && (
+          <Button variant="primary" full onClick={onResume}>Resume →</Button>
+        )}
+        {state.kind === 'done' && (
+          <>
+            <Button variant="ghost" style={{ flex: 1 }} onClick={onEdit}>Edit</Button>
+            <Button variant="ghost" style={{ flex: 1 }} onClick={onLogAgain}>Log again</Button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 /**
- * TRAIN — the calm surface: what you're chasing, the one read moving underneath
- * it, and the session to do. The depth (the weak-link stack, the "why") lives in
- * Coach; the plan and rules live in Program. Show the conclusion, hide the
- * working — the feeling of intelligence is the confidence number that moves.
+ * TRAIN — the week, in full. Every session for the week is on the surface with
+ * its state (to-do / in-progress / done), startable, resumable, and editable in
+ * any order. Sessions aren't pinned to days — you pick what fits the gym, the
+ * gear, the time you've got. The read sharpens underneath as you train; the
+ * end-of-week recap lives in Coach.
  */
 export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
   const { refresh } = (useOutletContext<LoopContext>() ?? { refresh: () => {} })
   const isFirstVisit = onboardingStep === 'first_session_pending'
-  const [showPicker, setShowPicker] = useState(false)
-  const [resume, setResume] = useState<ActiveDraft | null>(null)
+  const [draftRoutineIds, setDraftRoutineIds] = useState<string[]>([])
   // Sessions finished offline, waiting to sync. Re-checked when connectivity
   // returns so the note clears itself once the outbox drains.
   const [pendingSync, setPendingSync] = useState(pendingCount())
@@ -150,23 +216,23 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const goal          = view?.goal ?? null
   const p1            = view?.p1 ?? null
   const retestDue     = isRetestDue(view?.retestDate ?? null)
+  const weekWorkouts  = view?.weekWorkouts ?? []
 
-  // Week strip — recomputed from cached logged-dates against the current day, so
-  // "today" and the Mon–Sun window are always correct even from a stale cache.
+  // Week strip — recomputed from the workouts against the current day, so "today"
+  // and the Mon–Sun window are always correct even from a stale cache.
   const today = new Date()
-  const loggedDates = (view?.loggedDates ?? []).map((s) => new Date(s))
+  const loggedDates = weekWorkouts.map((w) => new Date(w.performedAt))
   const weekDays: WeekDayStatus[] = getWeekDays().map((d) => ({
     date: d,
     logged: loggedDates.some((ld) => isSameDay(ld, d)),
     isToday: isSameDay(d, today),
   }))
 
-  // A live draft surfaces a "Resume session" entry. Best-effort and offline-
-  // tolerant — the WorkoutScreen can still resume from its localStorage tier even
-  // if this lookup can't reach the server.
+  // Which sessions are mid-flight (a live draft). Offline-tolerant — the local
+  // scan alone is enough, so the markers show with no connection.
   useEffect(() => {
-    void loadActiveDraft(athleteId).then(setResume).catch(() => setResume(null))
-  }, [athleteId])
+    void loadDraftRoutineIds(athleteId).then(setDraftRoutineIds).catch(() => setDraftRoutineIds([]))
+  }, [athleteId, view])
 
   // Keep the pending-sync note honest: the outbox flushes on `online`, so recount
   // shortly after connectivity returns (and on focus) to clear it when drained.
@@ -182,9 +248,6 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
 
   // Lazy outer-cadence triggers (§4.2, §5): run the weekly review + phase
   // advancement once per page-session, then refresh ONLY if something changed.
-  // (refresh() flips global loading → remounts this screen; an unconditional
-  // refresh would reset a local guard and loop, so the guard is module-level and
-  // we refresh only on a real change.)
   useEffect(() => {
     if (triggeredThisSession.has(athleteId)) return
     triggeredThisSession.add(athleteId)
@@ -198,15 +261,14 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [athleteId])
 
-  function handleStartWorkout() {
-    if (todayRoutine) navigate(`/app/workout/${todayRoutine.id}`)
-  }
-
-  // Free picking — start any session in the phase, not just the recommended one.
-  // The plan still recommends where the week left off, but equipment/energy/time
-  // can send you to a different session, so any of them is one tap away.
-  function startRoutine(routineId: string) {
-    navigate(`/app/workout/${routineId}`)
+  // Per-routine status for the week list.
+  function statusFor(routineId: string): SessionState {
+    const ws = weekWorkouts
+      .filter((w) => w.routineId === routineId)
+      .sort((a, b) => b.performedAt.localeCompare(a.performedAt))
+    if (ws.length) return { kind: 'done', lastWorkout: ws[0], count: ws.length }
+    if (draftRoutineIds.includes(routineId)) return { kind: 'in_progress' }
+    return { kind: 'todo' }
   }
 
   const telemetryItems: Array<{ label: string; value: string | number; signal?: boolean }> = [
@@ -216,6 +278,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   ]
 
   const confidencePct = p1 ? Math.round(p1.confidence * 100) : null
+  const doneCount = routines.filter((r) => statusFor(r.id).kind === 'done').length
 
   return (
     <div className="screen with-nav">
@@ -224,7 +287,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           className="fade-rise"
           style={{ padding: '12px 16px', fontSize: 14, color: 'var(--text)', lineHeight: 1.5, borderBottom: '1px solid var(--line)' }}
         >
-          This is Today. Open it before each session — it shows you what to do, and the read sharpens underneath as you train.
+          This is your week. Every session's here — start any of them, in any order, and pick up where you left off. The read sharpens underneath as you train.
         </p>
       )}
 
@@ -233,8 +296,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
       <div className="page page--rail">
        <div className="page__main">
 
-        {/* Offline-completed sessions waiting to sync. They're saved locally; the
-            coach reads them (the AI debrief) as soon as you're back online. */}
+        {/* Offline-completed sessions waiting to sync. */}
         {pendingSync > 0 && (
           <div
             className="fade-rise"
@@ -251,12 +313,12 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
 
         {/* Goal anchor — the durable thing. The read moves underneath, and taps
             through to Coach for the why. */}
-        <div className="fade-rise" style={{ marginBottom: 28 }}>
+        <div className="fade-rise" style={{ marginBottom: 24 }}>
           <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-            {goal ? 'Chasing' : 'Today'}
+            {goal ? 'Chasing' : 'This week'}
           </p>
           <h2 style={{ marginTop: goal ? 6 : 4, fontSize: goal ? 21 : 22, fontWeight: 600, lineHeight: 1.25 }}>
-            {goal ?? 'Today'}
+            {goal ?? 'This week'}
           </h2>
           {!loading && p1 && confidencePct !== null && (
             <button
@@ -288,119 +350,50 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           </div>
         )}
 
-        {/* Resume — a session was started this week but not completed. Sits above
-            the session card so picking it back up is the obvious next move. */}
-        {!loading && resume && (() => {
-          const r = routines.find((x) => x.id === resume.routineId)
-          const mins = Math.round(resume.elapsedSeconds / 60)
-          return (
-            <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
-              <SectionHeader>In progress</SectionHeader>
-              <h3 style={{ marginTop: 8, fontSize: 18, fontWeight: 600 }}>{r?.name ?? 'Your session'}</h3>
-              <p className="text-dim" style={{ marginTop: 6, fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                {resume.setsLogged} set{resume.setsLogged === 1 ? '' : 's'} logged
-                {mins > 0 ? ` · ${mins} min in` : ''}
-              </p>
-              <Button variant="primary" full style={{ marginTop: 14 }} onClick={() => navigate(`/app/workout/${resume.routineId}`)}>
-                Resume session →
-              </Button>
-            </div>
-          )
-        })()}
+        {/* THE WEEK — every session, on the surface. */}
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+            <SectionHeader>This week's sessions</SectionHeader>
+            {!loading && routines.length > 0 && (
+              <span className="num text-xs text-dim">{doneCount}/{routines.length} done</span>
+            )}
+          </div>
+          <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 12, lineHeight: 1.5 }}>
+            Do whichever fits — gym, gear, time. Tap a logged one to edit, or log a session for a past day.
+          </p>
 
-        {/* Session card — the one action */}
-        {loading ? (
-          <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <Skeleton height={12} width={80} />
-            <Skeleton height={20} width={160} />
-            <Skeleton height={12} width={120} />
-          </div>
-        ) : todayRoutine ? (
-          <div className="card fade-rise fade-rise-delay-1" style={{ marginBottom: 16 }}>
-            <SectionHeader>Session ready</SectionHeader>
-            <h3 style={{ marginTop: 8, fontSize: 18, fontWeight: 600 }}>{todayRoutine.name}</h3>
-            {p1 && (
-              <p className="text-dim" style={{ marginTop: 6, fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                targeting P1 · {p1.category}
+          {loading && routines.length === 0 ? (
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  <Skeleton height={14} width={160} /><Skeleton height={10} width={90} /><Skeleton height={36} width="100%" />
+                </div>
+              ))}
+            </div>
+          ) : routines.length === 0 ? (
+            <div className="card">
+              <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
+                No sessions in this phase yet. Finish onboarding and your program builds here.
               </p>
-            )}
-            {todayRoutine.intent && (
-              <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{todayRoutine.intent}</p>
-            )}
-            <div style={{ display: 'flex', gap: 20, margin: '16px 0' }}>
-              <div>
-                <span className="num text-signal" style={{ fontSize: 20, fontWeight: 600 }}>
-                  {(todayRoutine.exercises as unknown[]).length}
-                </span>
-                <span className="text-xs text-dim" style={{ marginLeft: 4 }}>exercises</span>
-              </div>
-              <div>
-                <span className="num text-dim" style={{ fontSize: 20 }}>~{(todayRoutine.exercises as unknown[]).length * 8}</span>
-                <span className="text-xs text-dim" style={{ marginLeft: 4 }}>min</span>
-              </div>
             </div>
-            <Button variant="primary" full onClick={handleStartWorkout}>Start session →</Button>
-            {routines.length > 1 && (
-              <PickerToggle
-                open={showPicker}
-                onClick={() => setShowPicker((v) => !v)}
-                label={showPicker ? 'Hide other sessions' : 'Choose a different session'}
+          ) : (
+            routines.map((r) => (
+              <SessionCard
+                key={r.id}
+                routine={r}
+                recommended={todayRoutine?.id === r.id}
+                state={statusFor(r.id)}
+                onStart={() => navigate(`/app/workout/${r.id}`)}
+                onResume={() => navigate(`/app/workout/${r.id}`)}
+                onLogAgain={() => navigate(`/app/workout/${r.id}`)}
+                onEdit={() => {
+                  const s = statusFor(r.id)
+                  if (s.kind === 'done') navigate(`/app/workout/${r.id}?w=${s.lastWorkout.id}`)
+                }}
               />
-            )}
-          </div>
-        ) : (
-          <div className="card fade-rise fade-rise-delay-1" style={{ marginBottom: 16 }}>
-            <p className="text-dim" style={{ fontSize: 14 }}>No session scheduled today. Rest day.</p>
-            {routines.length > 0 && (
-              <PickerToggle
-                open={showPicker}
-                onClick={() => setShowPicker((v) => !v)}
-                label={showPicker ? 'Hide sessions' : 'Train anyway — pick a session'}
-              />
-            )}
-          </div>
-        )}
-
-        {/* The picker — any session, any day. Equipment/energy/time can send you to
-            a different session than the one the week left off on, so all of them
-            sit one tap away. The recommendation is just the default, not a lock. */}
-        {!loading && showPicker && routines.length > 0 && (
-          <div className="card fade-rise" style={{ marginBottom: 16 }}>
-            <SectionHeader>All sessions</SectionHeader>
-            <p className="text-xs text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>
-              Do whichever fits today — the equipment you've got, the time you have. The recommendation just picks up where the week left off.
-            </p>
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
-              {routines.map((r) => {
-                const isRecommended = todayRoutine?.id === r.id
-                return (
-                  <button
-                    key={r.id}
-                    type="button"
-                    onClick={() => startRoutine(r.id)}
-                    className="card"
-                    style={{ textAlign: 'left', cursor: 'pointer', width: '100%', background: 'none' }}
-                  >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                      <h3 style={{ fontSize: 15, fontWeight: 600, display: 'flex', alignItems: 'baseline', gap: 8 }}>
-                        {r.name}
-                        {isRecommended && (
-                          <span className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                            Recommended
-                          </span>
-                        )}
-                      </h3>
-                      <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
-                        {(r.exercises as unknown[]).length} ex ›
-                      </span>
-                    </div>
-                    {r.intent && <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{r.intent}</p>}
-                  </button>
-                )
-              })}
-            </div>
-          </div>
-        )}
+            ))
+          )}
+        </div>
        </div>
 
        {/* Week strip — cadence, de-emphasised. Right rail on desktop. */}

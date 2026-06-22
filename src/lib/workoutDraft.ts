@@ -243,3 +243,34 @@ export async function loadActiveDraft(athleteId: string): Promise<ActiveDraft | 
   }
   return local ?? remote
 }
+
+// Every routine with a live (this-week) draft, for the week view's "In progress"
+// markers. Offline-first: the local scan alone is enough; the remote set is
+// merged in when reachable (cross-device drafts).
+export async function loadDraftRoutineIds(athleteId: string): Promise<string[]> {
+  const ids = new Set<string>()
+  try {
+    const keys: string[] = []
+    for (let i = 0; i < localStorage.length; i++) {
+      const k = localStorage.key(i)
+      if (k && k.startsWith(LOCAL_PREFIX)) keys.push(k)
+    }
+    for (const k of keys) {
+      const routineId = k.slice(LOCAL_PREFIX.length)
+      if (readStored(routineId)) ids.add(routineId)   // readStored sweeps stale
+    }
+  } catch { /* non-fatal */ }
+
+  try {
+    const { data } = await supabase
+      .from('workout_draft')
+      .select('routine_id, started_at')
+      .eq('athlete_id', athleteId)
+    const monday = weekStart()
+    for (const r of (data ?? []) as { routine_id: string; started_at: string }[]) {
+      if (new Date(r.started_at).getTime() >= monday.getTime()) ids.add(r.routine_id)
+    }
+  } catch { /* offline — local set covers it */ }
+
+  return [...ids]
+}

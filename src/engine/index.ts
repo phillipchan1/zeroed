@@ -2756,6 +2756,12 @@ export interface PendingSession {
   // skip→complete (first session only), else null.
   onboardingTransition: 'first_session_complete' | 'complete' | null
   debrief: PendingDebrief | null   // null when the athlete skipped the debrief
+  // Editing an already-logged session: update this row instead of inserting, and
+  // clear its prior observations before re-running the coach.
+  editWorkoutId: string | null
+  // The day the session happened (ISO). Lets a forgotten session be backdated;
+  // null means "now" on insert / leave unchanged on edit.
+  performedAt: string | null
   queuedAt: string
 }
 
@@ -2777,20 +2783,38 @@ export interface CommitResult {
 }
 
 export async function commitSession(p: PendingSession): Promise<CommitResult> {
-  // 1. Promote to a real workout row.
-  const { data: workout, error } = await supabase
-    .from('workout')
-    .insert({
+  // 1. Promote to a real workout row — or update the one being edited. Editing
+  //    rewrites the numbers (and clears the old observations) so re-running the
+  //    coach reads the corrected session, not a duplicate of the original.
+  let workoutId: string
+  if (p.editWorkoutId) {
+    const patch: Record<string, unknown> = {
+      actual_weights: p.actualWeights,
+      actual_reps:    p.actualReps,
+      rpe:            p.rpe,
+      duration_mins:  p.durationMins,
+    }
+    if (p.performedAt) patch.performed_at = p.performedAt
+    const { data: updated, error: updErr } = await supabase
+      .from('workout').update(patch).eq('id', p.editWorkoutId).select().single()
+    if (updErr || !updated) throw updErr ?? new Error('workout update failed')
+    workoutId = (updated as { id: string }).id
+    // Clear prior observations so the re-run doesn't stack duplicates.
+    await supabase.from('session_observation').delete().eq('workout_id', workoutId)
+  } else {
+    const insert: Record<string, unknown> = {
       routine_id:     p.routineId,
       actual_weights: p.actualWeights,
       actual_reps:    p.actualReps,
       rpe:            p.rpe,
       duration_mins:  p.durationMins,
-    })
-    .select()
-    .single()
-  if (error || !workout) throw error ?? new Error('workout insert failed')
-  const workoutId = (workout as { id: string }).id
+    }
+    if (p.performedAt) insert.performed_at = p.performedAt
+    const { data: workout, error } = await supabase
+      .from('workout').insert(insert).select().single()
+    if (error || !workout) throw error ?? new Error('workout insert failed')
+    workoutId = (workout as { id: string }).id
+  }
 
   // 2. Onboarding state transition, if any.
   if (p.onboardingTransition) {
@@ -2892,11 +2916,14 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
   const best = moves.length ? moves.reduce((a, b) => (b.delta > a.delta ? b : a)) : null
 
   // 7. The living loop: read this session as evidence on the P1 weak link.
-  //    Best-effort — a committed session must never hang on this.
-  try {
-    await recordSessionAdaptation(p.athleteId, workoutId)
-  } catch (e) {
-    console.error('[loop] session adaptation failed', e)
+  //    Best-effort — a committed session must never hang on this. Skipped on an
+  //    edit so a correction doesn't append a duplicate adaptation note.
+  if (!p.editWorkoutId) {
+    try {
+      await recordSessionAdaptation(p.athleteId, workoutId)
+    } catch (e) {
+      console.error('[loop] session adaptation failed', e)
+    }
   }
 
   return {
