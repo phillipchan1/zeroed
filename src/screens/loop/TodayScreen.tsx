@@ -172,7 +172,7 @@ function SessionCard({
           {routine.name}
           {recommended && state.kind === 'todo' && (
             <span className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              Recommended
+              Next up
             </span>
           )}
         </h3>
@@ -196,20 +196,29 @@ function SessionCard({
         <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{routine.intent}</p>
       )}
 
-      {/* Action */}
-      <div style={{ display: 'flex', gap: 10, alignItems: 'center', marginTop: 12 }}>
+      {/* Action — one clear CTA per state. */}
+      <div style={{ marginTop: 12 }}>
         {state.kind === 'todo' && (
           <Button variant={recommended ? 'primary' : 'ghost'} full onClick={onStart}>
-            Start session →
+            {recommended ? 'Start session →' : 'Start →'}
           </Button>
         )}
         {state.kind === 'in_progress' && (
-          <Button variant="primary" full onClick={onResume}>Resume →</Button>
+          <Button variant="primary" full onClick={onResume}>Resume session →</Button>
         )}
         {state.kind === 'done' && (
           <>
-            <Button variant="ghost" style={{ flex: 1 }} onClick={onEdit}>Edit</Button>
-            <Button variant="ghost" style={{ flex: 1 }} onClick={onLogAgain}>Log again</Button>
+            <Button variant="ghost" full onClick={onEdit}>Review / edit →</Button>
+            <button
+              type="button"
+              onClick={onLogAgain}
+              style={{
+                display: 'block', margin: '10px auto 0', background: 'none', border: 'none', cursor: 'pointer',
+                fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', color: 'var(--text-dim)',
+              }}
+            >
+              Log again
+            </button>
           </>
         )}
       </div>
@@ -243,7 +252,6 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const likelyCount   = view?.likelyCount ?? 0
   const p1Count       = view?.p1Count ?? 0
   const lastSignalAt  = view?.lastSignalAt ?? null
-  const goal          = view?.goal ?? null
   const p1            = view?.p1 ?? null
   const retestDue     = isRetestDue(view?.retestDate ?? null)
   const weekWorkouts  = view?.weekWorkouts ?? []
@@ -377,31 +385,24 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           </div>
         )}
 
-        {/* Goal anchor — the durable thing. The read moves underneath, and taps
-            through to Coach for the why. */}
-        <div className="fade-rise" style={{ marginBottom: 24 }}>
-          <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-            {goal ? 'Chasing' : 'This week'}
-          </p>
-          <h2 style={{ marginTop: goal ? 6 : 4, fontSize: goal ? 21 : 22, fontWeight: 600, lineHeight: 1.25 }}>
-            {goal ?? 'This week'}
-          </h2>
-          {!loading && p1 && confidencePct !== null && (
-            <button
-              type="button"
-              onClick={() => navigate('/app/coach')}
-              style={{
-                marginTop: 10, padding: 0, background: 'none', border: 'none', cursor: 'pointer',
-                fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em',
-                color: 'var(--text-dim)', display: 'inline-flex', alignItems: 'center', gap: 6,
-              }}
-            >
-              THE READ · {p1.category.toUpperCase()} ·{' '}
-              <span className="num text-signal">{confidencePct}%</span> CONFIDENT
-              <span style={{ opacity: 0.6 }}>›</span>
-            </button>
-          )}
-        </div>
+        {/* The read — a quick glance that taps through to Coach. The goal
+            ("chasing") anchor lives in Profile, so it isn't duplicated here. */}
+        {!loading && p1 && confidencePct !== null && (
+          <button
+            type="button"
+            onClick={() => navigate('/app/coach')}
+            className="fade-rise"
+            style={{
+              marginBottom: 20, padding: 0, background: 'none', border: 'none', cursor: 'pointer',
+              fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em',
+              color: 'var(--text-dim)', display: 'inline-flex', alignItems: 'center', gap: 6,
+            }}
+          >
+            THE READ · {p1.category.toUpperCase()} ·{' '}
+            <span className="num text-signal">{confidencePct}%</span> CONFIDENT
+            <span style={{ opacity: 0.6 }}>›</span>
+          </button>
+        )}
 
         {/* Retest due — the program cadence CTA (§6). Routes into the rescreen. */}
         {!loading && retestDue && (
