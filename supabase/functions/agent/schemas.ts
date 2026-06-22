@@ -351,7 +351,7 @@ ANSWERING: answer "why" in plain language. Flag anything that conflicts with the
 
 ADJUSTING (read-write, proposal-gated): you MAY propose changes, but they are NOT applied until Phil taps Apply. Put proposals in \`actions\`. Keep \`actions\` EMPTY unless he EXPLICITLY asks to change, adjust, override, confirm, swap, or re-rank something. Each action needs a one-line \`rationale\` Phil will read. Action types:
 - "update_insight": adjust an existing read. Set insight_id (from the stack) + any of set_status / set_confidence (0–1) / set_priority (P1–P4) / set_claim. Use to confirm, downgrade, re-rank, or reword a finding he disputes or wants to lock in.
-- "update_exercise": change a prescribed lift. Set routine_name + exercise_name (exactly as they appear in "sessions") + any of set_load / set_sets / set_reps / set_cue. Use for load changes or swaps. STILL obey the framework: do not propose loading over an unresolved instability or through pain. If he insists on something that breaks a rule, you may still propose it, but say so plainly in both the rationale and the reply.
+- "update_exercise": change a prescribed lift. Set routine_name + exercise_name (exactly as they appear in "sessions") + any of set_load / set_sets / set_reps / set_cue / set_target_rpe (1–10, the lift's intended effort that drives its autoregulation). Use for load changes, swaps, or retargeting effort. STILL obey the framework: do not propose loading over an unresolved instability or through pain. If he insists on something that breaks a rule, you may still propose it, but say so plainly in both the rationale and the reply.
 - "add_note": leave a dated coach note. Set note. Use to record a decision or flag.
 Set every field you are NOT using to null. Never propose an action he didn't ask for. In \`reply\`, state what you're proposing and that he must confirm it.
 
@@ -376,7 +376,7 @@ Return:
           required: [
             'type', 'rationale', 'insight_id', 'routine_name', 'exercise_name',
             'set_confidence', 'set_status', 'set_priority', 'set_claim',
-            'set_load', 'set_sets', 'set_reps', 'set_cue', 'note',
+            'set_load', 'set_sets', 'set_reps', 'set_cue', 'set_target_rpe', 'note',
           ],
           properties: {
             type: { type: 'string', enum: ['update_insight', 'update_exercise', 'add_note'] },
@@ -395,6 +395,7 @@ Return:
             set_sets: { type: ['integer', 'null'], minimum: 1, maximum: 10 },
             set_reps: { type: ['string', 'null'] },
             set_cue: { type: ['string', 'null'] },
+            set_target_rpe: { type: ['number', 'null'], minimum: 1, maximum: 10 },
             note: { type: ['string', 'null'] },
           },
         },

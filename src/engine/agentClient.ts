@@ -150,6 +150,7 @@ export interface CoachAction {
   set_sets: number | null
   set_reps: string | null
   set_cue: string | null
+  set_target_rpe: number | null
   note: string | null
 }
 

@@ -824,6 +824,7 @@ export function describeCoachAction(a: CoachAction): string {
       if (a.set_sets != null) bits.push(`sets → ${a.set_sets}`)
       if (a.set_reps) bits.push(`reps → ${a.set_reps}`)
       if (a.set_cue) bits.push(`cue → "${a.set_cue}"`)
+      if (a.set_target_rpe != null) bits.push(`target → RPE ${a.set_target_rpe}`)
       return `${a.exercise_name ?? 'Exercise'} (${a.routine_name ?? 'routine'}) — ${bits.join(', ') || 'no change'}`
     }
     case 'add_note':
@@ -886,6 +887,7 @@ export async function applyCoachActions(
         if (a.set_sets != null) ex.sets = a.set_sets
         if (a.set_reps) ex.reps = a.set_reps
         if (a.set_cue) ex.cue = a.set_cue
+        if (a.set_target_rpe != null) ex.target_rpe = Math.max(1, Math.min(10, a.set_target_rpe))
         exs[idx] = ex
         const { error } = await supabase.from('routine').update({ exercises: exs }).eq('id', routine.id)
         results.push({ ok: !error, label, error: error?.message })
@@ -2197,12 +2199,45 @@ export interface SessionPrescription {
   rule: IntelligenceRule | null   // standing rule in effect this session, or null
 }
 
+// Round a computed load to the nearest 5 units — a real, rackable number.
+function roundLoad(w: number): number {
+  return Math.max(0, Math.round(w / 5) * 5)
+}
+
+// Per-exercise RPE autoregulation. The weekly review sets a TARGET RPE; this
+// turns how far THIS lift's last top set landed from that target into a per-lift
+// load nudge — ~3% per RPE point (≈ one RIR ≈ ~3% of load near the top end),
+// clamped. This is what makes "logged RPE 4 on an RPE-8 lift" recommend a heavier
+// weight for THAT lift specifically, while a lift that hit RPE 9 backs off — even
+// in the same week. Falls back to the program-wide weekly delta when this lift
+// has no logged RPE. A DELOAD week is a hard recovery directive and is never
+// overridden upward. maxUp caps progression by phase (Stability banks load).
+function autoregulateDelta(
+  lastRpe: number | null | undefined,
+  rpeTarget: number | null,
+  weeklyDelta: number,
+  directive: WeeklyDirective | null,
+  maxUp: number,
+): number {
+  if (directive === 'DELOAD') return weeklyDelta
+  if (lastRpe != null) {
+    const target = rpeTarget ?? 7
+    const adj = Math.round((target - lastRpe) * 3)
+    return Math.max(-10, Math.min(maxUp, adj))
+  }
+  return Math.max(-10, Math.min(maxUp, weeklyDelta))
+}
+
 function buildHint(top: SetLog | null, unit: string, directive: WeeklyDirective | null, delta: number, rpe: number | null): string {
   const rpeStr = rpe != null ? `RPE ${rpe}` : null
   if (top && top.weight != null) {
     const last = `${top.weight}${unit} last`
-    if (directive === 'PROGRESS' || delta > 0) return `${last} → +${delta}%${rpeStr ? `, aim ${rpeStr}` : ''}`
-    if (directive === 'DELOAD' || delta < 0) return `${last} → back off ~${Math.abs(delta)}%${rpeStr ? `, ${rpeStr}` : ''}`
+    if (delta !== 0) {
+      // Concrete recommended weight, not just a percentage — the actionable number.
+      const target = roundLoad(top.weight * (1 + delta / 100))
+      const pct = `${delta > 0 ? '+' : ''}${delta}%`
+      return `${last} → ${target}${unit} (${pct})${rpeStr ? `, aim ${rpeStr}` : ''}`
+    }
     if (directive) return `${last} → repeat${rpeStr ? `, ${rpeStr}` : ''}`
     return last
   }
@@ -2230,6 +2265,17 @@ export async function gatherSessionPrescription(
 ): Promise<SessionPrescription> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+
+  // Phase caps how far a single easy lift may jump in one step: a Stability phase
+  // "banks" load (the program's own rule — don't chase RPE up while stabilizing),
+  // later phases let progression run.
+  let phaseName: string | null = null
+  if (prog?.id) {
+    const { data: phaseRow } = await supabase
+      .from('phase').select('name').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
+    phaseName = (phaseRow as { name: string } | null)?.name ?? null
+  }
+  const maxUp = phaseName === 'Stability' ? 5 : 15
 
   let directive: WeeklyDirective | null = null
   let loadDeltaPct = 0
@@ -2281,7 +2327,12 @@ export async function gatherSessionPrescription(
         ? `Hold ${top.weight}${unit} — cap stays until ${p1!.category} clears`
         : `Hold steady — ${p1!.category} not cleared yet`
     } else {
-      hints[i] = buildHint(top, unit, directive, loadDeltaPct, rpeTarget)
+      // Per-LIFT autoregulation against THIS exercise's own target RPE (falling
+      // back to the week's target): each lift's last RPE vs its own target sets
+      // its load step — capped by phase — instead of one program-wide delta.
+      const exTarget = ex.target_rpe ?? rpeTarget
+      const exDelta = autoregulateDelta(top?.rpe, exTarget, loadDeltaPct, directive, maxUp)
+      hints[i] = buildHint(top, unit, directive, exDelta, exTarget)
     }
   })
 
