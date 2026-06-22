@@ -10,6 +10,7 @@ export interface AppState {
   hasDiagnostic: boolean
   hasProfile: boolean       // true once "Zeroed In" is cleared
   todayRoutine: RoutineRow | null   // first routine available to log today
+  routines: RoutineRow[]    // every session in the active phase (for free picking)
   loading: boolean
   refresh: () => void
 }
@@ -21,6 +22,7 @@ interface AppStateSnapshot {
   profile: AthleteProfileRow | null
   hasDiagnostic: boolean
   todayRoutine: RoutineRow | null
+  routines: RoutineRow[]
 }
 
 const EMPTY: AppStateSnapshot = {
@@ -28,6 +30,7 @@ const EMPTY: AppStateSnapshot = {
   profile: null,
   hasDiagnostic: false,
   todayRoutine: null,
+  routines: [],
 }
 
 // Fetch + derive the whole app-state snapshot from Supabase. Throws on the first
@@ -65,6 +68,7 @@ async function fetchSnapshot(userId: string): Promise<AppStateSnapshot> {
   //    from the ACTIVE phase only (a completed phase's routines stay on the
   //    program but must not surface), falling back to all program routines.
   let todayRoutine: RoutineRow | null = null
+  let routines: RoutineRow[] = []
   if (profile) {
     const { data: prog } = await supabase
       .from('program')
@@ -88,14 +92,16 @@ async function fetchSnapshot(userId: string): Promise<AppStateSnapshot> {
         .order('name')
       if (activePhase) routineQuery = routineQuery.eq('phase_id', activePhase.id)
 
-      let { data: routines } = await routineQuery
+      let { data: routineRows } = await routineQuery
       // Fallback: a program whose routines predate phase wiring.
-      if (activePhase && (!routines || routines.length === 0)) {
+      if (activePhase && (!routineRows || routineRows.length === 0)) {
         const all = await supabase.from('routine').select('*').eq('program_id', prog.id).order('name')
-        routines = all.data
+        routineRows = all.data
       }
 
-      if (routines && routines.length > 0) {
+      if (routineRows && routineRows.length > 0) {
+        const ordered = [...(routineRows as unknown as RoutineRow[])].sort((a, b) => a.name.localeCompare(b.name))
+
         // This week's workouts for these routines (Mon–Sun), for scheduling.
         const monday = new Date()
         monday.setHours(0, 0, 0, 0)
@@ -103,20 +109,21 @@ async function fetchSnapshot(userId: string): Promise<AppStateSnapshot> {
         const { data: weekWorkouts } = await supabase
           .from('workout')
           .select('routine_id, performed_at')
-          .in('routine_id', routines.map((r) => r.id))
+          .in('routine_id', ordered.map((r) => r.id))
           .gte('performed_at', monday.toISOString())
 
         const schedule = computeWeekSchedule(
-          routines as unknown as RoutineRow[],
+          ordered,
           (weekWorkouts ?? []) as Array<{ routine_id: string; performed_at: string }>,
           athlete.sessions_per_week ?? 3,
         )
         todayRoutine = schedule.todayRoutine
+        routines = ordered
       }
     }
   }
 
-  return { athlete, profile, hasDiagnostic, todayRoutine }
+  return { athlete, profile, hasDiagnostic, todayRoutine, routines }
 }
 
 export function useAppState(userId: string | undefined): AppState {
@@ -177,6 +184,7 @@ export function useAppState(userId: string | undefined): AppState {
     hasDiagnostic: snapshot.hasDiagnostic,
     hasProfile: !!snapshot.profile,
     todayRoutine: snapshot.todayRoutine,
+    routines: snapshot.routines,
     loading,
     refresh,
   }

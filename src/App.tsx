@@ -57,7 +57,7 @@ function LoopLayout({
 
 function AppRoutes() {
   const { user, loading: authLoading } = useAuth()
-  const { athlete, todayRoutine, loading: stateLoading, refresh } = useAppState(user?.id)
+  const { athlete, todayRoutine, routines, loading: stateLoading, refresh } = useAppState(user?.id)
 
   if (authLoading || stateLoading) return <Splash />
 
@@ -100,7 +100,7 @@ function AppRoutes() {
         }
       >
         <Route index element={<Navigate to="today" replace />} />
-        <Route path="today"   element={<TodayScreen   athleteId={athleteId} todayRoutine={todayRoutine} onboardingStep={onboardingStep} />} />
+        <Route path="today"   element={<TodayScreen   athleteId={athleteId} todayRoutine={todayRoutine} routines={routines} onboardingStep={onboardingStep} />} />
         <Route path="profile" element={<ProfileScreen athleteId={athleteId} athleteName={athleteName} />} />
         <Route path="program" element={<ProgramScreen athleteId={athleteId} />} />
         <Route path="coach"   element={<CoachScreen athleteId={athleteId} />} />

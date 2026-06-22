@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
@@ -9,6 +9,7 @@ import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/databas
 interface TodayScreenProps {
   athleteId: string
   todayRoutine: RoutineRow | null
+  routines: RoutineRow[]
   onboardingStep?: OnboardingStep
 }
 
@@ -99,16 +100,37 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
   }
 }
 
+// A quiet, link-styled toggle that reveals the session picker. Kept subtle so the
+// recommended session stays the focal action and picking another is a deliberate,
+// secondary move.
+function PickerToggle({ open, onClick, label }: { open: boolean; onClick: () => void; label: string }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      style={{
+        marginTop: 12, padding: 0, background: 'none', border: 'none', cursor: 'pointer',
+        fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em',
+        color: 'var(--text-dim)', display: 'inline-flex', alignItems: 'center', gap: 6,
+      }}
+    >
+      {label}
+      <span style={{ opacity: 0.6 }}>{open ? '▴' : '▾'}</span>
+    </button>
+  )
+}
+
 /**
  * TRAIN — the calm surface: what you're chasing, the one read moving underneath
  * it, and the session to do. The depth (the weak-link stack, the "why") lives in
  * Coach; the plan and rules live in Program. Show the conclusion, hide the
  * working — the feeling of intelligence is the confidence number that moves.
  */
-export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodayScreenProps) {
+export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
   const { refresh } = (useOutletContext<LoopContext>() ?? { refresh: () => {} })
   const isFirstVisit = onboardingStep === 'first_session_pending'
+  const [showPicker, setShowPicker] = useState(false)
 
   const { data: view, loading, refetch } = useCachedLoader(
     `today:${athleteId}`,
@@ -153,6 +175,13 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
 
   function handleStartWorkout() {
     if (todayRoutine) navigate(`/app/workout/${todayRoutine.id}`)
+  }
+
+  // Free picking — start any session in the phase, not just the recommended one.
+  // The plan still recommends where the week left off, but equipment/energy/time
+  // can send you to a different session, so any of them is one tap away.
+  function startRoutine(routineId: string) {
+    navigate(`/app/workout/${routineId}`)
   }
 
   const telemetryItems: Array<{ label: string; value: string | number; signal?: boolean }> = [
@@ -250,10 +279,65 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
               </div>
             </div>
             <Button variant="primary" full onClick={handleStartWorkout}>Start session →</Button>
+            {routines.length > 1 && (
+              <PickerToggle
+                open={showPicker}
+                onClick={() => setShowPicker((v) => !v)}
+                label={showPicker ? 'Hide other sessions' : 'Choose a different session'}
+              />
+            )}
           </div>
         ) : (
-          <div className="card fade-rise fade-rise-delay-1">
+          <div className="card fade-rise fade-rise-delay-1" style={{ marginBottom: 16 }}>
             <p className="text-dim" style={{ fontSize: 14 }}>No session scheduled today. Rest day.</p>
+            {routines.length > 0 && (
+              <PickerToggle
+                open={showPicker}
+                onClick={() => setShowPicker((v) => !v)}
+                label={showPicker ? 'Hide sessions' : 'Train anyway — pick a session'}
+              />
+            )}
+          </div>
+        )}
+
+        {/* The picker — any session, any day. Equipment/energy/time can send you to
+            a different session than the one the week left off on, so all of them
+            sit one tap away. The recommendation is just the default, not a lock. */}
+        {!loading && showPicker && routines.length > 0 && (
+          <div className="card fade-rise" style={{ marginBottom: 16 }}>
+            <SectionHeader>All sessions</SectionHeader>
+            <p className="text-xs text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>
+              Do whichever fits today — the equipment you've got, the time you have. The recommendation just picks up where the week left off.
+            </p>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 12 }}>
+              {routines.map((r) => {
+                const isRecommended = todayRoutine?.id === r.id
+                return (
+                  <button
+                    key={r.id}
+                    type="button"
+                    onClick={() => startRoutine(r.id)}
+                    className="card"
+                    style={{ textAlign: 'left', cursor: 'pointer', width: '100%', background: 'none' }}
+                  >
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                      <h3 style={{ fontSize: 15, fontWeight: 600, display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                        {r.name}
+                        {isRecommended && (
+                          <span className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                            Recommended
+                          </span>
+                        )}
+                      </h3>
+                      <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
+                        {(r.exercises as unknown[]).length} ex ›
+                      </span>
+                    </div>
+                    {r.intent && <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{r.intent}</p>}
+                  </button>
+                )
+              })}
+            </div>
           </div>
         )}
        </div>
