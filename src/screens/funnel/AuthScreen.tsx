@@ -2,10 +2,11 @@ import { useState } from 'react'
 import { supabase } from '../../lib/supabaseClient'
 import { Logo, Button, Input } from '../../components/ui'
 
-type Phase = 'idle' | 'sending' | 'sent' | 'error'
+type Phase = 'idle' | 'sending' | 'sent' | 'verifying' | 'error'
 
 export function AuthScreen() {
   const [email, setEmail] = useState('')
+  const [code, setCode]   = useState('')
   const [phase, setPhase] = useState<Phase>('idle')
   const [error, setError]  = useState<string | null>(null)
 
@@ -30,6 +31,31 @@ export function AuthScreen() {
     }
   }
 
+  // Code path — works where a clicked link can't (installed PWA, or when the
+  // link opens a different browser than the app). On success, the global auth
+  // listener (useAuth) routes us forward; nothing to do here.
+  async function verifyCode(e: React.FormEvent) {
+    e.preventDefault()
+    const token = code.trim()
+    if (!token) return
+
+    setError(null)
+    setPhase('verifying')
+
+    const { error: vErr } = await supabase.auth.verifyOtp({
+      email: email.trim(),
+      token,
+      type: 'email',
+    })
+
+    if (vErr) {
+      setError(vErr.message)
+      setPhase('sent')
+    }
+  }
+
+  const isSent = phase === 'sent' || phase === 'verifying'
+
   return (
     <div className="screen--centered">
       <div style={{ width: '100%', maxWidth: 360 }}>
@@ -38,7 +64,7 @@ export function AuthScreen() {
           <Logo />
         </div>
 
-        {phase !== 'sent' ? (
+        {!isSent ? (
           <>
             {/* Brand promise */}
             <p
@@ -70,7 +96,7 @@ export function AuthScreen() {
                 full
                 disabled={phase === 'sending' || !email.trim()}
               >
-                {phase === 'sending' ? 'Sending…' : 'Send sign-in link'}
+                {phase === 'sending' ? 'Sending…' : 'Send sign-in code'}
               </Button>
             </form>
 
@@ -78,19 +104,48 @@ export function AuthScreen() {
               className="text-xs text-dim"
               style={{ textAlign: 'center', marginTop: 24 }}
             >
-              No password. A link arrives in your inbox.
+              No password. A code (and a link) arrive in your inbox.
             </p>
           </>
         ) : (
           <div className="fade-rise" style={{ textAlign: 'center' }}>
-            <p className="text-lg" style={{ marginBottom: 12 }}>Link sent.</p>
-            <p className="text-dim" style={{ fontSize: 14, lineHeight: 1.6 }}>
-              Check {email} — open the link to continue.
+            <p className="text-lg" style={{ marginBottom: 8 }}>Check {email}.</p>
+            <p className="text-dim" style={{ fontSize: 14, lineHeight: 1.6, marginBottom: 20 }}>
+              Enter the 6-digit code below — or tap the link if it opens in this same browser.
             </p>
+
+            <form onSubmit={verifyCode} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+              <Input
+                type="text"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                placeholder="123456"
+                value={code}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                maxLength={6}
+                autoFocus
+                disabled={phase === 'verifying'}
+                style={{ textAlign: 'center', letterSpacing: '0.3em', fontFamily: 'var(--font-mono)' }}
+              />
+
+              {error && (
+                <p className="text-xs" style={{ color: 'var(--veto)' }}>{error}</p>
+              )}
+
+              <Button
+                type="submit"
+                variant="primary"
+                full
+                disabled={phase === 'verifying' || code.trim().length < 6}
+              >
+                {phase === 'verifying' ? 'Verifying…' : 'Verify code'}
+              </Button>
+            </form>
+
             <button
               className="btn btn--ghost"
-              style={{ marginTop: 32, width: '100%' }}
-              onClick={() => { setPhase('idle'); setEmail('') }}
+              style={{ marginTop: 24, width: '100%' }}
+              onClick={() => { setPhase('idle'); setEmail(''); setCode(''); setError(null) }}
             >
               Use a different address
             </button>
