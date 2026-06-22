@@ -823,6 +823,7 @@ export function describeCoachAction(a: CoachAction): string {
       if (a.set_sets != null) bits.push(`sets → ${a.set_sets}`)
       if (a.set_reps) bits.push(`reps → ${a.set_reps}`)
       if (a.set_cue) bits.push(`cue → "${a.set_cue}"`)
+      if (a.set_target_rpe != null) bits.push(`target → RPE ${a.set_target_rpe}`)
       return `${a.exercise_name ?? 'Exercise'} (${a.routine_name ?? 'routine'}) — ${bits.join(', ') || 'no change'}`
     }
     case 'add_note':
@@ -885,6 +886,7 @@ export async function applyCoachActions(
         if (a.set_sets != null) ex.sets = a.set_sets
         if (a.set_reps) ex.reps = a.set_reps
         if (a.set_cue) ex.cue = a.set_cue
+        if (a.set_target_rpe != null) ex.target_rpe = Math.max(1, Math.min(10, a.set_target_rpe))
         exs[idx] = ex
         const { error } = await supabase.from('routine').update({ exercises: exs }).eq('id', routine.id)
         results.push({ ok: !error, label, error: error?.message })
@@ -2324,10 +2326,12 @@ export async function gatherSessionPrescription(
         ? `Hold ${top.weight}${unit} — cap stays until ${p1!.category} clears`
         : `Hold steady — ${p1!.category} not cleared yet`
     } else {
-      // Per-LIFT autoregulation: this exercise's own last RPE vs the target sets
+      // Per-LIFT autoregulation against THIS exercise's own target RPE (falling
+      // back to the week's target): each lift's last RPE vs its own target sets
       // its load step — capped by phase — instead of one program-wide delta.
-      const exDelta = autoregulateDelta(top?.rpe, rpeTarget, loadDeltaPct, directive, maxUp)
-      hints[i] = buildHint(top, unit, directive, exDelta, rpeTarget)
+      const exTarget = ex.target_rpe ?? rpeTarget
+      const exDelta = autoregulateDelta(top?.rpe, exTarget, loadDeltaPct, directive, maxUp)
+      hints[i] = buildHint(top, unit, directive, exDelta, exTarget)
     }
   })
 

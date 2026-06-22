@@ -232,6 +232,10 @@ export interface ExerciseTemplate {
   reps: string        // e.g. "8" | "8-10" | "30s"
   load?: string       // e.g. "light" | "moderate" | "bodyweight"
   cue?: string
+  // Intended effort for THIS lift (1–10). Drives per-exercise RPE autoregulation
+  // in gatherSessionPrescription — each lift tunes to its own target rather than a
+  // single program-wide number. Optional; falls back to the week's target.
+  target_rpe?: number
   insight_id?: string // the insight this exercise was placed to address (Shift 5)
   // How this movement is logged. Optional on disk: legacy/agent routines omit it
   // and the WorkoutScreen resolves an effective type from the library at render.
