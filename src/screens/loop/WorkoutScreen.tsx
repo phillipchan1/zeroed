@@ -882,6 +882,10 @@ export function WorkoutScreen() {
         style={{
           display: 'flex', alignItems: 'stretch', borderBottom: '1px solid var(--line)',
           position: 'sticky', top: 0, background: 'var(--ground)', zIndex: 10,
+          // Workout is a full-screen route (no app-shell), so it reserves the
+          // status-bar inset itself — the ground-filled padding sits behind the
+          // translucent bar while the controls clear it.
+          paddingTop: 'env(safe-area-inset-top, 0px)',
         }}
       >
         <button

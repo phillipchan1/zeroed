@@ -145,7 +145,10 @@ body {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: var(--sp-6);
+  /* Respect the status-bar / home-indicator insets so funnel + full-screen
+     centered states (splash, auth, loading) never tuck under the system UI. */
+  padding: calc(var(--sp-6) + env(safe-area-inset-top, 0px)) var(--sp-6)
+           calc(var(--sp-6) + env(safe-area-inset-bottom, 0px));
 }
 
 .container {
@@ -293,7 +296,10 @@ body {
   border-radius: var(--radius-btn);
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 14px;
+  /* 16px (not 14) so iOS Safari doesn't auto-zoom the page on focus — the same
+     reason .set-row__input is 16px. Below 16px the field triggers a zoom that
+     strands the rest of the screen off-frame. */
+  font-size: 16px;
   outline: none;
   transition: border-color var(--dur-fast);
   -webkit-appearance: none;
@@ -736,7 +742,10 @@ textarea.input {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 60px;
+  /* The bar is 60px of icons PLUS the home-indicator inset below them. Folding
+     the inset into a flat height:60px (border-box) eats the icon row on devices
+     with a home indicator, so add the inset on top of the 60px instead. */
+  height: calc(60px + env(safe-area-inset-bottom, 0px));
   background: var(--surface);
   border-top: 1px solid var(--line);
   display: flex;
@@ -781,7 +790,11 @@ textarea.input {
 /* --- Responsive app shell ------------------------------------------------- */
 /* Mobile: a plain column with the fixed bottom nav (unchanged). Desktop: a
    left sidebar + scrolling main, reclaiming the bottom of the screen. */
-.app-shell { min-height: 100dvh; }
+/* Top inset: the status bar is translucent (viewport-fit=cover), so the loop's
+   top bar would render behind the clock/battery without this. border-box keeps
+   the shell at 100dvh — the inset eats into content, it doesn't add scroll.
+   env() is 0 on desktop, so the sidebar layout is untouched. */
+.app-shell { min-height: 100dvh; padding-top: env(safe-area-inset-top, 0px); }
 .app-sidebar { display: none; }
 
 .sidebar__brand { padding: 4px 12px 0; }
@@ -1571,7 +1584,8 @@ textarea.input {
   border-radius: 10px;
   color: var(--text);
   font-family: var(--font-sans);
-  font-size: 14px;
+  /* 16px — keep iOS from zooming the page when the chat field is focused. */
+  font-size: 16px;
 }
 .coach-input input:focus {
   outline: none;
