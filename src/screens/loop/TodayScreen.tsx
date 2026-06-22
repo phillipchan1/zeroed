@@ -6,6 +6,7 @@ import { runLoopTriggers, isRetestDue } from '../../engine'
 import { loadActiveDraft, type ActiveDraft } from '../../lib/workoutDraft'
 import { pendingCount } from '../../lib/workoutOutbox'
 import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
+import { WorkoutPreviewSheet } from '../../components/WorkoutPreviewSheet'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
 
 interface TodayScreenProps {
@@ -134,6 +135,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [showPicker, setShowPicker] = useState(false)
   const [resume, setResume] = useState<ActiveDraft | null>(null)
+  const [previewRoutine, setPreviewRoutine] = useState<RoutineRow | null>(null)
   // Sessions finished offline, waiting to sync. Re-checked when connectivity
   // returns so the note clears itself once the outbox drains.
   const [pendingSync, setPendingSync] = useState(pendingCount())
@@ -327,17 +329,30 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             {todayRoutine.intent && (
               <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{todayRoutine.intent}</p>
             )}
-            <div style={{ display: 'flex', gap: 20, margin: '16px 0' }}>
-              <div>
-                <span className="num text-signal" style={{ fontSize: 20, fontWeight: 600 }}>
-                  {(todayRoutine.exercises as unknown[]).length}
-                </span>
-                <span className="text-xs text-dim" style={{ marginLeft: 4 }}>exercises</span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', margin: '16px 0' }}>
+              <div style={{ display: 'flex', gap: 20 }}>
+                <div>
+                  <span className="num text-signal" style={{ fontSize: 20, fontWeight: 600 }}>
+                    {(todayRoutine.exercises as unknown[]).length}
+                  </span>
+                  <span className="text-xs text-dim" style={{ marginLeft: 4 }}>exercises</span>
+                </div>
+                <div>
+                  <span className="num text-dim" style={{ fontSize: 20 }}>~{(todayRoutine.exercises as unknown[]).length * 8}</span>
+                  <span className="text-xs text-dim" style={{ marginLeft: 4 }}>min</span>
+                </div>
               </div>
-              <div>
-                <span className="num text-dim" style={{ fontSize: 20 }}>~{(todayRoutine.exercises as unknown[]).length * 8}</span>
-                <span className="text-xs text-dim" style={{ marginLeft: 4 }}>min</span>
-              </div>
+              <button
+                type="button"
+                onClick={() => setPreviewRoutine(todayRoutine)}
+                style={{
+                  padding: 0, background: 'none', border: 'none', cursor: 'pointer',
+                  fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em',
+                  color: 'var(--text-dim)', display: 'inline-flex', alignItems: 'center', gap: 4,
+                }}
+              >
+                Preview <span style={{ opacity: 0.6 }}>›</span>
+              </button>
             </div>
             <Button variant="primary" full onClick={handleStartWorkout}>Start session →</Button>
             {routines.length > 1 && (
@@ -377,7 +392,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                   <button
                     key={r.id}
                     type="button"
-                    onClick={() => startRoutine(r.id)}
+                    onClick={() => setPreviewRoutine(r)}
                     className="card"
                     style={{ textAlign: 'left', cursor: 'pointer', width: '100%', background: 'none' }}
                   >
@@ -402,6 +417,15 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           </div>
         )}
        </div>
+
+       {/* Workout preview sheet */}
+       {previewRoutine && (
+         <WorkoutPreviewSheet
+           routine={previewRoutine}
+           onStart={() => { setPreviewRoutine(null); startRoutine(previewRoutine.id) }}
+           onClose={() => setPreviewRoutine(null)}
+         />
+       )}
 
        {/* Week strip — cadence, de-emphasised. Right rail on desktop. */}
        <aside className="page__rail">
