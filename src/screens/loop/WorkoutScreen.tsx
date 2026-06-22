@@ -290,15 +290,13 @@ function FeltChips({ value, note, onFelt, onNote }: FeltChipsProps) {
           </button>
         ))}
       </div>
-      {value && (
-        <input
-          className="input felt__note"
-          type="text"
-          placeholder="Add a note — e.g. weaker on the left side"
-          value={note}
-          onChange={(e) => onNote(e.target.value)}
-        />
-      )}
+      <textarea
+        className="input felt__note"
+        rows={2}
+        placeholder="Note for coach — e.g. weaker on the left side, shoulder twinge on set 3"
+        value={note}
+        onChange={(e) => onNote(e.target.value)}
+      />
     </div>
   )
 }
@@ -713,12 +711,16 @@ export function WorkoutScreen() {
     //    independent of the agent). Severity must be 1–5.
     const obsRows: SessionObservationInsert[] = []
     for (const ex of debriefExercises) {
-      if (!ex.felt) continue
-      const sev = FELT_CHIPS.find((c) => c.label === ex.felt)?.severity ?? 2
+      const note = ex.note?.trim()
+      if (!ex.felt && !note) continue
+      const sev = ex.felt ? FELT_CHIPS.find((c) => c.label === ex.felt)?.severity ?? 2 : 2
+      const signal = ex.felt
+        ? `${ex.name} — ${ex.felt}${note ? ` — ${note}` : ''}`
+        : `${ex.name} — ${note}`
       obsRows.push({
         workout_id: workoutId,
         category: 'Felt',
-        signal: `${ex.name} — ${ex.felt}${ex.note ? ` — ${ex.note}` : ''}`,
+        signal,
         severity: sev,
       })
     }
