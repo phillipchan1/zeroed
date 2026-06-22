@@ -266,15 +266,15 @@ BEGIN
   (v_program, v_phase1, '1 · Accessory + Prehab (Mon)', 'mobility',
    'Carries all the non-negotiables: scap system + knee/hip/ankle prehab + mobility. Keeps the rest of the week lean.',
    $json$[
-     {"name":"Push-up plus","sets":3,"reps":"10","load":"bodyweight","tracking_type":"bodyweight_reps","cue":"Push the floor away at the top. Serratus, not pecs."},
+     {"name":"Push-up plus","sets":3,"reps":"10","load":"bodyweight","tracking_type":"bodyweight_reps","cue":"Push the floor away at the top. Serratus, not pecs.","target_rpe":6},
      {"name":"Wall slides","sets":3,"reps":"10","load":"bodyweight","tracking_type":"bodyweight_reps","cue":"Work at 65-70deg only — stop where the shoulder stays pain-free and the back stays flat. Do NOT force 90deg. Left side is tighter."},
-     {"name":"Face pull","sets":3,"reps":"15","load":"light cable/band","tracking_type":"weight_reps","cue":"Pull to nose, elbows high, external rotate at the end."},
-     {"name":"Band pull-apart","sets":3,"reps":"15","load":"band","tracking_type":"bodyweight_reps","cue":"Controlled, chest height. Not a speed drill."},
-     {"name":"Bottom-up KB press","sets":3,"reps":"5/side","load":"~30 lbs (or 20 lb x8)","tracking_type":"weight_reps","cue":"Phil's favorite — the shoulder fights instability here. Shaking = serratus firing = correct."},
-     {"name":"Terminal knee extension","sets":3,"reps":"15/side","load":"band","tracking_type":"bodyweight_reps","cue":"VMO squeeze at the top. These make the knees feel better. Pain-free only."},
+     {"name":"Face pull","sets":3,"reps":"15","load":"light cable/band","tracking_type":"weight_reps","cue":"Pull to nose, elbows high, external rotate at the end.","target_rpe":7},
+     {"name":"Band pull-apart","sets":3,"reps":"15","load":"band","tracking_type":"bodyweight_reps","cue":"Controlled, chest height. Not a speed drill.","target_rpe":6},
+     {"name":"Bottom-up KB press","sets":3,"reps":"5/side","load":"~30 lbs (or 20 lb x8)","tracking_type":"weight_reps","cue":"Phil's favorite — the shoulder fights instability here. Shaking = serratus firing = correct.","target_rpe":7},
+     {"name":"Terminal knee extension","sets":3,"reps":"15/side","load":"band","tracking_type":"bodyweight_reps","cue":"VMO squeeze at the top. These make the knees feel better. Pain-free only.","target_rpe":6},
      {"name":"90/90 hip IR hold","sets":2,"reps":"60s/side","load":"bodyweight","tracking_type":"time","cue":"Lean into the front shin. Primary duck-feet fix."},
-     {"name":"Lateral band walk","sets":3,"reps":"15/side","load":"band","tracking_type":"bodyweight_reps","cue":"Stay low, toes straight (harder = the point). Don't let the band pull the knees in."},
-     {"name":"Copenhagen plank","sets":3,"reps":"20s/side","load":"bodyweight","tracking_type":"time","cue":"Top foot on bench, bottom leg free. Right side has been the weaker one."},
+     {"name":"Lateral band walk","sets":3,"reps":"15/side","load":"band","tracking_type":"bodyweight_reps","cue":"Stay low, toes straight (harder = the point). Don't let the band pull the knees in.","target_rpe":6},
+     {"name":"Copenhagen plank","sets":3,"reps":"20s/side","load":"bodyweight","tracking_type":"time","cue":"Top foot on bench, bottom leg free. Right side has been the weaker one.","target_rpe":7},
      {"name":"Thoracic extension (foam roller)","sets":1,"reps":"90s","load":"bodyweight","tracking_type":"time","cue":"Segment by segment up the spine."},
      {"name":"Knee-to-wall ankle drill","sets":3,"reps":"10/side","load":"bodyweight","tracking_type":"bodyweight_reps","cue":"Foot 3-4\" from wall, knee over pinky toe, heel flat. This is also the Jun 28 retest marker (4\"+)."}
    ]$json$::jsonb),
@@ -284,19 +284,19 @@ BEGIN
    $json$[
      {"name":"Defensive lateral slide (AM skills)","sets":4,"reps":"30s","load":"bodyweight","tracking_type":"time","cue":"Stay low, don't cross feet. Lateral quickness."},
      {"name":"First-step acceleration (AM skills)","sets":6,"reps":"1/dir","load":"bodyweight","tracking_type":"distance","cue":"Explode one step, stop. Hip loading."},
-     {"name":"Squat (no belt)","sets":3,"reps":"5","load":"~275 lbs","tracking_type":"weight_reps","cue":"Coach moved this to LOW BAR through the Jun 28 retest (left-shoulder impingement on high bar). You've been testing high bar at 275 — go by shoulder feel. Full depth, controlled."},
-     {"name":"Bulgarian split squat","sets":3,"reps":"8/side","load":"20 lbs/hand","tracking_type":"weight_reps","cue":"The shaking is the point — quad-stabilizer isolation. Keep it pain-free."},
-     {"name":"Step-up","sets":3,"reps":"10/side","load":"~17.5 lbs/hand","tracking_type":"weight_reps","cue":"Most knee-provocative accessory (in-joint). Drive through the heel; lower the box if it climbs above 4/10."},
-     {"name":"Glute bridge","sets":3,"reps":"12","load":"25 lb plate or band","tracking_type":"weight_reps","cue":"Hip extension power for jumping and sprinting."}
+     {"name":"Squat (no belt)","sets":3,"reps":"5","load":"~275 lbs","tracking_type":"weight_reps","cue":"Coach moved this to LOW BAR through the Jun 28 retest (left-shoulder impingement on high bar). You've been testing high bar at 275 — go by shoulder feel. Full depth, controlled.","target_rpe":7},
+     {"name":"Bulgarian split squat","sets":3,"reps":"8/side","load":"20 lbs/hand","tracking_type":"weight_reps","cue":"The shaking is the point — quad-stabilizer isolation. Keep it pain-free.","target_rpe":7},
+     {"name":"Step-up","sets":3,"reps":"10/side","load":"~17.5 lbs/hand","tracking_type":"weight_reps","cue":"Most knee-provocative accessory (in-joint). Drive through the heel; lower the box if it climbs above 4/10.","target_rpe":6},
+     {"name":"Glute bridge","sets":3,"reps":"12","load":"25 lb plate or band","tracking_type":"weight_reps","cue":"Hip extension power for jumping and sprinting.","target_rpe":6}
    ]$json$::jsonb),
 
   (v_program, v_phase1, '3 · Upper A (Wed)', 'strength',
    'Bench rebuild day. Paused bench + unilateral DB work to attack instability and asymmetry. Film from the front.',
    $json$[
-     {"name":"Bench press","sets":3,"reps":"5","load":"~195 lbs","tracking_type":"weight_reps","cue":"1s pause at chest. Scap retracted + depressed throughout. Elbows still a touch shaky at 195 — watch the left arm; film from the front."},
-     {"name":"DB bench (unilateral)","sets":3,"reps":"8/side","load":"~65 lbs/side","tracking_type":"weight_reps","cue":"Left and right should feel identical. Left grip has felt weaker — even it out."},
-     {"name":"Chest-supported DB row","sets":3,"reps":"10","load":"~50 lbs/side","tracking_type":"weight_reps","cue":"Row to the hip. Upper back = bench stability."},
-     {"name":"Landmine press","sets":3,"reps":"8/side","load":"35 lbs","tracking_type":"weight_reps","cue":"Arc motion. Left side has felt weaker — earn symmetry."}
+     {"name":"Bench press","sets":3,"reps":"5","load":"~195 lbs","tracking_type":"weight_reps","cue":"1s pause at chest. Scap retracted + depressed throughout. Elbows still a touch shaky at 195 — watch the left arm; film from the front.","target_rpe":7},
+     {"name":"DB bench (unilateral)","sets":3,"reps":"8/side","load":"~65 lbs/side","tracking_type":"weight_reps","cue":"Left and right should feel identical. Left grip has felt weaker — even it out.","target_rpe":7},
+     {"name":"Chest-supported DB row","sets":3,"reps":"10","load":"~50 lbs/side","tracking_type":"weight_reps","cue":"Row to the hip. Upper back = bench stability.","target_rpe":8},
+     {"name":"Landmine press","sets":3,"reps":"8/side","load":"35 lbs","tracking_type":"weight_reps","cue":"Arc motion. Left side has felt weaker — earn symmetry.","target_rpe":7}
    ]$json$::jsonb),
 
   (v_program, v_phase1, '4 · Basketball (Thu)', 'conditioning',
@@ -310,9 +310,9 @@ BEGIN
   (v_program, v_phase1, '5 · Full Body + Conditioning (Fri)', 'strength',
    'Biggest session, freshest day. Maintain the deadlift, groove the OHP, power work, sprint finisher.',
    $json$[
-     {"name":"Deadlift (conventional, no belt)","sets":2,"reps":"3","load":"~345 lbs","tracking_type":"weight_reps","cue":"Conventional, no belt. Strength is easy — grip is the limiter (no mixed grip). Consider straps or keep building grip."},
-     {"name":"Strict OHP","sets":3,"reps":"5","load":"100 lbs","tracking_type":"weight_reps","cue":"On the edge of shaking at 100 — perfect build weight. Film it, look for the shake reducing."},
-     {"name":"Chest-supported DB row","sets":3,"reps":"10","load":"~50 lbs/side","tracking_type":"weight_reps","cue":"Second row session = faster scap rebuild."},
+     {"name":"Deadlift (conventional, no belt)","sets":2,"reps":"3","load":"~345 lbs","tracking_type":"weight_reps","cue":"Conventional, no belt. Strength is easy — grip is the limiter (no mixed grip). Consider straps or keep building grip.","target_rpe":7},
+     {"name":"Strict OHP","sets":3,"reps":"5","load":"100 lbs","tracking_type":"weight_reps","cue":"On the edge of shaking at 100 — perfect build weight. Film it, look for the shake reducing.","target_rpe":7},
+     {"name":"Chest-supported DB row","sets":3,"reps":"10","load":"~50 lbs/side","tracking_type":"weight_reps","cue":"Second row session = faster scap rebuild.","target_rpe":8},
      {"name":"Box jump","sets":3,"reps":"5","load":"max intent","tracking_type":"bodyweight_reps","cue":"Step down to land in Phase 1. Full reset between reps."},
      {"name":"Broad jump","sets":3,"reps":"3","load":"max intent","tracking_type":"distance","cue":"Measure best of 3 (last logged ~6'4\"+). Weekly explosiveness tracker."},
      {"name":"Sprint (court length)","sets":6,"reps":"1","load":"max intent","tracking_type":"distance","cue":"Walk back to recover. Log gas tank after rep 6."}
