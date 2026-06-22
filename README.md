@@ -75,10 +75,31 @@ Zeroed ships as an installable Progressive Web App — no App Store needed.
 4. Launch "Zeroed" from your home screen — it opens full-screen (standalone),
    with offline support via the service worker.
 
+### Offline-first
+
+Zeroed is built to load and run on low/no connectivity:
+
+- **Instant loading.** The service worker (`public/sw.js`) is *cache-first* for
+  the app shell and built JS/CSS — the UI paints with zero network round-trips
+  once installed. The Vite build (`vite.config.ts`) precaches the exact hashed
+  assets it emits and stamps a version, so even a first cold launch works
+  offline and a new deploy is picked up cleanly.
+- **Offline data.** Reads are *stale-while-revalidate* (`src/lib/cache.ts`):
+  every screen renders the last-synced data instantly from `localStorage`, then
+  refreshes from Supabase in the background. On a dead connection the cached
+  data simply stays — the app never blocks on the wire. Cache is namespaced by
+  a schema version and cleared on sign-out.
+- **Connectivity surface.** `src/components/OfflineBar.tsx` shows an "offline"
+  strip (so cached data isn't mistaken for live) and a tap-to-refresh prompt
+  when a new build is waiting.
+
+> **Writes** (logging a workout, edits) still require connectivity — they post
+> straight to Supabase. Reading and navigating are fully offline-capable.
+
 ### PWA assets
 
 - `public/manifest.webmanifest` — app name, theme, icons, standalone display.
-- `public/sw.js` — service worker (network-first navigations, runtime caching).
+- `public/sw.js` — service worker (cache-first shell, precache + runtime caching).
 - `public/icons/` + `public/apple-touch-icon.png` — generated icons.
 
 Regenerate the icons (e.g. after a brand change) with:

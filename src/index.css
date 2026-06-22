@@ -1611,3 +1611,44 @@ textarea.input {
 }
 .coach-input button:disabled,
 .coach-input input:disabled { opacity: 0.5; cursor: default; }
+
+/* ---- Connectivity / update bar -------------------------------------------
+   Offline-first: a quiet, fixed strip that surfaces "you're offline" (cached
+   data is in play) and a tap-to-refresh prompt when a new build is waiting.
+   Non-blocking — the app stays fully usable underneath. */
+.conn-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  width: 100%;
+  padding: calc(6px + env(safe-area-inset-top, 0px)) 12px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border: none;
+  border-bottom: 1px solid var(--line);
+  animation: conn-bar-in var(--dur-fast, 160ms) var(--ease-out, ease-out);
+}
+.conn-bar--offline {
+  background: var(--surface);
+  color: var(--text-dim);
+}
+.conn-bar--update {
+  background: var(--signal-dim);
+  color: var(--signal);
+  cursor: pointer;
+}
+.conn-bar--update:hover { filter: brightness(1.15); }
+.conn-bar svg { flex-shrink: 0; }
+
+@keyframes conn-bar-in {
+  from { transform: translateY(-100%); opacity: 0; }
+  to   { transform: translateY(0);     opacity: 1; }
+}

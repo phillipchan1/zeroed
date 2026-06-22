@@ -4,6 +4,7 @@ import { useAppState } from './hooks/useAppState'
 import { Spinner } from './components/ui'
 import { Nav, Sidebar } from './components/layout/Nav'
 import { DebugReset } from './components/DebugReset'
+import { OfflineBar } from './components/OfflineBar'
 import { ONBOARDING_FUNNEL_STEPS } from './types/database'
 
 // Onboarding (six-act "First Read")
@@ -120,6 +121,8 @@ function AppRoutes() {
 export default function App() {
   return (
     <BrowserRouter>
+      {/* Connectivity / update bar — fixed, above everything. */}
+      <OfflineBar />
       <AppRoutes />
       {/* DEV-only: wipe onboarding state to re-test the funnel. No-op in prod. */}
       <DebugReset onReset={() => { window.location.href = '/' }} />
