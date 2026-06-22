@@ -107,7 +107,7 @@ export function AuthSheet({ onClose }: { onClose: () => void }) {
           <div className="fade-rise">
             <p className="text-lg" style={{ marginBottom: 8 }}>Check {email}.</p>
             <p className="text-dim" style={{ fontSize: 14, lineHeight: 1.6, marginBottom: 16 }}>
-              Enter the 6-digit code to finish — works right here in the app.
+              Enter the code from the email to finish — works right here in the app.
             </p>
 
             <form onSubmit={verifyCode} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -115,10 +115,10 @@ export function AuthSheet({ onClose }: { onClose: () => void }) {
                 type="text"
                 inputMode="numeric"
                 autoComplete="one-time-code"
-                placeholder="123456"
+                placeholder="Enter code"
                 value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                maxLength={6}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                maxLength={10}
                 autoFocus
                 disabled={phase === 'verifying'}
                 style={{ textAlign: 'center', letterSpacing: '0.3em', fontFamily: 'var(--font-mono)' }}

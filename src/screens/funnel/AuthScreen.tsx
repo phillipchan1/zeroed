@@ -111,7 +111,7 @@ export function AuthScreen() {
           <div className="fade-rise" style={{ textAlign: 'center' }}>
             <p className="text-lg" style={{ marginBottom: 8 }}>Check {email}.</p>
             <p className="text-dim" style={{ fontSize: 14, lineHeight: 1.6, marginBottom: 20 }}>
-              Enter the 6-digit code below — or tap the link if it opens in this same browser.
+              Enter the code from the email below — or tap the link if it opens in this same browser.
             </p>
 
             <form onSubmit={verifyCode} style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -119,10 +119,10 @@ export function AuthScreen() {
                 type="text"
                 inputMode="numeric"
                 autoComplete="one-time-code"
-                placeholder="123456"
+                placeholder="Enter code"
                 value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                maxLength={6}
+                onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 10))}
+                maxLength={10}
                 autoFocus
                 disabled={phase === 'verifying'}
                 style={{ textAlign: 'center', letterSpacing: '0.3em', fontFamily: 'var(--font-mono)' }}
