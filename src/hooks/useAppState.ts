@@ -9,6 +9,7 @@ export interface AppState {
   hasDiagnostic: boolean
   hasProfile: boolean       // true once "Zeroed In" is cleared
   todayRoutine: RoutineRow | null   // first routine available to log today
+  routines: RoutineRow[]    // every session in the active phase (for free picking)
   loading: boolean
   refresh: () => void
 }
@@ -18,6 +19,7 @@ export function useAppState(userId: string | undefined): AppState {
   const [profile, setProfile]         = useState<AthleteProfileRow | null>(null)
   const [hasDiagnostic, setHasDiag]   = useState(false)
   const [todayRoutine, setTodayRoutine] = useState<RoutineRow | null>(null)
+  const [routines, setRoutines]       = useState<RoutineRow[]>([])
   const [loading, setLoading]         = useState(true)
   const [tick, setTick]               = useState(0)
 
@@ -119,15 +121,18 @@ export function useAppState(userId: string | undefined): AppState {
               .gte('performed_at', monday.toISOString())
 
             if (!cancelled) {
+              const ordered = [...(routines as unknown as RoutineRow[])].sort((a, b) => a.name.localeCompare(b.name))
               const schedule = computeWeekSchedule(
-                routines as unknown as RoutineRow[],
+                ordered,
                 (weekWorkouts ?? []) as Array<{ routine_id: string; performed_at: string }>,
                 (athleteData as AthleteRow).sessions_per_week ?? 3,
               )
               setTodayRoutine(schedule.todayRoutine)
+              setRoutines(ordered)
             }
           } else if (!cancelled) {
             setTodayRoutine(null)
+            setRoutines([])
           }
         }
       }
@@ -145,6 +150,7 @@ export function useAppState(userId: string | undefined): AppState {
     hasDiagnostic,
     hasProfile: !!profile,
     todayRoutine,
+    routines,
     loading,
     refresh,
   }
