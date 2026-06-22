@@ -1,7 +1,10 @@
-import { useEffect, useState, useRef, type ReactNode } from 'react'
+import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
+import {
+  restoreDraft, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
+} from '../../lib/workoutDraft'
 import { runSessionDebriefAgent, gatherSessionPrescription, recordSessionAdaptation, type DebriefInput, type SessionPrescription } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
@@ -448,6 +451,12 @@ function newSetLog(setNum: number): SetLog {
   return { set: setNum, weight: null, reps: null, rpe: null, done: false, duration: null, distance: null }
 }
 
+// A set counts as "logged" once it carries any real signal — the trigger for
+// autosaving the draft (so we never persist an untouched, empty session).
+function isLogged(s: SetLog): boolean {
+  return s.done || s.reps != null || s.duration != null || s.distance != null
+}
+
 // Short "what they actually did" summary per exercise, for the debrief agent.
 function performedSummary(t: TrackingType, logs: SetLog[], unit: string, distanceUnit: string): string {
   const done = logs.filter((l) => l.done || l.reps != null || l.duration != null || l.distance != null)
@@ -506,6 +515,15 @@ export function WorkoutScreen() {
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
   const startRef = useRef<number>(Date.now())
 
+  // Draft persistence (§ start/stop/continue). draftReady gates autosave until a
+  // restore attempt has run, so we never clobber a saved session with empty state.
+  // sessionStartRef is the real session start (the week-window anchor); payloadRef
+  // always mirrors current state so the flush handlers can read it cheaply.
+  const [draftReady, setDraftReady] = useState(false)
+  const sessionStartRef = useRef<string>(new Date().toISOString())
+  const payloadRef = useRef<DraftPayload | null>(null)
+  const completedRef = useRef(false)   // true once promoted to a workout → stop persisting
+
   useEffect(() => {
     if (!routineId) return
     loadRoutine()
@@ -526,6 +544,62 @@ export function WorkoutScreen() {
     }, 250)
     return () => clearInterval(id)
   }, [restEndsAt])
+
+  // ---- draft autosave (start / stop / continue) -----------------------------
+
+  // Keep a live snapshot of the session for the flush handlers. elapsed ticks
+  // every second; reading it here (not in the save effects) keeps the debounce
+  // from being reset by the clock.
+  useEffect(() => {
+    payloadRef.current = {
+      setLogs, feedback, elapsedSeconds: elapsed, startedAt: sessionStartRef.current,
+    }
+  }, [setLogs, feedback, elapsed])
+
+  const hasDraftSignal = () =>
+    !!payloadRef.current && Object.values(payloadRef.current.setLogs).flat().some(isLogged)
+
+  const persistLocal = useCallback(() => {
+    if (!routineId || !draftReady || completedRef.current || !hasDraftSignal()) return
+    saveDraftLocal(routineId, payloadRef.current!)
+  }, [routineId, draftReady])
+
+  const persistRemote = useCallback(() => {
+    if (!routineId || !athleteId || !draftReady || completedRef.current || !hasDraftSignal()) return
+    void saveDraftRemote(athleteId, routineId, payloadRef.current!).catch(() => { /* offline — local covers it */ })
+  }, [routineId, athleteId, draftReady])
+
+  // Content changes (a set logged, a felt chip) → save locally at once, mirror to
+  // Supabase on a short debounce so rapid entry coalesces into one write.
+  useEffect(() => {
+    if (!draftReady) return
+    persistLocal()
+    const t = setTimeout(persistRemote, 2500)
+    return () => clearTimeout(t)
+  }, [setLogs, feedback, draftReady, persistLocal, persistRemote])
+
+  // A periodic mirror so the elapsed clock (and anything mid-debounce) reaches the
+  // server even during a long, edit-free stretch.
+  useEffect(() => {
+    if (!draftReady) return
+    const id = setInterval(persistRemote, 20000)
+    return () => clearInterval(id)
+  }, [draftReady, persistRemote])
+
+  // Backgrounding / leaving the page (the Coach-chat detour, a reload, iOS
+  // suspending the PWA) → flush both tiers immediately.
+  useEffect(() => {
+    const flush = () => { persistLocal(); persistRemote() }
+    const onVis = () => { if (document.visibilityState === 'hidden') flush() }
+    document.addEventListener('visibilitychange', onVis)
+    window.addEventListener('pagehide', flush)
+    return () => {
+      document.removeEventListener('visibilitychange', onVis)
+      window.removeEventListener('pagehide', flush)
+      // Unmount (e.g. navigating to nuvo) is itself a "leave" — capture it.
+      flush()
+    }
+  }, [persistLocal, persistRemote])
 
   async function loadRoutine() {
     if (!routineId) return
@@ -594,6 +668,26 @@ export function WorkoutScreen() {
           setPrescription(presc)
         } catch { /* non-fatal */ }
       }
+
+      // Resume an in-progress session if one was autosaved this week. We overlay
+      // the draft onto the fresh template by exercise index, so a routine that has
+      // since gained/lost an exercise still loads cleanly. The timer continues
+      // from the saved elapsed (true stop/continue — time away isn't counted).
+      if (programData && routineId) {
+        const draft = await restoreDraft(programData.athlete_id, routineId)
+        if (draft) {
+          const merged: Record<number, SetLog[]> = { ...initial }
+          Object.entries(draft.setLogs).forEach(([k, v]) => { if (v && v.length) merged[Number(k)] = v })
+          setSetLogs(merged)
+          setFeedback((draft.feedback ?? {}) as Record<number, ExerciseFeedback>)
+          setElapsed(draft.elapsedSeconds)
+          startRef.current = Date.now() - draft.elapsedSeconds * 1000
+          sessionStartRef.current = draft.startedAt
+          setHasStarted(true)
+          setBriefOpen(false)   // resuming → drop straight back into training
+        }
+      }
+      setDraftReady(true)
     }
     setLoading(false)
   }
@@ -621,9 +715,7 @@ export function WorkoutScreen() {
   }
 
   const allSetsFlat = Object.values(setLogs).flat()
-  const hasAnyLog = allSetsFlat.some(
-    (s) => s.done || s.reps != null || s.duration != null || s.distance != null,
-  )
+  const hasAnyLog = allSetsFlat.some(isLogged)
 
   async function handleCompleteWorkout() {
     if (!routine) return
@@ -657,6 +749,11 @@ export function WorkoutScreen() {
       setSaving(false)
       return
     }
+
+    // Promoted to a real workout row — the draft has served its purpose. Stop
+    // autosaving and clear both tiers so it can't resurface as a resume.
+    completedRef.current = true
+    if (athleteId) clearDraft(athleteId, routineId!)
 
     setWorkoutId(workout.id)
     setRestEndsAt(null)

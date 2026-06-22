@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { runLoopTriggers, isRetestDue } from '../../engine'
+import { loadActiveDraft, type ActiveDraft } from '../../lib/workoutDraft'
 import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
 
@@ -89,12 +90,14 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const [goal, setGoal]                   = useState<string | null>(null)
   const [p1, setP1] = useState<{ category: string; confidence: number } | null>(null)
   const [retestDue, setRetestDue] = useState(false)
+  const [resume, setResume] = useState<ActiveDraft | null>(null)
 
   useEffect(() => {
     loadWeekData()
     loadGoal()
     loadInsights()
     loadRetestStatus()
+    void loadActiveDraft(athleteId).then(setResume).catch(() => setResume(null))
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [athleteId])
 
@@ -245,6 +248,26 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             </Button>
           </div>
         )}
+
+        {/* Resume — a session was started this week but not completed. Sits above
+            the session card so picking it back up is the obvious next move. */}
+        {!loading && resume && (() => {
+          const r = routines.find((x) => x.id === resume.routineId)
+          const mins = Math.round(resume.elapsedSeconds / 60)
+          return (
+            <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
+              <SectionHeader>In progress</SectionHeader>
+              <h3 style={{ marginTop: 8, fontSize: 18, fontWeight: 600 }}>{r?.name ?? 'Your session'}</h3>
+              <p className="text-dim" style={{ marginTop: 6, fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                {resume.setsLogged} set{resume.setsLogged === 1 ? '' : 's'} logged
+                {mins > 0 ? ` · ${mins} min in` : ''}
+              </p>
+              <Button variant="primary" full style={{ marginTop: 14 }} onClick={() => navigate(`/app/workout/${resume.routineId}`)}>
+                Resume session →
+              </Button>
+            </div>
+          )
+        })()}
 
         {/* Session card — the one action */}
         {loading ? (

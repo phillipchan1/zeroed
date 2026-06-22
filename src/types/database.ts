@@ -143,6 +143,20 @@ export interface WorkoutRow {
   duration_mins: number | null
 }
 
+// An in-progress session, autosaved as it's logged (table workout_draft). Staged
+// separately from `workout` so it's never mistaken for a completed session;
+// promoted to a real workout row and deleted on "Complete workout".
+export interface WorkoutDraftRow {
+  id: string
+  athlete_id: string
+  routine_id: string
+  set_logs: Record<string, SetLog[]>
+  feedback: Record<string, ExerciseFeedback>
+  elapsed_seconds: number
+  started_at: string
+  updated_at: string
+}
+
 export interface SessionObservationRow {
   id: string
   workout_id: string
@@ -308,6 +322,8 @@ export type PhaseInsert = Omit<PhaseRow, 'id'>
 export type RoutineInsert = Omit<RoutineRow, 'id'>
 
 export type WorkoutInsert = Omit<WorkoutRow, 'id' | 'performed_at'>
+
+export type WorkoutDraftInsert = Omit<WorkoutDraftRow, 'id' | 'started_at' | 'updated_at'>
 
 export type SessionObservationInsert = Omit<SessionObservationRow, 'id' | 'logged_at'>
 
