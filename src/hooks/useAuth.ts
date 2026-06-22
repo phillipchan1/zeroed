@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabaseClient'
+import { clearAllCache } from '../lib/cache'
 
 interface AuthState {
   user: User | null
@@ -19,7 +20,9 @@ export function useAuth(): AuthState {
     })
 
     // Subscribe to auth changes (magic link confirm, sign out, etc.)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+      // Drop every cached view on sign-out so the next account starts clean.
+      if (event === 'SIGNED_OUT') clearAllCache()
       setUser(session?.user ?? null)
       setLoading(false)
     })

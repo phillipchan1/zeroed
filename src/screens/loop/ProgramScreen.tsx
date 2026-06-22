@@ -1,5 +1,6 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment } from 'react'
 import { supabase } from '../../lib/supabaseClient'
+import { useCachedLoader } from '../../lib/cache'
 import { SectionHeader, Skeleton, BracketFrame } from '../../components/ui'
 import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName } from '../../types/database'
 
@@ -17,43 +18,53 @@ import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName } f
 
 const PHASES: PhaseName[] = ['Stability', 'Strength', 'Power', 'Sport']
 
+interface ProgramView {
+  program: ProgramRow | null
+  phase: PhaseRow | null
+  routines: RoutineRow[]
+  profile: AthleteProfileRow | null
+}
+
+async function fetchProgramView(athleteId: string): Promise<ProgramView> {
+  const [programRes, profileRes] = await Promise.all([
+    supabase.from('program').select('*').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle(),
+    supabase.from('athlete_profile').select('*').eq('athlete_id', athleteId).maybeSingle(),
+  ])
+  if (programRes.error) throw programRes.error
+  if (profileRes.error) throw profileRes.error
+  const program = programRes.data as ProgramRow | null
+  const profile = profileRes.data as AthleteProfileRow | null
+
+  let phase: PhaseRow | null = null
+  let routines: RoutineRow[] = []
+  if (program) {
+    const phaseRes = await supabase
+      .from('phase').select('*').eq('program_id', program.id).eq('status', 'active').maybeSingle()
+    phase = phaseRes.data as PhaseRow | null
+
+    // Sessions belong to the ACTIVE phase only (a completed phase's routines
+    // stay on the program but must not surface), falling back to all.
+    let routineRes = phase
+      ? await supabase.from('routine').select('*').eq('program_id', program.id).eq('phase_id', phase.id).order('name')
+      : await supabase.from('routine').select('*').eq('program_id', program.id).order('name')
+    if (phase && (!routineRes.data || routineRes.data.length === 0)) {
+      routineRes = await supabase.from('routine').select('*').eq('program_id', program.id).order('name')
+    }
+    routines = (routineRes.data ?? []) as RoutineRow[]
+  }
+  return { program, phase, routines, profile }
+}
+
 export function ProgramScreen({ athleteId }: { athleteId: string }) {
-  const [program, setProgram] = useState<ProgramRow | null>(null)
-  const [phase, setPhase]     = useState<PhaseRow | null>(null)
-  const [routines, setRoutines] = useState<RoutineRow[]>([])
-  const [profile, setProfile] = useState<AthleteProfileRow | null>(null)
-  const [loading, setLoading] = useState(true)
-
-  useEffect(() => {
-    void (async () => {
-      setLoading(true)
-      const [programRes, profileRes] = await Promise.all([
-        supabase.from('program').select('*').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle(),
-        supabase.from('athlete_profile').select('*').eq('athlete_id', athleteId).maybeSingle(),
-      ])
-      const prog = programRes.data as ProgramRow | null
-      setProgram(prog)
-      setProfile(profileRes.data as AthleteProfileRow | null)
-
-      if (prog) {
-        const phaseRes = await supabase
-          .from('phase').select('*').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
-        const activePhase = phaseRes.data as PhaseRow | null
-        setPhase(activePhase)
-
-        // Sessions belong to the ACTIVE phase only (a completed phase's routines
-        // stay on the program but must not surface), falling back to all.
-        let routineRes = activePhase
-          ? await supabase.from('routine').select('*').eq('program_id', prog.id).eq('phase_id', activePhase.id).order('name')
-          : await supabase.from('routine').select('*').eq('program_id', prog.id).order('name')
-        if (activePhase && (!routineRes.data || routineRes.data.length === 0)) {
-          routineRes = await supabase.from('routine').select('*').eq('program_id', prog.id).order('name')
-        }
-        setRoutines((routineRes.data ?? []) as RoutineRow[])
-      }
-      setLoading(false)
-    })()
-  }, [athleteId])
+  const { data, loading: coldLoading } = useCachedLoader(
+    `program:${athleteId}`,
+    () => fetchProgramView(athleteId),
+  )
+  const program  = data?.program ?? null
+  const phase     = data?.phase ?? null
+  const routines  = data?.routines ?? []
+  const profile   = data?.profile ?? null
+  const loading   = coldLoading
 
   const retestDays = profile?.retest_date
     ? Math.ceil((new Date(profile.retest_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))

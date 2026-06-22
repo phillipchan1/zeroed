@@ -1,6 +1,7 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
+import { useCachedLoader } from '../../lib/cache'
 import { runLoopTriggers, isRetestDue } from '../../engine'
 import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
@@ -48,6 +49,56 @@ function isSameDay(a: Date, b: Date) {
   )
 }
 
+// The cached Today view. Everything here is serializable (ISO strings, plain
+// numbers) so it round-trips through localStorage; the date-derived week strip
+// is recomputed at render from `loggedDates` against "now".
+interface TodayView {
+  loggedDates: string[]          // ISO timestamps of workouts logged this week
+  totalInsights: number
+  likelyCount: number
+  p1Count: number
+  lastSignalAt: string | null
+  goal: string | null
+  p1: { category: string; confidence: number } | null
+  retestDate: string | null
+}
+
+async function fetchTodayView(athleteId: string): Promise<TodayView> {
+  const days = getWeekDays()
+  const weekEnd = new Date(days[6].getFullYear(), days[6].getMonth(), days[6].getDate(), 23, 59, 59)
+
+  const [workoutRes, insightRes, athRes, profileRes] = await Promise.all([
+    supabase
+      .from('workout')
+      .select('performed_at, routine_id, routine!inner(program!inner(athlete_id))')
+      .gte('performed_at', days[0].toISOString())
+      .lte('performed_at', weekEnd.toISOString()),
+    supabase.from('insight').select('*').eq('athlete_id', athleteId).order('priority'),
+    supabase.from('athlete').select('goals, obstacle').eq('id', athleteId).maybeSingle(),
+    supabase.from('athlete_profile').select('retest_date').eq('athlete_id', athleteId).maybeSingle(),
+  ])
+  if (workoutRes.error) throw workoutRes.error
+  if (insightRes.error) throw insightRes.error
+  if (athRes.error) throw athRes.error
+  if (profileRes.error) throw profileRes.error
+
+  const all = (insightRes.data ?? []) as InsightRow[]
+  const active = all.filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
+  const top = active[0] ?? null
+  const ath = athRes.data as { goals: string | null; obstacle: string | null } | null
+
+  return {
+    loggedDates: (workoutRes.data ?? []).map((w) => w.performed_at as string),
+    totalInsights: all.length,
+    likelyCount: all.filter((i) => i.status === 'likely').length,
+    p1Count: active.filter((i) => i.priority === 'P1').length,
+    lastSignalAt: all.reduce<string | null>((max, i) => (!max || i.updated_at > max ? i.updated_at : max), null),
+    goal: (ath?.goals as string | null) || (ath?.obstacle as string | null) || null,
+    p1: top ? { category: top.category, confidence: top.confidence } : null,
+    retestDate: (profileRes.data?.retest_date as string | null) ?? null,
+  }
+}
+
 /**
  * TRAIN — the calm surface: what you're chasing, the one read moving underneath
  * it, and the session to do. The depth (the weak-link stack, the "why") lives in
@@ -58,23 +109,29 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
   const navigate   = useNavigate()
   const { refresh } = (useOutletContext<LoopContext>() ?? { refresh: () => {} })
   const isFirstVisit = onboardingStep === 'first_session_pending'
-  const [weekDays, setWeekDays] = useState<WeekDayStatus[]>([])
-  const [loading, setLoading]   = useState(true)
-  const [totalInsights, setTotalInsights] = useState(0)
-  const [likelyCount, setLikelyCount]     = useState(0)
-  const [p1Count, setP1Count]             = useState(0)
-  const [lastSignalAt, setLastSignalAt]   = useState<string | null>(null)
-  const [goal, setGoal]                   = useState<string | null>(null)
-  const [p1, setP1] = useState<{ category: string; confidence: number } | null>(null)
-  const [retestDue, setRetestDue] = useState(false)
 
-  useEffect(() => {
-    loadWeekData()
-    loadGoal()
-    loadInsights()
-    loadRetestStatus()
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [athleteId])
+  const { data: view, loading, refetch } = useCachedLoader(
+    `today:${athleteId}`,
+    () => fetchTodayView(athleteId),
+  )
+
+  const totalInsights = view?.totalInsights ?? 0
+  const likelyCount   = view?.likelyCount ?? 0
+  const p1Count       = view?.p1Count ?? 0
+  const lastSignalAt  = view?.lastSignalAt ?? null
+  const goal          = view?.goal ?? null
+  const p1            = view?.p1 ?? null
+  const retestDue     = isRetestDue(view?.retestDate ?? null)
+
+  // Week strip — recomputed from cached logged-dates against the current day, so
+  // "today" and the Mon–Sun window are always correct even from a stale cache.
+  const today = new Date()
+  const loggedDates = (view?.loggedDates ?? []).map((s) => new Date(s))
+  const weekDays: WeekDayStatus[] = getWeekDays().map((d) => ({
+    date: d,
+    logged: loggedDates.some((ld) => isSameDay(ld, d)),
+    isToday: isSameDay(d, today),
+  }))
 
   // Lazy outer-cadence triggers (§4.2, §5): run the weekly review + phase
   // advancement once per page-session, then refresh ONLY if something changed.
@@ -87,68 +144,12 @@ export function TodayScreen({ athleteId, todayRoutine, onboardingStep }: TodaySc
     void (async () => {
       const changed = await runLoopTriggers(athleteId)
       if (changed) {
-        loadRetestStatus()
+        refetch()
         refresh()
       }
     })()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [athleteId])
-
-  async function loadRetestStatus() {
-    const { data } = await supabase
-      .from('athlete_profile')
-      .select('retest_date')
-      .eq('athlete_id', athleteId)
-      .maybeSingle()
-    setRetestDue(isRetestDue((data?.retest_date as string | null) ?? null))
-  }
-
-  async function loadInsights() {
-    const { data } = await supabase
-      .from('insight')
-      .select('*')
-      .eq('athlete_id', athleteId)
-      .order('priority')
-
-    const all = (data ?? []) as InsightRow[]
-    const active = all.filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
-    setTotalInsights(all.length)
-    setLikelyCount(all.filter((i) => i.status === 'likely').length)
-    setP1Count(active.filter((i) => i.priority === 'P1').length)
-    const top = active[0] ?? null
-    setP1(top ? { category: top.category, confidence: top.confidence } : null)
-    setLastSignalAt(all.reduce<string | null>((max, i) =>
-      !max || i.updated_at > max ? i.updated_at : max, null))
-  }
-
-  // The TARGET is the durable anchor — what the athlete is chasing
-  // (athlete.goals), falling back to their obstacle.
-  async function loadGoal() {
-    const { data: ath } = await supabase
-      .from('athlete')
-      .select('goals, obstacle')
-      .eq('id', athleteId)
-      .maybeSingle()
-    setGoal((ath?.goals as string | null) || (ath?.obstacle as string | null) || null)
-  }
-
-  async function loadWeekData() {
-    setLoading(true)
-    const days  = getWeekDays()
-    const today = new Date()
-    const { data: workouts } = await supabase
-      .from('workout')
-      .select('performed_at, routine_id, routine!inner(program!inner(athlete_id))')
-      .gte('performed_at', days[0].toISOString())
-      .lte('performed_at', new Date(days[6].getFullYear(), days[6].getMonth(), days[6].getDate(), 23, 59, 59).toISOString())
-    const loggedDates = (workouts ?? []).map((w) => new Date(w.performed_at))
-    setWeekDays(days.map((d) => ({
-      date: d,
-      logged: loggedDates.some((ld) => isSameDay(ld, d)),
-      isToday: isSameDay(d, today),
-    })))
-    setLoading(false)
-  }
 
   function handleStartWorkout() {
     if (todayRoutine) navigate(`/app/workout/${todayRoutine.id}`)
