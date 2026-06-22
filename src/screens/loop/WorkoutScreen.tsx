@@ -1,7 +1,8 @@
 import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
-import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
+import { ChevronLeft, Check, Plus, Info, X, History } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
+import { ExerciseHistorySheet } from '../../components/ExerciseHistorySheet'
 import {
   restoreDraft, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
 } from '../../lib/workoutDraft'
@@ -506,6 +507,7 @@ export function WorkoutScreen() {
   const [insightMap, setInsightMap] = useState<Record<string, InsightRow>>({})
   const [openInsight, setOpenInsight] = useState<InsightRow | null>(null)
   const [openReading, setOpenReading] = useState<{ name: string; why: string } | null>(null)
+  const [historyExercise, setHistoryExercise] = useState<string | null>(null)
 
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
 
@@ -980,6 +982,14 @@ export function WorkoutScreen() {
                       READING
                     </button>
                   )}
+                  <button
+                    type="button"
+                    className="exercise-info-btn"
+                    aria-label="View exercise history"
+                    onClick={() => setHistoryExercise(ex.name)}
+                  >
+                    <History size={12} strokeWidth={2} />
+                  </button>
                 </div>
                 {ex.cue && (
                   <p className="text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.5 }}>{ex.cue}</p>
@@ -1157,6 +1167,15 @@ export function WorkoutScreen() {
             </p>
           </div>
         </div>
+      )}
+
+      {/* Exercise history sheet */}
+      {historyExercise && athleteId && (
+        <ExerciseHistorySheet
+          exerciseName={historyExercise}
+          athleteId={athleteId}
+          onClose={() => setHistoryExercise(null)}
+        />
       )}
     </div>
   )

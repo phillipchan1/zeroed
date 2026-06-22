@@ -1,8 +1,10 @@
-import { Fragment } from 'react'
+import { Fragment, useState } from 'react'
+import { History, ChevronDown, ChevronUp } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
 import { SectionHeader, Skeleton, BracketFrame } from '../../components/ui'
-import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName } from '../../types/database'
+import { ExerciseHistorySheet } from '../../components/ExerciseHistorySheet'
+import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName, ExerciseTemplate } from '../../types/database'
 
 /**
  * PROGRAM — "you are here." The macro view (per the Notion Screen Architecture
@@ -56,6 +58,9 @@ async function fetchProgramView(athleteId: string): Promise<ProgramView> {
 }
 
 export function ProgramScreen({ athleteId }: { athleteId: string }) {
+  const [historyExercise, setHistoryExercise] = useState<string | null>(null)
+  const [expandedRoutines, setExpandedRoutines] = useState<Set<string>>(new Set())
+
   const { data, loading: coldLoading } = useCachedLoader(
     `program:${athleteId}`,
     () => fetchProgramView(athleteId),
@@ -164,17 +169,56 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
             <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 28 }}>
               <SectionHeader>Sessions</SectionHeader>
               <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                {routines.length > 0 ? routines.map((r) => (
-                  <div key={r.id} className="card">
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                      <h3 style={{ fontSize: 15, fontWeight: 600 }}>{r.name}</h3>
-                      <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
-                        {(r.exercises as unknown[]).length} exercises
-                      </span>
+                {routines.length > 0 ? routines.map((r) => {
+                  const exercises = r.exercises as ExerciseTemplate[]
+                  const isExpanded = expandedRoutines.has(r.id)
+                  return (
+                    <div key={r.id} className="card">
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                        <h3 style={{ fontSize: 15, fontWeight: 600 }}>{r.name}</h3>
+                        <button
+                          type="button"
+                          className="btn btn--ghost"
+                          style={{ padding: '0 4px', height: 24, fontSize: 11, color: 'var(--text-dim)', display: 'flex', alignItems: 'center', gap: 4 }}
+                          onClick={() => setExpandedRoutines((prev) => {
+                            const next = new Set(prev)
+                            if (next.has(r.id)) next.delete(r.id)
+                            else next.add(r.id)
+                            return next
+                          })}
+                        >
+                          <span className="num">{exercises.length} exercises</span>
+                          {isExpanded
+                            ? <ChevronUp size={12} strokeWidth={2} />
+                            : <ChevronDown size={12} strokeWidth={2} />}
+                        </button>
+                      </div>
+                      {r.intent && <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{r.intent}</p>}
+                      {isExpanded && (
+                        <div style={{ marginTop: 12, borderTop: '1px solid var(--line)', paddingTop: 10, display: 'flex', flexDirection: 'column', gap: 6 }}>
+                          {exercises.map((ex, i) => (
+                            <div key={i} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+                              <div>
+                                <span style={{ fontSize: 13 }}>{ex.name}</span>
+                                <span className="num text-xs text-dim" style={{ marginLeft: 8 }}>
+                                  {ex.sets}×{ex.reps}{ex.load ? ` · ${ex.load}` : ''}
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                className="exercise-info-btn"
+                                aria-label={`View history for ${ex.name}`}
+                                onClick={() => setHistoryExercise(ex.name)}
+                              >
+                                <History size={12} strokeWidth={2} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
-                    {r.intent && <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{r.intent}</p>}
-                  </div>
-                )) : (
+                  )
+                }) : (
                   <p className="text-sm text-dim">No sessions in this phase yet.</p>
                 )}
               </div>
@@ -205,6 +249,14 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
         )}
        </aside>
       </div>
+
+      {historyExercise && (
+        <ExerciseHistorySheet
+          exerciseName={historyExercise}
+          athleteId={athleteId}
+          onClose={() => setHistoryExercise(null)}
+        />
+      )}
     </div>
   )
 }
