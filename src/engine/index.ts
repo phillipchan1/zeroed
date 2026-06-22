@@ -25,6 +25,7 @@ import type {
   WeeklyPrescription,
   WeeklyReviewAdjustments,
   CoachMessageInsert,
+  SessionObservationInsert,
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
@@ -2670,4 +2671,199 @@ export async function runLoopTriggers(athleteId: string): Promise<boolean> {
   try { changed = (await runWeeklyReviewAgent(athleteId, prog.id)) > 0 || changed } catch (e) { console.error('[loop] weekly review failed', e) }
   try { changed = (await runPhaseAdvancement(athleteId)) || changed } catch (e) { console.error('[loop] phase advancement failed', e) }
   return changed
+}
+
+// ---- Session commit (online completion + deferred offline sync) ------------
+// The single server-side write path for a finished session: promote the draft to
+// a real `workout` row, then (if a debrief was given) run the agent, persist the
+// observations, move the insights, and record the adaptation. Both the live
+// "Complete workout" flow and the offline outbox replay funnel through this, so
+// the two can never drift. Throws on the first write failure (e.g. offline) so
+// the caller can keep the session queued and retry.
+
+export interface PendingDebrief {
+  reflection: string
+  readingAnswer: string
+  exercises: DebriefExerciseInput[]
+  reading: { name: string; readingWhy: string } | null
+}
+
+// Everything needed to commit a session, captured at completion so it can be
+// replayed verbatim from the outbox later. Plain/serializable — it round-trips
+// through localStorage.
+export interface PendingSession {
+  id: string
+  athleteId: string
+  routineId: string
+  actualWeights: Record<string, SetLog[]>
+  actualReps: Record<string, number[]>
+  rpe: number | null
+  durationMins: number
+  setsDone: number
+  athleteName: string | null
+  // The onboarding step to write on commit: submit→first_session_complete,
+  // skip→complete (first session only), else null.
+  onboardingTransition: 'first_session_complete' | 'complete' | null
+  debrief: PendingDebrief | null   // null when the athlete skipped the debrief
+  queuedAt: string
+}
+
+export interface CommitResult {
+  workoutId: string
+  summary: string | null
+  movedCount: number
+  best: {
+    movedInsightId: string | null
+    category: string
+    previousConfidence: number | null
+    newConfidence: number | null
+    isNew: boolean
+  } | null
+  setsDone: number
+  durationMins: number
+  athleteName: string | null
+  firstSession: boolean   // drives the post-session revelation when committed live
+}
+
+export async function commitSession(p: PendingSession): Promise<CommitResult> {
+  // 1. Promote to a real workout row.
+  const { data: workout, error } = await supabase
+    .from('workout')
+    .insert({
+      routine_id:     p.routineId,
+      actual_weights: p.actualWeights,
+      actual_reps:    p.actualReps,
+      rpe:            p.rpe,
+      duration_mins:  p.durationMins,
+    })
+    .select()
+    .single()
+  if (error || !workout) throw error ?? new Error('workout insert failed')
+  const workoutId = (workout as { id: string }).id
+
+  // 2. Onboarding state transition, if any.
+  if (p.onboardingTransition) {
+    await supabase.from('athlete').update({ onboarding_step: p.onboardingTransition }).eq('id', p.athleteId)
+  }
+
+  const firstSession = p.onboardingTransition === 'first_session_complete'
+
+  // Skipped debrief → the workout is the whole record.
+  if (!p.debrief) {
+    return {
+      workoutId, summary: null, movedCount: 0, best: null,
+      setsDone: p.setsDone, durationMins: p.durationMins, athleteName: p.athleteName, firstSession,
+    }
+  }
+
+  const { reflection, readingAnswer, exercises, reading } = p.debrief
+
+  // 3. Load existing insights so the engine can decide update vs create.
+  const { data: existingInsights } = await supabase
+    .from('insight')
+    .select('*')
+    .eq('athlete_id', p.athleteId)
+    .neq('status', 'resolved')
+    .neq('status', 'disproved')
+
+  // 4. Agent classifies the whole session → many bounded actions (or fallback).
+  const debrief = await runSessionDebriefAgent(
+    p.athleteId,
+    workoutId,
+    {
+      reflection,
+      readiness: null,
+      exercises,
+      reading: reading ? { name: reading.name, question: reading.readingWhy, answer: readingAnswer } : null,
+    },
+    (existingInsights as InsightRow[]) ?? [],
+  )
+
+  // 5. Persist the raw signal as append-only observation rows. Severity 1–5.
+  const obsRows: SessionObservationInsert[] = []
+  for (const ex of exercises) {
+    const note = ex.note?.trim()
+    if (!ex.felt && !note) continue
+    const sev = ex.felt ? FELT_CHIPS.find((c) => c.label === ex.felt)?.severity ?? 2 : 2
+    const signal = ex.felt
+      ? `${ex.name} — ${ex.felt}${note ? ` — ${note}` : ''}`
+      : `${ex.name} — ${note}`
+    obsRows.push({ workout_id: workoutId, category: 'Felt', signal, severity: sev })
+  }
+  if (reflection) obsRows.push({ workout_id: workoutId, category: 'Reflection', signal: reflection, severity: 1 })
+  if (readingAnswer && reading) {
+    obsRows.push({ workout_id: workoutId, category: 'Reading', signal: `${reading.name} — ${readingAnswer}`, severity: 2 })
+  }
+  if (obsRows.length) await supabase.from('session_observation').insert(obsRows)
+
+  // 6. Execute each insight action; pick the most-moved for the reveal.
+  interface Move {
+    movedInsightId: string | null
+    category: string
+    previousConfidence: number | null
+    newConfidence: number | null
+    isNew: boolean
+    delta: number
+  }
+  const moves: Move[] = []
+  for (const action of debrief.actions) {
+    if (action.action === 'update' && action.existingInsightId) {
+      const updatePayload: Record<string, unknown> = {
+        confidence: action.updatedConfidence,
+        evidence:   action.updatedEvidence,
+      }
+      if (action.updatedStatus) updatePayload.status = action.updatedStatus
+      await supabase.from('insight').update(updatePayload).eq('id', action.existingInsightId)
+
+      const prior = ((existingInsights as InsightRow[]) ?? []).find((i) => i.id === action.existingInsightId)
+      moves.push({
+        movedInsightId: action.existingInsightId,
+        category: action.insightCategory,
+        previousConfidence: prior?.confidence ?? null,
+        newConfidence: action.updatedConfidence,
+        isNew: false,
+        delta: (action.updatedConfidence ?? 0) - (prior?.confidence ?? 0),
+      })
+    } else if (action.action === 'create' && action.newInsight) {
+      const { data: created } = await supabase.from('insight').insert(action.newInsight).select().single()
+      if (created) {
+        moves.push({
+          movedInsightId: (created as InsightRow).id,
+          category: action.insightCategory,
+          previousConfidence: null,
+          newConfidence: (created as InsightRow).confidence,
+          isNew: true,
+          delta: 0.0001,
+        })
+      }
+    }
+  }
+  const best = moves.length ? moves.reduce((a, b) => (b.delta > a.delta ? b : a)) : null
+
+  // 7. The living loop: read this session as evidence on the P1 weak link.
+  //    Best-effort — a committed session must never hang on this.
+  try {
+    await recordSessionAdaptation(p.athleteId, workoutId)
+  } catch (e) {
+    console.error('[loop] session adaptation failed', e)
+  }
+
+  return {
+    workoutId,
+    summary: debrief.summary,
+    movedCount: debrief.actions.length,
+    best: best
+      ? {
+          movedInsightId: best.movedInsightId,
+          category: best.category,
+          previousConfidence: best.previousConfidence,
+          newConfidence: best.newConfidence,
+          isNew: best.isNew,
+        }
+      : null,
+    setsDone: p.setsDone,
+    durationMins: p.durationMins,
+    athleteName: p.athleteName,
+    firstSession,
+  }
 }

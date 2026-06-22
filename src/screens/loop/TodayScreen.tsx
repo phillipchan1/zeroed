@@ -4,6 +4,7 @@ import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
 import { runLoopTriggers, isRetestDue } from '../../engine'
 import { loadActiveDraft, type ActiveDraft } from '../../lib/workoutDraft'
+import { pendingCount } from '../../lib/workoutOutbox'
 import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
 
@@ -133,6 +134,9 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [showPicker, setShowPicker] = useState(false)
   const [resume, setResume] = useState<ActiveDraft | null>(null)
+  // Sessions finished offline, waiting to sync. Re-checked when connectivity
+  // returns so the note clears itself once the outbox drains.
+  const [pendingSync, setPendingSync] = useState(pendingCount())
 
   const { data: view, loading, refetch } = useCachedLoader(
     `today:${athleteId}`,
@@ -163,6 +167,18 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   useEffect(() => {
     void loadActiveDraft(athleteId).then(setResume).catch(() => setResume(null))
   }, [athleteId])
+
+  // Keep the pending-sync note honest: the outbox flushes on `online`, so recount
+  // shortly after connectivity returns (and on focus) to clear it when drained.
+  useEffect(() => {
+    const recount = () => setTimeout(() => setPendingSync(pendingCount()), 1500)
+    window.addEventListener('online', recount)
+    window.addEventListener('focus', recount)
+    return () => {
+      window.removeEventListener('online', recount)
+      window.removeEventListener('focus', recount)
+    }
+  }, [])
 
   // Lazy outer-cadence triggers (§4.2, §5): run the weekly review + phase
   // advancement once per page-session, then refresh ONLY if something changed.
@@ -216,6 +232,22 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
 
       <div className="page page--rail">
        <div className="page__main">
+
+        {/* Offline-completed sessions waiting to sync. They're saved locally; the
+            coach reads them (the AI debrief) as soon as you're back online. */}
+        {pendingSync > 0 && (
+          <div
+            className="fade-rise"
+            style={{
+              marginBottom: 16, padding: '10px 14px', borderRadius: 8,
+              background: 'var(--surface)', border: '1px solid var(--line)',
+            }}
+          >
+            <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
+              {pendingSync} session{pendingSync === 1 ? '' : 's'} saved offline — {pendingSync === 1 ? 'it syncs' : 'they sync'} and the coach reads {pendingSync === 1 ? 'it' : 'them'} when you're back online.
+            </p>
+          </div>
+        )}
 
         {/* Goal anchor — the durable thing. The read moves underneath, and taps
             through to Coach for the why. */}

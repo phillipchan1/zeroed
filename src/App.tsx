@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
 import { useAppState } from './hooks/useAppState'
+import { useOutboxSync } from './lib/workoutOutbox'
 import { Spinner } from './components/ui'
 import { Nav, Sidebar } from './components/layout/Nav'
 import { DebugReset } from './components/DebugReset'
@@ -58,6 +59,9 @@ function LoopLayout({
 function AppRoutes() {
   const { user, loading: authLoading } = useAuth()
   const { athlete, todayRoutine, routines, loading: stateLoading, refresh } = useAppState(user?.id)
+
+  // Flush any sessions completed offline once we're back (and on every launch).
+  useOutboxSync()
 
   if (authLoading || stateLoading) return <Splash />
 

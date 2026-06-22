@@ -5,7 +5,11 @@ import { supabase } from '../../lib/supabaseClient'
 import {
   restoreDraft, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
 } from '../../lib/workoutDraft'
-import { runSessionDebriefAgent, gatherSessionPrescription, recordSessionAdaptation, type DebriefInput, type SessionPrescription } from '../../engine'
+import { enqueueSession, commitPending } from '../../lib/workoutOutbox'
+import {
+  gatherSessionPrescription,
+  type SessionPrescription, type PendingSession, type PendingDebrief, type DebriefExerciseInput,
+} from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import {
@@ -13,7 +17,7 @@ import {
 } from '../../components/ui'
 import type {
   RoutineRow, ExerciseTemplate, SetLog, InsightRow, TrackingType,
-  SessionObservationInsert, OnboardingStep, FeltLabel, ExerciseFeedback,
+  OnboardingStep, FeltLabel, ExerciseFeedback,
 } from '../../types/database'
 import { FELT_CHIPS } from '../../types/database'
 
@@ -480,10 +484,11 @@ export function WorkoutScreen() {
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep | null>(null)
   const [loading, setLoading]     = useState(true)
   const [elapsed, setElapsed]     = useState(0)
-  const [saving, setSaving]       = useState(false)
   const [showDebrief, setShowDebrief] = useState(false)
   const [savingDebrief, setSavingDebrief] = useState(false)
-  const [workoutId, setWorkoutId] = useState<string | null>(null)
+  // Elapsed frozen at the moment "Complete" was tapped — the debrief sheet can
+  // sit open for a while, so the committed duration is this, not the live clock.
+  const finalElapsedRef = useRef(0)
 
   // "Why this session" brief — auto-shown on open (the slot the readiness gate
   // used to hold), re-openable any time from the header.
@@ -717,59 +722,105 @@ export function WorkoutScreen() {
   const allSetsFlat = Object.values(setLogs).flat()
   const hasAnyLog = allSetsFlat.some(isLogged)
 
-  async function handleCompleteWorkout() {
+  // "Complete" no longer writes — it freezes the clock and opens the debrief.
+  // The actual server commit happens at finishSession (after debrief or skip), so
+  // the whole session, debrief included, lands in one durable, replayable unit.
+  function handleCompleteWorkout() {
     if (!routine) return
-    setSaving(true)
     if (timerRef.current) clearInterval(timerRef.current)
+    finalElapsedRef.current = elapsed
+    completedRef.current = true   // stop draft autosave; the outbox owns it now
+    setRestEndsAt(null)
+    setShowDebrief(true)
+  }
 
+  // Assemble the workout numbers + (optional) debrief into a replayable unit.
+  function buildPending(debrief: PendingDebrief | null): PendingSession {
     const actualWeights: Record<string, SetLog[]> = {}
     const actualReps: Record<string, number[]>    = {}
     Object.entries(setLogs).forEach(([idx, logs]) => {
       actualWeights[idx] = logs
       actualReps[idx]    = logs.map((l) => l.reps ?? 0)
     })
-
     const rpeValues = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
     const avgRpe    = rpeValues.length ? Math.round(rpeValues.reduce((a, b) => a + b, 0) / rpeValues.length) : null
 
-    const { data: workout, error } = await supabase
-      .from('workout')
-      .insert({
-        routine_id:     routineId!,
-        actual_weights: actualWeights,
-        actual_reps:    actualReps,
-        rpe:            avgRpe,
-        duration_mins:  Math.ceil(elapsed / 60),
-      })
-      .select()
-      .single()
+    const onboardingTransition =
+      onboardingStep === 'first_session_pending'
+        ? (debrief ? 'first_session_complete' : 'complete')
+        : null
 
-    if (error || !workout) {
-      console.error('Failed to save workout', error)
-      setSaving(false)
+    return {
+      id: crypto.randomUUID(),
+      athleteId: athleteId!,
+      routineId: routineId!,
+      actualWeights,
+      actualReps,
+      rpe: avgRpe,
+      durationMins: Math.ceil(finalElapsedRef.current / 60),
+      setsDone: allSetsFlat.filter((s) => s.done).length,
+      athleteName,
+      onboardingTransition,
+      debrief,
+      queuedAt: new Date().toISOString(),
+    }
+  }
+
+  // The single finish path: enqueue durably, drop the draft, then try to commit
+  // right now. Online → we get the reveal data back and route to it. Offline →
+  // the commit throws, the session stays queued, and the outbox syncs it (AI
+  // debrief included) the moment the connection returns.
+  async function finishSession(debrief: PendingDebrief | null) {
+    if (!athleteId || !routine) return
+    setSavingDebrief(true)
+
+    const pending = buildPending(debrief)
+    enqueueSession(pending)                       // durable before any network
+    clearDraft(athleteId, routineId!)             // the outbox is its home now
+
+    let result
+    try {
+      result = await commitPending(pending)
+    } catch {
+      result = null                                // offline / failed — stays queued
+    }
+    setSavingDebrief(false)
+
+    if (result && result.firstSession) {
+      navigate('/onboarding/revelation', {
+        replace: true,
+        state: {
+          movedInsightId: result.best?.movedInsightId ?? null,
+          category: result.best?.category ?? 'Recovery',
+          previousConfidence: result.best?.previousConfidence ?? null,
+          newConfidence: result.best?.newConfidence ?? null,
+          isNew: result.best?.isNew ?? true,
+          movedCount: result.movedCount,
+          summary: result.summary,
+          durationMins: result.durationMins,
+          setsLogged: result.setsDone,
+          name: result.athleteName,
+        },
+      })
       return
     }
 
-    // Promoted to a real workout row — the draft has served its purpose. Stop
-    // autosaving and clear both tiers so it can't resurface as a resume.
-    completedRef.current = true
-    if (athleteId) clearDraft(athleteId, routineId!)
+    if (result && debrief) {
+      navigate('/app/profile', { state: { pulsedCategory: result.best?.category ?? 'Recovery' }, replace: true })
+      return
+    }
 
-    setWorkoutId(workout.id)
-    setRestEndsAt(null)
-    setSaving(false)
-    setShowDebrief(true)
+    // Skipped debrief (committed or not), or an offline finish → back to Today.
+    // queuedOffline tells Today to show the "will sync" note.
+    navigate('/app/today', { replace: true, state: { queuedOffline: result === null } })
   }
 
-  async function handleDebrief(reflection: string, readingAnswer: string) {
-    if (!workoutId || !athleteId || !routine) return
-    setSavingDebrief(true)
-
+  function handleDebrief(reflection: string, readingAnswer: string) {
+    if (!routine) return
     const exercises = routine.exercises as ExerciseTemplate[]
     const readingEx = exercises.find((e) => e.reading)
 
-    // Build the debrief input from everything the session produced.
-    const debriefExercises: DebriefInput['exercises'] = exercises.map((ex, i) => {
+    const debriefExercises: DebriefExerciseInput[] = exercises.map((ex, i) => {
       const t = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
       const fb = feedback[i]
       return {
@@ -781,145 +832,16 @@ export function WorkoutScreen() {
       }
     })
 
-    // 1. Load existing insights so the engine can decide update vs create.
-    const { data: existingInsights } = await supabase
-      .from('insight')
-      .select('*')
-      .eq('athlete_id', athleteId)
-      .neq('status', 'resolved')
-      .neq('status', 'disproved')
-
-    // 2. Agent classifies the whole session → many bounded actions (or fallback).
-    const debrief = await runSessionDebriefAgent(
-      athleteId,
-      workoutId,
-      {
-        reflection,
-        readiness: null,
-        exercises: debriefExercises,
-        reading: readingEx
-          ? { name: readingEx.name, question: readingEx.reading_why ?? '', answer: readingAnswer }
-          : null,
-      },
-      (existingInsights as InsightRow[]) ?? [],
-    )
-
-    // 3. Persist the raw signal as append-only observation rows (durable record,
-    //    independent of the agent). Severity must be 1–5.
-    const obsRows: SessionObservationInsert[] = []
-    for (const ex of debriefExercises) {
-      const note = ex.note?.trim()
-      if (!ex.felt && !note) continue
-      const sev = ex.felt ? FELT_CHIPS.find((c) => c.label === ex.felt)?.severity ?? 2 : 2
-      const signal = ex.felt
-        ? `${ex.name} — ${ex.felt}${note ? ` — ${note}` : ''}`
-        : `${ex.name} — ${note}`
-      obsRows.push({
-        workout_id: workoutId,
-        category: 'Felt',
-        signal,
-        severity: sev,
-      })
-    }
-    if (reflection) obsRows.push({ workout_id: workoutId, category: 'Reflection', signal: reflection, severity: 1 })
-    if (readingAnswer && readingEx) {
-      obsRows.push({ workout_id: workoutId, category: 'Reading', signal: `${readingEx.name} — ${readingAnswer}`, severity: 2 })
-    }
-    if (obsRows.length) await supabase.from('session_observation').insert(obsRows)
-
-    // 4. Execute each insight action; collect candidates and pick the most-moved
-    //    insight for the reveal afterward (avoids closure-mutation narrowing).
-    interface Move {
-      movedInsightId: string | null
-      category: string
-      previousConfidence: number | null
-      newConfidence: number | null
-      isNew: boolean
-      delta: number
-    }
-    const moves: Move[] = []
-
-    for (const action of debrief.actions) {
-      if (action.action === 'update' && action.existingInsightId) {
-        const updatePayload: Record<string, unknown> = {
-          confidence: action.updatedConfidence,
-          evidence:   action.updatedEvidence,
-        }
-        if (action.updatedStatus) updatePayload.status = action.updatedStatus
-        await supabase.from('insight').update(updatePayload).eq('id', action.existingInsightId)
-
-        const prior = ((existingInsights as InsightRow[]) ?? []).find((i) => i.id === action.existingInsightId)
-        moves.push({
-          movedInsightId: action.existingInsightId,
-          category: action.insightCategory,
-          previousConfidence: prior?.confidence ?? null,
-          newConfidence: action.updatedConfidence,
-          isNew: false,
-          delta: (action.updatedConfidence ?? 0) - (prior?.confidence ?? 0),
-        })
-      } else if (action.action === 'create' && action.newInsight) {
-        const { data: created } = await supabase.from('insight').insert(action.newInsight).select().single()
-        if (created) {
-          moves.push({
-            movedInsightId: (created as InsightRow).id,
-            category: action.insightCategory,
-            previousConfidence: null,
-            newConfidence: (created as InsightRow).confidence,
-            isNew: true,
-            delta: 0.0001, // new signals rank below a real positive move, above nothing
-          })
-        }
-      }
-    }
-
-    const best = moves.length
-      ? moves.reduce((a, b) => (b.delta > a.delta ? b : a))
-      : null
-
-    // The living loop: read this session as evidence on the P1 weak link. Strong,
-    // pain-free P1 work disconfirms the limiter → confidence falls, may resolve,
-    // and a grounded coach note is written (surfaced on the Coach tab).
-    // Best-effort — a logged session must never hang on this.
-    try {
-      await recordSessionAdaptation(athleteId, workoutId)
-    } catch (e) {
-      console.error('[loop] session adaptation failed', e)
-    }
-
-    setSavingDebrief(false)
-
-    const movedCount = debrief.actions.length
-    const primaryCategory = best?.category ?? 'Recovery'
-
-    // 5. First session ever → the post-session revelation (Act 6). Else profile pulse.
-    if (onboardingStep === 'first_session_pending') {
-      await supabase.from('athlete').update({ onboarding_step: 'first_session_complete' }).eq('id', athleteId)
-      navigate('/onboarding/revelation', {
-        replace: true,
-        state: {
-          movedInsightId: best?.movedInsightId ?? null,
-          category: primaryCategory,
-          previousConfidence: best?.previousConfidence ?? null,
-          newConfidence: best?.newConfidence ?? null,
-          isNew: best?.isNew ?? true,
-          movedCount,
-          summary: debrief.summary,
-          durationMins: Math.ceil(elapsed / 60),
-          setsLogged: allSetsFlat.filter((s) => s.done).length,
-          name: athleteName,
-        },
-      })
-      return
-    }
-
-    navigate('/app/profile', { state: { pulsedCategory: primaryCategory }, replace: true })
+    void finishSession({
+      reflection,
+      readingAnswer,
+      exercises: debriefExercises,
+      reading: readingEx ? { name: readingEx.name, readingWhy: readingEx.reading_why ?? '' } : null,
+    })
   }
 
-  async function handleDebriefSkip() {
-    if (onboardingStep === 'first_session_pending' && athleteId) {
-      await supabase.from('athlete').update({ onboarding_step: 'complete' }).eq('id', athleteId)
-    }
-    navigate('/app/today', { replace: true })
+  function handleDebriefSkip() {
+    void finishSession(null)
   }
 
   // ---- loading / error ------------------------------------------------------
@@ -1195,10 +1117,8 @@ export function WorkoutScreen() {
               <span className="num text-xs">{setsDone}</span>
             </div>
           </div>
-          <Button variant="primary" full onClick={handleCompleteWorkout} disabled={saving || !hasAnyLog}>
-            {saving ? (
-              <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}><Spinner /> Saving…</span>
-            ) : 'Complete workout →'}
+          <Button variant="primary" full onClick={handleCompleteWorkout} disabled={!hasAnyLog}>
+            Complete workout →
           </Button>
         </div>
       </div>
