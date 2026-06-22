@@ -8,7 +8,7 @@
  *
  * Bump CACHE_VERSION to force old caches to be discarded on the next load.
  */
-const CACHE_VERSION = 'v1'
+const CACHE_VERSION = 'v2'
 const SHELL_CACHE = `zeroed-shell-${CACHE_VERSION}`
 const RUNTIME_CACHE = `zeroed-runtime-${CACHE_VERSION}`
 
