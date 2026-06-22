@@ -53,6 +53,7 @@ function isSameDay(a: Date, b: Date) {
 }
 
 const shortDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short' })
+const dayAndDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
 
 // The cached Today view. Everything here is serializable (ISO strings, plain
 // numbers) so it round-trips through localStorage; the date-derived week strip
@@ -72,6 +73,7 @@ interface TodayView {
   p1: { category: string; confidence: number } | null
   retestDate: string | null
   latestReview: { id: string; weekEnding: string } | null
+  lastDoneByRoutine: Record<string, string>   // routineId → most recent performed_at (any week)
 }
 
 async function fetchTodayView(athleteId: string): Promise<TodayView> {
@@ -98,18 +100,30 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
   const top = active[0] ?? null
   const ath = athRes.data as { goals: string | null; obstacle: string | null } | null
 
-  // Latest weekly review, for the recap prompt (separate light lookup — it's
-  // scoped by the active program, not the athlete directly).
+  // Latest weekly review (recap prompt) + last-performed per routine (so a
+  // session done in a prior week still shows its history, not a blank "to do").
+  // Both scoped by the active program.
   let latestReview: { id: string; weekEnding: string } | null = null
+  const lastDoneByRoutine: Record<string, string> = {}
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
   if (prog?.id) {
-    const { data: rev } = await supabase
-      .from('weekly_review').select('id, week_ending')
-      .eq('program_id', prog.id)
-      .order('week_ending', { ascending: false })
-      .limit(1).maybeSingle()
+    const [{ data: rev }, { data: recent }] = await Promise.all([
+      supabase
+        .from('weekly_review').select('id, week_ending')
+        .eq('program_id', prog.id)
+        .order('week_ending', { ascending: false })
+        .limit(1).maybeSingle(),
+      supabase
+        .from('workout').select('routine_id, performed_at, routine!inner(program_id)')
+        .eq('routine.program_id', prog.id)
+        .order('performed_at', { ascending: false })
+        .limit(80),
+    ])
     if (rev) latestReview = { id: rev.id as string, weekEnding: rev.week_ending as string }
+    for (const w of (recent ?? []) as { routine_id: string; performed_at: string }[]) {
+      if (!lastDoneByRoutine[w.routine_id]) lastDoneByRoutine[w.routine_id] = w.performed_at
+    }
   }
 
   return {
@@ -126,6 +140,7 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
     p1: top ? { category: top.category, confidence: top.confidence } : null,
     retestDate: (profileRes.data?.retest_date as string | null) ?? null,
     latestReview,
+    lastDoneByRoutine,
   }
 }
 
@@ -150,11 +165,12 @@ type SessionState =
   | { kind: 'done'; lastWorkout: WeekWorkout; count: number }
 
 function SessionCard({
-  routine, recommended, state, onStart, onResume, onEdit, onLogAgain,
+  routine, recommended, state, lastDone, onStart, onResume, onEdit, onLogAgain,
 }: {
   routine: RoutineRow
   recommended: boolean
   state: SessionState
+  lastDone: string | null
   onStart: () => void
   onResume: () => void
   onEdit: () => void
@@ -191,6 +207,14 @@ function SessionCard({
           ? `✓ Logged · ${shortDay(state.lastWorkout.performedAt)}${state.count > 1 ? ` · ×${state.count}` : ''}`
           : inProg ? '● In progress' : '○ To do'}
       </p>
+
+      {/* History — proves a session logged even when it was a prior week, so a
+          rolled-over week never looks like the work vanished. */}
+      {state.kind !== 'done' && lastDone && (
+        <p className="text-xs text-dim" style={{ marginTop: 4, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
+          Last done {dayAndDate(lastDone)}
+        </p>
+      )}
 
       {routine.intent && state.kind === 'todo' && (
         <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{routine.intent}</p>
@@ -317,6 +341,15 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
 
   const confidencePct = p1 ? Math.round(p1.confidence * 100) : null
   const doneCount = routines.filter((r) => statusFor(r.id).kind === 'done').length
+  const lastDoneByRoutine = view?.lastDoneByRoutine ?? {}
+
+  // Exactly one session gets the primary (yellow) Start: the scheduler's pick if
+  // it's still to-do, otherwise the first to-do in the list. Guarantees a clear
+  // CTA even when the week has rolled over and there's no scheduled "today".
+  const primaryRoutineId =
+    (todayRoutine && statusFor(todayRoutine.id).kind === 'todo' ? todayRoutine.id : null)
+    ?? routines.find((r) => statusFor(r.id).kind === 'todo')?.id
+    ?? null
 
   // Recap prompt: the latest review, shown for ~10 days after it's cut, until
   // viewed or dismissed (tracked locally — no schema change).
@@ -448,8 +481,9 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
               <SessionCard
                 key={r.id}
                 routine={r}
-                recommended={todayRoutine?.id === r.id}
+                recommended={r.id === primaryRoutineId}
                 state={statusFor(r.id)}
+                lastDone={lastDoneByRoutine[r.id] ?? null}
                 onStart={() => navigate(`/app/workout/${r.id}`)}
                 onResume={() => navigate(`/app/workout/${r.id}`)}
                 onLogAgain={() => navigate(`/app/workout/${r.id}`)}

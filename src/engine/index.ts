@@ -2817,22 +2817,25 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     workoutId = (workout as { id: string }).id
   }
 
-  // 2. Onboarding state transition, if any.
-  if (p.onboardingTransition) {
-    await supabase.from('athlete').update({ onboarding_step: p.onboardingTransition }).eq('id', p.athleteId)
-  }
-
+  // The workout row now exists. Everything below is best-effort and must NOT
+  // throw — if it did, the outbox would requeue a session that's already logged
+  // and double-insert on the next flush. So the agent/observations/insights run
+  // inside a guard; a failure still leaves the session correctly logged.
   const firstSession = p.onboardingTransition === 'first_session_complete'
-
-  // Skipped debrief → the workout is the whole record.
-  if (!p.debrief) {
-    return {
-      workoutId, summary: null, movedCount: 0, best: null,
-      setsDone: p.setsDone, durationMins: p.durationMins, athleteName: p.athleteName, firstSession,
-    }
+  const loggedOnly: CommitResult = {
+    workoutId, summary: null, movedCount: 0, best: null,
+    setsDone: p.setsDone, durationMins: p.durationMins, athleteName: p.athleteName, firstSession,
   }
+  try {
+    // 2. Onboarding state transition, if any.
+    if (p.onboardingTransition) {
+      await supabase.from('athlete').update({ onboarding_step: p.onboardingTransition }).eq('id', p.athleteId)
+    }
 
-  const { reflection, readingAnswer, exercises, reading } = p.debrief
+    // Skipped debrief → the workout is the whole record.
+    if (!p.debrief) return loggedOnly
+
+    const { reflection, readingAnswer, exercises, reading } = p.debrief
 
   // 3. Load existing insights so the engine can decide update vs create.
   const { data: existingInsights } = await supabase
@@ -2944,6 +2947,12 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     durationMins: p.durationMins,
     athleteName: p.athleteName,
     firstSession,
+  }
+  } catch (e) {
+    // The workout is saved; the read just didn't move this time. Never rethrow —
+    // returning cleanly lets the outbox dequeue (no duplicate on retry).
+    console.error('[commit] post-write step failed; workout is logged', e)
+    return loggedOnly
   }
 }
 
