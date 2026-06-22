@@ -71,6 +71,7 @@ interface TodayView {
   goal: string | null
   p1: { category: string; confidence: number } | null
   retestDate: string | null
+  latestReview: { id: string; weekEnding: string } | null
 }
 
 async function fetchTodayView(athleteId: string): Promise<TodayView> {
@@ -97,6 +98,20 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
   const top = active[0] ?? null
   const ath = athRes.data as { goals: string | null; obstacle: string | null } | null
 
+  // Latest weekly review, for the recap prompt (separate light lookup — it's
+  // scoped by the active program, not the athlete directly).
+  let latestReview: { id: string; weekEnding: string } | null = null
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (prog?.id) {
+    const { data: rev } = await supabase
+      .from('weekly_review').select('id, week_ending')
+      .eq('program_id', prog.id)
+      .order('week_ending', { ascending: false })
+      .limit(1).maybeSingle()
+    if (rev) latestReview = { id: rev.id as string, weekEnding: rev.week_ending as string }
+  }
+
   return {
     weekWorkouts: (workoutRes.data ?? []).map((w) => ({
       id: w.id as string,
@@ -110,7 +125,21 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
     goal: (ath?.goals as string | null) || (ath?.obstacle as string | null) || null,
     p1: top ? { category: top.category, confidence: top.confidence } : null,
     retestDate: (profileRes.data?.retest_date as string | null) ?? null,
+    latestReview,
   }
+}
+
+// Recap prompts are dismissed locally (no "seen" column needed).
+const RECAP_SEEN_KEY = 'zeroed:recap-seen'
+function recapSeen(id: string): boolean {
+  try { return (JSON.parse(localStorage.getItem(RECAP_SEEN_KEY) || '[]') as string[]).includes(id) }
+  catch { return false }
+}
+function markRecapSeen(id: string): void {
+  try {
+    const seen = JSON.parse(localStorage.getItem(RECAP_SEEN_KEY) || '[]') as string[]
+    if (!seen.includes(id)) localStorage.setItem(RECAP_SEEN_KEY, JSON.stringify([...seen.slice(-20), id]))
+  } catch { /* non-fatal */ }
 }
 
 // ---- one session row in the week list -------------------------------------
@@ -200,6 +229,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const { refresh } = (useOutletContext<LoopContext>() ?? { refresh: () => {} })
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [draftRoutineIds, setDraftRoutineIds] = useState<string[]>([])
+  const [recapDismissed, setRecapDismissed] = useState(false)
   // Sessions finished offline, waiting to sync. Re-checked when connectivity
   // returns so the note clears itself once the outbox drains.
   const [pendingSync, setPendingSync] = useState(pendingCount())
@@ -280,6 +310,14 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const confidencePct = p1 ? Math.round(p1.confidence * 100) : null
   const doneCount = routines.filter((r) => statusFor(r.id).kind === 'done').length
 
+  // Recap prompt: the latest review, shown for ~10 days after it's cut, until
+  // viewed or dismissed (tracked locally — no schema change).
+  const latestReview = view?.latestReview ?? null
+  const recapRecent = latestReview
+    ? Date.now() - new Date(`${latestReview.weekEnding}T12:00:00`).getTime() < 11 * 864e5
+    : false
+  const showRecap = !loading && !!latestReview && recapRecent && !recapDismissed && !recapSeen(latestReview.id)
+
   return (
     <div className="screen with-nav">
       {isFirstVisit && (
@@ -308,6 +346,34 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
               {pendingSync} session{pendingSync === 1 ? '' : 's'} saved offline — {pendingSync === 1 ? 'it syncs' : 'they sync'} and the coach reads {pendingSync === 1 ? 'it' : 'them'} when you're back online.
             </p>
+          </div>
+        )}
+
+        {/* Weekly recap — last week's review, the end-of-week payoff. */}
+        {showRecap && latestReview && (
+          <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+              <SectionHeader>Weekly recap</SectionHeader>
+              <button
+                type="button"
+                aria-label="Dismiss"
+                onClick={() => { markRecapSeen(latestReview.id); setRecapDismissed(true) }}
+                style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}
+              >
+                ×
+              </button>
+            </div>
+            <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>
+              Last week's in — what you did, what moved, and the call for this week.
+            </p>
+            <Button
+              variant="primary"
+              full
+              style={{ marginTop: 14 }}
+              onClick={() => { markRecapSeen(latestReview.id); navigate(`/app/recap/${latestReview.id}`) }}
+            >
+              View recap →
+            </Button>
           </div>
         )}
 

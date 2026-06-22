@@ -18,6 +18,7 @@ import { ProfileScreen } from './screens/loop/ProfileScreen'
 import { WorkoutScreen } from './screens/loop/WorkoutScreen'
 import { ProgramScreen } from './screens/loop/ProgramScreen'
 import { CoachScreen }   from './screens/loop/CoachScreen'
+import { RecapScreen }   from './screens/loop/RecapScreen'
 import { RetestScreen }  from './screens/loop/RetestScreen'
 
 // ---- Splash ----------------------------------------------------------------
@@ -108,6 +109,8 @@ function AppRoutes() {
         <Route path="profile" element={<ProfileScreen athleteId={athleteId} athleteName={athleteName} />} />
         <Route path="program" element={<ProgramScreen athleteId={athleteId} />} />
         <Route path="coach"   element={<CoachScreen athleteId={athleteId} />} />
+        <Route path="recap"             element={<RecapScreen athleteId={athleteId} />} />
+        <Route path="recap/:reviewId"   element={<RecapScreen athleteId={athleteId} />} />
       </Route>
 
       {/* Workout — full-screen, no nav */}

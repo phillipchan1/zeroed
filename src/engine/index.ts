@@ -24,6 +24,7 @@ import type {
   WeeklyDirective,
   WeeklyPrescription,
   WeeklyReviewAdjustments,
+  WeeklyReviewRow,
   CoachMessageInsert,
   SessionObservationInsert,
 } from '../types/database'
@@ -2943,5 +2944,136 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     durationMins: p.durationMins,
     athleteName: p.athleteName,
     firstSession,
+  }
+}
+
+// ---- Weekly recap (the end-of-week review surface) -------------------------
+// The weekly_review row already holds the directive + tally (runWeeklyReviewAgent
+// writes it at rollover). This assembles the full recap around it: the sessions
+// actually logged that week and the reads that moved — everything the athlete
+// wants to see when the week closes.
+
+const isSetDone = (s: SetLog) => s.done || s.reps != null || s.duration != null || s.distance != null
+
+export interface RecapSessionHighlight { name: string; set: SetLog }
+export interface RecapSession {
+  workoutId: string
+  routineName: string
+  performedAt: string
+  setsDone: number
+  rpe: number | null
+  highlights: RecapSessionHighlight[]   // top set of the first few exercises
+}
+export interface RecapMovement {
+  id: string
+  category: string
+  claim: string
+  status: InsightStatus
+  prevStatus: InsightStatus | null
+  confidence: number
+}
+export interface WeeklyRecap {
+  review: WeeklyReviewRow
+  weekStart: string   // ISO date (Monday)
+  weekEnd: string     // ISO date (Sunday) — review.week_ending
+  planned: number     // sessions/week target, for the done/planned stat
+  totalSets: number
+  sessions: RecapSession[]
+  movements: RecapMovement[]
+}
+
+/**
+ * Assemble the recap for a given review (or the most recent one). Pulls the
+ * sessions logged in that Mon–Sun window (with each routine's top sets) and the
+ * insights that moved that week, alongside the stored review/directive.
+ */
+export async function gatherWeeklyRecap(athleteId: string, reviewId?: string): Promise<WeeklyRecap | null> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return null
+
+  let reviewRow: WeeklyReviewRow | null = null
+  if (reviewId) {
+    const { data } = await supabase.from('weekly_review').select('*').eq('id', reviewId).maybeSingle()
+    reviewRow = (data as WeeklyReviewRow | null) ?? null
+  } else {
+    const { data } = await supabase
+      .from('weekly_review').select('*')
+      .eq('program_id', prog.id)
+      .order('week_ending', { ascending: false })
+      .limit(1).maybeSingle()
+    reviewRow = (data as WeeklyReviewRow | null) ?? null
+  }
+  if (!reviewRow) return null
+
+  // The week window: Monday 00:00 → Sunday 23:59 around week_ending.
+  const sunday = new Date(`${reviewRow.week_ending}T23:59:59`)
+  const monday = startOfWeekMonday(sunday)
+  const mondayStart = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate())
+
+  const [{ data: ws }, { data: ins }, { data: ath }] = await Promise.all([
+    supabase
+      .from('workout')
+      .select('id, performed_at, rpe, actual_weights, routine!inner(name, exercises, program_id)')
+      .eq('routine.program_id', prog.id)
+      .gte('performed_at', mondayStart.toISOString())
+      .lte('performed_at', sunday.toISOString())
+      .order('performed_at', { ascending: true }),
+    supabase
+      .from('insight').select('*')
+      .eq('athlete_id', athleteId)
+      .gte('updated_at', mondayStart.toISOString())
+      .lte('updated_at', sunday.toISOString()),
+    supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle(),
+  ])
+  const planned = ((ath as { sessions_per_week: number | null } | null)?.sessions_per_week) ?? 3
+
+  const sessions: RecapSession[] = ((ws ?? []) as unknown as Array<{
+    id: string; performed_at: string; rpe: number | null
+    actual_weights: Record<string, SetLog[]> | null
+    routine: { name: string; exercises: ExerciseTemplate[] }
+  }>).map((w) => {
+    const aw = w.actual_weights ?? {}
+    const setsDone = Object.values(aw).flat().filter(isSetDone).length
+    const exs = (w.routine.exercises ?? []) as ExerciseTemplate[]
+    const highlights: RecapSessionHighlight[] = []
+    for (const [idx, sets] of Object.entries(aw)) {
+      const top = topWorkingSet(sets)
+      const ex = exs[Number(idx)]
+      if (top && ex) highlights.push({ name: ex.name, set: top })
+      if (highlights.length >= 3) break
+    }
+    return {
+      workoutId: w.id,
+      routineName: w.routine.name,
+      performedAt: w.performed_at,
+      setsDone,
+      rpe: w.rpe,
+      highlights,
+    }
+  })
+
+  const movements: RecapMovement[] = ((ins ?? []) as InsightRow[])
+    .map((i) => ({
+      id: i.id,
+      category: i.category,
+      claim: i.claim,
+      status: i.status,
+      prevStatus: i.prev_status,
+      confidence: i.confidence,
+    }))
+    // Surface the meaningful ones first: a status transition, then by confidence.
+    .sort((a, b) => Number(!!b.prevStatus) - Number(!!a.prevStatus) || b.confidence - a.confidence)
+
+  const totalSets = sessions.reduce((a, s) => a + s.setsDone, 0)
+
+  return {
+    review: reviewRow,
+    weekStart: isoDate(mondayStart),
+    weekEnd: reviewRow.week_ending,
+    planned,
+    totalSets,
+    sessions,
+    movements,
   }
 }

@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import {
   InsightCard, SectionHeader, Skeleton, StatusCounts, TelemetryStrip, TypeOn,
@@ -42,6 +43,7 @@ function relativeTime(iso: string): string {
 }
 
 export function CoachScreen({ athleteId }: { athleteId: string }) {
+  const navigate = useNavigate()
   const [insights, setInsights] = useState<InsightRow[]>([])
   const [loading, setLoading]   = useState(true)
 
@@ -184,14 +186,27 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
         {/* Headline moment — the freshest adaptation, grounded in real data. This
             is the "it changed because of what I did" beat a static program can't
             produce. */}
-        {!loading && messages[0] && (
-          <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
-            <p className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
-              {KIND_LABEL[messages[0].kind] ?? 'UPDATE'} · {relativeTime(messages[0].created_at)}
-            </p>
-            <p style={{ fontSize: 15, lineHeight: 1.5 }}>{messages[0].body}</p>
-          </div>
-        )}
+        {!loading && messages[0] && (() => {
+          const m = messages[0]
+          const toRecap = m.kind === 'weekly_review' && m.ref_id ? `/app/recap/${m.ref_id}` : null
+          return (
+            <div
+              className="card fade-rise"
+              style={{ marginBottom: 16, borderColor: 'var(--signal)', cursor: toRecap ? 'pointer' : undefined }}
+              onClick={toRecap ? () => navigate(toRecap) : undefined}
+            >
+              <p className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
+                {KIND_LABEL[m.kind] ?? 'UPDATE'} · {relativeTime(m.created_at)}
+              </p>
+              <p style={{ fontSize: 15, lineHeight: 1.5 }}>{m.body}</p>
+              {toRecap && (
+                <p className="text-xs text-signal" style={{ marginTop: 8, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
+                  View full recap ›
+                </p>
+              )}
+            </div>
+          )
+        })()}
 
         {/* The read — demoted to a compact header. P1 (the anchor the
             conversation is about) stays visible; the rest of the stack is one
@@ -231,8 +246,14 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 10 }}>
               {messages.slice(1).map((m) => {
                 const directive = m.ref_id ? directiveByRef[m.ref_id] : undefined
+                const toRecap = m.kind === 'weekly_review' && m.ref_id ? `/app/recap/${m.ref_id}` : null
                 return (
-                  <div key={m.id} className="card">
+                  <div
+                    key={m.id}
+                    className="card"
+                    style={{ cursor: toRecap ? 'pointer' : undefined }}
+                    onClick={toRecap ? () => navigate(toRecap) : undefined}
+                  >
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8, gap: 8 }}>
                       <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                         <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.08em', color: 'var(--text-dim)' }}>
