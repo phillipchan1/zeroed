@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import type { User } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabaseClient'
 import { clearAllCache } from '../lib/cache'
+import { clearAllDraftsLocal } from '../lib/workoutDraft'
 
 interface AuthState {
   user: User | null
@@ -21,8 +22,9 @@ export function useAuth(): AuthState {
 
     // Subscribe to auth changes (magic link confirm, sign out, etc.)
     const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      // Drop every cached view on sign-out so the next account starts clean.
-      if (event === 'SIGNED_OUT') clearAllCache()
+      // Drop every cached view and any local workout draft on sign-out so the
+      // next account on this device starts clean.
+      if (event === 'SIGNED_OUT') { clearAllCache(); clearAllDraftsLocal() }
       setUser(session?.user ?? null)
       setLoading(false)
     })
