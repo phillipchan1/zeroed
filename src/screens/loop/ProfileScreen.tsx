@@ -19,6 +19,22 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
+  const [signingOut, setSigningOut] = useState(false)
+
+  async function handleSignOut() {
+    if (signingOut) return
+    setSigningOut(true)
+    try {
+      // Local scope clears this device's session with no network round-trip, so
+      // sign-out is instant even on the flaky signal you often have right after
+      // a workout. Global scope used to hang here, leaving the button spinning.
+      await supabase.auth.signOut({ scope: 'local' })
+      // SIGNED_OUT propagates through useAuth and swaps the app to onboarding.
+    } catch {
+      // Never strand the athlete on a dead button — force a clean reload.
+      window.location.href = '/'
+    }
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -63,9 +79,10 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
           <button
             className="btn btn--ghost text-xs"
             style={{ height: 32, padding: '0 8px', marginTop: 4 }}
-            onClick={() => supabase.auth.signOut()}
+            onClick={handleSignOut}
+            disabled={signingOut}
           >
-            Sign out
+            {signingOut ? 'Signing out…' : 'Sign out'}
           </button>
         </div>
        </div>
