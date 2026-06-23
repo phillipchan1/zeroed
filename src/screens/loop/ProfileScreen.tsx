@@ -24,6 +24,9 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   async function handleSignOut() {
     if (signingOut) return
     setSigningOut(true)
+    // Drop focus so iOS tears the keyboard down before the view swaps, instead
+    // of leaving it hovering over the splash through the logout transition.
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
     try {
       // Local scope clears this device's session with no network round-trip, so
       // sign-out is instant even on the flaky signal you often have right after
