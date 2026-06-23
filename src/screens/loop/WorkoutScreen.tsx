@@ -128,6 +128,9 @@ function SetHeader({
 
 // ---- Set row (tracking-type aware) -----------------------------------------
 
+// Numeric metric fields that the check-to-complete autofill can touch.
+type MetricField = 'weight' | 'reps' | 'rpe' | 'duration' | 'distance'
+
 interface SetRowProps {
   setNum: number
   log: SetLog
@@ -136,6 +139,8 @@ interface SetRowProps {
   distanceUnit: string
   prescribedReps: number | null
   prescribedDuration: number | null
+  prescribedLoad: number | null   // parsed prescribed weight, e.g. "225 lbs" → 225
+  carry: Partial<SetLog>          // values to carry forward (prev set this/last session)
   prevText: string | null  // last session's result for this set (desktop column)
   onChange: (updated: SetLog) => void
   onComplete: () => void   // fires when a set is newly marked done (→ rest timer)
@@ -144,25 +149,55 @@ interface SetRowProps {
 
 function SetRow({
   setNum, log, trackingType, unit, distanceUnit,
-  prescribedReps, prescribedDuration, prevText, onChange, onComplete, onActivate,
+  prescribedReps, prescribedDuration, prescribedLoad, carry,
+  prevText, onChange, onComplete, onActivate,
 }: SetRowProps) {
   const [rpeOpen, setRpeOpen] = useState(false)
+  // Which fields *this row's* check auto-filled — so un-checking can revert
+  // exactly those, while anything the athlete typed by hand is left alone.
+  const [autofilled, setAutofilled] = useState<MetricField[]>([])
 
   const num = (v: string) => (v === '' ? null : Number(v))
 
-  // Tap-to-complete: toggling a set ON prefills the prescribed target into any
-  // empty metric, so "did it as written" is one tap (TrainHeroic pattern).
+  // Any manual edit means the athlete owns that field now: drop it from the
+  // autofill set so a later un-check won't wipe their number.
+  function setField(field: MetricField, value: number | null) {
+    setAutofilled((a) => (a.includes(field) ? a.filter((f) => f !== field) : a))
+    onChange({ ...log, [field]: value })
+  }
+
+  // Tap-to-complete: toggling a set ON carries the previous set's numbers into
+  // any empty metric — weight, reps and RPE — so repeating a load (25 lb every
+  // set) is one tap, not a retype. Where there's nothing to carry we fall back
+  // to the prescription. Un-checking reverts only what we filled.
   function toggleDone() {
     if (log.done) {
-      onChange({ ...log, done: false })
+      const reverted: SetLog = { ...log, done: false }
+      autofilled.forEach((f) => { reverted[f] = null })
+      setAutofilled([])
+      onChange(reverted)
       return
     }
     const next: SetLog = { ...log, done: true }
-    if (trackingType === 'weight_reps' || trackingType === 'bodyweight_reps') {
-      if (next.reps == null && prescribedReps != null) next.reps = prescribedReps
-    } else if (trackingType === 'time') {
-      if (next.duration == null && prescribedDuration != null) next.duration = prescribedDuration
+    const filled: MetricField[] = []
+    const fill = (field: MetricField, value: number | null | undefined) => {
+      if (value != null && next[field] == null) { next[field] = value; filled.push(field) }
     }
+    if (trackingType === 'weight_reps') {
+      fill('weight', carry.weight ?? prescribedLoad)
+      fill('reps', carry.reps ?? prescribedReps)
+      fill('rpe', carry.rpe)
+    } else if (trackingType === 'bodyweight_reps') {
+      fill('reps', carry.reps ?? prescribedReps)
+      fill('weight', carry.weight)
+      fill('rpe', carry.rpe)
+    } else if (trackingType === 'time') {
+      fill('duration', carry.duration ?? prescribedDuration)
+      fill('rpe', carry.rpe)
+    } else if (trackingType === 'distance') {
+      fill('distance', carry.distance)
+    }
+    setAutofilled(filled)
     onChange(next)
     onComplete()
   }
@@ -190,23 +225,26 @@ function SetRow({
       </button>
       {rpeOpen && (
         <div className="rpe-pop">
-          {RPE_SCALE.map((v) => (
+          <span className="rpe-pop__label">RPE — how hard?</span>
+          <div className="rpe-pop__scale">
+            {RPE_SCALE.map((v) => (
+              <button
+                key={v}
+                type="button"
+                className={`rpe-pop__btn${log.rpe === v ? ' rpe-pop__btn--on' : ''}`}
+                onClick={() => { setField('rpe', v); setRpeOpen(false) }}
+              >
+                {v}
+              </button>
+            ))}
             <button
-              key={v}
               type="button"
-              className={`rpe-pop__btn${log.rpe === v ? ' rpe-pop__btn--on' : ''}`}
-              onClick={() => { onChange({ ...log, rpe: v }); setRpeOpen(false) }}
+              className="rpe-pop__btn rpe-pop__btn--clear"
+              onClick={() => { setField('rpe', null); setRpeOpen(false) }}
             >
-              {v}
+              –
             </button>
-          ))}
-          <button
-            type="button"
-            className="rpe-pop__btn rpe-pop__btn--clear"
-            onClick={() => { onChange({ ...log, rpe: null }); setRpeOpen(false) }}
-          >
-            –
-          </button>
+          </div>
         </div>
       )}
     </div>
@@ -237,17 +275,17 @@ function SetRow({
   if (trackingType === 'time') {
     cells = (
       <>
-        {numInput(log.duration, 'sec', (n) => onChange({ ...log, duration: n }))}
+        {numInput(log.duration, 'sec', (n) => setField('duration', n))}
         {rpeCell}
       </>
     )
   } else if (trackingType === 'distance') {
-    cells = numInput(log.distance, distanceUnit, (n) => onChange({ ...log, distance: n }), 'decimal')
+    cells = numInput(log.distance, distanceUnit, (n) => setField('distance', n), 'decimal')
   } else if (trackingType === 'bodyweight_reps') {
     cells = (
       <>
-        {numInput(log.reps, 'reps', (n) => onChange({ ...log, reps: n }))}
-        {numInput(log.weight, `+${unit}`, (n) => onChange({ ...log, weight: n }), 'decimal')}
+        {numInput(log.reps, 'reps', (n) => setField('reps', n))}
+        {numInput(log.weight, `+${unit}`, (n) => setField('weight', n), 'decimal')}
         {rpeCell}
       </>
     )
@@ -255,8 +293,8 @@ function SetRow({
     // weight_reps (default)
     cells = (
       <>
-        {numInput(log.weight, unit, (n) => onChange({ ...log, weight: n }), 'decimal')}
-        {numInput(log.reps, 'reps', (n) => onChange({ ...log, reps: n }))}
+        {numInput(log.weight, unit, (n) => setField('weight', n), 'decimal')}
+        {numInput(log.reps, 'reps', (n) => setField('reps', n))}
         {rpeCell}
       </>
     )
@@ -1017,6 +1055,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           const trackingType = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
           const pReps = leadingInt(ex.reps)
           const pDur  = trackingType === 'time' ? leadingInt(ex.reps) : null
+          const pLoad = leadingInt(ex.load ?? undefined)
 
           return (
             <div key={exIdx} style={{ paddingTop: 20, paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
@@ -1068,22 +1107,39 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                 prescribedLoad={ex.load ?? null}
               />
 
-              {logs.map((log, setIdx) => (
-                <SetRow
-                  key={setIdx}
-                  setNum={setIdx + 1}
-                  log={log}
-                  trackingType={trackingType}
-                  unit={unit}
-                  distanceUnit={distanceUnit}
-                  prescribedReps={pReps}
-                  prescribedDuration={pDur}
-                  prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], unit, distanceUnit)}
-                  onChange={(updated) => handleSetChange(exIdx, setIdx, updated)}
-                  onComplete={() => setRestEndsAt(Date.now() + REST_SECONDS * 1000)}
-                  onActivate={() => setActiveExIdx(exIdx)}
-                />
-              ))}
+              {logs.map((log, setIdx) => {
+                // What "check to complete" carries into empty fields: the set
+                // before it this session wins (you usually repeat a load), with
+                // last session's matching set as the fallback for set 1. RPE is
+                // in-session only — it's the read we're measuring, not a default.
+                const inSessionPrev = setIdx > 0 ? logs[setIdx - 1] : null
+                const lastSame = (prevByExercise[exIdx] ?? [])[setIdx]
+                const carry: Partial<SetLog> = {
+                  weight:   inSessionPrev?.weight   ?? lastSame?.weight   ?? null,
+                  reps:     inSessionPrev?.reps     ?? lastSame?.reps     ?? null,
+                  rpe:      inSessionPrev?.rpe      ?? null,
+                  duration: inSessionPrev?.duration ?? lastSame?.duration ?? null,
+                  distance: inSessionPrev?.distance ?? lastSame?.distance ?? null,
+                }
+                return (
+                  <SetRow
+                    key={setIdx}
+                    setNum={setIdx + 1}
+                    log={log}
+                    trackingType={trackingType}
+                    unit={unit}
+                    distanceUnit={distanceUnit}
+                    prescribedReps={pReps}
+                    prescribedDuration={pDur}
+                    prescribedLoad={pLoad}
+                    carry={carry}
+                    prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], unit, distanceUnit)}
+                    onChange={(updated) => handleSetChange(exIdx, setIdx, updated)}
+                    onComplete={() => setRestEndsAt(Date.now() + REST_SECONDS * 1000)}
+                    onActivate={() => setActiveExIdx(exIdx)}
+                  />
+                )
+              })}
 
               <button
                 type="button"
