@@ -186,18 +186,23 @@ export function OnboardingRouter({
   }
 
   // --- Pre-auth / bootstrap states ------------------------------------------
+  // No session → always the pre-auth funnel, regardless of any athlete still in
+  // memory. On sign-out `user` clears a render before the cached athlete does;
+  // without this guard we'd briefly render an authed onboarding step (several
+  // carry an autoFocus input), which popped the keyboard over the splash in the
+  // weird in-between frame during logout.
+  if (!user) {
+    return (
+      <HookAct
+        authed={false}
+        initialObstacle=""
+        initialArena={null}
+        initialLimiterChoice={null}
+        onAuthedAdvance={() => { /* unreachable while unauthenticated */ }}
+      />
+    )
+  }
   if (!athlete) {
-    if (!user) {
-      return (
-        <HookAct
-          authed={false}
-          initialObstacle=""
-          initialArena={null}
-          initialLimiterChoice={null}
-          onAuthedAdvance={() => { /* unreachable while unauthenticated */ }}
-        />
-      )
-    }
     return <div className="screen--centered"><Spinner /></div>
   }
 
