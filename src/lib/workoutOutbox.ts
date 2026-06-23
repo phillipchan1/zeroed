@@ -42,6 +42,16 @@ export function pendingCount(): number {
   return readQueue().length
 }
 
+// Finished-but-uncommitted sessions, shaped like `workout` rows so the schedule
+// can fold them in. The outbox — not the `workout` table — is the durable source
+// of truth for "I finished a session"; until a commit lands, scheduling reads
+// (today's routine, the week strip) must still count these or a finished session
+// stays invisible across reloads. `queuedAt` is the completion time, which is all
+// the calendar-day scheduling keys off of.
+export function pendingWorkouts(): Array<{ routine_id: string; performed_at: string }> {
+  return readQueue().map((p) => ({ routine_id: p.routineId, performed_at: p.queuedAt }))
+}
+
 // Ids currently being committed — guards against the live commit and a concurrent
 // flush (e.g. an `online` event firing mid-submit) double-inserting the workout.
 const inFlight = new Set<string>()

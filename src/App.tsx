@@ -114,7 +114,7 @@ function AppRoutes() {
       </Route>
 
       {/* Workout — full-screen, no nav */}
-      <Route path="/app/workout/:routineId" element={<WorkoutScreen />} />
+      <Route path="/app/workout/:routineId" element={<WorkoutScreen onCommitted={refresh} />} />
 
       {/* Retest — full-screen rescreen (program cadence, §6) */}
       <Route path="/app/retest" element={<RetestScreen athleteId={athleteId} onDone={refresh} />} />

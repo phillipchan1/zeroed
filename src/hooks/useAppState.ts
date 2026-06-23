@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabaseClient'
 import { loadCache, saveCache } from '../lib/cache'
 import { computeWeekSchedule } from '../engine'
+import { pendingWorkouts } from '../lib/workoutOutbox'
 import type { AthleteRow, AthleteProfileRow, RoutineRow } from '../types/database'
 
 export interface AppState {
@@ -112,9 +113,16 @@ async function fetchSnapshot(userId: string): Promise<AppStateSnapshot> {
           .in('routine_id', ordered.map((r) => r.id))
           .gte('performed_at', monday.toISOString())
 
+        // Fold in sessions finished but not yet committed (offline, or a commit
+        // still in flight / failing). Without this, a finished session stays
+        // invisible to scheduling until its DB row lands — so "today" keeps
+        // offering a session the athlete already did, even across reloads.
+        // computeWeekSchedule dedupes by calendar day, so a pending entry that
+        // overlaps a committed one collapses to one session.
+        const pending = pendingWorkouts().filter((w) => ordered.some((r) => r.id === w.routine_id))
         const schedule = computeWeekSchedule(
           ordered,
-          (weekWorkouts ?? []) as Array<{ routine_id: string; performed_at: string }>,
+          [...((weekWorkouts ?? []) as Array<{ routine_id: string; performed_at: string }>), ...pending],
           athlete.sessions_per_week ?? 3,
         )
         todayRoutine = schedule.todayRoutine

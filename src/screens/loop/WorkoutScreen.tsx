@@ -482,7 +482,7 @@ function performedSummary(t: TrackingType, logs: SetLog[], unit: string, distanc
   return done.map((l) => `${l.reps ?? '?'}×${l.weight != null ? `${l.weight}${unit}` : 'BW'}`).join(', ')
 }
 
-export function WorkoutScreen() {
+export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}) {
   const { routineId } = useParams<{ routineId: string }>()
   const navigate      = useNavigate()
   const [searchParams] = useSearchParams()
@@ -851,6 +851,13 @@ export function WorkoutScreen() {
       result = null                                // offline / failed — stays queued
     }
     setSavingDebrief(false)
+
+    // Recompute app-state now so Today reflects the finished (or edited) session
+    // immediately, without a reload. The schedule folds in the outbox, so even a
+    // still-queued session stops "today" from offering work already done. (The
+    // screen below us isn't mounted, so this is the only way to refresh the
+    // cached snapshot before navigating to it.)
+    onCommitted?.()
 
     // Editing an existing session → back to Today (no revelation / pulse).
     if (isEdit) {
