@@ -164,64 +164,55 @@ type SessionState =
   | { kind: 'in_progress' }
   | { kind: 'done'; lastWorkout: WeekWorkout; count: number }
 
-function SessionCard({
-  routine, recommended, state, lastDone, onStart, onResume, onEdit, onLogAgain,
+function WorkoutPreviewSheet({
+  routine, recommended, state, onClose, onStart, onResume, onEdit, onLogAgain,
 }: {
   routine: RoutineRow
   recommended: boolean
   state: SessionState
-  lastDone: string | null
+  onClose: () => void
   onStart: () => void
   onResume: () => void
   onEdit: () => void
   onLogAgain: () => void
 }) {
-  const exCount = (routine.exercises as unknown[]).length
-  const done = state.kind === 'done'
-  const inProg = state.kind === 'in_progress'
-  const borderColor = inProg ? 'var(--signal)' : done ? 'var(--confirmed)' : undefined
-
   return (
-    <div className="card fade-rise" style={{ marginBottom: 10, borderColor }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-        <h3 style={{ fontSize: 15, fontWeight: 600, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-          {routine.name}
-          {recommended && state.kind === 'todo' && (
-            <span className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              Next up
-            </span>
-          )}
-        </h3>
-        <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{exCount} ex</span>
-      </div>
+    <div className="obs-sheet" onClick={onClose}>
+      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 4 }}>
+          <p className="section-header">{routine.name}</p>
+          <button
+            type="button"
+            onClick={onClose}
+            style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}
+          >
+            ×
+          </button>
+        </div>
 
-      {/* Status line */}
-      <p
-        className="text-xs"
-        style={{
-          marginTop: 6, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', textTransform: 'uppercase',
-          color: done ? 'var(--confirmed)' : inProg ? 'var(--signal)' : 'var(--text-dim)',
-        }}
-      >
-        {state.kind === 'done'
-          ? `✓ Logged · ${shortDay(state.lastWorkout.performedAt)}${state.count > 1 ? ` · ×${state.count}` : ''}`
-          : inProg ? '● In progress' : '○ To do'}
-      </p>
+        {routine.intent && (
+          <p className="text-xs text-dim" style={{ marginBottom: 14, lineHeight: 1.5 }}>{routine.intent}</p>
+        )}
 
-      {/* History — proves a session logged even when it was a prior week, so a
-          rolled-over week never looks like the work vanished. */}
-      {state.kind !== 'done' && lastDone && (
-        <p className="text-xs text-dim" style={{ marginTop: 4, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
-          Last done {dayAndDate(lastDone)}
-        </p>
-      )}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
+          {routine.exercises.map((ex, i) => (
+            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+              <div style={{ flex: 1 }}>
+                <p className="text-sm" style={{ fontWeight: 500 }}>{ex.name}</p>
+                {ex.cue && (
+                  <p className="text-xs text-dim" style={{ marginTop: 2, lineHeight: 1.4 }}>{ex.cue}</p>
+                )}
+              </div>
+              <p
+                className="num text-xs"
+                style={{ whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)', paddingTop: 2 }}
+              >
+                {ex.sets}×{ex.reps}{ex.load ? ` · ${ex.load}` : ''}
+              </p>
+            </div>
+          ))}
+        </div>
 
-      {routine.intent && state.kind === 'todo' && (
-        <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{routine.intent}</p>
-      )}
-
-      {/* Action — one clear CTA per state. */}
-      <div style={{ marginTop: 12 }}>
         {state.kind === 'todo' && (
           <Button variant={recommended ? 'primary' : 'ghost'} full onClick={onStart}>
             {recommended ? 'Start session →' : 'Start →'}
@@ -247,6 +238,112 @@ function SessionCard({
         )}
       </div>
     </div>
+  )
+}
+
+function SessionCard({
+  routine, recommended, state, lastDone, onStart, onResume, onEdit, onLogAgain,
+}: {
+  routine: RoutineRow
+  recommended: boolean
+  state: SessionState
+  lastDone: string | null
+  onStart: () => void
+  onResume: () => void
+  onEdit: () => void
+  onLogAgain: () => void
+}) {
+  const [showPreview, setShowPreview] = useState(false)
+  const exCount = (routine.exercises as unknown[]).length
+  const done = state.kind === 'done'
+  const inProg = state.kind === 'in_progress'
+  const borderColor = inProg ? 'var(--signal)' : done ? 'var(--confirmed)' : undefined
+
+  return (
+    <>
+      <div
+        className="card fade-rise"
+        style={{ marginBottom: 10, borderColor, cursor: 'pointer' }}
+        onClick={() => setShowPreview(true)}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+          <h3 style={{ fontSize: 15, fontWeight: 600, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
+            {routine.name}
+            {recommended && state.kind === 'todo' && (
+              <span className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+                Next up
+              </span>
+            )}
+          </h3>
+          <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{exCount} ex</span>
+        </div>
+
+        {/* Status line */}
+        <p
+          className="text-xs"
+          style={{
+            marginTop: 6, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', textTransform: 'uppercase',
+            color: done ? 'var(--confirmed)' : inProg ? 'var(--signal)' : 'var(--text-dim)',
+          }}
+        >
+          {state.kind === 'done'
+            ? `✓ Logged · ${shortDay(state.lastWorkout.performedAt)}${state.count > 1 ? ` · ×${state.count}` : ''}`
+            : inProg ? '● In progress' : '○ To do'}
+        </p>
+
+        {/* History — proves a session logged even when it was a prior week, so a
+            rolled-over week never looks like the work vanished. */}
+        {state.kind !== 'done' && lastDone && (
+          <p className="text-xs text-dim" style={{ marginTop: 4, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
+            Last done {dayAndDate(lastDone)}
+          </p>
+        )}
+
+        {routine.intent && state.kind === 'todo' && (
+          <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{routine.intent}</p>
+        )}
+
+        {/* Action — one clear CTA per state. */}
+        <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}>
+          {state.kind === 'todo' && (
+            <Button variant={recommended ? 'primary' : 'ghost'} full onClick={onStart}>
+              {recommended ? 'Start session →' : 'Start →'}
+            </Button>
+          )}
+          {state.kind === 'in_progress' && (
+            <Button variant="primary" full onClick={onResume}>Resume session →</Button>
+          )}
+          {state.kind === 'done' && (
+            <>
+              <Button variant="ghost" full onClick={onEdit}>Review / edit →</Button>
+              <button
+                type="button"
+                onClick={onLogAgain}
+                style={{
+                  display: 'block', margin: '10px auto 0', background: 'none', border: 'none', cursor: 'pointer',
+                  fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', color: 'var(--text-dim)',
+                }}
+              >
+                Log again
+              </button>
+            </>
+          )}
+        </div>
+      </div>
+
+      {showPreview && (
+        <WorkoutPreviewSheet
+          routine={routine}
+          recommended={recommended}
+          state={state}
+          onClose={() => setShowPreview(false)}
+          onStart={onStart}
+          onResume={onResume}
+          onEdit={onEdit}
+          onLogAgain={onLogAgain}
+        />
+      )}
+    </>
   )
 }
 
