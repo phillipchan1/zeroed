@@ -59,10 +59,12 @@ function formatPrev(
 
 // Enter flies the cursor to the next numeric field, across rows and exercises —
 // spreadsheet-speed entry on a physical keyboard, harmless under a thumb.
+// On the last field, blur instead so the keyboard dismisses naturally.
 function advanceField(el: EventTarget & HTMLInputElement) {
   const inputs = Array.from(document.querySelectorAll<HTMLInputElement>('.set-row__input'))
   const i = inputs.indexOf(el)
   if (i >= 0 && i + 1 < inputs.length) inputs[i + 1].focus()
+  else el.blur()
 }
 
 // ---- Column header (prescribed target as a labelled column) ----------------
@@ -263,6 +265,7 @@ function SetRow({
       placeholder={placeholder}
       value={value ?? ''}
       onChange={(e) => onVal(num(e.target.value))}
+      enterKeyHint="next"
       onFocus={onActivate}
       onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); advanceField(e.currentTarget) } }}
     />
@@ -460,7 +463,6 @@ function DebriefSheet({ reading, saving, onSave, onSkip }: DebriefSheetProps) {
           placeholder="Felt strong on the second set, knee was quiet, left side still lagging…"
           value={reflection}
           onChange={(e) => setReflection(e.target.value)}
-          autoFocus
         />
 
         <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
@@ -806,6 +808,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // the whole session, debrief included, lands in one durable, replayable unit.
   function handleCompleteWorkout() {
     if (!routine) return
+    // Dismiss any open keyboard before the debrief sheet slides up, so it isn't
+    // hidden behind a keyboard the user has no way to close.
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
     if (timerRef.current) clearInterval(timerRef.current)
     finalElapsedRef.current = elapsed
     completedRef.current = true   // stop draft autosave; the outbox owns it now
