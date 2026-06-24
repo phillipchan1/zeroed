@@ -881,60 +881,63 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // debrief included) the moment the connection returns.
   async function finishSession(debrief: PendingDebrief | null) {
     if (!athleteId || !routine) return
-    setSavingDebrief(true)
 
     const pending = buildPending(debrief)
     enqueueSession(pending)                       // durable before any network
     if (!isEdit) clearDraft(athleteId, routineId!) // the outbox is its home now
 
-    let result
-    try {
-      result = await commitPending(pending)
-    } catch {
-      result = null                                // offline / failed — stays queued
-    }
-    setSavingDebrief(false)
+    // First session with debrief: wait for the commit so the revelation screen
+    // gets the AI-generated insight data for the "moved" animation. This path
+    // happens once ever per athlete so the wait is acceptable.
+    if (pending.onboardingTransition === 'first_session_complete') {
+      setSavingDebrief(true)
+      let result = null
+      try {
+        result = await commitPending(pending)
+      } catch { /* stays queued, outbox retries on next online event */ }
+      setSavingDebrief(false)
+      onCommitted?.()
 
-    // Recompute app-state now so Today reflects the finished (or edited) session
-    // immediately, without a reload. The schedule folds in the outbox, so even a
-    // still-queued session stops "today" from offering work already done. (The
-    // screen below us isn't mounted, so this is the only way to refresh the
-    // cached snapshot before navigating to it.)
+      if (result) {
+        navigate('/onboarding/revelation', {
+          replace: true,
+          state: {
+            movedInsightId: result.best?.movedInsightId ?? null,
+            category: result.best?.category ?? 'Recovery',
+            previousConfidence: result.best?.previousConfidence ?? null,
+            newConfidence: result.best?.newConfidence ?? null,
+            isNew: result.best?.isNew ?? true,
+            movedCount: result.movedCount,
+            summary: result.summary,
+            durationMins: result.durationMins,
+            setsLogged: result.setsDone,
+            name: result.athleteName,
+          },
+        })
+      } else {
+        navigate('/app/today', { replace: true, state: { queuedOffline: true } })
+      }
+      return
+    }
+
+    // All other cases — optimistic: navigate immediately, commit in background.
+    // The session is durably in the outbox the moment enqueueSession() returns;
+    // the UI doesn't need to wait for the server write (or the AI debrief agent)
+    // to feel complete. The commit removes the session from the queue on success;
+    // the outbox retries on the next `online` event if it fails.
     onCommitted?.()
 
-    // Editing an existing session → back to Today (no revelation / pulse).
     if (isEdit) {
-      navigate('/app/today', { replace: true, state: { queuedOffline: result === null } })
-      return
+      navigate('/app/today', { replace: true })
+    } else if (debrief) {
+      // Navigate to profile without waiting for the AI agent; the category
+      // pulse is skipped but the session is saved.
+      navigate('/app/profile', { replace: true })
+    } else {
+      navigate('/app/today', { replace: true })
     }
 
-    if (result && result.firstSession) {
-      navigate('/onboarding/revelation', {
-        replace: true,
-        state: {
-          movedInsightId: result.best?.movedInsightId ?? null,
-          category: result.best?.category ?? 'Recovery',
-          previousConfidence: result.best?.previousConfidence ?? null,
-          newConfidence: result.best?.newConfidence ?? null,
-          isNew: result.best?.isNew ?? true,
-          movedCount: result.movedCount,
-          summary: result.summary,
-          durationMins: result.durationMins,
-          setsLogged: result.setsDone,
-          name: result.athleteName,
-        },
-      })
-      return
-    }
-
-    if (result && debrief) {
-      navigate('/app/profile', { state: { pulsedCategory: result.best?.category ?? 'Recovery' }, replace: true })
-      return
-    }
-
-    // Skipped debrief (committed or not), or an offline finish → back to Today.
-    // queuedOffline tells Today to show the "will sync" note.
-    navigate('/app/today', { replace: true, state: { queuedOffline: result === null } })
+    void commitPending(pending).catch(() => { /* stays queued */ })
   }
 
   function handleDebrief(reflection: string, readingAnswer: string) {
