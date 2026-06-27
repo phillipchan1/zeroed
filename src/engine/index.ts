@@ -32,7 +32,7 @@ import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
 import {
   callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callInfoGain, callTarget,
-  callCoachChat,
+  callCoachChat, callWeeklyDebrief,
   type ProgramDesignResult, type InsightCategory,
   type CoachContext, type CoachChatTurn, type CoachAction,
 } from './agentClient'
@@ -992,7 +992,33 @@ function tallyWeek(planned: number, workouts: WeekWorkout[], observations: WeekO
 }
 
 // The §4.3 decision tree — the only place a directive is chosen.
-function decidePrescription(t: WeeklyTally): WeeklyPrescription {
+//
+// Two athlete-state overrides sit in front of the tree:
+//  • injury  — explicit "I'm hurt / taking time off". The engine never infers
+//    this; only the athlete declares it. Forces a RECOVERY back-off.
+//  • emptyMissed — a completed week with NO logged work. A no-penalty reset so a
+//    skipped week never reads as a failure or silently vanishes.
+function decidePrescription(
+  t: WeeklyTally,
+  opts: { injury?: boolean; emptyMissed?: boolean } = {},
+): WeeklyPrescription {
+  if (opts.injury) {
+    return {
+      directive: 'RECOVERY',
+      load_delta_pct: -20,
+      rpe_target: 5,
+      rationale:
+        'You flagged an injury / time off — next week backs load off 20% and caps effort at RPE 5. Recovery is the training right now; we ramp back when the joint is calm.',
+    }
+  }
+  if (opts.emptyMissed || t.done === 0) {
+    return {
+      directive: 'HOLD (missed)',
+      load_delta_pct: 0,
+      rpe_target: 7,
+      rationale: 'No sessions logged this week — holding load, no penalty. Pick it back up when you can; the week resets clean.',
+    }
+  }
   if (t.painCount >= 2 || (t.avgRPE != null && t.avgRPE >= 8.5)) {
     return {
       directive: 'DELOAD',
@@ -1027,30 +1053,132 @@ function decidePrescription(t: WeeklyTally): WeeklyPrescription {
   }
 }
 
+// Deterministic fallback note — always available, used offline and whenever the
+// weekly_debrief model call fails. The warm model message wraps the SAME tally
+// and directive; this is the floor, never wrong.
 function weeklyCoachNotes(weekEnding: string, t: WeeklyTally, p: WeeklyPrescription): string {
   const rpeStr = t.avgRPE != null ? `avg RPE ${t.avgRPE}` : 'RPE not logged'
   const tally = `Week to ${weekEnding}: ${t.done}/${t.planned} sessions · ${rpeStr} · ${t.painCount} pain flag${t.painCount === 1 ? '' : 's'} · ${t.positiveCount} strong set${t.positiveCount === 1 ? '' : 's'}.`
   return `${tally} ${p.rationale}`
 }
 
+// The coach's end-of-week message. The engine has already crunched the tally and
+// chosen the directive (decidePrescription) — the model only DRAFTS warm
+// language around that fixed decision, and never on a fully-empty week (nothing
+// to narrate). Any failure falls back to the deterministic note: the app always
+// produces a message, online or off.
+async function generateWeeklyCoachMessage(
+  weekEnding: string,
+  t: WeeklyTally,
+  p: WeeklyPrescription,
+  ctx: { name: string | null; target: string | null; injury: boolean; missed: boolean },
+): Promise<string> {
+  const fallback = weeklyCoachNotes(weekEnding, t, p)
+  // Empty missed week — the templated reset reads cleaner than model filler. An
+  // injury declaration is the exception: it still gets the warm, reassuring note
+  // even with nothing logged.
+  if (t.done === 0 && !ctx.injury) return fallback
+  try {
+    const res = await callWeeklyDebrief({
+      name: ctx.name,
+      target: ctx.target,
+      week_ending: weekEnding,
+      planned: t.planned,
+      done: t.done,
+      adherence: Math.round(t.adherence * 100),
+      avg_rpe: t.avgRPE,
+      pain_count: t.painCount,
+      positive_count: t.positiveCount,
+      flagged_categories: t.flagged_categories,
+      directive: p.directive,
+      load_delta_pct: p.load_delta_pct,
+      rpe_target: p.rpe_target,
+      rationale: p.rationale,
+      injury: ctx.injury,
+      missed: ctx.missed,
+    })
+    if (res.ok && res.data.message.trim()) return res.data.message.trim()
+  } catch {
+    /* fall through to the deterministic note */
+  }
+  return fallback
+}
+
+// Persist one week: crunch → decide → draft message → write the review row and
+// its coach_message. The single place a weekly_review is minted, so the auto
+// rollover and the manual close-out can never drift. Returns the new review id.
+async function persistWeeklyReview(
+  athleteId: string,
+  programId: string,
+  weekEnding: string,
+  planned: number,
+  workouts: WeekWorkout[],
+  observations: WeekObservation[],
+  ctx: { name: string | null; target: string | null; injury?: boolean },
+): Promise<string | null> {
+  const tally = tallyWeek(planned, workouts, observations)
+  const injury = ctx.injury === true
+  const prescription = decidePrescription(tally, { injury })
+  const adjustments: WeeklyReviewAdjustments = {
+    avgRPE: tally.avgRPE,
+    adherence: Math.round(tally.adherence * 100) / 100,
+    painCount: tally.painCount,
+    positiveCount: tally.positiveCount,
+    flagged_categories: tally.flagged_categories,
+  }
+  const coach_notes = await generateWeeklyCoachMessage(weekEnding, tally, prescription, {
+    name: ctx.name,
+    target: ctx.target,
+    injury,
+    missed: !injury && tally.done === 0,
+  })
+
+  const { data: review } = await supabase
+    .from('weekly_review')
+    .insert({ program_id: programId, week_ending: weekEnding, coach_notes, adjustments, next_week_prescription: prescription })
+    .select()
+    .single()
+  if (!review) return null
+  const reviewId = (review as { id: string }).id
+  await insertCoachMessage(athleteId, { kind: 'weekly_review', body: coach_notes, ref_id: reviewId })
+  return reviewId
+}
+
+// The athlete's name + what they're chasing — passed to the coach-message model
+// so the weekly note is specific, not generic. Falls back gracefully when unset.
+async function fetchReviewContext(athleteId: string): Promise<{ name: string | null; target: string | null }> {
+  const { data: ath } = await supabase
+    .from('athlete').select('name, goals, obstacle').eq('id', athleteId).maybeSingle()
+  const a = ath as { name: string | null; goals: string | null; obstacle: string | null } | null
+  return { name: a?.name ?? null, target: (a?.goals || a?.obstacle) ?? null }
+}
+
+// At most this many completed weeks are back-filled in a single rollover run, so
+// an athlete returning after a long absence gets a bounded set of recent reset
+// notes rather than dozens of empty rows.
+const MAX_WEEKLY_BACKFILL = 16
+
 /**
  * WeeklyReviewAgent (deterministic, §4.2–4.3). Synthesizes every COMPLETED
- * Mon–Sun week that has ≥1 workout and no review yet into a weekly_review row +
- * a coach_message. Idempotent: one review per (program_id, week_ending).
+ * Mon–Sun week from the athlete's first logged session up to last week into a
+ * weekly_review row + a coach_message — INCLUDING weeks with no logged work,
+ * which become a no-penalty reset so a missed week is acknowledged, never
+ * silently dropped. Idempotent: one review per (program_id, week_ending).
  */
 export async function runWeeklyReviewAgent(athleteId: string, programId: string): Promise<number> {
-  const [{ data: ath }, { data: existingReviews }, { data: workoutRows }, { data: obsRows }] = await Promise.all([
+  const [{ data: ath }, { data: existingReviews }, { data: workoutRows }, { data: obsRows }, reviewCtx] = await Promise.all([
     supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle(),
     supabase.from('weekly_review').select('week_ending').eq('program_id', programId),
     supabase.from('workout').select('performed_at, rpe, actual_weights, routine!inner(program_id)').eq('routine.program_id', programId),
     supabase.from('session_observation').select('severity, signal, logged_at, workout!inner(routine!inner(program_id))').eq('workout.routine.program_id', programId),
+    fetchReviewContext(athleteId),
   ])
 
   const planned = (ath?.sessions_per_week as number | null) ?? 3
   const reviewed = new Set((existingReviews ?? []).map((r) => r.week_ending as string))
   const workouts = (workoutRows ?? []) as unknown as WeekWorkout[]
   const observations = (obsRows ?? []) as unknown as WeekObservation[]
-  if (workouts.length === 0) return 0
+  if (workouts.length === 0) return 0 // no activity yet — nothing to review or back-fill
 
   const thisMonday = startOfWeekMonday(new Date())
 
@@ -1065,37 +1193,82 @@ export async function runWeeklyReviewAgent(athleteId: string, programId: string)
   for (const w of workouts) bucketFor(w.performed_at).workouts.push(w)
   for (const o of observations) bucketFor(o.logged_at).observations.push(o)
 
-  // Process each completed week (its Monday strictly before this week's Monday)
-  // that has ≥1 workout and no review yet — oldest first.
-  const pending = [...weeks.entries()]
-    .filter(([key, wk]) => wk.monday.getTime() < thisMonday.getTime() && wk.workouts.length > 0 && !reviewed.has(key))
-    .sort((a, b) => a[1].monday.getTime() - b[1].monday.getTime())
+  // Walk every completed week from the first activity to last week — filling the
+  // gaps (weeks with no logged work) so a skipped week is reviewed, not dropped.
+  const firstMonday = [...weeks.values()].reduce((min, wk) => (wk.monday < min ? wk.monday : min), thisMonday)
+  const allMondays: Date[] = []
+  for (let m = new Date(firstMonday); m.getTime() < thisMonday.getTime(); m.setDate(m.getDate() + 7)) {
+    allMondays.push(new Date(m))
+  }
+
+  // Oldest-first, but cap the back-fill to the most recent N completed weeks.
+  const pending = allMondays
+    .map((monday) => ({ monday, key: weekEndingISO(monday) }))
+    .filter(({ key }) => !reviewed.has(key))
+    .slice(-MAX_WEEKLY_BACKFILL)
 
   let created = 0
-  for (const [weekEnding, wk] of pending) {
-    const tally = tallyWeek(planned, wk.workouts, wk.observations)
-    const prescription = decidePrescription(tally)
-    const adjustments: WeeklyReviewAdjustments = {
-      avgRPE: tally.avgRPE,
-      adherence: Math.round(tally.adherence * 100) / 100,
-      painCount: tally.painCount,
-      positiveCount: tally.positiveCount,
-      flagged_categories: tally.flagged_categories,
-    }
-    const coach_notes = weeklyCoachNotes(weekEnding, tally, prescription)
-
-    const { data: review } = await supabase
-      .from('weekly_review')
-      .insert({ program_id: programId, week_ending: weekEnding, coach_notes, adjustments, next_week_prescription: prescription })
-      .select()
-      .single()
-
-    if (review) {
-      created++
-      await insertCoachMessage(athleteId, { kind: 'weekly_review', body: coach_notes, ref_id: (review as { id: string }).id })
-    }
+  for (const { monday, key } of pending) {
+    const wk = weeks.get(key) ?? { monday, workouts: [], observations: [] }
+    const id = await persistWeeklyReview(athleteId, programId, key, planned, wk.workouts, wk.observations, reviewCtx)
+    if (id) created++
   }
   return created
+}
+
+export interface CloseWeekResult {
+  reviewId: string
+  alreadyClosed: boolean
+}
+
+/**
+ * Manual "I'm done with the week" — close out the CURRENT, still-in-progress week
+ * on demand instead of waiting for the Sunday→Monday rollover. Crunches this
+ * week's logged work, decides next week's directive, and writes the review +
+ * coach message now. Two extra behaviours over the auto rollover:
+ *   • it reviews THIS week (the auto agent only ever touches completed weeks);
+ *   • opts.injury forces a RECOVERY back-off — the athlete-declared "I'm hurt /
+ *     taking time off" path the engine never infers on its own.
+ * First it runs the normal rollover so any earlier missed weeks are filled too.
+ * Idempotent: re-closing a week that already has a review returns the existing
+ * one (alreadyClosed: true) rather than minting a duplicate.
+ */
+export async function closeOutCurrentWeek(
+  athleteId: string,
+  opts: { injury?: boolean } = {},
+): Promise<CloseWeekResult | null> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return null
+  const programId = prog.id as string
+
+  // Fill any earlier completed/missed weeks first, so the manual close never
+  // jumps ahead of an un-reviewed gap.
+  try { await runWeeklyReviewAgent(athleteId, programId) } catch (e) { console.error('[close-week] rollover failed', e) }
+
+  const thisMonday = startOfWeekMonday(new Date())
+  const weekEnding = weekEndingISO(thisMonday)
+
+  // Already closed this week? Return it — re-closing must never duplicate.
+  const { data: existing } = await supabase
+    .from('weekly_review').select('id').eq('program_id', programId).eq('week_ending', weekEnding).maybeSingle()
+  if (existing) return { reviewId: (existing as { id: string }).id, alreadyClosed: true }
+
+  const [{ data: ath }, { data: workoutRows }, { data: obsRows }, reviewCtx] = await Promise.all([
+    supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle(),
+    supabase.from('workout').select('performed_at, rpe, actual_weights, routine!inner(program_id)').eq('routine.program_id', programId).gte('performed_at', thisMonday.toISOString()),
+    supabase.from('session_observation').select('severity, signal, logged_at, workout!inner(routine!inner(program_id))').eq('workout.routine.program_id', programId).gte('logged_at', thisMonday.toISOString()),
+    fetchReviewContext(athleteId),
+  ])
+  const planned = (ath?.sessions_per_week as number | null) ?? 3
+  const workouts = (workoutRows ?? []) as unknown as WeekWorkout[]
+  const observations = (obsRows ?? []) as unknown as WeekObservation[]
+
+  const reviewId = await persistWeeklyReview(
+    athleteId, programId, weekEnding, planned, workouts, observations,
+    { ...reviewCtx, injury: opts.injury === true },
+  )
+  return reviewId ? { reviewId, alreadyClosed: false } : null
 }
 
 /**

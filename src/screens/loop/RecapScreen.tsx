@@ -12,6 +12,7 @@ const DIRECTIVE_TONE: Record<WeeklyDirective, { color: string; gist: string }> =
   HOLD:            { color: 'var(--text-dim)',  gist: 'Holding the line' },
   'HOLD (missed)': { color: 'var(--pending)',   gist: 'Resetting the week' },
   DELOAD:          { color: 'var(--pending)',   gist: 'Backing off to recover' },
+  RECOVERY:        { color: 'var(--pending)',   gist: 'Healing — recovery is the work' },
 }
 
 function fmtRange(startISO: string, endISO: string): string {
