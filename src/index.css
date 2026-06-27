@@ -753,11 +753,16 @@ textarea.input {
 }
 
 .nav__item {
+  /* Equal quarter-width columns: each item takes exactly 1/4 of the bar so the
+     icon + label always centre together and a wider label (PROGRAM) can't widen
+     its column, shove the icons out of line, or overflow on a narrow screen. */
+  flex: 1 1 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   align-items: center;
   gap: 3px;
-  padding: 6px 16px;
+  padding: 6px 4px;
   cursor: pointer;
   color: var(--text-dim);
   text-decoration: none;
@@ -777,6 +782,7 @@ textarea.input {
   font-weight: 500;
   letter-spacing: 0.04em;
   text-transform: uppercase;
+  white-space: nowrap;   /* never wrap to a second line and break vertical alignment */
 }
 
 /* Main content area when nav is shown */
