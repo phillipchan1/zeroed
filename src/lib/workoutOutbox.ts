@@ -52,6 +52,14 @@ export function pendingWorkouts(): Array<{ routine_id: string; performed_at: str
   return readQueue().map((p) => ({ routine_id: p.routineId, performed_at: p.queuedAt }))
 }
 
+// The full queued sessions — same source of truth, but with the set logs / RPE a
+// rich read (the training log) needs to render a finished-but-uncommitted session
+// before its `workout` row lands. Committed reads still flush on launch/`online`;
+// this just stops a session you finished seconds ago from looking lost.
+export function pendingSessionsRaw(): PendingSession[] {
+  return readQueue()
+}
+
 // Ids currently being committed — guards against the live commit and a concurrent
 // flush (e.g. an `online` event firing mid-submit) double-inserting the workout.
 const inFlight = new Set<string>()
