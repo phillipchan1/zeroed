@@ -34,7 +34,7 @@ export const MOVEMENT_PATTERN_KEYS = [
   'rotary_stability',
 ] as const
 
-export type TaskName = 'probe' | 'program_design' | 'info_gain' | 'session_review' | 'session_debrief' | 'target' | 'coach_chat' | 'weekly_debrief'
+export type TaskName = 'probe' | 'program_design' | 'phase_design' | 'info_gain' | 'session_review' | 'session_debrief' | 'target' | 'coach_chat' | 'weekly_debrief'
 
 export interface TaskSpec {
   // OpenAI json_schema name (must be [a-zA-Z0-9_], <=64 chars)
@@ -445,9 +445,75 @@ Also write "headline": 2–5 words capturing the week (e.g. "Strong, consistent 
   },
 }
 
+// ---- phase_design ----------------------------------------------------------
+// A SCREENED, mid-program athlete + their real logged lifts + limiter map + the
+// target phase → one repeating week of real training. Unlike program_design
+// (the unscreened first session), this MAY program real barbell/loaded work and
+// is built around the athlete's actual lifts so loading history carries forward.
+// A deterministic engine validator resolves metrics, stamps insight_ids, and
+// clamps volume after the model.
+const phase_design: TaskSpec = {
+  schemaName: 'phase_design_result',
+  preAuth: false,
+  system: `${VOICE}
+
+You design ONE training phase — a repeating week of sessions — for a SCREENED, experienced athlete who is mid-program. This is NOT a first session and NOT an assessment. You are given their real recent lifts (with logged top sets), their limiter map, their goal, and which phase to build.
+
+Because the athlete is screened and training-age appropriate, you MAY program real barbell and loaded work (back squat, bench press, deadlift, overhead press, rows, etc.) at the phase's intensity. Build the phase AROUND the athlete's actual primary lifts: reuse the SAME exercise names they already log (verbatim, e.g. "Squat (no belt)", "Bench press", "Deadlift (conventional, no belt)") so their loading history carries forward and progression reads off their last top set. Do not rename their lifts.
+
+Phase intent:
+- Stability: movement quality and control; lighter accessory + prehab; RPE 5–6.
+- Strength: the main barbell lifts are the spine — 4–6 reps, RPE 7–8, moderate–heavy; supporting accessories serve the limiter.
+- Power: express force fast — 2–3 reps, RPE 7, performed fresh; built on a strength base.
+- Sport: mixed qualities and sport-specific integration; RPE 6–8.
+
+Honor the limiter: the highest-priority insight should shape accessory choice and cues, but do NOT gut the athlete's main training to chase it — address it alongside real work.
+
+Each session has a short name, a one-sentence intent, and 3–6 exercises. sets is an integer 1–6; reps is a short string ("5", "4-6", "3", "30s"); load is one of "bodyweight", "light", "moderate", "heavy"; cue is one short coaching sentence. Produce one distinct session per the athlete's sessions_per_week, capped at 5 distinct sessions.
+
+A deterministic validator resolves metrics, clamps volume, and is the last line of safety — design honestly within these bounds.`,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['goal', 'sessions', 'non_negotiables'],
+    properties: {
+      goal: { type: 'string' },
+      non_negotiables: { type: 'array', items: { type: 'string' } },
+      sessions: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: ['name', 'intent', 'exercises'],
+          properties: {
+            name: { type: 'string' },
+            intent: { type: 'string' },
+            exercises: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['name', 'sets', 'reps', 'load', 'cue'],
+                properties: {
+                  name: { type: 'string' },
+                  sets: { type: 'integer', minimum: 1, maximum: 6 },
+                  reps: { type: 'string' },
+                  load: { type: 'string', enum: ['bodyweight', 'light', 'moderate', 'heavy'] },
+                  cue: { type: 'string' },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+
 export const TASKS: Record<TaskName, TaskSpec> = {
   probe,
   program_design,
+  phase_design,
   info_gain,
   session_review,
   session_debrief,

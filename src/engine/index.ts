@@ -31,12 +31,13 @@ import type {
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
 import {
-  callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callInfoGain, callTarget,
+  callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callPhaseDesign, callInfoGain, callTarget,
   callCoachChat, callWeeklyDebrief,
-  type ProgramDesignResult, type InsightCategory,
+  type ProgramDesignResult, type PhaseDesignResult, type InsightCategory,
   type CoachContext, type CoachChatTurn, type CoachAction,
 } from './agentClient'
 import { FELT_CHIPS, type FeltLabel } from '../types/database'
+import { getWeightUnit } from '../lib/units'
 import { validateProvisionalProgram } from './safety'
 import {
   OBSTACLE_CATEGORY_HINTS, buildReadSkeleton, READ_FLOORS,
@@ -2678,6 +2679,164 @@ async function insertPhaseAndRoutines(programId: string, plan: GeneratedProgram)
  * duration elapsed but adherence/safety failed, extend a week and HOLD. Returns
  * true iff a phase advanced.
  */
+// ════════════════════════════════════════════════════════════════════════════
+// PHASE DESIGN (agent proposes, code disposes) — a SCREENED, mid-program phase
+// designed by the model around the athlete's REAL logged lifts, with the
+// deterministic generatePhase template as the always-safe fallback. This is what
+// makes a Strength block carry the athlete's actual barbell work (progressing
+// from their logged top sets) instead of a generic category template.
+// ════════════════════════════════════════════════════════════════════════════
+
+// Newest logged top set per exercise across the program — the athlete's real
+// lifts, fed to the design agent so a new phase reuses the same names (history
+// carries forward) and the right working loads.
+async function gatherRecentLifts(programId: string, unit: string): Promise<Array<{ name: string; top_set: string; rpe: number | null }>> {
+  const { data: ws } = await supabase
+    .from('workout')
+    .select('rpe, performed_at, actual_weights, routine!inner(exercises, program_id)')
+    .eq('routine.program_id', programId)
+    .order('performed_at', { ascending: false })
+    .limit(40)
+  type Row = { rpe: number | null; actual_weights: Record<string, SetLog[]> | null; routine: { exercises: ExerciseTemplate[] } }
+  const seen = new Map<string, { top_set: string; rpe: number | null }>()
+  for (const w of (ws ?? []) as unknown as Row[]) {
+    const exs = w.routine?.exercises ?? []
+    for (const [idx, sets] of Object.entries(w.actual_weights ?? {})) {
+      const ex = exs[Number(idx)]
+      if (!ex || seen.has(ex.name)) continue   // newest wins
+      const top = topWorkingSet(sets)
+      if (!top) continue
+      const detail = top.weight != null ? `${top.weight}${unit}×${top.reps ?? '?'}`
+        : top.duration != null ? `${top.duration}s`
+        : top.distance != null ? `${top.distance}`
+        : `${top.reps ?? '?'} reps`
+      seen.set(ex.name, { top_set: detail, rpe: top.rpe ?? w.rpe })
+    }
+  }
+  return [...seen.entries()].map(([name, v]) => ({ name, top_set: v.top_set, rpe: v.rpe })).slice(0, 20)
+}
+
+// Dispose the agent's design onto the canonical GeneratedProgram shape with
+// deterministic guardrails (clamp sets, cap sessions/exercises, stamp the P1
+// insight, keep canonical advancement criteria). Falls back to the template if
+// the design is empty.
+function disposePhaseDesign(
+  d: PhaseDesignResult, phaseName: PhaseName, category: string, startDateStr: string, p1InsightId: string | null,
+): GeneratedProgram {
+  const canonical = generatePhase(phaseName, category, startDateStr, { p1InsightId })
+  const routines = (d.sessions ?? []).slice(0, 5).map((s, i) => ({
+    name: (s.name ?? '').trim() || `Session ${String.fromCharCode(65 + i)}`,
+    session_type: 'strength',
+    exercises: (s.exercises ?? []).slice(0, 8).map((ex) => {
+      const t: ExerciseTemplate = {
+        name: String(ex.name ?? '').trim(),
+        sets: Math.max(1, Math.min(6, Math.round(Number(ex.sets)) || 3)),
+        reps: String(ex.reps ?? '8'),
+        load: ex.load,
+        cue: ex.cue ? String(ex.cue) : undefined,
+      }
+      if (p1InsightId) t.insight_id = p1InsightId
+      return t
+    }).filter((ex) => ex.name),
+    intent: s.intent ? String(s.intent) : '',
+  })).filter((r) => r.exercises.length)
+
+  if (!routines.length) return canonical
+  return {
+    goal: (d.goal ?? '').trim() || canonical.goal,
+    retest_date: canonical.retest_date,
+    phase: {
+      name: phaseName,
+      week_start: startDateStr,
+      week_end: canonical.phase.week_end,
+      non_negotiables: d.non_negotiables?.length ? d.non_negotiables : canonical.phase.non_negotiables,
+      advancement_criteria: canonical.phase.advancement_criteria,
+    },
+    routines,
+  }
+}
+
+// Design a phase via the agent (screened athlete), falling back to the
+// deterministic template on ANY failure — the app always produces a safe phase.
+async function designPhasePlan(
+  athleteId: string, programId: string, phaseName: PhaseName, startDateStr: string,
+  category: string, p1InsightId: string | null, unit: string,
+): Promise<GeneratedProgram> {
+  try {
+    const [{ data: ath }, { data: insightRows }] = await Promise.all([
+      supabase.from('athlete').select('goals, obstacle, training_age, sessions_per_week').eq('id', athleteId).maybeSingle(),
+      supabase.from('insight').select('priority, category, claim, confidence, status').eq('athlete_id', athleteId).order('priority'),
+    ])
+    const recent_lifts = await gatherRecentLifts(programId, unit)
+    const insights = ((insightRows ?? []) as Array<{ priority: string; category: string; claim: string; confidence: number; status: string }>)
+      .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
+    const res = await callPhaseDesign({
+      phase_name: phaseName,
+      profile: {
+        goal: (ath?.goals as string | null) ?? null,
+        target: null,
+        obstacle: (ath?.obstacle as string | null) ?? null,
+        training_age: (ath?.training_age as number | null) ?? null,
+        sessions_per_week: (ath?.sessions_per_week as number | null) ?? null,
+      },
+      insights,
+      recent_lifts,
+    })
+    if (!res.ok) return generatePhase(phaseName, category, startDateStr, { p1InsightId })
+    return disposePhaseDesign(res.data, phaseName, category, startDateStr, p1InsightId)
+  } catch {
+    return generatePhase(phaseName, category, startDateStr, { p1InsightId })
+  }
+}
+
+/**
+ * Redesign the CURRENT active phase in place — the "this phase isn't my real
+ * training" escape hatch. Overwrites the existing routine rows (RLS allows
+ * update, not delete) with an agent-designed week built around the athlete's
+ * real logged lifts; inserts any extra designed sessions. Keeps the phase window.
+ */
+export async function redesignActivePhase(athleteId: string, unit: string): Promise<boolean> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return false
+  const { data: phaseRow } = await supabase
+    .from('phase').select('*').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
+  if (!phaseRow) return false
+  const phase = phaseRow as PhaseRow
+
+  const { data: existing } = await supabase
+    .from('routine').select('id').eq('phase_id', phase.id).order('name')
+  const routineIds = ((existing ?? []) as Array<{ id: string }>).map((r) => r.id)
+
+  const { data: insightRows } = await supabase
+    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
+  const p1 = ((insightRows ?? []) as InsightRow[]).filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
+  const category = p1?.category ?? 'Lower Chain'
+
+  const plan = await designPhasePlan(athleteId, prog.id, phase.name, phase.week_start, category, p1?.id ?? null, unit)
+  if (!plan.routines.length) return false
+
+  // Overwrite existing routine rows in place; insert any surplus designed ones.
+  for (let i = 0; i < plan.routines.length; i++) {
+    const r = plan.routines[i]
+    if (i < routineIds.length) {
+      await supabase.from('routine')
+        .update({ name: r.name, session_type: r.session_type, exercises: r.exercises, intent: r.intent })
+        .eq('id', routineIds[i])
+    } else {
+      await supabase.from('routine')
+        .insert({ program_id: prog.id, phase_id: phase.id, name: r.name, session_type: r.session_type, exercises: r.exercises, intent: r.intent })
+    }
+  }
+  await supabase.from('phase').update({ non_negotiables: plan.phase.non_negotiables }).eq('id', phase.id)
+  await insertCoachMessage(athleteId, {
+    kind: 'phase_change',
+    body: `Rebuilt your ${phase.name} block around your real lifts. ${plan.goal}`,
+    ref_id: phase.id,
+  })
+  return true
+}
+
 export async function runPhaseAdvancement(athleteId: string): Promise<boolean> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
@@ -2725,7 +2884,7 @@ export async function runPhaseAdvancement(athleteId: string): Promise<boolean> {
   }
 
   const today = isoDate(new Date())
-  const plan = generatePhase(nextName, category, today, { p1InsightId: p1?.id ?? null })
+  const plan = await designPhasePlan(athleteId, prog.id, nextName, today, category, p1?.id ?? null, getWeightUnit())
 
   // Prefer ACTIVATING an existing pending phase of the next stage (one the program
   // was seeded or planned with) over inserting a fresh one — otherwise advancement
@@ -2826,7 +2985,7 @@ async function rescopeAfterRetest(athleteId: string): Promise<void> {
 
   if (phaseRow) await supabase.from('phase').update({ status: 'completed' }).eq('id', (phaseRow as PhaseRow).id)
 
-  const plan = generatePhase(nextName, category, today, { p1InsightId: p1?.id ?? null })
+  const plan = await designPhasePlan(athleteId, prog.id, nextName, today, category, p1?.id ?? null, getWeightUnit())
   await insertPhaseAndRoutines(prog.id, plan)
 
   const newRetest = addDays(today, 28)

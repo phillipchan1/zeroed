@@ -1,9 +1,9 @@
-import { Fragment } from 'react'
+import { Fragment, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Lock } from 'lucide-react'
+import { Lock, Sparkles } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
-import { gatherProgramMap, gatherTrainingLog, type NextWeekProjection, type MapPhase } from '../../engine'
+import { gatherProgramMap, gatherTrainingLog, redesignActivePhase, type NextWeekProjection, type MapPhase } from '../../engine'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { getWeightUnit } from '../../lib/units'
 import { SectionHeader, Skeleton, BracketFrame } from '../../components/ui'
@@ -79,11 +79,12 @@ async function fetchProgramView(athleteId: string): Promise<ProgramView> {
 
 export function ProgramScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
-  const { data, loading: coldLoading } = useCachedLoader(
+  const [redesigning, setRedesigning] = useState(false)
+  const { data, loading: coldLoading, refetch: refetchProgram } = useCachedLoader(
     `program:${athleteId}`,
     () => fetchProgramView(athleteId),
   )
-  const { data: map } = useCachedLoader(
+  const { data: map, refetch: refetchMap } = useCachedLoader(
     `programmap:${athleteId}`,
     () => gatherProgramMap(athleteId, getWeightUnit()),
   )
@@ -91,6 +92,19 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
     `history:${athleteId}`,
     () => gatherTrainingLog(athleteId, pendingSessionsRaw()),
   )
+
+  async function handleRedesign() {
+    if (redesigning) return
+    setRedesigning(true)
+    try {
+      const ok = await redesignActivePhase(athleteId, getWeightUnit())
+      if (ok) { refetchProgram(); refetchMap() }
+    } catch (e) {
+      console.error('[redesign] failed', e)
+    } finally {
+      setRedesigning(false)
+    }
+  }
   const nextWeek = map?.nextWeek ?? null
   const aheadPhases = (map?.phases ?? []).filter((p) => p.state === 'upcoming')
   const recentWeeks = (log?.weeks ?? []).slice(0, 2)
@@ -205,8 +219,26 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
 
             {/* SESSIONS — the work in this phase */}
             <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 28 }}>
-              <SectionHeader>Sessions</SectionHeader>
-              <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                <SectionHeader>Sessions</SectionHeader>
+                <button
+                  type="button"
+                  onClick={handleRedesign}
+                  disabled={redesigning}
+                  style={{
+                    display: 'inline-flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', padding: 0,
+                    cursor: redesigning ? 'default' : 'pointer', opacity: redesigning ? 0.6 : 1,
+                    fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--signal)',
+                  }}
+                >
+                  <Sparkles size={12} strokeWidth={1.5} />
+                  {redesigning ? 'Rebuilding…' : 'Rebuild from my lifts'}
+                </button>
+              </div>
+              <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 12, lineHeight: 1.6 }}>
+                Coach-designed around the lifts you actually log — same names, so your loading carries forward.
+              </p>
+              <div style={{ marginTop: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
                 {routines.length > 0 ? routines.map((r) => (
                   <div key={r.id} className="card">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
