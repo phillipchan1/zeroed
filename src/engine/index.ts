@@ -2488,11 +2488,14 @@ export async function gatherSessionPrescription(
     .from('workout').select('actual_weights, performed_at')
     .eq('routine_id', routineId).order('performed_at', { ascending: false }).limit(1).maybeSingle()
   const lastWeights = (lastWorkout?.actual_weights as Record<string, SetLog[]> | null) ?? null
+  // Cross-phase fallback base: a just-(re)designed routine has no own history, but
+  // its lifts (same names) do elsewhere in the program — read off that.
+  const byName = prog?.id ? await gatherExerciseBases(prog.id) : new Map<string, SetLog>()
 
   const hints: Record<number, string> = {}
   const held: Record<number, boolean> = {}
   exercises.forEach((ex, i) => {
-    const top = lastWeights ? topWorkingSet(lastWeights[String(i)]) : null
+    const top = (lastWeights ? topWorkingSet(lastWeights[String(i)]) : null) ?? byName.get(ex.name) ?? null
     // Held when the rule is in effect AND this lift addresses the P1 insight.
     const isHeld = p1Unresolved && !!ex.insight_id && ex.insight_id === p1!.id
     held[i] = isHeld
@@ -2686,6 +2689,31 @@ async function insertPhaseAndRoutines(programId: string, plan: GeneratedProgram)
 // makes a Strength block carry the athlete's actual barbell work (progressing
 // from their logged top sets) instead of a generic category template.
 // ════════════════════════════════════════════════════════════════════════════
+
+// Most recent top working set per exercise NAME across the whole program (not
+// just one routine). The cross-phase base for projections: a freshly (re)designed
+// phase reuses the athlete's real lift names, so loads read off their actual
+// history immediately instead of waiting to be logged again in-phase.
+async function gatherExerciseBases(programId: string): Promise<Map<string, SetLog>> {
+  const { data: ws } = await supabase
+    .from('workout')
+    .select('performed_at, actual_weights, routine!inner(exercises, program_id)')
+    .eq('routine.program_id', programId)
+    .order('performed_at', { ascending: false })
+    .limit(60)
+  type Row = { actual_weights: Record<string, SetLog[]> | null; routine: { exercises: ExerciseTemplate[] } }
+  const out = new Map<string, SetLog>()
+  for (const w of (ws ?? []) as unknown as Row[]) {
+    const exs = w.routine?.exercises ?? []
+    for (const [idx, sets] of Object.entries(w.actual_weights ?? {})) {
+      const ex = exs[Number(idx)]
+      if (!ex || out.has(ex.name)) continue   // newest wins (rows are desc)
+      const top = topWorkingSet(sets)
+      if (top) out.set(ex.name, top)
+    }
+  }
+  return out
+}
 
 // Newest logged top set per exercise across the program — the athlete's real
 // lifts, fed to the design agent so a new phase reuses the same names (history
@@ -3824,13 +3852,19 @@ export async function gatherWeekPager(athleteId: string, unit: string): Promise<
       .from('routine').select('id, name, exercises, intent').eq('phase_id', (activePhase as { id: string }).id).order('name')
     const routines = (routineRows ?? []) as unknown as Array<{ id: string; name: string; exercises: ExerciseTemplate[]; intent: string | null }>
 
-    // Base top-set weight per routine+exercise, from each routine's last session.
+    // Base top-set weight per routine+exercise: prefer this routine's own last
+    // session, else fall back to the athlete's most recent top set for that lift
+    // anywhere in the program — so a just-(re)designed phase projects off real
+    // history right away instead of waiting to be logged in-phase.
+    const byName = await gatherExerciseBases(prog.id)
     const baseByRoutine = new Map<string, (number | null)[]>()
     for (const r of routines) {
       const { data: lastW } = await supabase
         .from('workout').select('actual_weights').eq('routine_id', r.id).order('performed_at', { ascending: false }).limit(1).maybeSingle()
       const aw = (lastW?.actual_weights as Record<string, SetLog[]> | null) ?? null
-      baseByRoutine.set(r.id, r.exercises.map((_, i) => topWorkingSet(aw?.[String(i)] ?? undefined)?.weight ?? null))
+      baseByRoutine.set(r.id, r.exercises.map((ex, i) =>
+        topWorkingSet(aw?.[String(i)] ?? undefined)?.weight ?? byName.get(ex.name)?.weight ?? null,
+      ))
     }
 
     // Weeks remaining in the phase (Mondays from next week through the phase end).
