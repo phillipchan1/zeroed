@@ -11,6 +11,7 @@ import {
   type SessionPrescription, type PendingSession, type PendingDebrief, type DebriefExerciseInput,
 } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
+import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import {
   Button, Spinner, ExerciseInsightSheet, TelemetryStrip,
@@ -422,6 +423,90 @@ function SessionBrief({
   )
 }
 
+// ---- Coach's notes sheet (how-to + what to watch for) ----------------------
+// The "I don't know how to do this" surface. Universal how-to/watch-for comes
+// from the hardcoded coaching library; the program-specific cue the coach wrote
+// for THIS lift is folded in underneath, so it reads as guidance for your plan,
+// not a generic wiki entry.
+
+interface CoachNotesSheetProps {
+  name: string
+  note: CoachingNote | null
+  cue: string | null
+  onClose: () => void
+}
+
+function CoachNotesSheet({ name, note, cue, onClose }: CoachNotesSheetProps) {
+  return (
+    <div className="obs-sheet" onClick={onClose}>
+      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14 }}>
+          <div>
+            <p className="section-header" style={{ marginBottom: 2 }}>Coach's notes</p>
+            <p className="text-sm" style={{ fontWeight: 600 }}>{name}</p>
+          </div>
+          <button
+            type="button"
+            className="btn btn--ghost"
+            style={{ padding: 0, height: 28, minWidth: 28, color: 'var(--text-dim)' }}
+            onClick={onClose}
+            aria-label="Close"
+          >
+            <X size={18} strokeWidth={1.5} />
+          </button>
+        </div>
+
+        {note && (
+          <div style={{ marginBottom: cue || note.watchFor.length ? 16 : 0 }}>
+            <p className="text-xs text-dim" style={{ marginBottom: 8, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+              How to
+            </p>
+            <ol style={{ margin: 0, paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {note.howTo.map((step, i) => (
+                <li key={i} style={{ display: 'flex', gap: 10 }}>
+                  <span className="num text-signal" style={{ fontSize: 12, flexShrink: 0, lineHeight: 1.5 }}>{i + 1}</span>
+                  <span className="text-sm" style={{ lineHeight: 1.5 }}>{step}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
+
+        {note && note.watchFor.length > 0 && (
+          <div style={{ marginBottom: cue ? 16 : 0 }}>
+            <p className="text-xs text-dim" style={{ marginBottom: 8, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+              Watch for
+            </p>
+            <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
+              {note.watchFor.map((fault, i) => (
+                <li key={i} style={{ display: 'flex', gap: 10 }}>
+                  <span style={{ color: 'var(--pending)', flexShrink: 0, lineHeight: 1.5 }}>!</span>
+                  <span className="text-sm" style={{ lineHeight: 1.5 }}>{fault}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {cue && (
+          <div className="card--data">
+            <p className="text-xs text-dim" style={{ marginBottom: 4, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
+              For your program
+            </p>
+            <p className="text-sm" style={{ lineHeight: 1.5 }}>{cue}</p>
+          </div>
+        )}
+
+        {!note && !cue && (
+          <p className="text-sm text-dim" style={{ lineHeight: 1.5 }}>
+            No notes for this one yet — train it clean and controlled.
+          </p>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ---- Session debrief sheet (the prose the agent mines) ---------------------
 
 interface DebriefSheetProps {
@@ -565,6 +650,8 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const [insightMap, setInsightMap] = useState<Record<string, InsightRow>>({})
   const [openInsight, setOpenInsight] = useState<InsightRow | null>(null)
   const [openReading, setOpenReading] = useState<{ name: string; why: string } | null>(null)
+  // Coach's notes (how-to) sheet for one exercise.
+  const [openCoachNotes, setOpenCoachNotes] = useState<{ name: string; note: CoachingNote | null; cue: string | null } | null>(null)
 
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
 
@@ -1064,6 +1151,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           const pReps = leadingInt(ex.reps)
           const pDur  = trackingType === 'time' ? leadingInt(ex.reps) : null
           const pLoad = leadingInt(ex.load ?? undefined)
+          // How-to notes: hardcoded library + the program-specific cue. Show the
+          // affordance whenever either exists (the cue is on every agent lift).
+          const coachNote = getCoachingNote(ex.name)
+          const hasNotes  = !!coachNote || !!ex.cue
 
           return (
             <div key={exIdx} style={{ paddingTop: 20, paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
@@ -1088,6 +1179,17 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                       onClick={() => setOpenReading({ name: ex.name, why: ex.reading_why ?? '' })}
                     >
                       READING
+                    </button>
+                  )}
+                  {hasNotes && (
+                    <button
+                      type="button"
+                      className="howto-tag"
+                      aria-label={`How to do ${ex.name}`}
+                      style={{ marginLeft: 'auto' }}
+                      onClick={() => setOpenCoachNotes({ name: ex.name, note: coachNote, cue: ex.cue ?? null })}
+                    >
+                      <Info size={11} strokeWidth={2} style={{ marginRight: 3 }} /> How-to
                     </button>
                   )}
                 </div>
@@ -1276,6 +1378,16 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           saving={savingDebrief}
           onSave={handleDebrief}
           onSkip={handleDebriefSkip}
+        />
+      )}
+
+      {/* Coach's notes (how-to) sheet */}
+      {openCoachNotes && (
+        <CoachNotesSheet
+          name={openCoachNotes.name}
+          note={openCoachNotes.note}
+          cue={openCoachNotes.cue}
+          onClose={() => setOpenCoachNotes(null)}
         />
       )}
 

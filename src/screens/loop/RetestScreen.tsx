@@ -88,6 +88,7 @@ export function RetestScreen({ athleteId, onDone }: { athleteId: string; onDone:
       trainingAge={profile.trainingAge}
       sessions={profile.sessions}
       onComplete={handleComplete}
+      onExit={() => navigate('/app/today')}
     />
   )
 }

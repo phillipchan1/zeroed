@@ -1282,6 +1282,27 @@ textarea.input {
 }
 .reading-tag:hover { border-color: var(--computing); }
 
+/* How-to tag — the tap-for-coaching-notes affordance on a workout exercise.
+   Neutral register (dim, not the computing-cyan reading instrument) so it reads
+   as "reference, tap if you want it" rather than a live signal. */
+.howto-tag {
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 2px;
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+}
+.howto-tag:hover { color: var(--text); border-color: var(--text-dim); }
+
 /* --- RPE tap-scale (set row) ---------------------------------------------- */
 .set-row__rpe {
   width: 100%;

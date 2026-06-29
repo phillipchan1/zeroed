@@ -1,4 +1,5 @@
 import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
+import { X } from 'lucide-react'
 import {
   Logo, Button, Input, StepIndicator, ScorePicker,
   SectionHeader, InsightCard, Spinner, PresenceDot, TickingNumber,
@@ -246,6 +247,16 @@ function MovementStep({
                 </p>
               )}
 
+              {/* How to do it — visible up front, not buried behind "Test me", so
+                  an unfamiliar movement is never a guess. The guided flow repeats
+                  the setup at the top, so we hide this line while it's open. */}
+              {!guided && PATTERN_TEST[pattern.key] && (
+                <p className="text-xs" style={{ marginBottom: 8, lineHeight: 1.5 }}>
+                  <span className="num text-signal" style={{ fontSize: 10, letterSpacing: '0.08em' }}>HOW</span>{' '}
+                  <span className="text-dim">{PATTERN_TEST[pattern.key].setup}</span>
+                </p>
+              )}
+
               {guided ? (
                 <GuidedMovementTest
                   patternKey={pattern.key}
@@ -425,9 +436,12 @@ interface ScreeningProps {
   sessions: number
   /** Hands the collected diagnostic up; the compute screen persists it. */
   onComplete: (results: DiagnosticResults) => void
+  /** When set, renders a close affordance that bails out of the screen without
+   *  submitting — so you can open it to look around and back out. */
+  onExit?: () => void
 }
 
-export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onComplete }: ScreeningProps) {
+export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onComplete, onExit }: ScreeningProps) {
   const [step, setStep] = useState<Step>('movement')
   const startedAtRef = useRef<number>(Date.now())
 
@@ -537,7 +551,20 @@ export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onCom
         }}
       >
         <Logo />
-        <StepIndicator total={activeSteps.length} current={currentStepIndex} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+          <StepIndicator total={activeSteps.length} current={currentStepIndex} />
+          {onExit && (
+            <button
+              type="button"
+              onClick={onExit}
+              aria-label="Close — back to your workout"
+              className="btn btn--ghost"
+              style={{ padding: 0, height: 28, minWidth: 28, color: 'var(--text-dim)' }}
+            >
+              <X size={18} strokeWidth={1.5} />
+            </button>
+          )}
+        </div>
       </div>
 
       <div style={{ flex: 1, padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
