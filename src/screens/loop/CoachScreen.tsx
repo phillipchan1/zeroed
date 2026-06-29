@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import {
-  InsightCard, SectionHeader, Skeleton, StatusCounts, TelemetryStrip, TypeOn,
+  InsightCard, Markdown, SectionHeader, Skeleton, StatusCounts, TelemetryStrip,
 } from '../../components/ui'
 import {
   countInsightsByStatus, gatherCoachContext, coachStarterPrompts, runCoachChat,
@@ -58,6 +58,11 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   const [pending, setPending]       = useState(false)
   const [draft, setDraft]           = useState('')
   const [stackOpen, setStackOpen]   = useState(false)   // full read collapsed by default
+  // On mobile the conversation is the screen; the read instrument folds into a
+  // header so chat isn't stranded at the bottom of a long page. Desktop keeps
+  // the split layout, so the read starts open there.
+  const [readOpen, setReadOpen]     = useState(() =>
+    typeof window !== 'undefined' && window.innerWidth >= 1000)
   const threadEndRef = useRef<HTMLDivElement | null>(null)
 
   // Coach-proposed changes awaiting the athlete's confirmation, plus a key that
@@ -173,16 +178,32 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   }
 
   return (
-    <div className="screen with-nav">
+    <div className="screen with-nav coach-screen">
       {!loading && <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />}
 
       <div className="page page--split">
-       <div className="page__main">
-        <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
-          The read
-        </p>
-        <h2 style={{ fontSize: 22, fontWeight: 600, marginBottom: 12 }}>Coach</h2>
+       <div className="page__main coach-read-pane">
+        {/* On mobile the read folds behind this header so the conversation owns
+            the screen; tap to expand the instrument. On desktop it's the left
+            column and always shown (the toggle is hidden). */}
+        <button
+          type="button"
+          className="coach-read-toggle"
+          onClick={() => setReadOpen((o) => !o)}
+          aria-expanded={readOpen}
+        >
+          <span style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'left' }}>
+            <span className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
+              The read
+            </span>
+            <span style={{ fontSize: 22, fontWeight: 600 }}>Coach</span>
+          </span>
+          <span className="coach-read-toggle__hint text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
+            {readOpen ? 'Hide ⌄' : `${active.length} read${active.length === 1 ? '' : 's'} ›`}
+          </span>
+        </button>
 
+        <div className={`coach-read${readOpen ? ' is-open' : ''}`}>
         {/* Headline moment — the freshest adaptation, grounded in real data. This
             is the "it changed because of what I did" beat a static program can't
             produce. */}
@@ -198,7 +219,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
               <p className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
                 {KIND_LABEL[m.kind] ?? 'UPDATE'} · {relativeTime(m.created_at)}
               </p>
-              <p style={{ fontSize: 15, lineHeight: 1.5 }}>{m.body}</p>
+              <Markdown text={m.body} style={{ fontSize: 15, lineHeight: 1.5 }} />
               {toRecap && (
                 <p className="text-xs text-signal" style={{ marginTop: 8, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
                   View full recap ›
@@ -267,13 +288,14 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
                       </span>
                       <span className="text-xs text-dim num">{relativeTime(m.created_at)}</span>
                     </div>
-                    <p className="text-sm" style={{ lineHeight: 1.5 }}>{m.body}</p>
+                    <Markdown className="text-sm" text={m.body} style={{ lineHeight: 1.5 }} />
                   </div>
                 )
               })}
             </div>
           </div>
         )}
+        </div>{/* /coach-read */}
        </div>
 
         {/* Conversation — the warm layer. Right pane on desktop, stacked below
@@ -286,7 +308,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
                 label — one presence dot per screen lives in the telemetry strip. */}
             {context && (
               <div className="coach-msg coach-msg--coach fade-rise">
-                <p className="coach-msg__body">{opener}</p>
+                <Markdown className="coach-msg__body" text={opener} />
               </div>
             )}
 
@@ -297,10 +319,8 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
                   <p className="coach-msg__body">{t.content}</p>
                 </div>
               ) : (
-                <div key={i} className="coach-msg coach-msg--coach fade-rise">
-                  <p className="coach-msg__body">
-                    {t.fresh ? <TypeOn text={t.content} delay={16} /> : t.content}
-                  </p>
+                <div key={i} className={`coach-msg coach-msg--coach fade-rise${t.fresh ? ' coach-msg--fresh' : ''}`}>
+                  <Markdown className="coach-msg__body" text={t.content} />
                 </div>
               ),
             )}

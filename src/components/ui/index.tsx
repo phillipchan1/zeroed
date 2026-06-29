@@ -278,6 +278,80 @@ export function TypeOn({ text, delay = 60, className }: TypeOnProps) {
   return <span className={className}>{text.slice(0, count)}</span>
 }
 
+// ---- Markdown — lightweight renderer for coach copy ------------------------
+// The coach speaks markdown (**bold**, *italic*, `code`, - bullets). The model
+// output was rendering raw, asterisks and all. This is a small, safe subset —
+// no HTML injection: every node is built as React, never dangerouslySetInnerHTML.
+
+// Inline: **bold**, __bold__, *italic*, _italic_, `code`. Flat (no nesting) by
+// design — coach copy never nests emphasis, and flat keeps the parser honest.
+function renderInline(text: string): ReactNode[] {
+  const nodes: ReactNode[] = []
+  const re = /(\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\n]+)\*|(?<![A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])|`([^`]+)`)/g
+  let last = 0
+  let key = 0
+  let m: RegExpExecArray | null
+  while ((m = re.exec(text)) !== null) {
+    if (m.index > last) nodes.push(text.slice(last, m.index))
+    if (m[2] !== undefined || m[3] !== undefined) {
+      nodes.push(<strong key={key++}>{m[2] ?? m[3]}</strong>)
+    } else if (m[4] !== undefined || m[5] !== undefined) {
+      nodes.push(<em key={key++}>{m[4] ?? m[5]}</em>)
+    } else if (m[6] !== undefined) {
+      nodes.push(<code key={key++}>{m[6]}</code>)
+    }
+    last = re.lastIndex
+  }
+  if (last < text.length) nodes.push(text.slice(last))
+  return nodes
+}
+
+interface MarkdownProps {
+  text: string
+  className?: string
+  style?: React.CSSProperties
+}
+
+export function Markdown({ text, className, style }: MarkdownProps) {
+  const blocks: ReactNode[] = []
+  let para: string[] = []
+  let list: string[] = []
+  let ordered = false
+  let key = 0
+
+  const flushPara = () => {
+    if (para.length) { blocks.push(<p key={key++}>{renderInline(para.join(' '))}</p>); para = [] }
+  }
+  const flushList = () => {
+    if (!list.length) return
+    const items = list.map((li, i) => <li key={i}>{renderInline(li)}</li>)
+    blocks.push(ordered ? <ol key={key++}>{items}</ol> : <ul key={key++}>{items}</ul>)
+    list = []
+  }
+
+  for (const raw of (text ?? '').split('\n')) {
+    const line = raw.trim()
+    if (!line) { flushPara(); flushList(); continue }
+    const heading = line.match(/^(#{1,3})\s+(.*)/)
+    const bullet = line.match(/^[-*]\s+(.*)/)
+    const numbered = line.match(/^\d+[.)]\s+(.*)/)
+    if (heading) {
+      flushPara(); flushList()
+      const Tag = (`h${heading[1].length}`) as 'h1' | 'h2' | 'h3'
+      blocks.push(<Tag key={key++}>{renderInline(heading[2])}</Tag>)
+    } else if (bullet) {
+      flushPara(); if (ordered) flushList(); ordered = false; list.push(bullet[1])
+    } else if (numbered) {
+      flushPara(); if (!ordered && list.length) flushList(); ordered = true; list.push(numbered[1])
+    } else {
+      flushList(); para.push(line)
+    }
+  }
+  flushPara(); flushList()
+
+  return <div className={`md${className ? ` ${className}` : ''}`} style={style}>{blocks}</div>
+}
+
 // ---- TickingNumber — animates integer changes ------------------------------
 
 interface TickingNumberProps {

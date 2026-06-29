@@ -1528,6 +1528,32 @@ textarea.input {
 }
 .stack-toggle:hover { color: var(--text); }
 
+/* --- Markdown (coach copy: bold / italic / code / lists) ------------------ */
+/* The coach speaks markdown; this renders the small subset it uses. Margins
+   collapse at the edges so a bubble or card hugs its text. */
+.md > :first-child { margin-top: 0; }
+.md > :last-child  { margin-bottom: 0; }
+.md p { margin: 0.55em 0; }
+.md ul, .md ol { margin: 0.5em 0; padding-left: 1.25em; }
+.md li { margin: 0.2em 0; }
+.md li::marker { color: var(--text-dim); }
+.md strong { font-weight: 600; color: var(--text); }
+.md em { font-style: italic; }
+.md code {
+  font-family: var(--font-mono);
+  font-size: 0.88em;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+.md h1, .md h2, .md h3 {
+  font-size: 1em;
+  font-weight: 600;
+  margin: 0.7em 0 0.3em;
+  letter-spacing: 0.01em;
+}
+
 /* --- Coach chat (the warm layer — read-only conversation) ----------------- */
 .coach-chat {
   display: flex;
@@ -1650,6 +1676,102 @@ textarea.input {
 }
 .coach-input button:disabled,
 .coach-input input:disabled { opacity: 0.5; cursor: default; }
+
+/* --- Coach: full-screen chat treatment ------------------------------------
+   The conversation is the screen. The read instrument folds behind a header
+   so chat isn't stranded at the bottom of a long page (the old behaviour). */
+
+/* Header / read toggle — looks like a plain page header; on mobile it's a tap
+   target that expands the read. */
+.coach-read-toggle {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 0 0 12px;
+  background: transparent;
+  border: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.coach-read-toggle__hint {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+@media (min-width: 1000px) {
+  /* Desktop keeps the split layout — the read is the left column, always open. */
+  .coach-read-toggle { cursor: default; }
+  .coach-read-toggle__hint { display: none; }
+  .coach-read { display: block !important; }
+}
+
+@media (max-width: 999px) {
+  /* The read collapses; the conversation takes the viewport. */
+  .coach-read { display: none; }
+  .coach-read.is-open {
+    display: block;
+    max-height: 45vh;
+    overflow-y: auto;
+    margin-bottom: 12px;
+    padding-bottom: 4px;
+  }
+
+  /* The screen fills the gap between the status bar and the fixed nav, and
+     manages its own internal scroll instead of scrolling the whole page. */
+  .coach-screen.with-nav {
+    height: calc(100dvh
+      - env(safe-area-inset-top, 0px)
+      - env(safe-area-inset-bottom, 0px)
+      - 60px);
+    min-height: 0;
+    padding-bottom: 0;
+    overflow: hidden;
+  }
+  .coach-screen .page--split {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    padding-top: 16px;
+    padding-bottom: 0;
+  }
+  .coach-screen .coach-read-pane {
+    flex: 0 0 auto;
+    min-height: 0;
+  }
+  /* Conversation pane becomes the flex body — thread scrolls, input docks. */
+  .coach-screen .coach-convo {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    margin-top: 0;
+    padding-top: 0;
+    border-top: none;
+  }
+  .coach-screen .coach-chat {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    margin-top: 12px;
+    padding-bottom: 4px;
+  }
+  .coach-screen .coach-input { margin-top: 12px; }
+  /* The read-only disclaimer is a desktop nicety; the docked input is enough
+     context on a phone, and dropping it keeps the input flush to the nav. */
+  .coach-screen .coach-convo > p:last-child { display: none; }
+}
+
+/* A freshly-arrived reply settles in (the type-on it replaced). */
+.coach-msg--fresh .coach-msg__body { animation: coach-settle var(--dur-mid) var(--ease-out); }
+@keyframes coach-settle {
+  from { opacity: 0.4; transform: translateY(2px); }
+  to   { opacity: 1; transform: none; }
+}
 
 /* ---- Connectivity / update bar -------------------------------------------
    Offline-first: a quiet, fixed strip that surfaces "you're offline" (cached
