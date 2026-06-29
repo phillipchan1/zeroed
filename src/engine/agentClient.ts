@@ -160,6 +160,13 @@ export interface CoachChatResult {
   actions: CoachAction[]
 }
 
+// The end-of-week coach note. The engine has already crunched the week and
+// chosen the directive; this is only the warm language that wraps it.
+export interface WeeklyDebriefResult {
+  message: string
+  headline: string
+}
+
 // ---- device id (pre-auth probe rate limiting) -------------------------------
 
 const DEVICE_KEY = 'zeroed_device_id'
@@ -297,4 +304,31 @@ export function callCoachChat(payload: {
   question: string
 }): Promise<AgentResult<CoachChatResult>> {
   return invokeAgent<CoachChatResult>('coach_chat', payload)
+}
+
+/**
+ * Weekly debrief — post-auth. The week's crunched numbers + the directive the
+ * engine already chose → a warm, coach-voice end-of-week note. The model only
+ * drafts language; it never changes the directive, the load delta, or a number.
+ * On failure the engine falls back to a deterministic templated note.
+ */
+export function callWeeklyDebrief(payload: {
+  name: string | null
+  target: string | null
+  week_ending: string
+  planned: number
+  done: number
+  adherence: number
+  avg_rpe: number | null
+  pain_count: number
+  positive_count: number
+  flagged_categories: string[]
+  directive: string
+  load_delta_pct: number
+  rpe_target: number
+  rationale: string
+  injury: boolean
+  missed: boolean
+}): Promise<AgentResult<WeeklyDebriefResult>> {
+  return invokeAgent<WeeklyDebriefResult>('weekly_debrief', payload)
 }

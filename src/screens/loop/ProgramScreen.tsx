@@ -16,6 +16,7 @@ const DIRECTIVE_COLOR: Record<WeeklyDirective, string> = {
   HOLD:            'var(--text-dim)',
   'HOLD (missed)': 'var(--pending)',
   DELOAD:          'var(--pending)',
+  RECOVERY:        'var(--pending)',
 }
 
 /**

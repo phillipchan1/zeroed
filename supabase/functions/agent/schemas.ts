@@ -34,7 +34,7 @@ export const MOVEMENT_PATTERN_KEYS = [
   'rotary_stability',
 ] as const
 
-export type TaskName = 'probe' | 'program_design' | 'info_gain' | 'session_review' | 'session_debrief' | 'target' | 'coach_chat'
+export type TaskName = 'probe' | 'program_design' | 'info_gain' | 'session_review' | 'session_debrief' | 'target' | 'coach_chat' | 'weekly_debrief'
 
 export interface TaskSpec {
   // OpenAI json_schema name (must be [a-zA-Z0-9_], <=64 chars)
@@ -404,6 +404,47 @@ Return:
   },
 }
 
+// ---- weekly_debrief --------------------------------------------------------
+// End-of-week recap voice. The deterministic engine has ALREADY crunched the
+// week (adherence, RPE, pain/positive counts) and ALREADY decided the directive
+// + load delta + RPE target for next week. This task only DRAFTS the warm coach
+// message that wraps that decision — it never changes a number or the directive.
+// On any failure the engine falls back to a templated note, so this is purely a
+// language upgrade.
+const weekly_debrief: TaskSpec = {
+  schemaName: 'weekly_debrief_result',
+  preAuth: false,
+  system: `${VOICE}
+
+You are the athlete's strength & conditioning coach writing the END-OF-WEEK note — the message they read when they close out their training week. The system has ALREADY done the math and ALREADY chosen next week's call; you are giving it a human voice, not re-deciding it.
+
+The payload carries the week's hard numbers and the decision the engine made:
+- name, target (what they're chasing)
+- week_ending, planned vs done sessions, adherence (a percentage), avg RPE, pain flags, strong sets, any flagged_categories
+- directive: the call for next week — PROGRESS / HOLD / "HOLD (missed)" / DELOAD / RECOVERY
+- load_delta_pct, rpe_target, rationale: the engine's reasoning for that call
+- injury: true when the athlete declared an injury / time off (directive is RECOVERY)
+- missed: true when the week had little or no logged work (a no-penalty reset)
+
+Write "message": 2–4 short sentences, second person, in coach voice. Open by reflecting what they actually did this week (use the real numbers), then state the call for next week and WHY in plain language. Match the directive's TONE:
+- PROGRESS → earned, matter-of-fact respect; they put in the work, so load goes up.
+- HOLD → steady; not enough signal to push, hold the line.
+- HOLD (missed) / missed → no guilt, no lecture. Life happens; reset and pick it back up. Make it easy to come back.
+- DELOAD → protective; the body asked to back off, so you're backing off.
+- RECOVERY / injury → reassuring and patient; the program waits for them, recovery is the training right now, come back when the joint is calm.
+
+Also write "headline": 2–5 words capturing the week (e.g. "Strong, consistent week", "A reset week", "Backing off to heal"). No emoji, no hype, no fabricated numbers — use ONLY what's in the payload. Never contradict the directive or invent data.`,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['message', 'headline'],
+    properties: {
+      message: { type: 'string' },
+      headline: { type: 'string' },
+    },
+  },
+}
+
 export const TASKS: Record<TaskName, TaskSpec> = {
   probe,
   program_design,
@@ -412,4 +453,5 @@ export const TASKS: Record<TaskName, TaskSpec> = {
   session_debrief,
   target,
   coach_chat,
+  weekly_debrief,
 }

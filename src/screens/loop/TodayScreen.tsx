@@ -2,7 +2,7 @@ import { useEffect, useState, type CSSProperties } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
-import { runLoopTriggers, isRetestDue, closeWeekEarly, gatherWeekPager, type PagerWeekView, type WeekPagerData } from '../../engine'
+import { runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, type PagerWeekView, type WeekPagerData } from '../../engine'
 import { getWeightUnit } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock } from 'lucide-react'
 import { loadDraftRoutineIds } from '../../lib/workoutDraft'
@@ -57,6 +57,8 @@ function isSameDay(a: Date, b: Date) {
 
 const shortDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short' })
 const dayAndDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+// Local YYYY-MM-DD (matches the engine's week_ending, which is local-time Sunday).
+const localIso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
 // The cached Today view. Everything here is serializable (ISO strings, plain
 // numbers) so it round-trips through localStorage; the date-derived week strip
@@ -487,6 +489,59 @@ function PagerBoundary({ boundary }: { boundary: NonNullable<WeekPagerData['boun
   )
 }
 
+// "I'm done with the week" — the end-of-week close-out. Crunches the week now
+// (instead of waiting for the Mon rollover), sets next week's call, and writes
+// the coach's note. The injury path forces a recovery back-off.
+function CloseWeekSheet({
+  doneCount, planned, closing, onClose, onConfirm, onInjury,
+}: {
+  doneCount: number
+  planned: number
+  closing: boolean
+  onClose: () => void
+  onConfirm: () => void
+  onInjury: () => void
+}) {
+  return (
+    <div className="obs-sheet" onClick={closing ? undefined : onClose}>
+      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 4 }}>
+          <p className="section-header">Close out the week</p>
+          {!closing && (
+            <button
+              type="button"
+              onClick={onClose}
+              style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}
+            >
+              ×
+            </button>
+          )}
+        </div>
+
+        <p className="text-sm text-dim" style={{ marginBottom: 16, lineHeight: 1.5 }}>
+          {doneCount}/{planned} sessions logged. The coach crunches the week, sets next week's load and effort, and leaves you a note. You can still log more after — this just draws the line.
+        </p>
+
+        <Button variant="primary" full disabled={closing} onClick={onConfirm}>
+          {closing ? 'Crunching the week…' : "I'm done — crunch my week →"}
+        </Button>
+        <button
+          type="button"
+          disabled={closing}
+          onClick={onInjury}
+          style={{
+            display: 'block', margin: '12px auto 0', background: 'none', border: 'none',
+            cursor: closing ? 'default' : 'pointer', opacity: closing ? 0.5 : 1,
+            fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', color: 'var(--text-dim)',
+          }}
+        >
+          Injured / taking time off →
+        </button>
+      </div>
+    </div>
+  )
+}
+
 /**
  * TRAIN — the week, in full. Every session for the week is on the surface with
  * its state (to-do / in-progress / done), startable, resumable, and editable in
@@ -500,6 +555,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [draftRoutineIds, setDraftRoutineIds] = useState<string[]>([])
   const [recapDismissed, setRecapDismissed] = useState(false)
+  const [showCloseSheet, setShowCloseSheet] = useState(false)
   const [closing, setClosing] = useState(false)
   const [weekOffset, setWeekOffset] = useState(0)   // 0 = this week, <0 past, >0 future/boundary
   // Planned day rides on routine.intended_dow (synced). Keep an optimistic
@@ -603,33 +659,9 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     ?? routines.find((r) => statusFor(r.id).kind === 'todo')?.id
     ?? null
 
-  // Weekly check-in: once the week's planned sessions are in, you can close the
-  // week now — cut the review early and reveal next week's finalized call (the
-  // rewarding path; the Sunday rollover is the backstop). Hidden once a review
-  // for this week exists (closed here, or auto-cut at rollover).
-  const isoDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-  const plannedSessions = view?.sessionsPerWeek ?? routines.length
-  const trainedDays = new Set(weekWorkouts.map((w) => isoDay(new Date(w.performedAt)))).size
-  const weekComplete = plannedSessions > 0 && trainedDays >= plannedSessions
-  const thisSundayIso = isoDay(weekDays[6]?.date ?? today)
-
   // Recap prompt: the latest review, shown for ~10 days after it's cut, until
   // viewed or dismissed (tracked locally — no schema change).
   const latestReview = view?.latestReview ?? null
-  const weekAlreadyClosed = latestReview?.weekEnding === thisSundayIso
-  const showCloseWeek = !loading && weekComplete && !weekAlreadyClosed
-
-  async function handleCloseWeek() {
-    setClosing(true)
-    try {
-      const res = await closeWeekEarly(athleteId)
-      refetch()
-      refresh()
-      if (res?.reviewId) navigate(`/app/recap/${res.reviewId}`)
-    } finally {
-      setClosing(false)
-    }
-  }
 
   const recapRecent = latestReview
     ? Date.now() - new Date(`${latestReview.weekEnding}T12:00:00`).getTime() < 11 * 864e5
@@ -648,7 +680,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     wOffset < 0 ? pastWeeks[pastWeeks.length + wOffset]
     : wOffset > 0 && wOffset <= futureWeeks.length ? futureWeeks[wOffset - 1]
     : null
-  const curRange = fmtWeekRange(isoDay(weekDays[0]?.date ?? today), isoDay(weekDays[6]?.date ?? today))
+  const curRange = fmtWeekRange(localIso(weekDays[0]?.date ?? today), localIso(weekDays[6]?.date ?? today))
   const weekTitle = wOffset === 0 ? 'This week'
     : atBoundary ? `${boundary!.phaseName} phase`
     : wOffset === 1 ? 'Next week'
@@ -657,6 +689,29 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     : atBoundary ? 'Upcoming'
     : wOffset < 0 ? `${pagerWeek ? fmtWeekRange(pagerWeek.weekStart, pagerWeek.weekEnd) : ''} · logged`
     : `${pagerWeek?.phaseName ? pagerWeek.phaseName + ' · ' : ''}projected`
+
+  // The current week's close-out (origin/master's flow). weekClosed is true once
+  // a review exists for THIS week's Sunday — re-closing is idempotent, but we swap
+  // the CTA so it reads "done" rather than inviting a second close.
+  const currentWeekEnding = localIso(weekDays[6].date)
+  const weekClosed = (latestReview?.weekEnding ?? null) === currentWeekEnding
+  const plannedThisWeek = routines.length || 3
+
+  async function handleCloseWeek(injury: boolean) {
+    if (closing) return
+    setClosing(true)
+    try {
+      const res = await closeOutCurrentWeek(athleteId, { injury })
+      setShowCloseSheet(false)
+      refetch()
+      refresh()
+      if (res) navigate(`/app/recap/${res.reviewId}`)
+    } catch (e) {
+      console.error('[close-week] failed', e)
+    } finally {
+      setClosing(false)
+    }
+  }
 
   return (
     <div className="screen with-nav">
@@ -689,22 +744,8 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           </div>
         )}
 
-        {/* Weekly check-in — the week's work is in; close it to reveal next
-            week's call now (the rewarding path; Sunday rollover is the backstop). */}
-        {showCloseWeek && (
-          <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--confirmed)' }}>
-            <SectionHeader>Week complete</SectionHeader>
-            <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              That's all {plannedSessions} sessions in. Close out the week to lock in your recap and reveal next week's call.
-            </p>
-            <Button variant="primary" full style={{ marginTop: 14 }} disabled={closing} onClick={handleCloseWeek}>
-              {closing ? 'Closing the week…' : 'Close out the week →'}
-            </Button>
-          </div>
-        )}
-
         {/* Weekly recap — last week's review, the end-of-week payoff. */}
-        {!showCloseWeek && showRecap && latestReview && (
+        {showRecap && latestReview && (
           <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
               <SectionHeader>Weekly recap</SectionHeader>
@@ -857,6 +898,41 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             />
           ) : null}
         </div>
+
+        {/* End-of-week — the manual "I'm done" close-out. Hidden until a program
+            exists; swaps to a "closed" state once this week's review is cut. */}
+        {!loading && routines.length > 0 && (
+          weekClosed ? (
+            <button
+              type="button"
+              onClick={() => latestReview && navigate(`/app/recap/${latestReview.id}`)}
+              className="fade-rise"
+              style={{
+                marginTop: 18, padding: 0, background: 'none', border: 'none', cursor: 'pointer',
+                fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em',
+                color: 'var(--confirmed)', display: 'inline-flex', alignItems: 'center', gap: 6,
+              }}
+            >
+              ✓ WEEK CLOSED · VIEW RECAP <span style={{ opacity: 0.6 }}>›</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setShowCloseSheet(true)}
+              className="fade-rise"
+              style={{
+                marginTop: 18, width: '100%', padding: '12px 14px', borderRadius: 8, cursor: 'pointer',
+                background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--text)',
+                fontSize: 13, textAlign: 'left',
+              }}
+            >
+              <span style={{ fontWeight: 600 }}>Done with the week?</span>
+              <span className="text-dim" style={{ display: 'block', marginTop: 3, fontSize: 12, lineHeight: 1.4 }}>
+                Crunch the numbers, set next week, and get the coach's note.
+              </span>
+            </button>
+          )
+        )}
        </div>
 
        {/* Week strip — cadence, de-emphasised. Right rail on desktop. */}
@@ -887,6 +963,17 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
         </div>
        </aside>
       </div>
+
+      {showCloseSheet && (
+        <CloseWeekSheet
+          doneCount={doneCount}
+          planned={plannedThisWeek}
+          closing={closing}
+          onClose={() => setShowCloseSheet(false)}
+          onConfirm={() => void handleCloseWeek(false)}
+          onInjury={() => void handleCloseWeek(true)}
+        />
+      )}
     </div>
   )
 }

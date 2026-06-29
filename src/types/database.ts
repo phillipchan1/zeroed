@@ -191,7 +191,9 @@ export interface CoachMessageRow {
 
 // ---- Weekly review value types (deterministic autoregulation, §4.3) --------
 
-export type WeeklyDirective = 'PROGRESS' | 'DELOAD' | 'HOLD' | 'HOLD (missed)'
+// RECOVERY is the explicit injury / time-off directive — an athlete-declared
+// back-off that the deterministic engine never infers on its own.
+export type WeeklyDirective = 'PROGRESS' | 'DELOAD' | 'HOLD' | 'HOLD (missed)' | 'RECOVERY'
 
 export interface WeeklyReviewAdjustments {
   avgRPE: number | null
