@@ -75,6 +75,21 @@ export interface ProgramDesignResult {
   sessions: Array<{ name: string; intent: string; exercises: ProgramExercise[] }>
 }
 
+// Like a ProgramExercise but a screened athlete may carry real load up to "heavy".
+export interface PhaseExercise {
+  name: string
+  sets: number
+  reps: string
+  load: 'bodyweight' | 'light' | 'moderate' | 'heavy'
+  cue: string
+}
+
+export interface PhaseDesignResult {
+  goal: string
+  non_negotiables: string[]
+  sessions: Array<{ name: string; intent: string; exercises: PhaseExercise[] }>
+}
+
 export interface InfoGainResult {
   pattern_key: MovementPatternKey
   rationale: string
@@ -248,6 +263,21 @@ export function callProgramDesign(payload: {
   insights?: Array<{ category: string; confidence: number; status: string; claim: string }>
 }): Promise<AgentResult<ProgramDesignResult>> {
   return invokeAgent<ProgramDesignResult>('program_design', payload)
+}
+
+/**
+ * Phase design — post-auth, SCREENED athlete. Their real recent lifts + limiter
+ * map + the target phase → one repeating week of real training, built around the
+ * lifts they already log (so loading history carries forward). The engine
+ * validates/clamps and falls back to the deterministic template on failure.
+ */
+export function callPhaseDesign(payload: {
+  phase_name: string
+  profile: { goal: string | null; target: string | null; obstacle: string | null; training_age: number | null; sessions_per_week: number | null }
+  insights: Array<{ priority: string; category: string; claim: string; confidence: number; status: string }>
+  recent_lifts: Array<{ name: string; top_set: string; rpe: number | null }>
+}): Promise<AgentResult<PhaseDesignResult>> {
+  return invokeAgent<PhaseDesignResult>('phase_design', payload)
 }
 
 /** Information-gain selection — post-auth. → the next pattern to screen. */
