@@ -131,6 +131,7 @@ export interface RoutineRow {
   session_type: string | null
   exercises: ExerciseTemplate[]
   intent: string | null
+  intended_dow: number | null   // soft day-pin: 0=Mon..6=Sun, null=any (never enforced)
 }
 
 export interface WorkoutRow {

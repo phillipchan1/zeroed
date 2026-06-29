@@ -1,8 +1,22 @@
 import { Fragment } from 'react'
+import { useNavigate } from 'react-router-dom'
+import { Lock } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
+import { gatherProgramMap, gatherTrainingLog, type NextWeekProjection, type MapPhase } from '../../engine'
+import { pendingSessionsRaw } from '../../lib/workoutOutbox'
+import { getWeightUnit } from '../../lib/units'
 import { SectionHeader, Skeleton, BracketFrame } from '../../components/ui'
-import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName } from '../../types/database'
+import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName, WeeklyDirective } from '../../types/database'
+
+// Directive → colour, matching the recap banner so "the call" reads the same
+// everywhere it appears.
+const DIRECTIVE_COLOR: Record<WeeklyDirective, string> = {
+  PROGRESS:        'var(--confirmed)',
+  HOLD:            'var(--text-dim)',
+  'HOLD (missed)': 'var(--pending)',
+  DELOAD:          'var(--pending)',
+}
 
 /**
  * PROGRAM — "you are here." The macro view (per the Notion Screen Architecture
@@ -17,6 +31,13 @@ import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName } f
  */
 
 const PHASES: PhaseName[] = ['Stability', 'Strength', 'Power', 'Sport']
+
+function fmtWeekRange(startISO: string, endISO: string): string {
+  const s = new Date(`${startISO}T12:00:00`)
+  const e = new Date(`${endISO}T12:00:00`)
+  const mon = (d: Date) => d.toLocaleDateString(undefined, { month: 'short' })
+  return mon(s) === mon(e) ? `${mon(s)} ${s.getDate()}–${e.getDate()}` : `${mon(s)} ${s.getDate()} – ${mon(e)} ${e.getDate()}`
+}
 
 interface ProgramView {
   program: ProgramRow | null
@@ -56,10 +77,22 @@ async function fetchProgramView(athleteId: string): Promise<ProgramView> {
 }
 
 export function ProgramScreen({ athleteId }: { athleteId: string }) {
+  const navigate = useNavigate()
   const { data, loading: coldLoading } = useCachedLoader(
     `program:${athleteId}`,
     () => fetchProgramView(athleteId),
   )
+  const { data: map } = useCachedLoader(
+    `programmap:${athleteId}`,
+    () => gatherProgramMap(athleteId, getWeightUnit()),
+  )
+  const { data: log } = useCachedLoader(
+    `history:${athleteId}`,
+    () => gatherTrainingLog(athleteId, pendingSessionsRaw()),
+  )
+  const nextWeek = map?.nextWeek ?? null
+  const aheadPhases = (map?.phases ?? []).filter((p) => p.state === 'upcoming')
+  const recentWeeks = (log?.weeks ?? []).slice(0, 2)
   const program  = data?.program ?? null
   const phase     = data?.phase ?? null
   const routines  = data?.routines ?? []
@@ -93,7 +126,16 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
         <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
           The plan
         </p>
-        <h2 style={{ fontSize: 22, fontWeight: 600, marginBottom: 24 }}>Program</h2>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 24, gap: 12 }}>
+          <h2 style={{ fontSize: 22, fontWeight: 600 }}>Program</h2>
+          <button
+            type="button"
+            onClick={() => navigate('/app/history')}
+            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-dim)' }}
+          >
+            ‹ History
+          </button>
+        </div>
 
         {loading ? (
           <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
@@ -180,6 +222,57 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
               </div>
             </div>
 
+            {/* NEXT WEEK — the standing prescription read forward. Provisional:
+                the real numbers lock when the week closes (check-in / Sunday). */}
+            {nextWeek && <NextWeekCard nextWeek={nextWeek} />}
+
+            {/* THE ROAD AHEAD — phases after this one. Concept only: their
+                sessions don't exist until you graduate into them. */}
+            {aheadPhases.length > 0 && (
+              <div className="fade-rise fade-rise-delay-3" style={{ marginBottom: 28 }}>
+                <SectionHeader>The road ahead</SectionHeader>
+                <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 12, lineHeight: 1.6 }}>
+                  What's after {phaseName}. The shape is set; the exact sessions build when you graduate in.
+                </p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {aheadPhases.map((p) => <RoadAheadCard key={p.name} phase={p} />)}
+                </div>
+              </div>
+            )}
+
+            {/* RECENT — a glance back; the full log lives in History. Completes
+                the timeline: road ahead above, what you've banked below. */}
+            {recentWeeks.length > 0 && (
+              <div className="fade-rise fade-rise-delay-3" style={{ marginBottom: 28 }}>
+                <SectionHeader>Recent</SectionHeader>
+                <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {recentWeeks.map((wk) => (
+                    <button
+                      key={wk.weekEnding}
+                      type="button"
+                      onClick={() => navigate('/app/history')}
+                      className="card"
+                      style={{ textAlign: 'left', cursor: 'pointer', width: '100%' }}
+                    >
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                        <span className="text-sm" style={{ fontWeight: 600 }}>{fmtWeekRange(wk.weekStart, wk.weekEnding)}</span>
+                        <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
+                          {wk.sessions.length} session{wk.sessions.length === 1 ? '' : 's'} · {wk.totalSets} sets
+                        </span>
+                      </div>
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  onClick={() => navigate('/app/history')}
+                  style={{ marginTop: 10, background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-dim)' }}
+                >
+                  View full history ›
+                </button>
+              </div>
+            )}
+
           </>
         )}
        </div>
@@ -247,6 +340,104 @@ function PhaseArc({ currentIdx }: { currentIdx: number }) {
           </Fragment>
         )
       })}
+    </div>
+  )
+}
+
+// ---- Next-week projection — the call + per-session projected loads, provisional.
+function NextWeekCard({ nextWeek }: { nextWeek: NextWeekProjection }) {
+  const directive = nextWeek.directive
+  const color = directive ? DIRECTIVE_COLOR[directive] ?? 'var(--text-dim)' : 'var(--text-dim)'
+  // Only show per-session rows once they carry real projected loads — otherwise
+  // they just duplicate the Sessions list above (e.g. a freshly-started phase
+  // with no logged history yet).
+  const sessionsWithLines = nextWeek.sessions.filter((s) => s.lines.length > 0)
+  return (
+    <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 28 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+        <SectionHeader>Next week</SectionHeader>
+        {nextWeek.provisional && (
+          <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--pending)' }}>
+            Projection
+          </span>
+        )}
+      </div>
+
+      {/* The call — directive read forward, or a nudge if there's no read yet. */}
+      <div className="card" style={{ marginTop: 10, marginBottom: 10, borderColor: directive ? color : undefined }}>
+        {directive ? (
+          <>
+            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
+              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 16, fontWeight: 600, letterSpacing: '0.04em', color }}>
+                {directive}
+              </span>
+              {nextWeek.loadDeltaPct !== 0 && (
+                <span className="num text-xs" style={{ color }}>
+                  {nextWeek.loadDeltaPct > 0 ? '+' : ''}{nextWeek.loadDeltaPct}% load
+                </span>
+              )}
+            </div>
+            {nextWeek.rationale && (
+              <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>{nextWeek.rationale}</p>
+            )}
+            {nextWeek.rpeTarget != null && (
+              <p className="num text-xs text-dim" style={{ marginTop: 8 }}>Target RPE {nextWeek.rpeTarget}</p>
+            )}
+          </>
+        ) : (
+          <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
+            No call yet — train this week and the projection sharpens once the coach reads it.
+          </p>
+        )}
+      </div>
+
+      {/* Per-session projected loads — only when they carry real numbers. */}
+      {sessionsWithLines.length > 0 ? (
+        <>
+          {sessionsWithLines.map((s) => (
+            <div key={s.routineId} className="card" style={{ marginBottom: 8 }}>
+              <h3 style={{ fontSize: 14, fontWeight: 600 }}>{s.routineName}</h3>
+              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 5 }}>
+                {s.lines.map((l, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                    <span className="text-xs" style={{ color: 'var(--text)' }}>{l.name}</span>
+                    <span className="num text-xs" style={{ color: l.held ? 'var(--pending)' : 'var(--text-dim)', textAlign: 'right' }}>{l.hint}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ))}
+          {nextWeek.provisional && (
+            <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
+              Projection — locks in when you close the week.
+            </p>
+          )}
+        </>
+      ) : (
+        <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>
+          Per-lift targets appear once you've logged a session this phase — the projection reads off your last working sets.
+        </p>
+      )}
+    </div>
+  )
+}
+
+// ---- A future phase — concept only (its sessions build on advancement). Locked.
+function RoadAheadCard({ phase }: { phase: MapPhase }) {
+  return (
+    <div className="card" style={{ opacity: 0.82 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Lock size={13} strokeWidth={1.5} color="var(--text-dim)" />
+        <h3 style={{ fontSize: 15, fontWeight: 600 }}>{phase.name}</h3>
+      </div>
+      {phase.goal && (
+        <p className="text-xs text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>{phase.goal}</p>
+      )}
+      {phase.gate.length > 0 && (
+        <p className="text-xs text-dim" style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.04em', lineHeight: 1.5 }}>
+          UNLOCKS WHEN · {phase.gate[0]}
+        </p>
+      )}
     </div>
   )
 }

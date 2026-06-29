@@ -1099,6 +1099,68 @@ export async function runWeeklyReviewAgent(athleteId: string, programId: string)
 }
 
 /**
+ * Close out the CURRENT week now — the weekly check-in (§ "when do I see next
+ * week"). Cuts the review for this Mon–Sun immediately instead of waiting for the
+ * Sunday rollover that runWeeklyReviewAgent handles, so finishing the week's work
+ * reveals next week's finalized call as a reward. Idempotent: one review per
+ * (program_id, week_ending) — re-calling returns the existing one. The Sunday
+ * backstop and this share the same `reviewed`-by-week_ending guard, so they never
+ * double-cut.
+ */
+export async function closeWeekEarly(athleteId: string): Promise<{ reviewId: string; created: boolean } | null> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return null
+
+  const monday = startOfWeekMonday(new Date())
+  const weekEnding = weekEndingISO(monday)
+
+  // Already cut (here or by the Sunday backstop)? Return it — never duplicate.
+  const { data: existing } = await supabase
+    .from('weekly_review').select('id').eq('program_id', prog.id).eq('week_ending', weekEnding).maybeSingle()
+  if (existing) return { reviewId: (existing as { id: string }).id, created: false }
+
+  const sundayEnd = new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + 6, 23, 59, 59)
+  const [{ data: ath }, { data: workoutRows }, { data: obsRows }] = await Promise.all([
+    supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle(),
+    supabase.from('workout')
+      .select('performed_at, rpe, actual_weights, routine!inner(program_id)')
+      .eq('routine.program_id', prog.id)
+      .gte('performed_at', monday.toISOString())
+      .lte('performed_at', sundayEnd.toISOString()),
+    supabase.from('session_observation')
+      .select('severity, signal, logged_at, workout!inner(routine!inner(program_id))')
+      .eq('workout.routine.program_id', prog.id)
+      .gte('logged_at', monday.toISOString())
+      .lte('logged_at', sundayEnd.toISOString()),
+  ])
+
+  const planned = (ath?.sessions_per_week as number | null) ?? 3
+  const workouts = (workoutRows ?? []) as unknown as WeekWorkout[]
+  const observations = (obsRows ?? []) as unknown as WeekObservation[]
+
+  const tally = tallyWeek(planned, workouts, observations)
+  const prescription = decidePrescription(tally)
+  const adjustments: WeeklyReviewAdjustments = {
+    avgRPE: tally.avgRPE,
+    adherence: Math.round(tally.adherence * 100) / 100,
+    painCount: tally.painCount,
+    positiveCount: tally.positiveCount,
+    flagged_categories: tally.flagged_categories,
+  }
+  const coach_notes = weeklyCoachNotes(weekEnding, tally, prescription)
+
+  const { data: review } = await supabase
+    .from('weekly_review')
+    .insert({ program_id: prog.id, week_ending: weekEnding, coach_notes, adjustments, next_week_prescription: prescription })
+    .select().single()
+  if (!review) return null
+
+  await insertCoachMessage(athleteId, { kind: 'weekly_review', body: coach_notes, ref_id: (review as { id: string }).id })
+  return { reviewId: (review as { id: string }).id, created: true }
+}
+
+/**
  * PhaseAdvancementAgent gate (deterministic proxy, §5.2). Returns true only when
  * ALL hold: duration elapsed, ≥70% adherence over the phase, and no severity-≥3
  * observation in the last 3 logged sessions. Pure read — side effects (advance
@@ -2553,7 +2615,39 @@ export async function runPhaseAdvancement(athleteId: string): Promise<boolean> {
 
   const today = isoDate(new Date())
   const plan = generatePhase(nextName, category, today, { p1InsightId: p1?.id ?? null })
-  const newPhaseId = await insertPhaseAndRoutines(prog.id, plan)
+
+  // Prefer ACTIVATING an existing pending phase of the next stage (one the program
+  // was seeded or planned with) over inserting a fresh one — otherwise advancement
+  // leaves an orphaned duplicate phase. Only generate from scratch when no pending
+  // phase of that stage exists. Its dates/criteria are reset to start now.
+  const { data: pendingNext } = await supabase
+    .from('phase').select('id')
+    .eq('program_id', prog.id).eq('name', nextName).eq('status', 'pending')
+    .order('week_start').limit(1).maybeSingle()
+
+  let newPhaseId: string | null
+  if (pendingNext) {
+    newPhaseId = (pendingNext as { id: string }).id
+    await supabase.from('phase').update({
+      status: 'active',
+      week_start: plan.phase.week_start,
+      week_end: plan.phase.week_end,
+      non_negotiables: plan.phase.non_negotiables,
+      advancement_criteria: plan.phase.advancement_criteria,
+    }).eq('id', newPhaseId)
+    // Populate sessions from the blueprint only if the phase has none yet.
+    const { count } = await supabase
+      .from('routine').select('id', { count: 'exact', head: true }).eq('phase_id', newPhaseId)
+    if (!count) {
+      await supabase.from('routine').insert(plan.routines.map((r) => ({
+        program_id: prog.id, phase_id: newPhaseId, name: r.name,
+        session_type: r.session_type, exercises: r.exercises, intent: r.intent,
+      })))
+    }
+  } else {
+    newPhaseId = await insertPhaseAndRoutines(prog.id, plan)
+  }
+
   await supabase.from('athlete_profile')
     .update({ current_phase: nextName, last_updated: new Date().toISOString() })
     .eq('athlete_id', athleteId)
@@ -3085,4 +3179,432 @@ export async function gatherWeeklyRecap(athleteId: string, reviewId?: string): P
     sessions,
     movements,
   }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE TRAINING LOG — every session you've logged, newest first, bucketed by the
+// Mon–Sun week it fell in. Pure read over `workout`, folding in the outbox so a
+// session finished seconds ago (not yet committed) never looks lost. The backward
+// half of the program timeline; the forward half is the program map.
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface LogSession {
+  workoutId: string                    // committed id, or `pending:<id>` for an uncommitted one
+  routineId: string
+  routineName: string
+  phaseName: string | null
+  performedAt: string
+  setsDone: number
+  rpe: number | null
+  pending: boolean                     // finished offline, not yet synced
+  highlights: RecapSessionHighlight[]  // top set of the first few exercises
+}
+export interface LogWeek {
+  weekStart: string   // ISO Monday
+  weekEnding: string  // ISO Sunday
+  totalSets: number
+  sessions: LogSession[]  // newest first within the week
+}
+export interface TrainingLog {
+  weeks: LogWeek[]    // newest week first
+}
+
+function topHighlights(aw: Record<string, SetLog[]> | null, exercises: ExerciseTemplate[]): RecapSessionHighlight[] {
+  const out: RecapSessionHighlight[] = []
+  for (const [idx, sets] of Object.entries(aw ?? {})) {
+    const top = topWorkingSet(sets)
+    const ex = exercises[Number(idx)]
+    if (top && ex) out.push({ name: ex.name, set: top })
+    if (out.length >= 3) break
+  }
+  return out
+}
+
+/**
+ * The full training history for the active program, newest first, grouped by
+ * week. `pending` is the raw outbox (pass pendingSessionsRaw()); those sessions
+ * are prepended unless a committed session already covers the same routine + day.
+ */
+export async function gatherTrainingLog(
+  athleteId: string,
+  pending: PendingSession[] = [],
+  limit = 150,
+): Promise<TrainingLog> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return { weeks: [] }
+
+  const { data: ws } = await supabase
+    .from('workout')
+    .select('id, routine_id, performed_at, rpe, actual_weights, routine!inner(name, exercises, program_id)')
+    .eq('routine.program_id', prog.id)
+    .order('performed_at', { ascending: false })
+    .limit(limit)
+
+  type Row = {
+    id: string; routine_id: string; performed_at: string; rpe: number | null
+    actual_weights: Record<string, SetLog[]> | null
+    routine: { name: string; exercises: ExerciseTemplate[] }
+  }
+  const committed: LogSession[] = ((ws ?? []) as unknown as Row[]).map((w) => ({
+    workoutId: w.id,
+    routineId: w.routine_id,
+    routineName: w.routine?.name ?? 'Session',
+    phaseName: null,  // reserved for the program timeline (Phase 3); not needed for the week-grouped log
+    performedAt: w.performed_at,
+    setsDone: Object.values(w.actual_weights ?? {}).flat().filter(isSetDone).length,
+    rpe: w.rpe,
+    pending: false,
+    highlights: topHighlights(w.actual_weights, w.routine?.exercises ?? []),
+  }))
+
+  // Fold in finished-but-uncommitted sessions. Resolve their routine names in one
+  // query; skip any whose routine + calendar day a committed session already owns.
+  const committedDayKeys = new Set(committed.map((s) => `${s.routineId}|${isoDate(new Date(s.performedAt))}`))
+  const freshPending = pending.filter(
+    (p) => !committedDayKeys.has(`${p.routineId}|${isoDate(new Date(p.queuedAt))}`),
+  )
+  let pendingSessions: LogSession[] = []
+  if (freshPending.length) {
+    const { data: routineRows } = await supabase
+      .from('routine')
+      .select('id, name, exercises')
+      .in('id', [...new Set(freshPending.map((p) => p.routineId))])
+    const byId = new Map(
+      ((routineRows ?? []) as unknown as Array<{ id: string; name: string; exercises: ExerciseTemplate[] }>)
+        .map((r) => [r.id, r]),
+    )
+    pendingSessions = freshPending.map((p) => {
+      const r = byId.get(p.routineId)
+      return {
+        workoutId: `pending:${p.id}`,
+        routineId: p.routineId,
+        routineName: r?.name ?? 'Session',
+        phaseName: null,
+        performedAt: p.queuedAt,
+        setsDone: p.setsDone,
+        rpe: p.rpe,
+        pending: true,
+        highlights: topHighlights(p.actualWeights, r?.exercises ?? []),
+      }
+    })
+  }
+
+  const all = [...pendingSessions, ...committed].sort((a, b) => b.performedAt.localeCompare(a.performedAt))
+
+  // Bucket by week-ending Sunday.
+  const weeks = new Map<string, LogWeek>()
+  for (const s of all) {
+    const monday = startOfWeekMonday(new Date(s.performedAt))
+    const weekEnding = weekEndingISO(monday)
+    let wk = weeks.get(weekEnding)
+    if (!wk) {
+      wk = { weekStart: isoDate(monday), weekEnding, totalSets: 0, sessions: [] }
+      weeks.set(weekEnding, wk)
+    }
+    wk.sessions.push(s)
+    wk.totalSets += s.setsDone
+  }
+
+  return { weeks: [...weeks.values()].sort((a, b) => b.weekEnding.localeCompare(a.weekEnding)) }
+}
+
+// ---- Per-exercise progression (the lift trend) -----------------------------
+
+export interface ExercisePoint {
+  performedAt: string
+  topWeight: number | null
+  topReps: number | null
+  e1rm: number | null    // Epley estimate when weight & reps are both present
+  rpe: number | null
+}
+export interface ExerciseHistory {
+  name: string
+  points: ExercisePoint[]   // oldest → newest
+  bestWeight: number | null
+  bestE1rm: number | null
+}
+
+// Epley 1-rep-max estimate — the standard load×reps → strength proxy.
+function epley1rm(weight: number, reps: number): number {
+  return Math.round(weight * (1 + reps / 30))
+}
+
+/**
+ * Every logged top set for one exercise (matched by name across all routines in
+ * the active program), oldest → newest, with an Epley e1RM trend and PR markers.
+ */
+export async function gatherExerciseHistory(athleteId: string, exerciseName: string): Promise<ExerciseHistory> {
+  const empty: ExerciseHistory = { name: exerciseName, points: [], bestWeight: null, bestE1rm: null }
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return empty
+
+  const { data: ws } = await supabase
+    .from('workout')
+    .select('performed_at, rpe, actual_weights, routine!inner(exercises, program_id)')
+    .eq('routine.program_id', prog.id)
+    .order('performed_at', { ascending: true })
+
+  type Row = {
+    performed_at: string; rpe: number | null
+    actual_weights: Record<string, SetLog[]> | null
+    routine: { exercises: ExerciseTemplate[] }
+  }
+  const points: ExercisePoint[] = []
+  for (const w of (ws ?? []) as unknown as Row[]) {
+    const exs = w.routine?.exercises ?? []
+    for (const [idx, sets] of Object.entries(w.actual_weights ?? {})) {
+      if (exs[Number(idx)]?.name !== exerciseName) continue
+      const top = topWorkingSet(sets)
+      if (!top) continue
+      const e1rm = top.weight != null && top.reps != null ? epley1rm(top.weight, top.reps) : null
+      points.push({ performedAt: w.performed_at, topWeight: top.weight ?? null, topReps: top.reps ?? null, e1rm, rpe: top.rpe ?? w.rpe })
+      break // one entry (the top set) per session
+    }
+  }
+
+  return {
+    name: exerciseName,
+    points,
+    bestWeight: points.reduce<number | null>((m, p) => (p.topWeight != null && (m == null || p.topWeight > m) ? p.topWeight : m), null),
+    bestE1rm: points.reduce<number | null>((m, p) => (p.e1rm != null && (m == null || p.e1rm > m) ? p.e1rm : m), null),
+  }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE PROGRAM MAP — the forward half of the timeline. The phase arc with what
+// graduates you, the current phase's sessions, the next-week PROJECTION (the
+// standing prescription read forward — provisional until the week closes), and
+// the road ahead (future phases as concept cards, since their routine rows don't
+// exist until advancement generates them — fidelity decays with distance).
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface MapPhase {
+  name: PhaseName
+  state: 'done' | 'current' | 'upcoming'
+  goal: string | null
+  gate: string[]   // advancement_criteria — what graduates you out of it
+}
+export interface ProjectedSession {
+  routineId: string
+  routineName: string
+  intent: string | null
+  lines: Array<{ name: string; hint: string; held: boolean }>  // per-exercise projected load
+}
+export interface NextWeekProjection {
+  directive: WeeklyDirective | null
+  loadDeltaPct: number
+  rpeTarget: number | null
+  rationale: string | null
+  provisional: boolean   // true until the week is closed (check-in or Sunday rollover)
+  sessions: ProjectedSession[]
+}
+export interface ProgramMap {
+  phases: MapPhase[]
+  currentPhaseName: PhaseName
+  nextWeek: NextWeekProjection | null   // null until there's a standing prescription to read forward
+}
+
+/**
+ * The forward program map. Real data for the active phase; the prescription read
+ * forward for next week (provisional); and canonical concept previews for the
+ * phases after this one (generatePhase is pure — no rows are written).
+ */
+export async function gatherProgramMap(athleteId: string, unit: string): Promise<ProgramMap | null> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return null
+
+  const [{ data: activePhase }, { data: insightRows }, { data: review }] = await Promise.all([
+    supabase.from('phase').select('id, name, advancement_criteria, status').eq('program_id', prog.id).eq('status', 'active').maybeSingle(),
+    supabase.from('insight').select('id, category, status, priority').eq('athlete_id', athleteId).order('priority'),
+    supabase.from('weekly_review').select('next_week_prescription, week_ending').eq('program_id', prog.id).order('week_ending', { ascending: false }).limit(1).maybeSingle(),
+  ])
+
+  const currentName = ((activePhase as { name: PhaseName } | null)?.name ?? 'Stability') as PhaseName
+  const currentIdx = Math.max(0, PHASE_SEQUENCE.indexOf(currentName))
+  const p1Category = ((insightRows ?? []) as Array<{ category: string; status: string }>)
+    .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0]?.category ?? 'Lower Chain'
+
+  // The arc: completed phases done, the active one current, the rest previewed
+  // from the canonical blueprint (generatePhase is pure — no writes).
+  const today = isoDate(new Date())
+  const phases: MapPhase[] = PHASE_SEQUENCE.map((name, i) => {
+    if (i < currentIdx) return { name, state: 'done', goal: null, gate: [] }
+    if (i === currentIdx) {
+      return {
+        name,
+        state: 'current',
+        goal: null,
+        gate: ((activePhase as { advancement_criteria: string[] | null } | null)?.advancement_criteria) ?? [],
+      }
+    }
+    const plan = generatePhase(name, p1Category, today)
+    return { name, state: 'upcoming', goal: plan.goal, gate: plan.phase.advancement_criteria }
+  })
+
+  // Next-week projection — the standing prescription read forward over the active
+  // phase's sessions. Provisional until THIS week is closed (the check-in or the
+  // Sunday backstop cuts a review for the current week_ending → finalized).
+  const currentWeekEnding = weekEndingISO(startOfWeekMonday(new Date()))
+  const weekClosed = (review?.week_ending as string | undefined) === currentWeekEnding
+  let nextWeek: NextWeekProjection | null = null
+  const presc = (review?.next_week_prescription as WeeklyPrescription | null) ?? null
+  const { data: routineRows } = activePhase
+    ? await supabase.from('routine').select('id, name, exercises, intent').eq('phase_id', (activePhase as { id: string }).id).order('name')
+    : { data: null }
+  const routines = (routineRows ?? []) as unknown as Array<{ id: string; name: string; exercises: ExerciseTemplate[]; intent: string | null }>
+
+  if (routines.length) {
+    const sessions: ProjectedSession[] = []
+    for (const r of routines) {
+      const rx = await gatherSessionPrescription(athleteId, r.id, r.exercises, unit)
+      const lines = r.exercises
+        .map((ex, i) => ({ name: ex.name, hint: rx.hints[i] ?? '', held: !!rx.held[i] }))
+        .filter((l) => l.hint)
+        .slice(0, 4)
+      sessions.push({ routineId: r.id, routineName: r.name, intent: r.intent, lines })
+    }
+    nextWeek = {
+      directive: presc?.directive ?? null,
+      loadDeltaPct: presc?.load_delta_pct ?? 0,
+      rpeTarget: presc?.rpe_target ?? null,
+      rationale: presc?.rationale ?? null,
+      provisional: !weekClosed,
+      sessions,
+    }
+  }
+
+  return { phases, currentPhaseName: currentName, nextWeek }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE WEEK PAGER — arrow ← / → through the program a week at a time. Past weeks
+// are real (what you logged); the current week is rendered live by the Train
+// screen; future weeks are PROJECTED — same phase sessions with loads compounded
+// forward at the phase's natural rate. Honest by construction: forward loads only
+// appear where there's a logged base, and projection stops at the phase edge.
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface PagerExLine { name: string; detail: string }
+export interface PagerSessionView {
+  routineId: string
+  routineName: string
+  intent: string | null
+  tag: string | null              // past: "Fri · 5 sets · RPE 7"; future: null
+  lines: PagerExLine[]
+}
+export interface PagerWeekView {
+  weekStart: string
+  weekEnd: string
+  phaseName: string | null
+  sessions: PagerSessionView[]
+}
+export interface WeekPagerData {
+  past: PagerWeekView[]    // chronological (oldest first); excludes the current week
+  future: PagerWeekView[]  // week+1, week+2, … to the phase edge
+  boundary: { phaseName: PhaseName; goal: string | null; gate: string[] } | null
+}
+
+// How fast load is assumed to climb per week WITHIN a phase, for the forward
+// projection ("if you keep earning load at this phase's rate"). Stability banks
+// load (flat); Sport holds; Strength/Power climb. The engine still re-decides
+// each real week — this is a labelled projection, not a commitment.
+const PHASE_WEEKLY_STEP_PCT: Record<PhaseName, number> = {
+  Stability: 0, Strength: 3, Power: 2, Sport: 0,
+}
+
+export async function gatherWeekPager(athleteId: string, unit: string): Promise<WeekPagerData | null> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return null
+
+  const thisMonday = startOfWeekMonday(new Date())
+  const thisWeekEnding = weekEndingISO(thisMonday)
+
+  // ---- PAST: real logged weeks (reuse the training log), minus the current week.
+  const log = await gatherTrainingLog(athleteId, [], 200)
+  const past: PagerWeekView[] = log.weeks
+    .filter((wk) => wk.weekEnding < thisWeekEnding)
+    .map((wk) => ({
+      weekStart: wk.weekStart,
+      weekEnd: wk.weekEnding,
+      phaseName: null,
+      sessions: wk.sessions.map((s) => ({
+        routineId: s.routineId,
+        routineName: s.routineName,
+        intent: null,
+        tag: `${new Date(s.performedAt).toLocaleDateString(undefined, { weekday: 'short' })} · ${s.setsDone} set${s.setsDone === 1 ? '' : 's'}${s.rpe != null ? ` · RPE ${s.rpe}` : ''}`,
+        lines: s.highlights.map((h) => ({ name: h.name, detail: fmtSetDetail(h.set, unit) })),
+      })),
+    }))
+    .sort((a, b) => a.weekEnd.localeCompare(b.weekEnd))   // oldest first
+
+  // ---- FUTURE: project the rest of the current phase, week by week.
+  const { data: activePhase } = await supabase
+    .from('phase').select('id, name, week_end, advancement_criteria').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
+  const future: PagerWeekView[] = []
+  let boundary: WeekPagerData['boundary'] = null
+
+  if (activePhase) {
+    const phaseName = (activePhase as { name: PhaseName }).name
+    const stepPct = PHASE_WEEKLY_STEP_PCT[phaseName] ?? 0
+    const { data: routineRows } = await supabase
+      .from('routine').select('id, name, exercises, intent').eq('phase_id', (activePhase as { id: string }).id).order('name')
+    const routines = (routineRows ?? []) as unknown as Array<{ id: string; name: string; exercises: ExerciseTemplate[]; intent: string | null }>
+
+    // Base top-set weight per routine+exercise, from each routine's last session.
+    const baseByRoutine = new Map<string, (number | null)[]>()
+    for (const r of routines) {
+      const { data: lastW } = await supabase
+        .from('workout').select('actual_weights').eq('routine_id', r.id).order('performed_at', { ascending: false }).limit(1).maybeSingle()
+      const aw = (lastW?.actual_weights as Record<string, SetLog[]> | null) ?? null
+      baseByRoutine.set(r.id, r.exercises.map((_, i) => topWorkingSet(aw?.[String(i)] ?? undefined)?.weight ?? null))
+    }
+
+    // Weeks remaining in the phase (Mondays from next week through the phase end).
+    const phaseEnd = new Date(`${activePhase.week_end as string}T23:59:59`)
+    const MAX_FORWARD = 6
+    for (let k = 1; k <= MAX_FORWARD; k++) {
+      const wkMonday = new Date(thisMonday); wkMonday.setDate(thisMonday.getDate() + 7 * k)
+      if (wkMonday > phaseEnd) break
+      const sessions: PagerSessionView[] = routines.map((r) => {
+        const base = baseByRoutine.get(r.id) ?? []
+        return {
+          routineId: r.id,
+          routineName: r.name,
+          intent: r.intent,
+          tag: null,
+          lines: r.exercises.map((ex, i) => {
+            const b = base[i]
+            const detail = b != null && stepPct > 0
+              ? `≈${roundLoad(b * Math.pow(1 + stepPct / 100, k))}${unit}×${ex.reps}`
+              : b != null
+                ? `${b}${unit}×${ex.reps}`
+                : `${ex.sets}×${ex.reps}${ex.load ? ` · ${ex.load}` : ''}`
+            return { name: ex.name, detail }
+          }),
+        }
+      })
+      future.push({ weekStart: isoDate(wkMonday), weekEnd: weekEndingISO(wkMonday), phaseName, sessions })
+    }
+
+    // The phase boundary — the next stage, concept only (no routine rows yet).
+    const nextName = PHASE_SEQUENCE[PHASE_SEQUENCE.indexOf(phaseName) + 1] ?? null
+    if (nextName) {
+      const plan = generatePhase(nextName, 'Lower Chain', isoDate(new Date()))
+      boundary = { phaseName: nextName, goal: plan.goal, gate: plan.phase.advancement_criteria }
+    }
+  }
+
+  return { past, future, boundary }
+}
+
+// Compact one-set detail for the pager (e.g. "275lb×5", "30s", "5m").
+function fmtSetDetail(s: SetLog, unit: string): string {
+  if (s.weight != null) return `${s.weight}${unit}×${s.reps ?? '?'}`
+  if (s.duration != null) return `${s.duration}s`
+  if (s.distance != null) return `${s.distance}`
+  return `${s.reps ?? '?'} reps`
 }

@@ -1,10 +1,13 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useState, type CSSProperties } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
-import { runLoopTriggers, isRetestDue } from '../../engine'
+import { runLoopTriggers, isRetestDue, closeWeekEarly, gatherWeekPager, type PagerWeekView, type WeekPagerData } from '../../engine'
+import { getWeightUnit } from '../../lib/units'
+import { ChevronLeft, ChevronRight, Lock } from 'lucide-react'
 import { loadDraftRoutineIds } from '../../lib/workoutDraft'
 import { pendingCount } from '../../lib/workoutOutbox'
+import { setIntendedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
 import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
 
@@ -72,6 +75,7 @@ interface TodayView {
   goal: string | null
   p1: { category: string; confidence: number } | null
   retestDate: string | null
+  sessionsPerWeek: number | null
   latestReview: { id: string; weekEnding: string } | null
   lastDoneByRoutine: Record<string, string>   // routineId → most recent performed_at (any week)
 }
@@ -87,7 +91,7 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
       .gte('performed_at', days[0].toISOString())
       .lte('performed_at', weekEnd.toISOString()),
     supabase.from('insight').select('*').eq('athlete_id', athleteId).order('priority'),
-    supabase.from('athlete').select('goals, obstacle').eq('id', athleteId).maybeSingle(),
+    supabase.from('athlete').select('goals, obstacle, sessions_per_week').eq('id', athleteId).maybeSingle(),
     supabase.from('athlete_profile').select('retest_date').eq('athlete_id', athleteId).maybeSingle(),
   ])
   if (workoutRes.error) throw workoutRes.error
@@ -98,7 +102,7 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
   const all = (insightRes.data ?? []) as InsightRow[]
   const active = all.filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
   const top = active[0] ?? null
-  const ath = athRes.data as { goals: string | null; obstacle: string | null } | null
+  const ath = athRes.data as { goals: string | null; obstacle: string | null; sessions_per_week: number | null } | null
 
   // Latest weekly review (recap prompt) + last-performed per routine (so a
   // session done in a prior week still shows its history, not a blank "to do").
@@ -139,6 +143,7 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
     goal: (ath?.goals as string | null) || (ath?.obstacle as string | null) || null,
     p1: top ? { category: top.category, confidence: top.confidence } : null,
     retestDate: (profileRes.data?.retest_date as string | null) ?? null,
+    sessionsPerWeek: (ath?.sessions_per_week as number | null) ?? null,
     latestReview,
     lastDoneByRoutine,
   }
@@ -165,11 +170,13 @@ type SessionState =
   | { kind: 'done'; lastWorkout: WeekWorkout; count: number }
 
 function WorkoutPreviewSheet({
-  routine, recommended, state, onClose, onStart, onResume, onEdit, onLogAgain,
+  routine, recommended, state, plannedDow, onPlanDay, onClose, onStart, onResume, onEdit, onLogAgain,
 }: {
   routine: RoutineRow
   recommended: boolean
   state: SessionState
+  plannedDow: number | null
+  onPlanDay: (dow: number | null) => void
   onClose: () => void
   onStart: () => void
   onResume: () => void
@@ -213,6 +220,45 @@ function WorkoutPreviewSheet({
           ))}
         </div>
 
+        {/* Plan for — soft day-pinning. A suggestion, never enforced: scheduling
+            stays count-based; this just lets you lay out the week. */}
+        <div style={{ marginBottom: 16 }}>
+          <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
+            Plan for
+          </p>
+          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+            {PLAN_DAYS.map((label, dow) => {
+              const active = plannedDow === dow
+              return (
+                <button
+                  key={dow}
+                  type="button"
+                  onClick={() => onPlanDay(active ? null : dow)}
+                  className="num text-xs"
+                  style={{
+                    flex: '1 0 auto', minWidth: 38, padding: '6px 0', borderRadius: 6, cursor: 'pointer',
+                    fontFamily: 'var(--font-mono)', letterSpacing: '0.02em',
+                    border: `1px solid ${active ? 'var(--signal)' : 'var(--line)'}`,
+                    background: active ? 'var(--signal-dim)' : 'transparent',
+                    color: active ? 'var(--signal)' : 'var(--text-dim)',
+                  }}
+                >
+                  {label}
+                </button>
+              )
+            })}
+          </div>
+          {plannedDow != null && (
+            <button
+              type="button"
+              onClick={() => onPlanDay(null)}
+              style={{ marginTop: 8, background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', color: 'var(--text-dim)' }}
+            >
+              Clear day
+            </button>
+          )}
+        </div>
+
         {state.kind === 'todo' && (
           <Button variant={recommended ? 'primary' : 'ghost'} full onClick={onStart}>
             {recommended ? 'Start session →' : 'Start →'}
@@ -242,12 +288,14 @@ function WorkoutPreviewSheet({
 }
 
 function SessionCard({
-  routine, recommended, state, lastDone, onStart, onResume, onEdit, onLogAgain,
+  routine, recommended, state, lastDone, plannedDow, onPlanDay, onStart, onResume, onEdit, onLogAgain,
 }: {
   routine: RoutineRow
   recommended: boolean
   state: SessionState
   lastDone: string | null
+  plannedDow: number | null
+  onPlanDay: (dow: number | null) => void
   onStart: () => void
   onResume: () => void
   onEdit: () => void
@@ -275,7 +323,14 @@ function SessionCard({
               </span>
             )}
           </h3>
-          <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{exCount} ex</span>
+          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, whiteSpace: 'nowrap' }}>
+            {plannedDow != null && (
+              <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--signal)' }}>
+                {PLAN_DAYS[plannedDow]}
+              </span>
+            )}
+            <span className="num text-xs text-dim">{exCount} ex</span>
+          </div>
         </div>
 
         {/* Status line */}
@@ -336,6 +391,8 @@ function SessionCard({
           routine={routine}
           recommended={recommended}
           state={state}
+          plannedDow={plannedDow}
+          onPlanDay={onPlanDay}
           onClose={() => setShowPreview(false)}
           onStart={onStart}
           onResume={onResume}
@@ -344,6 +401,89 @@ function SessionCard({
         />
       )}
     </>
+  )
+}
+
+const fmtWeekRange = (startISO: string, endISO: string) => {
+  const s = new Date(`${startISO}T12:00:00`), e = new Date(`${endISO}T12:00:00`)
+  const mon = (d: Date) => d.toLocaleDateString(undefined, { month: 'short' })
+  return mon(s) === mon(e) ? `${mon(s)} ${s.getDate()}–${e.getDate()}` : `${mon(s)} ${s.getDate()} – ${mon(e)} ${e.getDate()}`
+}
+
+const pagerArrowStyle = (disabled: boolean): CSSProperties => ({
+  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
+  width: 34, height: 34, borderRadius: 8, flexShrink: 0,
+  border: '1px solid var(--line)', background: 'transparent',
+  color: disabled ? 'var(--line)' : 'var(--text-dim)',
+  cursor: disabled ? 'default' : 'pointer',
+})
+
+// A non-current week in the pager: past (real, logged) or future (projected).
+// Read-only; past sessions tap through to the log.
+function PagerWeekBody({ week, mode, onTapSession }: {
+  week: PagerWeekView
+  mode: 'past' | 'future'
+  onTapSession?: (routineId: string) => void
+}) {
+  if (week.sessions.length === 0) {
+    return (
+      <div className="card">
+        <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
+          {mode === 'past' ? 'Nothing logged this week.' : 'Projected loads appear once you’ve logged a session in this phase.'}
+        </p>
+      </div>
+    )
+  }
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {week.sessions.map((s, i) => (
+        <div
+          key={`${s.routineId}-${i}`}
+          className="card"
+          style={{ cursor: mode === 'past' && onTapSession ? 'pointer' : 'default', opacity: mode === 'future' ? 0.92 : 1 }}
+          onClick={mode === 'past' && onTapSession ? () => onTapSession(s.routineId) : undefined}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+            <h3 style={{ fontSize: 15, fontWeight: 600 }}>{s.routineName}</h3>
+            {s.tag
+              ? <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{s.tag}</span>
+              : <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--pending)' }}>Projected</span>}
+          </div>
+          {s.lines.length > 0 && (
+            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 5 }}>
+              {s.lines.map((l, j) => (
+                <div key={j} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                  <span className="text-xs" style={{ color: 'var(--text)' }}>{l.name}</span>
+                  <span className="num text-xs text-dim">{l.detail}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// The far edge of the pager: the next phase, concept only (its sessions don't
+// exist until you graduate in).
+function PagerBoundary({ boundary }: { boundary: NonNullable<WeekPagerData['boundary']> }) {
+  return (
+    <div className="card" style={{ opacity: 0.9 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <Lock size={13} strokeWidth={1.5} color="var(--text-dim)" />
+        <h3 style={{ fontSize: 15, fontWeight: 600 }}>{boundary.phaseName} phase</h3>
+      </div>
+      {boundary.goal && <p className="text-xs text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>{boundary.goal}</p>}
+      {boundary.gate.length > 0 && (
+        <p className="text-xs text-dim" style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.04em', lineHeight: 1.5 }}>
+          UNLOCKS WHEN · {boundary.gate[0]}
+        </p>
+      )}
+      <p className="text-xs text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>
+        Sessions build when you graduate in — the program reads your phase before it writes the next one.
+      </p>
+    </div>
   )
 }
 
@@ -360,6 +500,17 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [draftRoutineIds, setDraftRoutineIds] = useState<string[]>([])
   const [recapDismissed, setRecapDismissed] = useState(false)
+  const [closing, setClosing] = useState(false)
+  const [weekOffset, setWeekOffset] = useState(0)   // 0 = this week, <0 past, >0 future/boundary
+  // Planned day rides on routine.intended_dow (synced). Keep an optimistic
+  // override so the chip/picker updates instantly before the refetch lands.
+  const [dowOverride, setDowOverride] = useState<Record<string, number | null>>({})
+  const handlePlanDay = (routineId: string, dow: number | null) => {
+    setDowOverride((o) => ({ ...o, [routineId]: dow }))
+    void setIntendedDay(routineId, dow).then(() => refresh())
+  }
+  const plannedDowFor = (r: RoutineRow): number | null =>
+    r.id in dowOverride ? dowOverride[r.id] : (r.intended_dow ?? null)
   // Sessions finished offline, waiting to sync. Re-checked when connectivity
   // returns so the note clears itself once the outbox drains.
   const [pendingSync, setPendingSync] = useState(pendingCount())
@@ -367,6 +518,10 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const { data: view, loading, refetch } = useCachedLoader(
     `today:${athleteId}`,
     () => fetchTodayView(athleteId),
+  )
+  const { data: pager } = useCachedLoader(
+    `weekpager:${athleteId}`,
+    () => gatherWeekPager(athleteId, getWeightUnit()),
   )
 
   const totalInsights = view?.totalInsights ?? 0
@@ -448,13 +603,60 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     ?? routines.find((r) => statusFor(r.id).kind === 'todo')?.id
     ?? null
 
+  // Weekly check-in: once the week's planned sessions are in, you can close the
+  // week now — cut the review early and reveal next week's finalized call (the
+  // rewarding path; the Sunday rollover is the backstop). Hidden once a review
+  // for this week exists (closed here, or auto-cut at rollover).
+  const isoDay = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+  const plannedSessions = view?.sessionsPerWeek ?? routines.length
+  const trainedDays = new Set(weekWorkouts.map((w) => isoDay(new Date(w.performedAt)))).size
+  const weekComplete = plannedSessions > 0 && trainedDays >= plannedSessions
+  const thisSundayIso = isoDay(weekDays[6]?.date ?? today)
+
   // Recap prompt: the latest review, shown for ~10 days after it's cut, until
   // viewed or dismissed (tracked locally — no schema change).
   const latestReview = view?.latestReview ?? null
+  const weekAlreadyClosed = latestReview?.weekEnding === thisSundayIso
+  const showCloseWeek = !loading && weekComplete && !weekAlreadyClosed
+
+  async function handleCloseWeek() {
+    setClosing(true)
+    try {
+      const res = await closeWeekEarly(athleteId)
+      refetch()
+      refresh()
+      if (res?.reviewId) navigate(`/app/recap/${res.reviewId}`)
+    } finally {
+      setClosing(false)
+    }
+  }
+
   const recapRecent = latestReview
     ? Date.now() - new Date(`${latestReview.weekEnding}T12:00:00`).getTime() < 11 * 864e5
     : false
   const showRecap = !loading && !!latestReview && recapRecent && !recapDismissed && !recapSeen(latestReview.id)
+
+  // ── Week pager — ← real past weeks · this week · projected future → · phase edge.
+  const pastWeeks = pager?.past ?? []
+  const futureWeeks = pager?.future ?? []
+  const boundary = pager?.boundary ?? null
+  const minWeekOffset = -pastWeeks.length
+  const maxWeekOffset = futureWeeks.length + (boundary ? 1 : 0)
+  const wOffset = Math.max(minWeekOffset, Math.min(maxWeekOffset, weekOffset))
+  const atBoundary = boundary != null && wOffset === futureWeeks.length + 1
+  const pagerWeek: PagerWeekView | null =
+    wOffset < 0 ? pastWeeks[pastWeeks.length + wOffset]
+    : wOffset > 0 && wOffset <= futureWeeks.length ? futureWeeks[wOffset - 1]
+    : null
+  const curRange = fmtWeekRange(isoDay(weekDays[0]?.date ?? today), isoDay(weekDays[6]?.date ?? today))
+  const weekTitle = wOffset === 0 ? 'This week'
+    : atBoundary ? `${boundary!.phaseName} phase`
+    : wOffset === 1 ? 'Next week'
+    : pagerWeek ? fmtWeekRange(pagerWeek.weekStart, pagerWeek.weekEnd) : ''
+  const weekSub = wOffset === 0 ? curRange
+    : atBoundary ? 'Upcoming'
+    : wOffset < 0 ? `${pagerWeek ? fmtWeekRange(pagerWeek.weekStart, pagerWeek.weekEnd) : ''} · logged`
+    : `${pagerWeek?.phaseName ? pagerWeek.phaseName + ' · ' : ''}projected`
 
   return (
     <div className="screen with-nav">
@@ -487,8 +689,22 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           </div>
         )}
 
+        {/* Weekly check-in — the week's work is in; close it to reveal next
+            week's call now (the rewarding path; Sunday rollover is the backstop). */}
+        {showCloseWeek && (
+          <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--confirmed)' }}>
+            <SectionHeader>Week complete</SectionHeader>
+            <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>
+              That's all {plannedSessions} sessions in. Close out the week to lock in your recap and reveal next week's call.
+            </p>
+            <Button variant="primary" full style={{ marginTop: 14 }} disabled={closing} onClick={handleCloseWeek}>
+              {closing ? 'Closing the week…' : 'Close out the week →'}
+            </Button>
+          </div>
+        )}
+
         {/* Weekly recap — last week's review, the end-of-week payoff. */}
-        {showRecap && latestReview && (
+        {!showCloseWeek && showRecap && latestReview && (
           <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
             <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
               <SectionHeader>Weekly recap</SectionHeader>
@@ -547,50 +763,99 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           </div>
         )}
 
-        {/* THE WEEK — every session, on the surface. */}
+        {/* THE WEEK PAGER — ← past (logged) · this week · projected → · phase edge */}
         <div style={{ marginBottom: 8 }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
-            <SectionHeader>This week's sessions</SectionHeader>
-            {!loading && routines.length > 0 && (
-              <span className="num text-xs text-dim">{doneCount}/{routines.length} done</span>
-            )}
+          {/* Pager header: arrows + which week you're looking at */}
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 14 }}>
+            <button
+              type="button" aria-label="Previous week"
+              disabled={wOffset <= minWeekOffset}
+              onClick={() => setWeekOffset(wOffset - 1)}
+              style={pagerArrowStyle(wOffset <= minWeekOffset)}
+            >
+              <ChevronLeft size={18} strokeWidth={1.5} />
+            </button>
+            <div style={{ textAlign: 'center', flex: 1, minWidth: 0 }}>
+              <p style={{ fontSize: 14, fontWeight: 600 }}>{weekTitle}</p>
+              {weekSub && (
+                <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', marginTop: 2 }}>{weekSub}</p>
+              )}
+            </div>
+            <button
+              type="button" aria-label="Next week"
+              disabled={wOffset >= maxWeekOffset}
+              onClick={() => setWeekOffset(wOffset + 1)}
+              style={pagerArrowStyle(wOffset >= maxWeekOffset)}
+            >
+              <ChevronRight size={18} strokeWidth={1.5} />
+            </button>
           </div>
-          <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 12, lineHeight: 1.5 }}>
-            Do whichever fits — gym, gear, time. Tap a logged one to edit, or log a session for a past day.
-          </p>
 
-          {loading && routines.length === 0 ? (
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-              {Array.from({ length: 3 }).map((_, i) => (
-                <div key={i} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  <Skeleton height={14} width={160} /><Skeleton height={10} width={90} /><Skeleton height={36} width="100%" />
+          {/* Body — current week is fully interactive; other weeks are read-only. */}
+          {wOffset === 0 ? (
+            <>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 12 }}>
+                <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
+                  Do whichever fits — gym, gear, time. Tap a logged one to edit.
+                </p>
+                <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, whiteSpace: 'nowrap' }}>
+                  {!loading && routines.length > 0 && (
+                    <span className="num text-xs text-dim">{doneCount}/{routines.length} done</span>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => navigate('/app/history')}
+                    style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-dim)' }}
+                  >
+                    All ›
+                  </button>
                 </div>
-              ))}
-            </div>
-          ) : routines.length === 0 ? (
-            <div className="card">
-              <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
-                No sessions in this phase yet. Finish onboarding and your program builds here.
-              </p>
-            </div>
-          ) : (
-            routines.map((r) => (
-              <SessionCard
-                key={r.id}
-                routine={r}
-                recommended={r.id === primaryRoutineId}
-                state={statusFor(r.id)}
-                lastDone={lastDoneByRoutine[r.id] ?? null}
-                onStart={() => navigate(`/app/workout/${r.id}`)}
-                onResume={() => navigate(`/app/workout/${r.id}`)}
-                onLogAgain={() => navigate(`/app/workout/${r.id}`)}
-                onEdit={() => {
-                  const s = statusFor(r.id)
-                  if (s.kind === 'done') navigate(`/app/workout/${r.id}?w=${s.lastWorkout.id}`)
-                }}
-              />
-            ))
-          )}
+              </div>
+
+              {loading && routines.length === 0 ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                  {Array.from({ length: 3 }).map((_, i) => (
+                    <div key={i} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                      <Skeleton height={14} width={160} /><Skeleton height={10} width={90} /><Skeleton height={36} width="100%" />
+                    </div>
+                  ))}
+                </div>
+              ) : routines.length === 0 ? (
+                <div className="card">
+                  <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
+                    No sessions in this phase yet. Finish onboarding and your program builds here.
+                  </p>
+                </div>
+              ) : (
+                routines.map((r) => (
+                  <SessionCard
+                    key={r.id}
+                    routine={r}
+                    recommended={r.id === primaryRoutineId}
+                    state={statusFor(r.id)}
+                    lastDone={lastDoneByRoutine[r.id] ?? null}
+                    plannedDow={plannedDowFor(r)}
+                    onPlanDay={(dow) => handlePlanDay(r.id, dow)}
+                    onStart={() => navigate(`/app/workout/${r.id}`)}
+                    onResume={() => navigate(`/app/workout/${r.id}`)}
+                    onLogAgain={() => navigate(`/app/workout/${r.id}`)}
+                    onEdit={() => {
+                      const s = statusFor(r.id)
+                      if (s.kind === 'done') navigate(`/app/workout/${r.id}?w=${s.lastWorkout.id}`)
+                    }}
+                  />
+                ))
+              )}
+            </>
+          ) : atBoundary && boundary ? (
+            <PagerBoundary boundary={boundary} />
+          ) : pagerWeek ? (
+            <PagerWeekBody
+              week={pagerWeek}
+              mode={wOffset < 0 ? 'past' : 'future'}
+              onTapSession={() => navigate('/app/history')}
+            />
+          ) : null}
         </div>
        </div>
 
