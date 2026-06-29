@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
 import { useAppState } from './hooks/useAppState'
+import { useDisableShakeToUndo } from './hooks/useDisableShakeToUndo'
 import { useOutboxSync } from './lib/workoutOutbox'
 import { Spinner } from './components/ui'
 import { Nav, Sidebar } from './components/layout/Nav'
@@ -128,6 +129,7 @@ function AppRoutes() {
 }
 
 export default function App() {
+  useDisableShakeToUndo()
   return (
     <BrowserRouter>
       {/* Connectivity / update bar — fixed, above everything. */}
