@@ -156,6 +156,19 @@ function SetRow({
   prevText, onChange, onComplete, onActivate,
 }: SetRowProps) {
   const [rpeOpen, setRpeOpen] = useState(false)
+  const rpeRef = useRef<HTMLDivElement>(null)
+
+  // Dismiss the RPE popover on any interaction outside it — tapping
+  // elsewhere in the set row shouldn't leave it hanging open.
+  useEffect(() => {
+    if (!rpeOpen) return
+    function onOutside(e: PointerEvent) {
+      if (!rpeRef.current?.contains(e.target as Node)) setRpeOpen(false)
+    }
+    document.addEventListener('pointerdown', onOutside)
+    return () => document.removeEventListener('pointerdown', onOutside)
+  }, [rpeOpen])
+
   // Which fields *this row's* check auto-filled — so un-checking can revert
   // exactly those, while anything the athlete typed by hand is left alone.
   const [autofilled, setAutofilled] = useState<MetricField[]>([])
@@ -218,7 +231,7 @@ function SetRow({
 
   // RPE cell — a tap-scale, not a keyboard (JuggernautAI). Shared by the loaded types.
   const rpeCell = (
-    <div style={{ position: 'relative' }}>
+    <div style={{ position: 'relative' }} ref={rpeRef}>
       <button
         type="button"
         className="set-row__rpe"
