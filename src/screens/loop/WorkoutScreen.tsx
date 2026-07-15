@@ -3,8 +3,9 @@ import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
 import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import {
-  restoreDraft, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
+  restoreDraft, loadDraftLocal, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
 } from '../../lib/workoutDraft'
+import { loadCache, saveCache } from '../../lib/cache'
 import { enqueueSession, commitPending } from '../../lib/workoutOutbox'
 import {
   gatherSessionPrescription,
@@ -620,6 +621,43 @@ function performedSummary(t: TrackingType, logs: SetLog[], unit: string, distanc
   return done.map((l) => `${l.reps ?? '?'}×${l.weight != null ? `${l.weight}${unit}` : 'BW'}`).join(', ')
 }
 
+// ---- offline-first bootstrap -----------------------------------------------
+// Everything the screen needs to paint the session and start logging, cached per
+// routine so a return visit (at the gym, on two bars) opens instantly and fully
+// offline — the network fetch below then revalidates in the background. Every
+// field is serializable so it round-trips through localStorage.
+
+interface WorkoutBootstrap {
+  routine: RoutineRow
+  athleteId: string | null
+  athleteName: string | null
+  onboardingStep: OnboardingStep | null
+  prevByExercise: Record<number, SetLog[]>
+  insightMap: Record<string, InsightRow>
+  prescription: SessionPrescription | null
+}
+
+const bootKey = (routineId: string) => `workout:${routineId}`
+
+// A fresh, empty set-log grid sized to the routine's exercises.
+function buildTemplate(routine: RoutineRow): Record<number, SetLog[]> {
+  const exs = routine.exercises as ExerciseTemplate[]
+  const initial: Record<number, SetLog[]> = {}
+  exs.forEach((ex, i) => { initial[i] = Array.from({ length: ex.sets }, (_, j) => newSetLog(j + 1)) })
+  return initial
+}
+
+// Overlay a saved draft's logs onto a fresh template by exercise index, so a
+// routine that has since gained or lost an exercise still loads cleanly.
+function overlayDraft(
+  base: Record<number, SetLog[]>,
+  draftSetLogs: Record<number, SetLog[]>,
+): Record<number, SetLog[]> {
+  const merged: Record<number, SetLog[]> = { ...base }
+  Object.entries(draftSetLogs).forEach(([k, v]) => { if (v && v.length) merged[Number(k)] = v })
+  return merged
+}
+
 export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}) {
   const { routineId } = useParams<{ routineId: string }>()
   const navigate      = useNavigate()
@@ -631,16 +669,31 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const unit = getWeightUnit()
   const distanceUnit = getDistanceUnit(unit)
 
+  // Offline-first seed: read the cached bootstrap and the (synchronous, local)
+  // draft exactly once, so the very first paint already shows the session — no
+  // spinner, no network round-trip. Edit mode hydrates from the logged workout
+  // row instead, so it doesn't seed from a draft.
+  const seedRef = useRef<{ boot: WorkoutBootstrap | null; draft: DraftPayload | null }>()
+  if (!seedRef.current) {
+    seedRef.current = {
+      boot: routineId ? loadCache<WorkoutBootstrap>(bootKey(routineId)) : null,
+      draft: routineId && !isEdit ? loadDraftLocal(routineId) : null,
+    }
+  }
+  const seedBoot = seedRef.current.boot
+  const seedDraft = seedRef.current.draft
+
   // The day the session happened — defaults to today, editable so a forgotten
   // session can be backdated. Stored as a yyyy-mm-dd input string.
   const [performedAt, setPerformedAt] = useState<string>(() => toDateInput(new Date()))
 
-  const [routine, setRoutine]     = useState<RoutineRow | null>(null)
-  const [athleteId, setAthleteId] = useState<string | null>(null)
-  const [athleteName, setAthleteName] = useState<string | null>(null)
-  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep | null>(null)
-  const [loading, setLoading]     = useState(true)
-  const [elapsed, setElapsed]     = useState(0)
+  const [routine, setRoutine]     = useState<RoutineRow | null>(() => seedBoot?.routine ?? null)
+  const [athleteId, setAthleteId] = useState<string | null>(() => seedBoot?.athleteId ?? null)
+  const [athleteName, setAthleteName] = useState<string | null>(() => seedBoot?.athleteName ?? null)
+  const [onboardingStep, setOnboardingStep] = useState<OnboardingStep | null>(() => seedBoot?.onboardingStep ?? null)
+  // Cache hit → paint immediately (no spinner). Cold open still shows one.
+  const [loading, setLoading]     = useState<boolean>(() => !seedBoot)
+  const [elapsed, setElapsed]     = useState<number>(() => seedDraft?.elapsedSeconds ?? 0)
   const [showDebrief, setShowDebrief] = useState(false)
   const [savingDebrief, setSavingDebrief] = useState(false)
   // Elapsed frozen at the moment "Complete" was tapped — the debrief sheet can
@@ -648,50 +701,67 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const finalElapsedRef = useRef(0)
 
   // "Why this session" brief — auto-shown on open (the slot the readiness gate
-  // used to hold), re-openable any time from the header.
-  const [briefOpen, setBriefOpen] = useState(true)
-  const [hasStarted, setHasStarted] = useState(false)
+  // used to hold), re-openable any time from the header. Resuming a seeded draft
+  // drops straight into training, so the brief starts closed there.
+  const [briefOpen, setBriefOpen] = useState<boolean>(() => !seedDraft)
+  const [hasStarted, setHasStarted] = useState<boolean>(() => !!seedDraft)
 
   // Per-exercise felt signal (exIdx → feedback).
-  const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>({})
+  const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>(
+    () => (seedDraft?.feedback ?? {}) as Record<number, ExerciseFeedback>,
+  )
 
   // Rest timer (epoch ms when rest ends, or null).
   const [restEndsAt, setRestEndsAt] = useState<number | null>(null)
   const [, setNowTick] = useState(0)
 
   // insight_id → insight, for the per-exercise "why" surface
-  const [insightMap, setInsightMap] = useState<Record<string, InsightRow>>({})
+  const [insightMap, setInsightMap] = useState<Record<string, InsightRow>>(() => seedBoot?.insightMap ?? {})
   const [openInsight, setOpenInsight] = useState<InsightRow | null>(null)
   const [openReading, setOpenReading] = useState<{ name: string; why: string } | null>(null)
   // Coach's notes (how-to) sheet for one exercise.
   const [openCoachNotes, setOpenCoachNotes] = useState<{ name: string; note: CoachingNote | null; cue: string | null } | null>(null)
 
-  const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>({})
+  const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>(() => {
+    if (!seedBoot) return {}
+    const base = buildTemplate(seedBoot.routine)
+    return seedDraft ? overlayDraft(base, seedDraft.setLogs) : base
+  })
 
   // Per-exercise prescription — last week's top set + the week's directive (§4.4).
-  const [prescription, setPrescription] = useState<SessionPrescription | null>(null)
+  const [prescription, setPrescription] = useState<SessionPrescription | null>(() => seedBoot?.prescription ?? null)
 
   // Last session's results per exercise index, for the desktop Previous column.
-  const [prevByExercise, setPrevByExercise] = useState<Record<number, SetLog[]>>({})
+  const [prevByExercise, setPrevByExercise] = useState<Record<number, SetLog[]>>(() => seedBoot?.prevByExercise ?? {})
   // Which exercise is in focus — drives the "why" panel in the desktop rail.
   const [activeExIdx, setActiveExIdx] = useState(0)
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
-  const startRef = useRef<number>(Date.now())
+  // Seed the clock from the resumed draft so the timer continues where it left
+  // off (true stop/continue — time away isn't counted).
+  const startRef = useRef<number>(
+    seedDraft ? Date.now() - seedDraft.elapsedSeconds * 1000 : Date.now(),
+  )
 
-  // Draft persistence (§ start/stop/continue). draftReady gates autosave until a
-  // restore attempt has run, so we never clobber a saved session with empty state.
+  // Draft persistence (§ start/stop/continue). With an offline seed the draft is
+  // already restored before first paint, so autosave is safe to arm immediately
+  // on a warm open (the hasDraftSignal guard still prevents persisting an empty
+  // session). A cold open arms it once the network restore has run.
   // sessionStartRef is the real session start (the week-window anchor); payloadRef
   // always mirrors current state so the flush handlers can read it cheaply.
-  const [draftReady, setDraftReady] = useState(false)
-  const sessionStartRef = useRef<string>(new Date().toISOString())
+  const [draftReady, setDraftReady] = useState<boolean>(() => !!seedBoot)
+  const sessionStartRef = useRef<string>(seedDraft?.startedAt ?? new Date().toISOString())
   const payloadRef = useRef<DraftPayload | null>(null)
-  const completedRef = useRef(false)   // true once promoted to a workout → stop persisting
+  const completedRef = useRef(isEdit)   // true once promoted to a workout (or editing) → stop persisting
+  // Flips once the athlete edits anything this open, so a late network draft
+  // restore can't clobber numbers they've already entered.
+  const startedLoggingRef = useRef(false)
 
   useEffect(() => {
     if (!routineId) return
     loadRoutine()
-    startRef.current = Date.now()
+    // startRef is seeded above (fresh now, or now minus a resumed draft's
+    // elapsed) — don't reset it here or a resumed clock would jump back to 0.
     timerRef.current = setInterval(() => {
       setElapsed(Math.floor((Date.now() - startRef.current) / 1000))
     }, 1000)
@@ -765,120 +835,147 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     }
   }, [persistLocal, persistRemote])
 
+  // Background revalidation. On a warm (cached) open the screen is already
+  // painted and interactive from the seed — this just refreshes the routine,
+  // prescription, Previous column and insights, and re-caches them for next
+  // time. It never resets the athlete's in-progress numbers: the set grid is
+  // only (re)seeded on a cold open, or from a draft they haven't yet touched.
   async function loadRoutine() {
     if (!routineId) return
-    setLoading(true)
+    const cold = !seedRef.current!.boot
+
     const { data } = await supabase
       .from('routine')
       .select('*, program:program_id(athlete_id)')
       .eq('id', routineId)
       .single()
 
-    if (data) {
-      const r = data as RoutineRow
-      setRoutine(r)
-      const programData = (data as unknown as { program: { athlete_id: string } | null }).program
-      if (programData) {
-        setAthleteId(programData.athlete_id)
-        const { data: ath } = await supabase
-          .from('athlete')
-          .select('name, onboarding_step')
-          .eq('id', programData.athlete_id)
-          .maybeSingle()
-        if (ath) {
-          setAthleteName((ath as { name: string | null }).name ?? null)
-          setOnboardingStep((ath as { onboarding_step: OnboardingStep }).onboarding_step)
-        }
-      }
-      const exs = r.exercises as ExerciseTemplate[]
-      const initial: Record<number, SetLog[]> = {}
-      exs.forEach((ex, i) => {
-        initial[i] = Array.from({ length: ex.sets }, (_, j) => newSetLog(j + 1))
-      })
-      setSetLogs(initial)
-
-      // Most recent prior session of this same routine → the Previous column.
-      // Same routine_id means the exercise list (and ordering) matches, so the
-      // index keys line up with this session's exercises.
-      const { data: prevWorkout } = await supabase
-        .from('workout')
-        .select('actual_weights')
-        .eq('routine_id', routineId)
-        .order('performed_at', { ascending: false })
-        .limit(1)
-        .maybeSingle()
-      const prevWeights = (prevWorkout as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
-      if (prevWeights) {
-        const map: Record<number, SetLog[]> = {}
-        Object.entries(prevWeights).forEach(([k, v]) => { map[Number(k)] = v })
-        setPrevByExercise(map)
-      }
-
-      const insightIds = [...new Set(exs.map((ex) => ex.insight_id).filter(Boolean))] as string[]
-      if (insightIds.length > 0) {
-        const { data: insightRows } = await supabase
-          .from('insight')
-          .select('*')
-          .in('id', insightIds)
-        const map: Record<string, InsightRow> = {}
-        ;(insightRows ?? []).forEach((ins) => { map[(ins as InsightRow).id] = ins as InsightRow })
-        setInsightMap(map)
-      }
-
-      // Prescription hints — best-effort; the session loads regardless.
-      if (programData && routineId) {
-        try {
-          const presc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, unit)
-          setPrescription(presc)
-        } catch { /* non-fatal */ }
-      }
-
-      if (isEdit && editWorkoutId) {
-        // Editing a logged session: hydrate from the workout row, not a draft.
-        // No autosave (completedRef), no brief — straight into the numbers.
-        completedRef.current = true
-        const { data: w } = await supabase
-          .from('workout')
-          .select('actual_weights, duration_mins, performed_at')
-          .eq('id', editWorkoutId)
-          .maybeSingle()
-        const aw = (w as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
-        if (aw) {
-          const merged: Record<number, SetLog[]> = { ...initial }
-          Object.entries(aw).forEach(([k, v]) => { if (v && v.length) merged[Number(k)] = v })
-          setSetLogs(merged)
-        }
-        const dur = (w as { duration_mins: number | null } | null)?.duration_mins ?? 0
-        setElapsed(dur * 60)
-        startRef.current = Date.now() - dur * 60 * 1000
-        const performed = (w as { performed_at: string | null } | null)?.performed_at
-        if (performed) setPerformedAt(toDateInput(new Date(performed)))
-        setHasStarted(true)
-        setBriefOpen(false)
-      } else if (programData && routineId) {
-        // Resume an in-progress session if one was autosaved this week. We overlay
-        // the draft onto the fresh template by exercise index, so a routine that has
-        // since gained/lost an exercise still loads cleanly. The timer continues
-        // from the saved elapsed (true stop/continue — time away isn't counted).
-        const draft = await restoreDraft(programData.athlete_id, routineId)
-        if (draft) {
-          const merged: Record<number, SetLog[]> = { ...initial }
-          Object.entries(draft.setLogs).forEach(([k, v]) => { if (v && v.length) merged[Number(k)] = v })
-          setSetLogs(merged)
-          setFeedback((draft.feedback ?? {}) as Record<number, ExerciseFeedback>)
-          setElapsed(draft.elapsedSeconds)
-          startRef.current = Date.now() - draft.elapsedSeconds * 1000
-          sessionStartRef.current = draft.startedAt
-          setHasStarted(true)
-          setBriefOpen(false)   // resuming → drop straight back into training
-        }
-      }
-      setDraftReady(true)
+    if (!data) {
+      // Offline with nothing cached is the only way here — leave the seed (if
+      // any) on screen and stop the spinner.
+      setLoading(false)
+      return
     }
+
+    const r = data as RoutineRow
+    setRoutine(r)
+    const exs = r.exercises as ExerciseTemplate[]
+    const initial = buildTemplate(r)
+    // Cold open only: no cached template was seeded, so lay down the empty grid
+    // now. A warm open already painted it (plus any local draft) synchronously.
+    if (cold) setSetLogs(initial)
+
+    let nextAthleteId: string | null = null
+    let nextAthleteName: string | null = null
+    let nextOnboardingStep: OnboardingStep | null = null
+    const programData = (data as unknown as { program: { athlete_id: string } | null }).program
+    if (programData) {
+      nextAthleteId = programData.athlete_id
+      setAthleteId(programData.athlete_id)
+      const { data: ath } = await supabase
+        .from('athlete')
+        .select('name, onboarding_step')
+        .eq('id', programData.athlete_id)
+        .maybeSingle()
+      if (ath) {
+        nextAthleteName = (ath as { name: string | null }).name ?? null
+        nextOnboardingStep = (ath as { onboarding_step: OnboardingStep }).onboarding_step
+        setAthleteName(nextAthleteName)
+        setOnboardingStep(nextOnboardingStep)
+      }
+    }
+
+    // Most recent prior session of this same routine → the Previous column.
+    // Same routine_id means the exercise list (and ordering) matches, so the
+    // index keys line up with this session's exercises.
+    let nextPrev: Record<number, SetLog[]> = {}
+    const { data: prevWorkout } = await supabase
+      .from('workout')
+      .select('actual_weights')
+      .eq('routine_id', routineId)
+      .order('performed_at', { ascending: false })
+      .limit(1)
+      .maybeSingle()
+    const prevWeights = (prevWorkout as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
+    if (prevWeights) {
+      Object.entries(prevWeights).forEach(([k, v]) => { nextPrev[Number(k)] = v })
+      setPrevByExercise(nextPrev)
+    }
+
+    let nextInsightMap: Record<string, InsightRow> = {}
+    const insightIds = [...new Set(exs.map((ex) => ex.insight_id).filter(Boolean))] as string[]
+    if (insightIds.length > 0) {
+      const { data: insightRows } = await supabase
+        .from('insight')
+        .select('*')
+        .in('id', insightIds)
+      ;(insightRows ?? []).forEach((ins) => { nextInsightMap[(ins as InsightRow).id] = ins as InsightRow })
+      setInsightMap(nextInsightMap)
+    }
+
+    // Prescription hints — best-effort; the session loads regardless. Keep the
+    // seeded value if the recompute fails (offline mid-revalidation).
+    let nextPresc: SessionPrescription | null = seedRef.current!.boot?.prescription ?? null
+    if (programData && routineId) {
+      try {
+        nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, unit)
+        setPrescription(nextPresc)
+      } catch { /* non-fatal */ }
+    }
+
+    // Re-cache the whole bootstrap so the next open is instant and offline-ready.
+    saveCache<WorkoutBootstrap>(bootKey(routineId), {
+      routine: r,
+      athleteId: nextAthleteId,
+      athleteName: nextAthleteName,
+      onboardingStep: nextOnboardingStep,
+      prevByExercise: nextPrev,
+      insightMap: nextInsightMap,
+      prescription: nextPresc,
+    })
+
+    if (isEdit && editWorkoutId) {
+      // Editing a logged session: hydrate from the workout row, not a draft.
+      // No autosave (completedRef), no brief — straight into the numbers.
+      completedRef.current = true
+      const { data: w } = await supabase
+        .from('workout')
+        .select('actual_weights, duration_mins, performed_at')
+        .eq('id', editWorkoutId)
+        .maybeSingle()
+      const aw = (w as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
+      if (aw && !startedLoggingRef.current) {
+        setSetLogs(overlayDraft(initial, aw as Record<number, SetLog[]>))
+      }
+      const dur = (w as { duration_mins: number | null } | null)?.duration_mins ?? 0
+      setElapsed(dur * 60)
+      startRef.current = Date.now() - dur * 60 * 1000
+      const performed = (w as { performed_at: string | null } | null)?.performed_at
+      if (performed) setPerformedAt(toDateInput(new Date(performed)))
+      setHasStarted(true)
+      setBriefOpen(false)
+    } else if (programData && routineId && !startedLoggingRef.current) {
+      // Resume an in-progress session if one was autosaved this week. restoreDraft
+      // merges the local (already seeded) and remote tiers by recency, so this
+      // also picks up a session continued on another device. Skipped once the
+      // athlete has started logging here, so it can't overwrite live input.
+      const draft = await restoreDraft(programData.athlete_id, routineId)
+      if (draft && !startedLoggingRef.current) {
+        setSetLogs(overlayDraft(initial, draft.setLogs))
+        setFeedback((draft.feedback ?? {}) as Record<number, ExerciseFeedback>)
+        setElapsed(draft.elapsedSeconds)
+        startRef.current = Date.now() - draft.elapsedSeconds * 1000
+        sessionStartRef.current = draft.startedAt
+        setHasStarted(true)
+        setBriefOpen(false)   // resuming → drop straight back into training
+      }
+    }
+    setDraftReady(true)
     setLoading(false)
   }
 
   function handleSetChange(exIdx: number, setIdx: number, updated: SetLog) {
+    startedLoggingRef.current = true
     setSetLogs((prev) => {
       const sets = [...(prev[exIdx] ?? [])]
       sets[setIdx] = updated
@@ -887,6 +984,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   }
 
   function addSet(exIdx: number) {
+    startedLoggingRef.current = true
     setSetLogs((prev) => {
       const sets = prev[exIdx] ?? []
       return { ...prev, [exIdx]: [...sets, newSetLog(sets.length + 1)] }
@@ -894,9 +992,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   }
 
   function setFelt(exIdx: number, name: string, felt: FeltLabel | null) {
+    startedLoggingRef.current = true
     setFeedback((prev) => ({ ...prev, [exIdx]: { name, felt, note: prev[exIdx]?.note ?? '' } }))
   }
   function setFeltNote(exIdx: number, name: string, note: string) {
+    startedLoggingRef.current = true
     setFeedback((prev) => ({ ...prev, [exIdx]: { name, felt: prev[exIdx]?.felt ?? null, note } }))
   }
 
