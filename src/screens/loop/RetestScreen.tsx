@@ -72,7 +72,12 @@ export function RetestScreen({ athleteId, onDone }: { athleteId: string; onDone:
               ? `Cleared ${summary.resolvedCount} weak link${summary.resolvedCount === 1 ? '' : 's'}.`
               : 'Re-scoped.'}
           </h2>
-          <p className="text-sm text-dim" style={{ lineHeight: 1.6, marginBottom: 28 }}>{improvedStr}</p>
+          <p className="text-sm text-dim" style={{ lineHeight: 1.6, marginBottom: summary.deferred ? 16 : 28 }}>{improvedStr}</p>
+          {summary.deferred && (
+            <p className="text-xs text-dim" style={{ lineHeight: 1.6, marginBottom: 28, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
+              Your new block starts Monday — this week's sessions stay exactly as you left them.
+            </p>
+          )}
           <Button variant="primary" full onClick={() => navigate('/app/today', { replace: true })}>
             Back to Today →
           </Button>
