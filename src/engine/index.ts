@@ -17,6 +17,7 @@ import type {
   InsightStatus,
   Priority,
   PhaseName,
+  PhaseStatus,
   ExerciseTemplate,
   SetLog,
   RoutineRow,
@@ -2652,7 +2653,9 @@ async function insertCoachMessage(
   })
 }
 
-async function insertPhaseAndRoutines(programId: string, plan: GeneratedProgram): Promise<string | null> {
+async function insertPhaseAndRoutines(
+  programId: string, plan: GeneratedProgram, status: PhaseStatus = 'active',
+): Promise<string | null> {
   const { data: newPhase } = await supabase.from('phase').insert({
     program_id: programId,
     name: plan.phase.name,
@@ -2660,7 +2663,7 @@ async function insertPhaseAndRoutines(programId: string, plan: GeneratedProgram)
     week_end: plan.phase.week_end,
     non_negotiables: plan.phase.non_negotiables,
     advancement_criteria: plan.phase.advancement_criteria,
-    status: 'active',
+    status,
   }).select().single()
   if (!newPhase) return null
   const phaseId = (newPhase as PhaseRow).id
@@ -2865,6 +2868,41 @@ export async function redesignActivePhase(athleteId: string, unit: string): Prom
   return true
 }
 
+/**
+ * Activate a phase that was scheduled to begin later (a retest re-scope deferred
+ * to the start of next week, so a mid-week retest never wipes the sessions
+ * already logged this week). Fires once its `week_start` has landed: retires
+ * whatever's active and promotes the queued block. Unconditional — a scheduled
+ * block is a decision already made, so no advancement gate applies. Idempotent:
+ * a no-op once no due pending phase remains.
+ */
+async function activateDueScheduledPhase(athleteId: string): Promise<boolean> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return false
+
+  const today = isoDate(new Date())
+  const { data: due } = await supabase
+    .from('phase').select('id, name')
+    .eq('program_id', prog.id).eq('status', 'pending').lte('week_start', today)
+    .order('week_start').limit(1).maybeSingle()
+  if (!due) return false
+  const { id: dueId, name: dueName } = due as { id: string; name: PhaseName }
+
+  await supabase.from('phase').update({ status: 'completed' })
+    .eq('program_id', prog.id).eq('status', 'active')
+  await supabase.from('phase').update({ status: 'active' }).eq('id', dueId)
+  await supabase.from('athlete_profile')
+    .update({ current_phase: dueName, last_updated: new Date().toISOString() })
+    .eq('athlete_id', athleteId)
+  await insertCoachMessage(athleteId, {
+    kind: 'phase_change',
+    body: `New block is live — your re-scoped ${dueName} phase starts this week.`,
+    ref_id: dueId,
+  })
+  return true
+}
+
 export async function runPhaseAdvancement(athleteId: string): Promise<boolean> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
@@ -2874,6 +2912,14 @@ export async function runPhaseAdvancement(athleteId: string): Promise<boolean> {
     .from('phase').select('*').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
   if (!phaseRow) return false
   const phase = phaseRow as PhaseRow
+
+  // A scheduled block is queued (e.g. a mid-week retest deferred its new phase to
+  // the week boundary). Let activateDueScheduledPhase own that transition — the
+  // normal advancement gate must not fire a competing swap.
+  const { count: pendingCount } = await supabase
+    .from('phase').select('id', { count: 'exact', head: true })
+    .eq('program_id', prog.id).eq('status', 'pending')
+  if ((pendingCount ?? 0) > 0) return false
 
   // Only act once the scheduled phase end has passed.
   if (isoDate(new Date()) < phase.week_end) return false
@@ -2985,14 +3031,28 @@ export interface RetestSummary {
   version: number
   resolvedCount: number
   improved: Array<{ pattern: string; from: number; to: number }>
+  // The re-scoped block was queued for next Monday (the current week already had
+  // logged sessions) rather than swapped in immediately. Lets the summary explain
+  // why this week is unchanged.
+  deferred: boolean
 }
 
 // Re-scope the program after a retest: clean → advance the phase; otherwise a
 // fresh Stability block on the new P1 weakness. New retest_date either way.
-async function rescopeAfterRetest(athleteId: string): Promise<void> {
+//
+// Timing matters. A retest is due on a fixed 28-day cadence, so it usually lands
+// MID-WEEK — and the athlete has often already logged sessions this week. Swapping
+// the phase (and its routines) in immediately orphaned those sessions from the new
+// routine rows, so Today reset to 0/N done and the week read as wiped. So: when
+// the current week already holds logged sessions, the new block is QUEUED as a
+// pending phase starting next Monday and the current phase runs out the week
+// (activateDueScheduledPhase promotes it at the boundary). A clean week has
+// nothing to preserve, so the new block takes over immediately as before.
+async function rescopeAfterRetest(athleteId: string): Promise<{ deferred: boolean; startsOn: string }> {
+  const today = isoDate(new Date())
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
-  if (!prog?.id) return
+  if (!prog?.id) return { deferred: false, startsOn: today }
 
   const { data: phaseRow } = await supabase
     .from('phase').select('*').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
@@ -3003,7 +3063,6 @@ async function rescopeAfterRetest(athleteId: string): Promise<void> {
   const active = ((insightRows ?? []) as InsightRow[]).filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
   const p1 = active[0] ?? null
 
-  const today = isoDate(new Date())
   let nextName: PhaseName = 'Stability'
   const category = p1?.category ?? 'Lower Chain'
   if (!p1) {
@@ -3011,16 +3070,44 @@ async function rescopeAfterRetest(athleteId: string): Promise<void> {
     nextName = PHASE_SEQUENCE[PHASE_SEQUENCE.indexOf(currentName) + 1] ?? 'Sport'
   }
 
-  if (phaseRow) await supabase.from('phase').update({ status: 'completed' }).eq('id', (phaseRow as PhaseRow).id)
+  // Preserve the in-progress week: defer the swap to next Monday iff a session was
+  // already logged this week (the exact condition that would make the retest look
+  // like it wiped the week).
+  const weekMonday = startOfWeekMonday(new Date())
+  const { count: loggedThisWeek } = await supabase
+    .from('workout').select('id, routine!inner(program_id)', { count: 'exact', head: true })
+    .eq('routine.program_id', prog.id)
+    .gte('performed_at', weekMonday.toISOString())
+  const deferred = (loggedThisWeek ?? 0) > 0
+  const startsOn = deferred ? addDays(isoDate(weekMonday), 7) : today
 
-  const plan = await designPhasePlan(athleteId, prog.id, nextName, today, category, p1?.id ?? null, getWeightUnit())
-  await insertPhaseAndRoutines(prog.id, plan)
+  const plan = await designPhasePlan(athleteId, prog.id, nextName, startsOn, category, p1?.id ?? null, getWeightUnit())
+
+  if (deferred) {
+    // Keep the current phase active through the end of this week; queue the new
+    // block as pending. It activates at the boundary, so nothing logged this week
+    // is orphaned.
+    if (phaseRow) {
+      await supabase.from('phase')
+        .update({ week_end: weekEndingISO(weekMonday) })
+        .eq('id', (phaseRow as PhaseRow).id)
+    }
+    await insertPhaseAndRoutines(prog.id, plan, 'pending')
+  } else {
+    if (phaseRow) await supabase.from('phase').update({ status: 'completed' }).eq('id', (phaseRow as PhaseRow).id)
+    await insertPhaseAndRoutines(prog.id, plan, 'active')
+    await supabase.from('athlete_profile')
+      .update({ current_phase: nextName, last_updated: new Date().toISOString() })
+      .eq('athlete_id', athleteId)
+  }
 
   const newRetest = addDays(today, 28)
   await supabase.from('program').update({ retest_date: newRetest }).eq('id', prog.id)
   await supabase.from('athlete_profile')
-    .update({ current_phase: nextName, retest_date: newRetest, last_updated: new Date().toISOString() })
+    .update({ retest_date: newRetest, last_updated: new Date().toISOString() })
     .eq('athlete_id', athleteId)
+
+  return { deferred, startsOn }
 }
 
 /**
@@ -3081,18 +3168,24 @@ export async function runRetest(athleteId: string, newResults: DiagnosticResults
     if (toInsert.length) await supabase.from('insight').insert(toInsert)
   }
 
-  await rescopeAfterRetest(athleteId)
+  const rescope = await rescopeAfterRetest(athleteId)
 
   const deltaSummary = improved.length
     ? improved.map((i) => `${labelOfPattern(i.pattern)} ${i.from}→${i.to}`).join(', ')
     : 'no pattern gains yet'
+  const clearedNote = resolvedCount > 0
+    ? `Cleared ${resolvedCount} weak link${resolvedCount === 1 ? '' : 's'}.`
+    : 'Holding the line.'
+  const scopeNote = rescope.deferred
+    ? ' Re-scoped — new block starts Monday, this week stays as-is.'
+    : ' Block re-scoped.'
   await insertCoachMessage(athleteId, {
     kind: 'retest',
-    body: `Retest v${newVersion}: ${deltaSummary}. ${resolvedCount > 0 ? `Cleared ${resolvedCount} weak link${resolvedCount === 1 ? '' : 's'}.` : 'Holding the line — block re-scoped.'}`,
+    body: `Retest v${newVersion}: ${deltaSummary}. ${clearedNote}${scopeNote}`,
     ref_id: newDiagId,
   })
 
-  return { version: newVersion, resolvedCount, improved }
+  return { version: newVersion, resolvedCount, improved, deferred: rescope.deferred }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -3112,6 +3205,9 @@ export async function runLoopTriggers(athleteId: string): Promise<boolean> {
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
   if (!prog?.id) return false
   let changed = false
+  // Promote a scheduled block (deferred retest re-scope) first, so downstream
+  // triggers see the phase that's actually current this week.
+  try { changed = (await activateDueScheduledPhase(athleteId)) || changed } catch (e) { console.error('[loop] scheduled phase activation failed', e) }
   try { changed = (await runWeeklyReviewAgent(athleteId, prog.id)) > 0 || changed } catch (e) { console.error('[loop] weekly review failed', e) }
   try { changed = (await runPhaseAdvancement(athleteId)) || changed } catch (e) { console.error('[loop] phase advancement failed', e) }
   return changed
