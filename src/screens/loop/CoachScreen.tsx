@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
+import { useCachedLoader } from '../../lib/cache'
 import {
   InsightCard, Markdown, SectionHeader, Skeleton, StatusCounts, TelemetryStrip,
 } from '../../components/ui'
@@ -10,6 +11,54 @@ import {
 } from '../../engine'
 import type { CoachContext, CoachChatTurn, CoachAction } from '../../engine/agentClient'
 import type { InsightRow, CoachMessageRow, WeeklyPrescription } from '../../types/database'
+
+// The read instrument + coach log + scoped conversation context, composed into
+// one serializable view so the screen paints instantly from cache (offline-first)
+// and revalidates in the background. The live chat (runCoachChat) stays online —
+// only the read it's grounded in is cached.
+interface CoachView {
+  insights: InsightRow[]
+  messages: CoachMessageRow[]
+  directiveByRef: Record<string, string>
+  context: CoachContext | null
+  suggestions: string[]
+}
+
+async function fetchCoachView(athleteId: string): Promise<CoachView> {
+  const { data: insightData } = await supabase
+    .from('insight')
+    .select('*')
+    .eq('athlete_id', athleteId)
+    .order('priority')
+  const insights = (insightData ?? []) as InsightRow[]
+
+  // The coach log — event memory, newest-first.
+  const { data: msgs } = await supabase
+    .from('coach_message')
+    .select('*')
+    .eq('athlete_id', athleteId)
+    .order('created_at', { ascending: false })
+    .limit(30)
+  const messages = (msgs ?? []) as CoachMessageRow[]
+
+  // Pull the directive for any weekly-review messages so the card can chip it.
+  const directiveByRef: Record<string, string> = {}
+  const reviewRefs = messages.filter((m) => m.kind === 'weekly_review' && m.ref_id).map((m) => m.ref_id as string)
+  if (reviewRefs.length) {
+    const { data: reviews } = await supabase
+      .from('weekly_review')
+      .select('id, next_week_prescription')
+      .in('id', reviewRefs)
+    ;(reviews ?? []).forEach((r) => {
+      const presc = (r as { next_week_prescription: WeeklyPrescription | null }).next_week_prescription
+      if (presc?.directive) directiveByRef[(r as { id: string }).id] = presc.directive
+    })
+  }
+
+  // The scoped read for the conversation (the trimmed slice the coach may see).
+  const context = await gatherCoachContext(athleteId)
+  return { insights, messages, directiveByRef, context, suggestions: coachStarterPrompts(context) }
+}
 
 /**
  * COACH — the intelligence, and now the conversation. The top half is the cold
@@ -44,17 +93,24 @@ function relativeTime(iso: string): string {
 
 export function CoachScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
-  const [insights, setInsights] = useState<InsightRow[]>([])
-  const [loading, setLoading]   = useState(true)
 
-  // Coach log — the event feed (weekly reviews etc.), newest-first.
-  const [messages, setMessages] = useState<CoachMessageRow[]>([])
-  const [directiveByRef, setDirectiveByRef] = useState<Record<string, string>>({})
+  // Offline-first read: insights, coach log and the scoped context paint instantly
+  // from the last sync, then revalidate. refetch() re-pulls after a coach write.
+  const { data: view, loading, refetch } = useCachedLoader(
+    `coach:${athleteId}`,
+    () => fetchCoachView(athleteId),
+  )
+  const insights = view?.insights ?? []
+  const messages = view?.messages ?? []
+  const directiveByRef = view?.directiveByRef ?? {}
+  const context = view?.context ?? null
 
   // ---- conversation state ----
-  const [context, setContext]       = useState<CoachContext | null>(null)
   const [turns, setTurns]           = useState<ChatTurn[]>([])
-  const [suggestions, setSuggestions] = useState<string[]>([])
+  // The chat can supersede the read-derived starter prompts with its own
+  // follow-ups; null means "still showing the cached starters".
+  const [chatSuggestions, setChatSuggestions] = useState<string[] | null>(null)
+  const suggestions = chatSuggestions ?? view?.suggestions ?? []
   const [pending, setPending]       = useState(false)
   const [draft, setDraft]           = useState('')
   const [stackOpen, setStackOpen]   = useState(false)   // full read collapsed by default
@@ -65,55 +121,9 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     typeof window !== 'undefined' && window.innerWidth >= 1000)
   const threadEndRef = useRef<HTMLDivElement | null>(null)
 
-  // Coach-proposed changes awaiting the athlete's confirmation, plus a key that
-  // forces a re-pull of the read after an apply so the screen reflects the write.
+  // Coach-proposed changes awaiting the athlete's confirmation.
   const [proposed, setProposed]   = useState<CoachAction[]>([])
   const [applying, setApplying]   = useState(false)
-  const [refreshKey, setRefreshKey] = useState(0)
-
-  useEffect(() => {
-    void (async () => {
-      setLoading(true)
-      const { data } = await supabase
-        .from('insight')
-        .select('*')
-        .eq('athlete_id', athleteId)
-        .order('priority')
-      setInsights((data ?? []) as InsightRow[])
-      setLoading(false)
-
-      // The coach log — event memory, newest-first.
-      const { data: msgs } = await supabase
-        .from('coach_message')
-        .select('*')
-        .eq('athlete_id', athleteId)
-        .order('created_at', { ascending: false })
-        .limit(30)
-      const msgRows = (msgs ?? []) as CoachMessageRow[]
-      setMessages(msgRows)
-
-      // Pull the directive for any weekly-review messages so the card can chip it.
-      const reviewRefs = msgRows.filter((m) => m.kind === 'weekly_review' && m.ref_id).map((m) => m.ref_id as string)
-      if (reviewRefs.length) {
-        const { data: reviews } = await supabase
-          .from('weekly_review')
-          .select('id, next_week_prescription')
-          .in('id', reviewRefs)
-        const map: Record<string, string> = {}
-        ;(reviews ?? []).forEach((r) => {
-          const presc = (r as { next_week_prescription: WeeklyPrescription | null }).next_week_prescription
-          if (presc?.directive) map[(r as { id: string }).id] = presc.directive
-        })
-        setDirectiveByRef(map)
-      }
-
-      // Gather the scoped read for the conversation (separate from the display
-      // stack above — this is the trimmed slice the coach is allowed to see).
-      const ctx = await gatherCoachContext(athleteId)
-      setContext(ctx)
-      setSuggestions(coachStarterPrompts(ctx))
-    })()
-  }, [athleteId, refreshKey])
 
   // Keep the latest turn in view as the thread grows.
   useEffect(() => {
@@ -145,7 +155,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     const q = question.trim()
     if (!q || pending || !context) return
     setDraft('')
-    setSuggestions([])
+    setChatSuggestions([])
     setProposed([])   // a new question supersedes any un-applied proposal
     // Mark prior coach turns stale so only the new reply types on.
     const history: CoachChatTurn[] = turns.map((t) => ({ role: t.role, content: t.content }))
@@ -155,7 +165,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     const res = await runCoachChat(context, history, q)
 
     setTurns((prev) => [...prev, { role: 'coach', content: res.reply, fresh: true }])
-    setSuggestions(res.followups.length ? res.followups : [])
+    setChatSuggestions(res.followups.length ? res.followups : [])
     setProposed(res.actions ?? [])
     setPending(false)
   }
@@ -174,7 +184,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     setTurns((prev) => [...prev.map((t) => ({ ...t, fresh: false })), { role: 'coach', content: summary, fresh: true }])
     setProposed([])
     setApplying(false)
-    setRefreshKey((k) => k + 1)   // re-pull insights + log so the read reflects the write
+    refetch()   // re-pull insights + log so the read reflects the write
   }
 
   return (

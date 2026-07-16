@@ -1,5 +1,5 @@
 import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
-import { useAuth } from './hooks/useAuth'
+import { useAuth, getCachedUserId } from './hooks/useAuth'
 import { useAppState } from './hooks/useAppState'
 import { useDisableShakeToUndo } from './hooks/useDisableShakeToUndo'
 import { useOutboxSync } from './lib/workoutOutbox'
@@ -61,18 +61,33 @@ function LoopLayout({
 
 function AppRoutes() {
   const { user, loading: authLoading } = useAuth()
-  const { athlete, todayRoutine, routines, loading: stateLoading, refresh } = useAppState(user?.id)
+  // Seed the per-user cache key from the last known uid while auth is still
+  // resolving, so a returning athlete hydrates the whole app from localStorage
+  // on the first paint — no network, no Splash. Once auth resolves we defer to
+  // the real session (undefined signs the app out cleanly).
+  const effectiveUid = user?.id ?? (authLoading ? getCachedUserId() ?? undefined : undefined)
+  const { athlete, todayRoutine, routines, loading: stateLoading, refresh } = useAppState(effectiveUid)
 
   // Flush any sessions completed offline once we're back (and on every launch).
   useOutboxSync()
 
-  if (authLoading || stateLoading) return <Splash />
+  // A returning, past-onboarding athlete we already have cached → paint the loop
+  // immediately and revalidate auth + data in the background. This is the whole
+  // "instant, offline-first" open. Only a true cold start (nothing cached, or
+  // still mid-onboarding) waits on the Splash.
+  const cachedLoopReady =
+    !!athlete &&
+    !ONBOARDING_FUNNEL_STEPS.has(athlete.onboarding_step) &&
+    (authLoading || !!user)
+
+  if ((authLoading || stateLoading) && !cachedLoopReady) return <Splash />
 
   // Onboarding owns the athlete until they finish the first session. That's
   // every state before auth, the brief no-athlete beat after sign-in, and every
   // funnel step (hook → zeroed_in). Everything else is the daily loop.
   const inOnboarding =
-    !user || !athlete || ONBOARDING_FUNNEL_STEPS.has(athlete.onboarding_step)
+    !cachedLoopReady &&
+    (!user || !athlete || ONBOARDING_FUNNEL_STEPS.has(athlete.onboarding_step))
 
   if (inOnboarding) {
     return <OnboardingRouter user={user} athlete={athlete} refresh={refresh} />
