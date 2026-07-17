@@ -80,23 +80,33 @@ async function fetchSnapshot(userId: string): Promise<AppStateSnapshot> {
       .maybeSingle()
 
     if (prog) {
-      const { data: activePhase } = await supabase
+      // Resolve THE current phase. A program should have exactly one active
+      // phase, but a retest re-scope (which queues a new block and swaps it in at
+      // the week boundary) can briefly leave zero or several rows flagged active.
+      // Reading with .maybeSingle() returned null in that case, which dropped the
+      // phase_id filter below and surfaced EVERY routine in the program — two or
+      // three phases' worth — so the week read as 8-10 sessions assigned. Instead
+      // pick a single phase deterministically: the newest active one, or (if none
+      // is active mid-swap) the newest phase of any status.
+      const { data: phaseRows } = await supabase
         .from('phase')
-        .select('id')
+        .select('id, status, week_start')
         .eq('program_id', prog.id)
-        .eq('status', 'active')
-        .maybeSingle()
+        .order('week_start', { ascending: false })
+      const phases = (phaseRows ?? []) as Array<{ id: string; status: string; week_start: string }>
+      const currentPhase = phases.find((p) => p.status === 'active') ?? phases[0] ?? null
 
       let routineQuery = supabase
         .from('routine')
         .select('*')
         .eq('program_id', prog.id)
         .order('name')
-      if (activePhase) routineQuery = routineQuery.eq('phase_id', activePhase.id)
+      if (currentPhase) routineQuery = routineQuery.eq('phase_id', currentPhase.id)
 
       let { data: routineRows } = await routineQuery
-      // Fallback: a program whose routines predate phase wiring.
-      if (activePhase && (!routineRows || routineRows.length === 0)) {
+      // Legacy fallback: a program whose routines predate phase wiring (null
+      // phase_id, no phase rows at all) — only then widen to every program routine.
+      if (currentPhase && (!routineRows || routineRows.length === 0)) {
         const all = await supabase.from('routine').select('*').eq('program_id', prog.id).order('name')
         routineRows = all.data
       }

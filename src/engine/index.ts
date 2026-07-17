@@ -2869,6 +2869,33 @@ export async function redesignActivePhase(athleteId: string, unit: string): Prom
 }
 
 /**
+ * Guard the "exactly one active phase" invariant the rest of the loop assumes.
+ * The retest re-scope and phase advancement each read the current phase with
+ * .maybeSingle(); if churn ever leaves two rows flagged active (e.g. an
+ * interrupted boundary swap, or a retest submitted twice), those reads return
+ * null and silently stop completing the old phase — and Today, which loads
+ * routines per active phase, starts surfacing multiple phases' sessions at once
+ * (the "8-10 sessions this week" bug). Collapse any extras here: the newest
+ * block (latest week_start) stays active, the rest are marked completed.
+ * Idempotent — a no-op whenever zero or one phase is active.
+ */
+async function reconcileActivePhases(athleteId: string): Promise<boolean> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return false
+  const { data: activeRows } = await supabase
+    .from('phase').select('id, week_start')
+    .eq('program_id', prog.id).eq('status', 'active')
+    .order('week_start', { ascending: false })
+  const actives = (activeRows ?? []) as Array<{ id: string; week_start: string }>
+  if (actives.length <= 1) return false
+  // Keep the newest block, retire the stragglers.
+  const stale = actives.slice(1).map((p) => p.id)
+  await supabase.from('phase').update({ status: 'completed' }).in('id', stale)
+  return true
+}
+
+/**
  * Activate a phase that was scheduled to begin later (a retest re-scope deferred
  * to the start of next week, so a mid-week retest never wipes the sessions
  * already logged this week). Fires once its `week_start` has landed: retires
@@ -3205,7 +3232,11 @@ export async function runLoopTriggers(athleteId: string): Promise<boolean> {
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
   if (!prog?.id) return false
   let changed = false
-  // Promote a scheduled block (deferred retest re-scope) first, so downstream
+  // Enforce the "exactly one active phase" invariant first, so every downstream
+  // trigger's .maybeSingle() read resolves the real current phase (and Today
+  // scopes the week to a single block, not several phases' routines at once).
+  try { changed = (await reconcileActivePhases(athleteId)) || changed } catch (e) { console.error('[loop] active-phase reconcile failed', e) }
+  // Promote a scheduled block (deferred retest re-scope) next, so downstream
   // triggers see the phase that's actually current this week.
   try { changed = (await activateDueScheduledPhase(athleteId)) || changed } catch (e) { console.error('[loop] scheduled phase activation failed', e) }
   try { changed = (await runWeeklyReviewAgent(athleteId, prog.id)) > 0 || changed } catch (e) { console.error('[loop] weekly review failed', e) }
