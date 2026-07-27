@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
+import { useCachedLoader } from '../../lib/cache'
+import { invalidateLoopViews } from '../../lib/loopCache'
 import {
   InsightCard, Markdown, SectionHeader, Skeleton, StatusCounts, Button,
 } from '../../components/ui'
@@ -42,19 +44,69 @@ function relativeTime(iso: string): string {
   return `${Math.floor(secs / 86400)}d ago`
 }
 
+// The whole Coach surface as one cached view: the read (insights), the event
+// feed, the directives those events carry, and the scoped slice the chat is
+// allowed to see. One key, one composed object — so re-entering Coach paints
+// from memory with no skeleton and no round-trip.
+interface CoachView {
+  insights: InsightRow[]
+  messages: CoachMessageRow[]
+  directiveByRef: Record<string, string>
+  context: CoachContext | null
+}
+
+export async function fetchCoachView(athleteId: string): Promise<CoachView> {
+  // The read and the event feed are independent — issue them together.
+  const [insightRes, msgRes] = await Promise.all([
+    supabase.from('insight').select('*').eq('athlete_id', athleteId).order('priority'),
+    supabase
+      .from('coach_message')
+      .select('*')
+      .eq('athlete_id', athleteId)
+      .order('created_at', { ascending: false })
+      .limit(30),
+  ])
+  const insights = (insightRes.data ?? []) as InsightRow[]
+  const messages = (msgRes.data ?? []) as CoachMessageRow[]
+
+  // The directive for any weekly-review message, so the card can chip it.
+  const directiveByRef: Record<string, string> = {}
+  const reviewRefs = messages.filter((m) => m.kind === 'weekly_review' && m.ref_id).map((m) => m.ref_id as string)
+  const [reviewRes, context] = await Promise.all([
+    reviewRefs.length
+      ? supabase.from('weekly_review').select('id, next_week_prescription').in('id', reviewRefs)
+      : Promise.resolve({ data: [] as unknown[] }),
+    // The trimmed slice the conversation is allowed to see (separate from the
+    // display stack above).
+    gatherCoachContext(athleteId),
+  ])
+  ;(reviewRes.data ?? []).forEach((r) => {
+    const presc = (r as { next_week_prescription: WeeklyPrescription | null }).next_week_prescription
+    if (presc?.directive) directiveByRef[(r as { id: string }).id] = presc.directive
+  })
+
+  return { insights, messages, directiveByRef, context }
+}
+
 export function CoachScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
-  const [insights, setInsights] = useState<InsightRow[]>([])
-  const [loading, setLoading]   = useState(true)
 
-  // Coach log — the event feed (weekly reviews etc.), newest-first.
-  const [messages, setMessages] = useState<CoachMessageRow[]>([])
-  const [directiveByRef, setDirectiveByRef] = useState<Record<string, string>>({})
+  // Offline-first: paints from the held view on the first frame, revalidates
+  // behind it. `loading` is true only on the very first visit ever.
+  const { data: view, loading, refetch } = useCachedLoader(
+    `coach:${athleteId}`,
+    () => fetchCoachView(athleteId),
+  )
+  const insights = view?.insights ?? []
+  const messages = view?.messages ?? []
+  const directiveByRef = view?.directiveByRef ?? {}
+  const context = view?.context ?? null
 
   // ---- conversation state ----
-  const [context, setContext]       = useState<CoachContext | null>(null)
   const [turns, setTurns]           = useState<ChatTurn[]>([])
-  const [suggestions, setSuggestions] = useState<string[]>([])
+  // Starter prompts are derived from the read; a sent question clears them.
+  const [suggestionsOverride, setSuggestionsOverride] = useState<string[] | null>(null)
+  const suggestions = suggestionsOverride ?? (context ? coachStarterPrompts(context) : [])
   const [pending, setPending]       = useState(false)
   const [draft, setDraft]           = useState('')
   const [stackOpen, setStackOpen]   = useState(false)   // full read collapsed by default
@@ -69,51 +121,6 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   // forces a re-pull of the read after an apply so the screen reflects the write.
   const [proposed, setProposed]   = useState<CoachAction[]>([])
   const [applying, setApplying]   = useState(false)
-  const [refreshKey, setRefreshKey] = useState(0)
-
-  useEffect(() => {
-    void (async () => {
-      setLoading(true)
-      const { data } = await supabase
-        .from('insight')
-        .select('*')
-        .eq('athlete_id', athleteId)
-        .order('priority')
-      setInsights((data ?? []) as InsightRow[])
-      setLoading(false)
-
-      // The coach log — event memory, newest-first.
-      const { data: msgs } = await supabase
-        .from('coach_message')
-        .select('*')
-        .eq('athlete_id', athleteId)
-        .order('created_at', { ascending: false })
-        .limit(30)
-      const msgRows = (msgs ?? []) as CoachMessageRow[]
-      setMessages(msgRows)
-
-      // Pull the directive for any weekly-review messages so the card can chip it.
-      const reviewRefs = msgRows.filter((m) => m.kind === 'weekly_review' && m.ref_id).map((m) => m.ref_id as string)
-      if (reviewRefs.length) {
-        const { data: reviews } = await supabase
-          .from('weekly_review')
-          .select('id, next_week_prescription')
-          .in('id', reviewRefs)
-        const map: Record<string, string> = {}
-        ;(reviews ?? []).forEach((r) => {
-          const presc = (r as { next_week_prescription: WeeklyPrescription | null }).next_week_prescription
-          if (presc?.directive) map[(r as { id: string }).id] = presc.directive
-        })
-        setDirectiveByRef(map)
-      }
-
-      // Gather the scoped read for the conversation (separate from the display
-      // stack above — this is the trimmed slice the coach is allowed to see).
-      const ctx = await gatherCoachContext(athleteId)
-      setContext(ctx)
-      setSuggestions(coachStarterPrompts(ctx))
-    })()
-  }, [athleteId, refreshKey])
 
   // Keep the latest turn in view as the thread grows.
   useEffect(() => {
@@ -136,7 +143,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     const q = question.trim()
     if (!q || pending || !context) return
     setDraft('')
-    setSuggestions([])
+    setSuggestionsOverride([])
     setProposed([])   // a new question supersedes any un-applied proposal
     // Mark prior coach turns stale so only the new reply types on.
     const history: CoachChatTurn[] = turns.map((t) => ({ role: t.role, content: t.content }))
@@ -146,7 +153,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     const res = await runCoachChat(context, history, q)
 
     setTurns((prev) => [...prev, { role: 'coach', content: res.reply, fresh: true }])
-    setSuggestions(res.followups.length ? res.followups : [])
+    setSuggestionsOverride(res.followups.length ? res.followups : [])
     setProposed(res.actions ?? [])
     setPending(false)
   }
@@ -165,7 +172,10 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     setTurns((prev) => [...prev.map((t) => ({ ...t, fresh: false })), { role: 'coach', content: summary, fresh: true }])
     setProposed([])
     setApplying(false)
-    setRefreshKey((k) => k + 1)   // re-pull insights + log so the read reflects the write
+    // Applied actions rewrite insights and exercises — the read here and the
+    // reticle, Today and Program around it.
+    invalidateLoopViews()
+    refetch()
   }
 
   return (
@@ -290,9 +300,9 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
 
         {/* Conversation — the warm layer. Right pane on desktop, stacked below
             the read on mobile (with a separator). Read-only: narrate and route. */}
+        {/* No section header: it sat directly under the screen's own "Coach"
+            title, and the input placeholder already says what this is for. */}
         <div className="fade-rise fade-rise-delay-1 page__main coach-convo">
-          <SectionHeader>Ask why</SectionHeader>
-
           <div className="coach-chat" style={{ marginTop: 12 }}>
             {/* Pre-emptive opener. Speaker is read from alignment + fill, not a
                 label — one presence dot per screen lives in the telemetry strip. */}

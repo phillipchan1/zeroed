@@ -3,6 +3,7 @@ import type { User } from '@supabase/supabase-js'
 import { supabase } from '../lib/supabaseClient'
 import { clearAllCache } from '../lib/cache'
 import { clearAllDraftsLocal } from '../lib/workoutDraft'
+import { persistedUser } from '../lib/persistedSession'
 
 interface AuthState {
   user: User | null
@@ -10,11 +11,19 @@ interface AuthState {
 }
 
 export function useAuth(): AuthState {
-  const [user, setUser]       = useState<User | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Hydrate synchronously from the session already stored on this device, so a
+  // returning athlete never sees the splash — not on a cold launch, not on a
+  // dead connection. `loading` is true only for a device that has never signed
+  // in, where there genuinely is nothing to paint yet.
+  //
+  // supabase.auth stays the authority: it refreshes the token in the background
+  // and, if the session turns out to be dead, SIGNED_OUT arrives through
+  // onAuthStateChange and swaps the app back to onboarding.
+  const [user, setUser]       = useState<User | null>(() => persistedUser())
+  const [loading, setLoading] = useState(() => persistedUser() === null)
 
   useEffect(() => {
-    // Get the current session on mount
+    // Reconcile with the real session (token refresh, expiry, another tab).
     supabase.auth.getSession().then(({ data: { session } }) => {
       setUser(session?.user ?? null)
       setLoading(false)

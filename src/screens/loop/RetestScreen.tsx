@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { runRetest, type RetestSummary } from '../../engine'
+import { invalidateLoopViews } from '../../lib/loopCache'
 import { DiagnosticIntake } from '../funnel/DiagnosticIntake'
 import { Button, Spinner } from '../../components/ui'
 import type { DiagnosticResults } from '../../types/database'
@@ -38,6 +39,9 @@ export function RetestScreen({ athleteId, onDone }: { athleteId: string; onDone:
     setSaving(true)
     const result = await runRetest(athleteId, results)
     setSummary(result)
+    // A retest rewrites the whole read (new diagnostic, resolved/new insights)
+    // and can re-scope the program — every cached view is now out of date.
+    invalidateLoopViews()
     onDone()
     setSaving(false)
   }

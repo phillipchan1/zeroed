@@ -12,6 +12,7 @@
 
 import { useEffect } from 'react'
 import { commitSession, type PendingSession, type CommitResult } from '../engine'
+import { invalidateLoopViews } from './loopCache'
 
 const OUTBOX_KEY = 'zeroed:workout-outbox'
 
@@ -46,10 +47,10 @@ export function pendingCount(): number {
 // can fold them in. The outbox — not the `workout` table — is the durable source
 // of truth for "I finished a session"; until a commit lands, scheduling reads
 // (today's routine, the week strip) must still count these or a finished session
-// stays invisible across reloads. `queuedAt` is the completion time, which is all
-// the calendar-day scheduling keys off of.
+// stays invisible across reloads. The day it counts for is `performedAt` (a
+// session can be backdated), falling back to the completion time.
 export function pendingWorkouts(): Array<{ routine_id: string; performed_at: string }> {
-  return readQueue().map((p) => ({ routine_id: p.routineId, performed_at: p.queuedAt }))
+  return readQueue().map((p) => ({ routine_id: p.routineId, performed_at: p.performedAt ?? p.queuedAt }))
 }
 
 // The full queued sessions — same source of truth, but with the set logs / RPE a
@@ -72,6 +73,10 @@ export async function commitPending(p: PendingSession): Promise<CommitResult | n
   try {
     const result = await commitSession(p)
     removeFromQueue(p.id)
+    // The session is now a real row, and the queued copy that screens were
+    // folding in is gone. Mark every view due so whatever is on screen catches
+    // up to the committed truth without the athlete doing anything.
+    invalidateLoopViews()
     return result
   } finally {
     inFlight.delete(p.id)

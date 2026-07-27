@@ -72,12 +72,12 @@ const APP_STATE = {
     retest_date: ymd(new Date(Date.now() + 11 * 864e5)), last_updated: iso(1),
   },
   hasDiagnostic: true,
-  todayRoutine: ROUTINES[0],
   routines: ROUTINES,
+  weekWorkouts: [{ routine_id: R2, performed_at: iso(0) }],
 }
 
 const TODAY_VIEW = {
-  weekWorkouts: [{ id: 'w-1', routineId: R2, performedAt: iso(2) }],
+  weekWorkouts: [{ id: 'w-1', routineId: R2, performedAt: iso(0) }],
   totalInsights: 5, likelyCount: 2, p1Count: 1, lastSignalAt: iso(2),
   goal: '315 lb squat',
   p1: { category: 'Lower Chain', confidence: 0.72, claim: INSIGHT.claim },
@@ -168,9 +168,22 @@ const WORKOUT_BOOT = {
   },
 }
 
+const COACH_VIEW = {
+  insights: [INSIGHT, INSIGHT2],
+  messages: [
+    { id: 'm-1', athlete_id: ATHLETE_ID, kind: 'weekly_review', ref_id: 'rev-1', created_at: iso(3),
+      body: 'Two of three in, effort held at 7, and the left-side gap narrowed. **Progress** next week — squat goes to 232.' },
+    { id: 'm-2', athlete_id: ATHLETE_ID, kind: 'note', ref_id: null, created_at: iso(9),
+      body: 'Moved the split squat ahead of the bilateral work. The left hip needs to be the first thing you ask for, not the last.' },
+  ],
+  directiveByRef: { 'rev-1': 'PROGRESS' },
+  context: { insights: [{ category: 'Lower Chain', confidence: 0.72, status: 'likely' }] },
+}
+
 const CACHE = {
   [`app-state:${USER_ID}`]: APP_STATE,
   [`today:${ATHLETE_ID}`]: TODAY_VIEW,
+  [`coach:${ATHLETE_ID}`]: COACH_VIEW,
   [`profile:${ATHLETE_ID}`]: { sessions_per_week: 3, training_age: 8, goals: '315 lb squat' },
   [`weekpager:${ATHLETE_ID}`]: WEEK_PAGER,
   [`program:${ATHLETE_ID}`]: PROGRAM_VIEW,

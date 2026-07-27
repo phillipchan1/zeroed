@@ -1,8 +1,9 @@
-import { useEffect, useState } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Target, CalendarDays, Scale, Activity, LogOut } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
-import { useCachedLoader } from '../../lib/cache'
+import { useCachedLoader, mutateCache } from '../../lib/cache'
+import { cacheKeys } from '../../lib/loopCache'
 import { getWeightUnit, setWeightUnit, type WeightUnit } from '../../lib/units'
 import {
   PageHeader, SectionHeader, Skeleton, Button, Input, Row, Sheet,
@@ -13,10 +14,20 @@ interface ProfileScreenProps {
   athleteName: string | null
 }
 
-interface Meta {
+interface ProfileMeta {
   sessions_per_week: number | null
   training_age: number | null
   goals: string | null
+}
+
+export async function fetchProfileMeta(athleteId: string): Promise<ProfileMeta | null> {
+  const { data, error } = await supabase
+    .from('athlete')
+    .select('sessions_per_week, training_age, goals')
+    .eq('id', athleteId)
+    .maybeSingle()
+  if (error) throw error
+  return (data as ProfileMeta | null) ?? null
 }
 
 type EditField = 'target' | 'sessions' | 'trainingAge' | 'units'
@@ -37,33 +48,15 @@ const FIELD_TITLE: Record<EditField, string> = {
  * settings list where every value is a row you can tap and change, and each
  * edit opens a focused sheet instead of expanding the page.
  */
-async function fetchMeta(athleteId: string): Promise<Meta> {
-  const { data, error } = await supabase
-    .from('athlete')
-    .select('sessions_per_week, training_age, goals')
-    .eq('id', athleteId)
-    .maybeSingle()
-  if (error) throw error
-  return (data as Meta | null) ?? { sessions_per_week: null, training_age: null, goals: null }
-}
-
 export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   const navigate = useNavigate()
-  // Offline-first like every other loop screen: paint the last synced values
-  // instantly, revalidate behind. Reading this straight off the network left
-  // the whole screen on skeletons with no signal — which is exactly where a
-  // phone-only athlete usually is.
-  const { data: fetched, loading, refetch } = useCachedLoader(
-    `profile:${athleteId}`,
-    () => fetchMeta(athleteId),
+  const profileKey = cacheKeys.profile(athleteId)
+  // Offline-first: paints from the held value on frame one, so returning to
+  // Profile never shows a skeleton after the first visit.
+  const { data: meta, loading } = useCachedLoader<ProfileMeta | null>(
+    profileKey,
+    () => fetchProfileMeta(athleteId),
   )
-  // Local overlay so an edit shows immediately, before the refetch lands. It's
-  // dropped as soon as fresh server data arrives, so the overlay can never mask
-  // a value changed elsewhere; offline, the refetch never resolves and the
-  // overlay correctly persists.
-  const [override, setOverride] = useState<Partial<Meta>>({})
-  useEffect(() => { setOverride({}) }, [fetched])
-  const meta: Meta | null = fetched ? { ...fetched, ...override } : null
   const [unit, setUnit] = useState<WeightUnit>(() => getWeightUnit())
 
   const [editing, setEditing] = useState<EditField | null>(null)
@@ -99,25 +92,33 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     setEditing(field)
   }
 
-  async function save() {
-    if (!editing) return
+  // Optimistic: the new value paints and the sheet closes on the same frame as
+  // the tap. The write goes out behind it — and if it fails (offline), the next
+  // revalidation restores the server's value rather than stranding a lie.
+  function save() {
+    if (!editing || saving) return
+
     if (editing === 'units') {
-      const next = draft === 'kg' ? 'kg' : 'lb'
+      const next: WeightUnit = draft === 'kg' ? 'kg' : 'lb'
       setWeightUnit(next)
       setUnit(next)
       setEditing(null)
       return
     }
-    setSaving(true)
-    const patch =
+
+    const patch: Partial<ProfileMeta> =
       editing === 'target' ? { goals: draft.trim() || null }
       : editing === 'sessions' ? { sessions_per_week: clampInt(draft, 1, 7) }
       : { training_age: clampInt(draft, 0, 60) }
-    setOverride((o) => ({ ...o, ...patch }))
-    await supabase.from('athlete').update(patch).eq('id', athleteId)
-    refetch()
-    setSaving(false)
+
+    mutateCache<ProfileMeta | null>(profileKey, (m) => (m ? { ...m, ...patch } : m))
     setEditing(null)
+    setSaving(true)
+    void supabase
+      .from('athlete')
+      .update(patch)
+      .eq('id', athleteId)
+      .then(() => setSaving(false), () => setSaving(false))
   }
 
   const target = meta?.goals ?? null
@@ -198,11 +199,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
         <Sheet
           title={FIELD_TITLE[editing]}
           onClose={() => setEditing(null)}
-          actions={
-            <Button variant="primary" full onClick={() => void save()} disabled={saving}>
-              {saving ? 'Saving…' : 'Save'}
-            </Button>
-          }
+          actions={<Button variant="primary" full onClick={save}>Save</Button>}
         >
           {editing === 'units' ? (
             <div style={{ display: 'flex', gap: 10 }}>
