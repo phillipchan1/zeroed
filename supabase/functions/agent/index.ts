@@ -19,6 +19,9 @@ import { TASKS, type TaskName } from './schemas.ts'
 
 const OPENAI_API_KEY = Deno.env.get('OPENAI_API_KEY') ?? ''
 const OPENAI_MODEL = Deno.env.get('OPENAI_MODEL') ?? 'gpt-5.4-nano'
+// The stronger model, for tasks flagged `heavy` in schemas.ts. Optional: when
+// the secret is unset every task runs on OPENAI_MODEL exactly as before.
+const OPENAI_MODEL_HEAVY = Deno.env.get('OPENAI_MODEL_HEAVY') ?? OPENAI_MODEL
 const SUPABASE_URL = Deno.env.get('SUPABASE_URL') ?? ''
 const SERVICE_ROLE_KEY = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
 
@@ -149,12 +152,12 @@ async function callOpenAI(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({
-        model: OPENAI_MODEL,
+        model: spec.heavy ? OPENAI_MODEL_HEAVY : OPENAI_MODEL,
         input: messages,
         text: {
           format: { type: 'json_schema', name: spec.schemaName, strict: true, schema: spec.schema },
         },
-        reasoning: { effort: 'low' },
+        reasoning: { effort: spec.effort ?? 'low' },
       }),
     })
   } catch (e) {

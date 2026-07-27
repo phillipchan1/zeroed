@@ -182,6 +182,99 @@ export interface WeeklyDebriefResult {
   headline: string
 }
 
+// ---- program edit (the conversational program editor) -----------------------
+
+/** One session in the week the editor is working on — the working draft. */
+export interface EditWeekSession {
+  name: string
+  intent: string | null
+  session_type: string | null
+  intended_dow: number | null
+  exercises: Array<{
+    name: string
+    sets: number
+    reps: string
+    load: string | null
+    cue: string | null
+    target_rpe: number | null
+  }>
+}
+
+/**
+ * Everything the program editor is allowed to see. Wider than CoachContext (it
+ * carries the full prescription down to sets/reps/RPE, because it is editing it)
+ * but still a scoped slice — no raw profile, no history beyond the recent week.
+ */
+export interface ProgramEditContext {
+  name: string | null
+  profile: {
+    target: string | null
+    obstacle: string | null
+    training_age: number | null
+    sessions_per_week: number | null
+  }
+  /** Standing asks from earlier editing sessions, newest first. */
+  standing_preferences: string | null
+  phase: {
+    name: string | null
+    week_of: string | null
+    weeks_remaining: number | null
+    non_negotiables: string[]
+    goal: string | null
+  } | null
+  insights: Array<{ id: string; priority: string; category: string; claim: string; confidence: number; status: string }>
+  recent_lifts: Array<{ name: string; top_set: string; rpe: number | null }>
+  recent_sessions: Array<{ session: string; performed_at: string; rpe: number | null; duration_mins: number | null; sets: string[] }>
+}
+
+/** One exercise inside an add_session edit. */
+export interface ProgramEditExercise {
+  name: string
+  sets: number
+  reps: string
+  load: string
+  cue: string
+  target_rpe: number | null
+}
+
+/**
+ * A single surgical change to the week. The model never returns a whole program
+ * — only deltas against the working draft it was handed, which is what keeps a
+ * request for "add explosive work" from silently rewriting everything else.
+ */
+export interface ProgramEdit {
+  type:
+    | 'add_exercise' | 'update_exercise' | 'remove_exercise'
+    | 'add_session' | 'update_session' | 'set_sessions_per_week' | 'add_note'
+  rationale: string
+  session_name: string | null
+  exercise_name: string | null
+  after_exercise: string | null
+  set_name: string | null
+  set_intent: string | null
+  set_session_type: string | null
+  set_intended_dow: number | null
+  sets: number | null
+  reps: string | null
+  load: string | null
+  cue: string | null
+  target_rpe: number | null
+  sessions_per_week: number | null
+  note: string | null
+  exercises: ProgramEditExercise[]
+}
+
+export interface ProgramEditResult {
+  reply: string
+  followups: string[]
+  edits: ProgramEdit[]
+}
+
+export interface ProgramEditTurn {
+  role: 'athlete' | 'coach'
+  content: string
+}
+
 // ---- device id (pre-auth probe rate limiting) -------------------------------
 
 const DEVICE_KEY = 'zeroed_device_id'
@@ -362,4 +455,21 @@ export function callWeeklyDebrief(payload: {
   missed: boolean
 }): Promise<AgentResult<WeeklyDebriefResult>> {
   return invokeAgent<WeeklyDebriefResult>('weekly_debrief', payload)
+}
+
+/**
+ * Program edit — post-auth. The working draft of the week + the conversation so
+ * far → a short reply and surgical edits to stage on top of that draft. Nothing
+ * is written here: the engine applies the edits in memory, diffs them, and the
+ * athlete confirms before anything reaches the DB.
+ */
+export function callProgramEdit(payload: {
+  context: ProgramEditContext
+  week: EditWeekSession[]
+  pending: string[]
+  estimates: Array<{ session: string; minutes: number }>
+  history: ProgramEditTurn[]
+  message: string
+}): Promise<AgentResult<ProgramEditResult>> {
+  return invokeAgent<ProgramEditResult>('program_edit', payload)
 }

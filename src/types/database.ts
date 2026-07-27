@@ -61,6 +61,10 @@ export interface AthleteRow {
   arena_type: ArenaType | null
   arena_raw: string | null
   limiter_choice: string | null
+  // What the athlete has told the coach they want their training to include,
+  // newest first. Written by the program editor on Apply and fed to phase design
+  // as the emphasis, so a preference outlives the block it was stated in.
+  training_preferences: string | null
 }
 
 export interface DiagnosticRow {

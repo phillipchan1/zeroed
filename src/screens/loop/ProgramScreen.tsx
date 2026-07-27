@@ -1,17 +1,16 @@
-import { Fragment, useState } from 'react'
+import { Fragment } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Lock, Sparkles } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
-import { invalidateLoopViews } from '../../lib/loopCache'
 import {
-  gatherProgramMap, gatherTrainingLog, planPhaseRedesign, applyPhaseRedesign,
-  type NextWeekProjection, type MapPhase, type PhaseRedesignPlan, type SessionDiff, type ExerciseChange,
+  gatherProgramMap, gatherTrainingLog,
+  type NextWeekProjection, type MapPhase,
 } from '../../engine'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { getWeightUnit } from '../../lib/units'
 import {
-  PageHeader, SectionHeader, Skeleton, Disclosure, Chip, Row, Button, Sheet, Spinner,
+  PageHeader, SectionHeader, Skeleton, Disclosure, Chip, Row, Button,
 } from '../../components/ui'
 import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName, WeeklyDirective } from '../../types/database'
 
@@ -84,16 +83,11 @@ export async function fetchProgramView(athleteId: string): Promise<ProgramView> 
 
 export function ProgramScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
-  const [redesigning, setRedesigning] = useState(false)
-  const [applying, setApplying] = useState(false)
-  const [preview, setPreview] = useState<PhaseRedesignPlan | null>(null)
-  const [previewError, setPreviewError] = useState<string | null>(null)
-  const [focus, setFocus] = useState('')
-  const { data, loading: coldLoading, refetch: refetchProgram } = useCachedLoader(
+  const { data, loading: coldLoading } = useCachedLoader(
     `program:${athleteId}`,
     () => fetchProgramView(athleteId),
   )
-  const { data: map, refetch: refetchMap } = useCachedLoader(
+  const { data: map } = useCachedLoader(
     `programmap:${athleteId}`,
     () => gatherProgramMap(athleteId, getWeightUnit()),
   )
@@ -102,44 +96,6 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
     () => gatherTrainingLog(athleteId, pendingSessionsRaw()),
   )
 
-  // Rebuild is two steps: design + diff (writes nothing), then apply what you
-  // actually looked at. A phase overwrite has no undo, so the preview IS the undo.
-  async function handleRedesign() {
-    if (redesigning) return
-    setRedesigning(true)
-    setPreviewError(null)
-    try {
-      const plan = await planPhaseRedesign(athleteId, getWeightUnit(), focus)
-      if (plan) setPreview(plan)
-      else setPreviewError('Could not build a new week right now. Your current program is untouched.')
-    } catch (e) {
-      console.error('[redesign] plan failed', e)
-      setPreviewError('Could not build a new week right now. Your current program is untouched.')
-    } finally {
-      setRedesigning(false)
-    }
-  }
-
-  async function handleApplyRedesign() {
-    if (!preview || applying) return
-    setApplying(true)
-    try {
-      const ok = await applyPhaseRedesign(athleteId, preview)
-      // A redesigned phase replaces the sessions themselves, so every view that
-      // names or schedules them is now wrong.
-      if (ok) {
-        invalidateLoopViews(); refetchProgram(); refetchMap()
-        setPreview(null); setFocus('')
-      } else {
-        setPreviewError('Nothing was applied. Your current program is untouched.')
-      }
-    } catch (e) {
-      console.error('[redesign] apply failed', e)
-      setPreviewError('Nothing was applied. Your current program is untouched.')
-    } finally {
-      setApplying(false)
-    }
-  }
   const nextWeek = map?.nextWeek ?? null
   const aheadPhases = (map?.phases ?? []).filter((p) => p.state === 'upcoming')
   const recentWeeks = (log?.weeks ?? []).slice(0, 3)
@@ -218,6 +174,21 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
               )}
             </div>
 
+            {/* The steering wheel. This used to be a textarea at the bottom of
+                the Sessions accordion — three taps deep, one shot, no way to
+                answer back. It is the second thing on the screen now. */}
+            <button type="button" className="program-edit-cta" onClick={() => navigate('/app/program/edit')}>
+              <span className="program-edit-cta__icon"><Sparkles size={18} strokeWidth={1.75} /></span>
+              <span style={{ minWidth: 0 }}>
+                <span className="program-edit-cta__title">Change the program</span>
+                <span className="program-edit-cta__sub">
+                  Add explosiveness, conditioning, size, or just more work — in conversation,
+                  with the whole week in front of you.
+                </span>
+              </span>
+              <span className="program-edit-cta__chev">›</span>
+            </button>
+
             {/* Everything else folds away. Each row states its own size so you
                 know what's behind it before you open it. */}
 
@@ -248,34 +219,6 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
                   </div>
                 )) : (
                   <p className="text-sm text-dim">No sessions in this phase yet.</p>
-                )}
-                {/* Optional free-text steer for the next rebuild. The agent weaves
-                    it in; the deterministic validator still clamps loads + volume. */}
-                <textarea
-                  value={focus}
-                  onChange={(e) => setFocus(e.target.value)}
-                  disabled={redesigning}
-                  rows={2}
-                  placeholder="Optional — what should the coach weave in? e.g. more basketball explosiveness (jumps/plyos) and eccentric protective work"
-                  style={{
-                    width: '100%', resize: 'none', marginTop: 4, padding: '10px 12px',
-                    background: 'var(--surface)', color: 'var(--text)',
-                    border: '1px solid var(--line)', borderRadius: 8,
-                    fontFamily: 'inherit', fontSize: 'var(--fs-sm)', lineHeight: 1.5,
-                  }}
-                />
-                {focus.trim() && (
-                  <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
-                    The coach factors this in — safety limits stay on. You'll see every
-                    change before anything is applied.
-                  </p>
-                )}
-                <Button variant="outline" full onClick={handleRedesign} disabled={redesigning} style={{ marginTop: 4 }}>
-                  <Sparkles size={16} strokeWidth={1.75} style={{ marginRight: 8 }} />
-                  {redesigning ? 'Drafting the week…' : 'Preview a rebuild'}
-                </Button>
-                {previewError && (
-                  <p className="text-xs" style={{ color: 'var(--veto)', lineHeight: 1.5 }}>{previewError}</p>
                 )}
               </div>
             </Disclosure>
@@ -341,187 +284,7 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
         )}
        </div>
       </div>
-
-      {preview && (
-        <RedesignPreviewSheet
-          plan={preview}
-          applying={applying}
-          onApply={handleApplyRedesign}
-          onClose={() => { if (!applying) setPreview(null) }}
-        />
-      )}
     </div>
-  )
-}
-
-// ---- Rebuild preview — what this week becomes, before it becomes it ----------
-//
-// The rebuild overwrites routines in place with no version history, so this sheet
-// is the only place the athlete can weigh the trade before paying for it. It leads
-// with the dilution alarm (main lifts the rebuild would drop), then the per-session
-// diff. Nothing here writes; Apply is the only door.
-
-const CHANGE_TONE: Record<ExerciseChange['kind'], string> = {
-  added:   'var(--confirmed)',
-  removed: 'var(--veto)',
-  changed: 'var(--computing)',
-  kept:    'var(--text-dim)',
-}
-
-const CHANGE_MARK: Record<ExerciseChange['kind'], string> = {
-  added: '+', removed: '−', changed: '~', kept: '·',
-}
-
-function ChangeRow({ change }: { change: ExerciseChange }) {
-  const tone = CHANGE_TONE[change.kind]
-  const dim = change.kind === 'kept'
-  return (
-    <li style={{ display: 'flex', gap: 10, alignItems: 'flex-start', opacity: dim ? 0.55 : 1 }}>
-      <span
-        className="num"
-        aria-hidden
-        style={{ color: tone, fontSize: 'var(--fs-sm)', fontWeight: 700, lineHeight: 1.5, width: 12, flexShrink: 0 }}
-      >
-        {CHANGE_MARK[change.kind]}
-      </span>
-      <div style={{ minWidth: 0 }}>
-        <p className="text-sm" style={{ lineHeight: 1.45, color: change.kind === 'removed' ? 'var(--text-dim)' : 'var(--text)' }}>
-          <span style={{ textDecoration: change.kind === 'removed' ? 'line-through' : 'none' }}>{change.name}</span>
-        </p>
-        <p className="num text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.4 }}>
-          {change.kind === 'changed' && change.before ? (
-            <>
-              <span style={{ textDecoration: 'line-through', opacity: 0.7 }}>{change.before}</span>
-              {' → '}
-              <span style={{ color: tone }}>{change.after}</span>
-            </>
-          ) : (
-            change.after ?? change.before
-          )}
-        </p>
-      </div>
-    </li>
-  )
-}
-
-function SessionDiffCard({ session }: { session: SessionDiff }) {
-  const untouched = session.added === 0 && session.removed === 0 && session.changed === 0
-  return (
-    <div className="card">
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-        <div style={{ minWidth: 0 }}>
-          <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{session.name}</h3>
-          {session.previousName && (
-            <p className="text-xs text-dim" style={{ marginTop: 3 }}>was {session.previousName}</p>
-          )}
-        </div>
-        <span className="num text-xs" style={{ whiteSpace: 'nowrap', color: 'var(--text-dim)' }}>
-          {session.isNew ? (
-            <span style={{ color: 'var(--confirmed)' }}>NEW</span>
-          ) : untouched ? 'unchanged' : (
-            <>
-              {session.added > 0 && <span style={{ color: 'var(--confirmed)' }}>+{session.added} </span>}
-              {session.removed > 0 && <span style={{ color: 'var(--veto)' }}>−{session.removed} </span>}
-              {session.changed > 0 && <span style={{ color: 'var(--computing)' }}>~{session.changed}</span>}
-            </>
-          )}
-        </span>
-      </div>
-      {session.intent && <p className="text-sm text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>{session.intent}</p>}
-      <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 12, marginTop: 14 }}>
-        {session.changes.map((c, i) => <ChangeRow key={`${c.kind}-${c.name}-${i}`} change={c} />)}
-      </ul>
-    </div>
-  )
-}
-
-interface RedesignPreviewSheetProps {
-  plan: PhaseRedesignPlan
-  applying: boolean
-  onApply: () => void
-  onClose: () => void
-}
-
-function RedesignPreviewSheet({ plan, applying, onApply, onClose }: RedesignPreviewSheetProps) {
-  const net = [
-    plan.added > 0 ? `${plan.added} added` : null,
-    plan.removed > 0 ? `${plan.removed} dropped` : null,
-    plan.changed > 0 ? `${plan.changed} retuned` : null,
-  ].filter(Boolean).join(' · ')
-
-  return (
-    <Sheet
-      title="Proposed rebuild"
-      subtitle={`Your ${plan.phaseName} block — ${net || 'no changes'}. Nothing is applied yet.`}
-      onClose={onClose}
-      dismissOnBackdrop={!applying}
-      actions={
-        <>
-          <Button variant="ghost" full onClick={onClose} disabled={applying}>Keep what I have</Button>
-          <Button full onClick={onApply} disabled={applying}>
-            {applying ? <Spinner /> : 'Apply this week'}
-          </Button>
-        </>
-      }
-    >
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {/* The dilution alarm — the question the athlete is actually asking. */}
-        {plan.mainLiftsDropped.length > 0 ? (
-          <div className="card" style={{ borderColor: 'var(--veto)' }}>
-            <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-              <Lock size={15} strokeWidth={1.75} style={{ color: 'var(--veto)', flexShrink: 0, marginTop: 2 }} />
-              <div style={{ minWidth: 0 }}>
-                <p className="text-sm" style={{ fontWeight: 700, color: 'var(--veto)', lineHeight: 1.45 }}>
-                  This drops a main lift
-                </p>
-                <p className="text-sm text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>
-                  {plan.mainLiftsDropped.join(', ')} {plan.mainLiftsDropped.length === 1 ? 'is' : 'are'} in your
-                  current week and not in this one. Your loading history for {plan.mainLiftsDropped.length === 1 ? 'it' : 'them'} stops
-                  progressing here.
-                </p>
-              </div>
-            </div>
-          </div>
-        ) : (
-          <p className="text-sm text-dim" style={{ lineHeight: 1.5 }}>
-            Every main lift in your current week survives this rebuild — the added work sits
-            alongside them, not in place of them.
-          </p>
-        )}
-
-        {plan.emphasis && (
-          <div>
-            <SectionHeader>What you asked for</SectionHeader>
-            <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>{plan.emphasis}</p>
-          </div>
-        )}
-
-        <div>
-          <SectionHeader>The new week</SectionHeader>
-          <p className="text-sm text-dim" style={{ marginTop: 8, lineHeight: 1.5 }}>{plan.goal}</p>
-        </div>
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {plan.sessions.map((s, i) => <SessionDiffCard key={`${s.name}-${i}`} session={s} />)}
-        </div>
-
-        {plan.nonNegotiables.length > 0 && (
-          <div>
-            <SectionHeader>Non-negotiables after this</SectionHeader>
-            <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12 }}>
-              {plan.nonNegotiables.map((rule, i) => (
-                <li key={i} style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
-                  <span className="num text-signal" style={{ fontSize: 'var(--fs-sm)', flexShrink: 0, fontWeight: 700, lineHeight: 1.55 }}>
-                    {String(i + 1).padStart(2, '0')}
-                  </span>
-                  <span className="text-sm" style={{ lineHeight: 1.5 }}>{rule}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-      </div>
-    </Sheet>
   )
 }
 

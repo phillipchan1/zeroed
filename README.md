@@ -63,6 +63,28 @@ supabase db push
 
 Migrations live in `supabase/migrations/`. Create new ones with `supabase migration new <name>`.
 
+### The `agent` Edge Function
+
+Every model call in the app goes through one function, `supabase/functions/agent`.
+Its task list (prompt + strict JSON schema per task) lives in `schemas.ts`, so
+**adding or changing a task means redeploying** — a client calling a task the
+deployed function doesn't know returns `unknown task` and the screen falls back
+to its deterministic floor.
+
+```bash
+supabase functions deploy agent
+
+# Secrets (never prefixed VITE_ — these must not reach the browser)
+supabase secrets set OPENAI_API_KEY=sk-...
+supabase secrets set OPENAI_MODEL=gpt-5.4-nano          # optional, the default
+supabase secrets set OPENAI_MODEL_HEAVY=gpt-5.4         # optional, see below
+```
+
+`OPENAI_MODEL_HEAVY` is used only by tasks flagged `heavy: true` in `schemas.ts`
+— today that's `program_edit`, which has to read a whole training week and name
+its sessions and lifts back exactly. When the secret is unset every task runs on
+`OPENAI_MODEL`, so the app works either way.
+
 ## Install as a PWA (iOS / Add to Home Screen)
 
 Zeroed ships as an installable Progressive Web App — no App Store needed.

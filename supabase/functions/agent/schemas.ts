@@ -34,7 +34,7 @@ export const MOVEMENT_PATTERN_KEYS = [
   'rotary_stability',
 ] as const
 
-export type TaskName = 'probe' | 'program_design' | 'phase_design' | 'info_gain' | 'session_review' | 'session_debrief' | 'target' | 'coach_chat' | 'weekly_debrief'
+export type TaskName = 'probe' | 'program_design' | 'phase_design' | 'info_gain' | 'session_review' | 'session_debrief' | 'target' | 'coach_chat' | 'weekly_debrief' | 'program_edit'
 
 export interface TaskSpec {
   // OpenAI json_schema name (must be [a-zA-Z0-9_], <=64 chars)
@@ -43,6 +43,14 @@ export interface TaskSpec {
   schema: Record<string, unknown>
   // Tasks allowed before authentication. Only the Probe is public.
   preAuth: boolean
+  // Route to OPENAI_MODEL_HEAVY when set. For the few tasks that are not
+  // classification or drafting — where the model has to read a whole program
+  // and name its parts back exactly — a stronger model is worth the latency.
+  // Falls back to OPENAI_MODEL when the secret isn't set, so nothing breaks.
+  heavy?: boolean
+  // Reasoning effort override. Defaults to 'low' (these are mostly drafting
+  // tasks); editing a program is the one that benefits from more.
+  effort?: 'low' | 'medium' | 'high'
 }
 
 const VOICE =
@@ -475,9 +483,9 @@ Phase intent:
 
 Honor the limiter: the highest-priority insight should shape accessory choice and cues, but do NOT gut the athlete's main training to chase it — address it alongside real work.
 
-If the input includes a non-empty "emphasis" field, it is the athlete's own request for what to weave into this phase (e.g. sport explosiveness, jumps/plyometrics, eccentric or tendon-resilience work). Honor it: bias or add 1–2 exercises per session toward the emphasis and name it in a non_negotiable, using real movements (box jump, depth jump, broad jump, bounds, Nordic curl, tempo/eccentric variants, isometrics, calf work, etc.). But keep the phase coherent — do NOT displace the main barbell lifts, exceed 6 exercises per session, or push loads/plyometric volume past the safety bounds below. The emphasis shapes accessories and cues; it never overrides the phase intent or the validator.
+If the input includes a non-empty "emphasis" field, it is the athlete's own request — either for this design specifically, or their standing preferences carried over from the program editor (in which case it may be several lines, newest first). Treat it as what to weave into this phase (e.g. sport explosiveness, jumps/plyometrics, eccentric or tendon-resilience work). Honor it: bias or add 1–2 exercises per session toward the emphasis and name it in a non_negotiable, using real movements (box jump, depth jump, broad jump, bounds, Nordic curl, tempo/eccentric variants, isometrics, calf work, etc.). But keep the phase coherent — do NOT displace the main barbell lifts, exceed 6 exercises per session, or push loads/plyometric volume past the safety bounds below. The emphasis shapes accessories and cues; it never overrides the phase intent or the validator.
 
-Each session has a short name, a one-sentence intent, and 3–6 exercises. sets is an integer 1–6; reps is a short string ("5", "4-6", "3", "30s"); load is one of "bodyweight", "light", "moderate", "heavy"; cue is one short coaching sentence. Produce one distinct session per the athlete's sessions_per_week, capped at 5 distinct sessions.
+Each session has a short name, a one-sentence intent, and 3–8 exercises. sets is an integer 1–10; reps is a short string ("5", "4-6", "3", "30s"); load is one of "bodyweight", "light", "moderate", "heavy"; cue is one short coaching sentence. Produce one distinct session per the athlete's sessions_per_week, up to 7 distinct sessions — if they train six days a week, build six sessions.
 
 A deterministic validator resolves metrics, clamps volume, and is the last line of safety — design honestly within these bounds.`,
   schema: {
@@ -518,6 +526,149 @@ A deterministic validator resolves metrics, clamps volume, and is the last line 
   },
 }
 
+// ---- program_edit ----------------------------------------------------------
+// The conversational program editor — the athlete's steering wheel.
+//
+// phase_design regenerates a whole week from scratch, which is why asking for
+// "more explosive work" came back as six additions and five deletions: a fresh
+// draft can't help churning. This task never regenerates. It returns SURGICAL
+// EDITS against the week it was handed — add this exercise here, add this
+// session, retune that lift — so the athlete's existing training is untouched by
+// default and every change is one they asked for.
+//
+// It is also deliberately the MOST PERMISSIVE surface in the app. The athlete is
+// screened, experienced, and mid-program; this is their program. When they ask
+// for more work, the answer is to add it, not to negotiate them down to the same
+// volume they already had.
+//
+// Multi-turn: the payload's "week" is the WORKING DRAFT — it already contains
+// every edit accepted so far in this conversation. Each turn's edits stack on
+// top of it. Nothing is written until the athlete taps Apply; the client shows
+// the running diff the whole time.
+const program_edit: TaskSpec = {
+  schemaName: 'program_edit_result',
+  preAuth: false,
+  heavy: true,
+  effort: 'medium',
+  system: `${VOICE}
+
+You are the athlete's strength & conditioning coach, editing their training program WITH them, in conversation. They are screened, experienced, mid-program, and this is their program — not yours.
+
+The payload carries:
+- "week": the WORKING DRAFT of their repeating week — every session with its exercises (name, sets, reps, load, cue, target RPE), session type, and day pin. Edits you return apply on top of THIS, not on the original program.
+- "pending": a plain summary of the changes already staged in this conversation (empty on the first turn).
+- "phase": the current block (name, intent, weeks remaining, non-negotiables) — the week you are editing repeats for the rest of it.
+- "profile": target, obstacle, training age, current training days per week.
+- "standing_preferences": what they have asked for in past editing sessions, newest first. Assume these still hold unless this conversation says otherwise; do not re-propose something already in the week.
+- "insights": the active weak-link stack — id, claim, live confidence, status.
+- "recent_lifts": their real logged top sets. Quote these; never invent numbers.
+- "recent_sessions": what they actually logged lately, including how long sessions took when known.
+- "estimates": the client's rough per-session time estimate for the working draft.
+
+POSTURE — permissive by default. This surface exists because the program was too conservative to be useful:
+- When they ask for more work — hypertrophy, explosiveness/jumps, HIIT/conditioning, prehab, sport work — ADD it. Do not "make room" by cutting things they did not ask you to cut.
+- NEVER remove or swap an existing exercise unless they explicitly asked for that exercise to go, or it is the direct cause of reported pain. Adding is free; removing is theirs to authorise.
+- You may add whole new sessions, including short ones (a 15–25 minute explosiveness or conditioning day is a real session). You may raise their training days per week to make a new session actually appear in the schedule.
+- You may program real barbell work, plyometrics (box/depth/broad jumps, bounds), sprints, intervals, and near-max efforts. The old first-session restrictions do not apply here.
+- A session may carry up to 12 exercises. Long sessions are allowed if that is what they asked for — say the time cost plainly instead of refusing.
+- If they say a session is too easy or too short, believe them and load it: more sets, more exercises, heavier top sets, or a finisher. State the new time estimate.
+
+COACHING — permissive is not careless. Get the dose right:
+- Plyometrics: low reps, high quality, fresh — early in a session, roughly 2 sessions a week, ~20–40 contacts to start, full recovery between sets. Depth jumps only on top of a strength base.
+- Intervals / HIIT: keep them away from heavy lower-body strength work (same-day pairing after lifting, or a separate day). Hard intervals 1–2×/week.
+- Hypertrophy: 8–20 hard sets per muscle per week, 6–15 reps, close to failure — added as accessories after the main lifts, not in front of them.
+- Injury prevention: eccentrics and isometrics (Nordics, tempo work, calf/tibialis, Copenhagen) tolerate frequent low-fuss dosing.
+- Honour their weak-link stack and the phase's non-negotiables when you choose accessories.
+- Pain, an unresolved instability, or a red flag is worth ONE plain sentence of pushback — then still give them a version of what they asked for (safer variation, lower dose) and let them decide. Never refuse, never lecture, never stall.
+
+CONVERSATION:
+- Reply in 1–3 short sentences. The athlete can SEE the diff; do not narrate it exercise by exercise. Say what you did and the one thing they should know (time cost, dose, what it might collide with).
+- Bold (**like this**) the single phrase that matters most.
+- Propose something CONCRETE on every turn where a change is asked for. Ask a clarifying question ONLY when you genuinely cannot proceed — and even then, propose your best guess alongside it.
+- If they are only asking a question, answer it and return an empty edits array.
+- followups: 0–3 short tappable next steps (six words or fewer), e.g. "Add a Friday jump day", "Make Session B longer".
+- Never say "insight", "P1", or other system-internal words. Never invent data that isn't in the payload.
+
+EDITS — every change is one of these. Set every field you are not using to null, and "exercises" to [] unless the type is add_session. Each edit needs a one-line "rationale" the athlete will read.
+- "add_exercise": session_name (an existing session in the week) + exercise_name + sets/reps/load/cue/target_rpe. Optional after_exercise to place it right after a named lift (null appends to the end).
+- "update_exercise": session_name + exercise_name (as they appear in the week) + any of sets/reps/load/cue/target_rpe. Only the fields you set change.
+- "remove_exercise": session_name + exercise_name. ONLY when explicitly asked or when it is the direct cause of reported pain.
+- "add_session": session_name (a new, short, distinct name) + set_intent + set_session_type ("strength" | "power" | "conditioning" | "mobility") + optional set_intended_dow (0=Mon…6=Sun) + "exercises": the full list for that session. The client raises their training days per week automatically so the new session shows up.
+- "update_session": session_name + any of set_name (rename) / set_intent / set_session_type / set_intended_dow.
+- "set_sessions_per_week": sessions_per_week (1–7). Use when they want to train more or fewer days without adding a session themselves.
+- "add_note": note — a dated coach note recording a decision worth remembering.
+
+Fields: sets is an integer 1–10; reps is a short string ("5", "8-12", "3 each side", "30s", "8 × 20s on / 40s off"); load is one of "bodyweight", "light", "moderate", "heavy"; target_rpe is 1–10; cue is one short coaching sentence.
+
+Deterministic code applies these edits, clamps the numbers, and shows the athlete the exact diff. Nothing you return is written until they confirm it.`,
+  schema: {
+    type: 'object',
+    additionalProperties: false,
+    required: ['reply', 'followups', 'edits'],
+    properties: {
+      reply: { type: 'string' },
+      followups: { type: 'array', items: { type: 'string' } },
+      edits: {
+        type: 'array',
+        items: {
+          type: 'object',
+          additionalProperties: false,
+          required: [
+            'type', 'rationale', 'session_name', 'exercise_name', 'after_exercise',
+            'set_name', 'set_intent', 'set_session_type', 'set_intended_dow',
+            'sets', 'reps', 'load', 'cue', 'target_rpe', 'sessions_per_week',
+            'note', 'exercises',
+          ],
+          properties: {
+            type: {
+              type: 'string',
+              enum: [
+                'add_exercise', 'update_exercise', 'remove_exercise',
+                'add_session', 'update_session', 'set_sessions_per_week', 'add_note',
+              ],
+            },
+            rationale: { type: 'string' },
+            session_name: { type: ['string', 'null'] },
+            exercise_name: { type: ['string', 'null'] },
+            after_exercise: { type: ['string', 'null'] },
+            set_name: { type: ['string', 'null'] },
+            set_intent: { type: ['string', 'null'] },
+            // No enum: a null-in-enum can trip strict structured-output
+            // validation. Allowed values are stated in the prompt and clamped
+            // by the engine before anything is written.
+            set_session_type: { type: ['string', 'null'] },
+            set_intended_dow: { type: ['integer', 'null'], minimum: 0, maximum: 6 },
+            sets: { type: ['integer', 'null'], minimum: 1, maximum: 10 },
+            reps: { type: ['string', 'null'] },
+            load: { type: ['string', 'null'] },
+            cue: { type: ['string', 'null'] },
+            target_rpe: { type: ['number', 'null'], minimum: 1, maximum: 10 },
+            sessions_per_week: { type: ['integer', 'null'], minimum: 1, maximum: 7 },
+            note: { type: ['string', 'null'] },
+            // Only used by add_session; [] for every other edit type.
+            exercises: {
+              type: 'array',
+              items: {
+                type: 'object',
+                additionalProperties: false,
+                required: ['name', 'sets', 'reps', 'load', 'cue', 'target_rpe'],
+                properties: {
+                  name: { type: 'string' },
+                  sets: { type: 'integer', minimum: 1, maximum: 10 },
+                  reps: { type: 'string' },
+                  load: { type: 'string', enum: ['bodyweight', 'light', 'moderate', 'heavy'] },
+                  cue: { type: 'string' },
+                  target_rpe: { type: ['number', 'null'], minimum: 1, maximum: 10 },
+                },
+              },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+
 export const TASKS: Record<TaskName, TaskSpec> = {
   probe,
   program_design,
@@ -528,4 +679,5 @@ export const TASKS: Record<TaskName, TaskSpec> = {
   target,
   coach_chat,
   weekly_debrief,
+  program_edit,
 }
