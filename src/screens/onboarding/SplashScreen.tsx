@@ -17,52 +17,32 @@ export function SplashScreen({ onBegin }: { onBegin: () => void }) {
       <div className="fade-rise" style={{ textAlign: 'center' }}>
         <Logo />
         <p
-          style={{
-            marginTop: 24,
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 8,
-            fontFamily: 'var(--font-mono)',
-            fontSize: 11,
-            letterSpacing: '0.12em',
-            textTransform: 'uppercase',
-            color: 'var(--text-dim)',
-          }}
+          className="eyebrow"
+          style={{ marginTop: 26, display: 'inline-flex', alignItems: 'center', gap: 8 }}
         >
           <PresenceDot />
           Instrument ready
         </p>
         <p
-          style={{
-            marginTop: 18,
-            fontFamily: 'var(--font-mono)',
-            fontSize: 12,
-            lineHeight: 1.7,
-            letterSpacing: '0.02em',
-            color: 'var(--text-dim)',
-            maxWidth: 300,
-          }}
+          className="text-lg"
+          style={{ marginTop: 20, color: 'var(--text-dim)', maxWidth: 300, lineHeight: 1.5 }}
         >
-          Tell me what's in your way.
-          <br />
-          A read in ~30 seconds — then your first session.
+          A read in 30 seconds, then your first session.
         </p>
       </div>
 
       <p
-        className="text-xs text-dim"
+        className="eyebrow"
         style={{
           position: 'fixed',
-          bottom: 'calc(32px + env(safe-area-inset-bottom, 0px))',
+          bottom: 'calc(40px + env(safe-area-inset-bottom, 0px))',
           left: 0,
           right: 0,
           textAlign: 'center',
-          fontFamily: 'var(--font-mono)',
-          letterSpacing: '0.08em',
-          opacity: 0.5,
+          opacity: 0.6,
         }}
       >
-        tap to begin
+        Tap to begin
       </p>
     </div>
   )

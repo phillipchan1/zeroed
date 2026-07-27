@@ -51,7 +51,7 @@ export function RetestScreen({ athleteId, onDone }: { athleteId: string; onDone:
       <div className="screen--centered">
         <div className="thinking-shimmer" style={{ textAlign: 'center', padding: '24px 40px', borderRadius: 8 }}>
           <Spinner />
-          <p className="text-dim" style={{ marginTop: 16, fontSize: 13 }}>Re-reading where you are…</p>
+          <p className="text-base text-dim" style={{ marginTop: 18 }}>Re-reading where you are…</p>
         </div>
       </div>
     )
@@ -64,18 +64,16 @@ export function RetestScreen({ athleteId, onDone }: { athleteId: string; onDone:
     return (
       <div className="screen--centered" style={{ padding: '0 24px' }}>
         <div style={{ maxWidth: 420, width: '100%', textAlign: 'center' }}>
-          <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 12 }}>
-            Retest v{summary.version}
-          </p>
-          <h2 style={{ fontSize: 22, fontWeight: 600, marginBottom: 12 }}>
+          <p className="eyebrow" style={{ marginBottom: 14 }}>Retest v{summary.version}</p>
+          <h2 className="screen-title" style={{ marginBottom: 14 }}>
             {summary.resolvedCount > 0
               ? `Cleared ${summary.resolvedCount} weak link${summary.resolvedCount === 1 ? '' : 's'}.`
               : 'Re-scoped.'}
           </h2>
-          <p className="text-sm text-dim" style={{ lineHeight: 1.6, marginBottom: summary.deferred ? 16 : 28 }}>{improvedStr}</p>
+          <p className="text-base text-dim" style={{ marginBottom: summary.deferred ? 18 : 30 }}>{improvedStr}</p>
           {summary.deferred && (
-            <p className="text-xs text-dim" style={{ lineHeight: 1.6, marginBottom: 28, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
-              Your new block starts Monday — this week's sessions stay exactly as you left them.
+            <p className="text-sm text-dim" style={{ marginBottom: 30 }}>
+              Your new block starts Monday — this week's sessions stay as they are.
             </p>
           )}
           <Button variant="primary" full onClick={() => navigate('/app/today', { replace: true })}>

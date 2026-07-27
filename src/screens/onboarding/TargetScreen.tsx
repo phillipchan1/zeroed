@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Logo, Button, SectionHeader, PresenceDot } from '../../components/ui'
+import { Logo, Button, PresenceDot } from '../../components/ui'
 import { generateTargetPrompt } from '../../engine'
 
 /**
@@ -44,14 +44,7 @@ export function TargetScreen({
   if (loading) {
     return (
       <div className="screen--centered">
-        <p
-          className="fade-rise"
-          style={{
-            display: 'inline-flex', alignItems: 'center', gap: 8,
-            fontFamily: 'var(--font-mono)', fontSize: 12, letterSpacing: '0.1em',
-            textTransform: 'uppercase', color: 'var(--text-dim)',
-          }}
-        >
+        <p className="eyebrow fade-rise" style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
           <PresenceDot />
           Reading what you're after
         </p>
@@ -67,11 +60,8 @@ export function TargetScreen({
 
       <div style={{ flex: 1, padding: '32px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
         <div className="fade-rise">
-          <SectionHeader>WHAT YOU'RE CHASING</SectionHeader>
-          <h1
-            className="hero-headline"
-            style={{ fontSize: 22, marginTop: 10, marginBottom: 24, lineHeight: 1.3 }}
-          >
+          <p className="eyebrow" style={{ marginBottom: 10 }}>What you're chasing</p>
+          <h1 className="hero-headline" style={{ marginBottom: 24 }}>
             {question}
           </h1>
         </div>
@@ -84,7 +74,6 @@ export function TargetScreen({
             placeholder="e.g. 285 lb bench"
             value={value}
             onChange={(e) => setValue(e.target.value)}
-            style={{ fontSize: 16 }}
           />
         </div>
 

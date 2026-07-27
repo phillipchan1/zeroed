@@ -50,14 +50,13 @@ export function AcknowledgmentScreen({
           )}
 
           <p className="hero-characterization" style={{ marginTop: obstacleQuote ? 0 : 24 }}>
-            I'll build your first session around that — light, and aimed at the early read. You'll
-            train; I'll keep sharpening the read underneath. No screen to sit through first.
+            I'll build your first session around that. No screening to sit through — you train, I sharpen the read underneath.
           </p>
         </div>
 
         <div className="fade-rise fade-rise-delay-2" style={{ marginTop: 36, display: 'flex', gap: 8 }}>
           <Button variant="ghost" onClick={onBack} style={{ flex: 1 }}>← Back</Button>
-          <Button variant="primary" onClick={onRun} style={{ flex: 2 }}>Build my first session →</Button>
+          <Button variant="primary" onClick={onRun} style={{ flex: 2 }}>Build it →</Button>
         </div>
       </div>
     </div>

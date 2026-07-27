@@ -1,4 +1,4 @@
-import { Logo, Button, Input, SectionHeader } from '../../components/ui'
+import { Logo, Button, Input } from '../../components/ui'
 
 /**
  * Orientation · Name (optional)
@@ -22,14 +22,14 @@ export function IdentityScreen({
 
       <div style={{ flex: 1, padding: '32px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
         <div className="fade-rise">
-          <SectionHeader>CALIBRATING YOUR SESSION</SectionHeader>
-          <h1 className="hero-headline" style={{ fontSize: 24, marginTop: 10, marginBottom: 28 }}>
+          <p className="eyebrow" style={{ marginBottom: 10 }}>Calibrating your session</p>
+          <h1 className="hero-headline" style={{ marginBottom: 10 }}>
             What should I call you?
           </h1>
+          <p className="text-sm text-dim" style={{ marginBottom: 28 }}>Optional — skip it if you'd rather.</p>
         </div>
 
         <div className="fade-rise fade-rise-delay-1">
-          <label className="text-xs text-dim" style={{ display: 'block', marginBottom: 6 }}>Name (optional)</label>
           <Input
             type="text"
             placeholder="Your name"

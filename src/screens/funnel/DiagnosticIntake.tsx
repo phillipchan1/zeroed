@@ -1,8 +1,9 @@
-import { useState, useCallback, useMemo, useRef, useEffect } from 'react'
-import { X } from 'lucide-react'
+import { useState, useCallback, useMemo } from 'react'
+import { X, HelpCircle } from 'lucide-react'
+import { getWeightUnit } from '../../lib/units'
 import {
   Logo, Button, Input, StepIndicator, ScorePicker,
-  SectionHeader, InsightCard, Spinner, PresenceDot, TickingNumber,
+  SectionHeader, InsightCard, Spinner, Ring, Chip, Sheet,
 } from '../../components/ui'
 import type { DiagnosticResults, InsightRow } from '../../types/database'
 import { MOVEMENT_PATTERNS } from '../../types/database'
@@ -93,14 +94,6 @@ const PATTERN_TEST: Record<string, { setup: string; clean: string }> = {
   rotary_stability:  { setup: 'On hands and knees, extend the same-side arm and leg, then draw elbow to knee under the body. Both sides.',     clean: 'You stay balanced and level through the whole motion, on both sides.' },
 }
 
-function relativeFrom(anchorMs: number): string {
-  const secs = Math.max(0, Math.floor((Date.now() - anchorMs) / 1000))
-  if (secs < 60) return `${secs}s ago`
-  const mins = Math.floor(secs / 60)
-  if (mins < 60) return `${mins}m ago`
-  return `${Math.floor(mins / 60)}h ago`
-}
-
 // ---- Helper: micro-reveal --------------------------------------------------
 
 function InsightReveal({ insight, index }: { insight: InsightRow; index: number }) {
@@ -146,10 +139,10 @@ function GuidedMovementTest({
   const q = questions[stage]
 
   return (
-    <div style={{ marginTop: 8, padding: '12px 14px', background: 'var(--ground)', border: '1px solid var(--line)', borderRadius: 8 }}>
-      <p className="text-xs text-dim" style={{ lineHeight: 1.5, marginBottom: 10 }}>{test.setup}</p>
-      <p style={{ fontSize: 13, marginBottom: 10, lineHeight: 1.5 }}>{q.prompt}</p>
-      <div style={{ display: 'flex', gap: 8 }}>
+    <div style={{ marginTop: 14, padding: '16px', background: 'var(--ground)', border: '1px solid var(--line)', borderRadius: 10 }}>
+      <p className="text-sm text-dim" style={{ lineHeight: 1.55, marginBottom: 14 }}>{test.setup}</p>
+      <p className="text-base" style={{ marginBottom: 14, lineHeight: 1.5, fontWeight: 600 }}>{q.prompt}</p>
+      <div style={{ display: 'flex', gap: 10 }}>
         <Button variant="outline" onClick={q.a.onClick} style={{ flex: 1 }}>{q.a.label}</Button>
         <Button variant="ghost"   onClick={q.b.onClick} style={{ flex: 1 }}>{q.b.label}</Button>
       </div>
@@ -158,133 +151,102 @@ function GuidedMovementTest({
 }
 
 function MovementStep({
-  stepNo,
   scores,
   onScore,
   revealedInsights,
-  startedAtMs,
   onNext,
 }: {
-  stepNo: number
   scores: Record<string, number | null>
   onScore: (key: string, score: number) => void
   revealedInsights: InsightRow[]
-  startedAtMs: number
   onNext: () => void
 }) {
   const allScored = MOVEMENT_PATTERNS.every((p) => scores[p.key] !== null)
   const [guidedKey, setGuidedKey] = useState<string | null>(null)
-
-  // Tick the "STARTED" relative time every second.
-  const [, setNow] = useState(0)
-  useEffect(() => {
-    const id = setInterval(() => setNow((n) => n + 1), 1000)
-    return () => clearInterval(id)
-  }, [])
+  const [explainKey, setExplainKey] = useState<string | null>(null)
 
   const scoredCount = MOVEMENT_PATTERNS.filter((p) => scores[p.key] !== null).length
   const weakLinkCount = MOVEMENT_PATTERNS.filter((p) => (scores[p.key] ?? 3) < 2).length
   const emergingCategory = detectEmergingCategory(scores)
 
+  const explain = MOVEMENT_PATTERNS.find((p) => p.key === explainKey) ?? null
+
   return (
     <div>
-      {/* Live screening telemetry — converts the form into an observed event.
-          One presence dot per screen lives here. */}
-      <div className="telemetry-strip" style={{ marginLeft: -20, marginRight: -20, marginBottom: 20, marginTop: -24 }}>
-        <span className="telemetry-strip__item"><PresenceDot /></span>
-        <span className="telemetry-strip__sep">·</span>
-        <span className="telemetry-strip__item">SCREENING <span className="num">{scoredCount}/7</span></span>
-        <span className="telemetry-strip__sep">·</span>
-        <span className={`telemetry-strip__item${weakLinkCount > 0 ? ' telemetry-strip__signal' : ''}`}>
-          WEAK LINKS <TickingNumber value={weakLinkCount} className="num" />
-        </span>
-        <span className="telemetry-strip__sep">·</span>
-        <span className="telemetry-strip__item">STARTED {relativeFrom(startedAtMs)}</span>
+      {/* Progress, drawn. This replaces a mono telemetry strip reading
+          "SCREENING 3/7 · WEAK LINKS 1 · STARTED 2m ago" — of which only the
+          first number meant anything to the person filling the form. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 22 }}>
+        <Ring value={scoredCount / MOVEMENT_PATTERNS.length} size={56} stroke={5}>
+          <span style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{scoredCount}</span>
+          <span className="text-micro text-dim">of {MOVEMENT_PATTERNS.length}</span>
+        </Ring>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h1 className="screen-title" style={{ fontSize: 'var(--fs-xl)' }}>How you move</h1>
+          <p className="text-xs text-dim" style={{ marginTop: 3 }}>
+            {scoredCount === 0 ? 'Tap “Test me” — I’ll walk you through each one.'
+              : weakLinkCount > 0 ? `${weakLinkCount} weak ${weakLinkCount === 1 ? 'link' : 'links'} so far`
+              : 'Clean so far'}
+          </p>
+        </div>
       </div>
-
-      <SectionHeader>{String(stepNo).padStart(2, '0')} // FIND YOUR WEAKNESSES</SectionHeader>
-      <p className="text-dim" style={{ marginTop: 8, marginBottom: 16, fontSize: 13, lineHeight: 1.6 }}>
-        How you move determines what you can load. Tap
-        <span className="text-signal"> Test me</span> on any pattern and we'll walk you through it with
-        yes/no questions — or score it yourself.
-      </p>
 
       {/* Pattern emerging callout — the system is thinking as you go. */}
       {emergingCategory && (
-        <p className="fade-rise" style={{ fontSize: 13, color: 'var(--text-dim)', marginBottom: 16, lineHeight: 1.6 }}>
-          <span className="num text-signal">PATTERN EMERGING — </span>
-          your {emergingCategory.toLowerCase()} looks like the bigger story.
-        </p>
+        <div className="fade-rise" style={{ marginBottom: 18 }}>
+          <Chip tone="doing">Pattern emerging</Chip>
+          <p className="text-sm text-dim" style={{ marginTop: 8 }}>
+            Your {emergingCategory.toLowerCase()} looks like the bigger story.
+          </p>
+        </div>
       )}
 
-      {/* Scoring rubric */}
-      <div
-        style={{
-          display: 'flex', flexDirection: 'column', gap: 4,
-          padding: '12px 14px', background: 'var(--surface)',
-          border: '1px solid var(--line)', borderRadius: 8, marginBottom: 24,
-        }}
-      >
-        <span className="text-xs text-dim"><span className="num text-signal">0</span> — pain anywhere in the movement</span>
-        <span className="text-xs text-dim"><span className="num text-signal">1</span> — can't complete it</span>
-        <span className="text-xs text-dim"><span className="num text-signal">2</span> — complete it, but with compensation or wobble</span>
-        <span className="text-xs text-dim"><span className="num text-signal">3</span> — clean, controlled, no compensation</span>
-      </div>
-
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
         {MOVEMENT_PATTERNS.map((pattern) => {
-          const scored = scores[pattern.key] !== null
+          const score = scores[pattern.key]
+          const scored = score !== null
           const guided = guidedKey === pattern.key
           return (
-            <div key={pattern.key}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 }}>
-                <span style={{ fontSize: 14, fontWeight: 500 }}>{pattern.label}</span>
-                <span className="text-xs text-dim">{pattern.category}</span>
+            <div key={pattern.key} className="card">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <p style={{ fontSize: 'var(--fs-lg)', fontWeight: 700, lineHeight: 1.3 }}>{pattern.label}</p>
+                  <p className="text-xs text-dim" style={{ marginTop: 2 }}>{pattern.category}</p>
+                </div>
+                {scored && (
+                  <Chip tone={score! < 2 ? 'pending' : 'done'}>{score}/3</Chip>
+                )}
+                {/* The what-is-this / how-to prose used to sit inline under
+                    every pattern — two paragraphs × seven patterns before you
+                    could score anything. It's one tap away instead. */}
+                <button
+                  type="button"
+                  className="sheet-close"
+                  style={{ margin: 0, width: 36, height: 36 }}
+                  aria-label={`About ${pattern.label}`}
+                  onClick={() => setExplainKey(pattern.key)}
+                >
+                  <HelpCircle size={18} strokeWidth={2} />
+                </button>
               </div>
-              {PATTERN_GUIDE[pattern.key] && (
-                <p className="text-xs text-dim" style={{ marginBottom: 8, lineHeight: 1.5 }}>
-                  {PATTERN_GUIDE[pattern.key]}
-                </p>
-              )}
-
-              {/* How to do it — visible up front, not buried behind "Test me", so
-                  an unfamiliar movement is never a guess. The guided flow repeats
-                  the setup at the top, so we hide this line while it's open. */}
-              {!guided && PATTERN_TEST[pattern.key] && (
-                <p className="text-xs" style={{ marginBottom: 8, lineHeight: 1.5 }}>
-                  <span className="num text-signal" style={{ fontSize: 10, letterSpacing: '0.08em' }}>HOW</span>{' '}
-                  <span className="text-dim">{PATTERN_TEST[pattern.key].setup}</span>
-                </p>
-              )}
 
               {guided ? (
                 <GuidedMovementTest
                   patternKey={pattern.key}
                   onResolve={(s) => { onScore(pattern.key, s); setGuidedKey(null) }}
                 />
-              ) : !scored ? (
-                <>
-                  {/* Test me is the primary affordance for unfamiliar patterns. */}
-                  <Button variant="outline" full onClick={() => setGuidedKey(pattern.key)}>
-                    Test me — walk me through it →
-                  </Button>
-                  <p className="text-xs text-dim" style={{ margin: '10px 0 6px' }}>
-                    Already know it? Score it yourself.
-                  </p>
-                  <ScorePicker value={null} onChange={(s) => onScore(pattern.key, s)} />
-                </>
               ) : (
-                <>
-                  <ScorePicker value={scores[pattern.key]} onChange={(s) => onScore(pattern.key, s)} />
-                  <button
-                    type="button"
-                    onClick={() => setGuidedKey(pattern.key)}
-                    className="text-xs text-dim link-button"
-                    style={{ marginTop: 6, background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
-                  >
-                    Re-test — walk me through it →
-                  </button>
-                </>
+                <div style={{ marginTop: 14 }}>
+                  <Button variant={scored ? 'ghost' : 'outline'} full onClick={() => setGuidedKey(pattern.key)}>
+                    {scored ? 'Re-test' : 'Test me →'}
+                  </Button>
+                  {!scored && (
+                    <div style={{ marginTop: 12 }}>
+                      <p className="text-xs text-dim" style={{ marginBottom: 8 }}>Or score it yourself</p>
+                      <ScorePicker value={null} onChange={(s) => onScore(pattern.key, s)} />
+                    </div>
+                  )}
+                </div>
               )}
             </div>
           )
@@ -294,66 +256,112 @@ function MovementStep({
       {/* Micro-reveal: insights surface as patterns are scored */}
       {revealedInsights.length > 0 && (
         <div style={{ marginTop: 28 }}>
-          <p className="text-xs text-dim" style={{ marginBottom: 12, letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-            Weak link identified
-          </p>
-          {revealedInsights.map((ins, i) => (
-            <InsightReveal key={ins.id} insight={ins} index={i} />
-          ))}
+          <SectionHeader>Weak link identified</SectionHeader>
+          <div style={{ marginTop: 10 }}>
+            {revealedInsights.map((ins, i) => (
+              <InsightReveal key={ins.id} insight={ins} index={i} />
+            ))}
+          </div>
         </div>
       )}
 
-      <div style={{ marginTop: 32 }}>
+      <div style={{ marginTop: 28 }}>
         <Button variant="primary" full disabled={!allScored} onClick={onNext}>
-          Continue →
+          {allScored ? 'Continue →' : `${MOVEMENT_PATTERNS.length - scoredCount} left`}
         </Button>
       </div>
+
+      {explain && (
+        <Sheet title={explain.label} subtitle={explain.category} onClose={() => setExplainKey(null)}>
+          {PATTERN_GUIDE[explain.key] && (
+            <>
+              <p className="section-header" style={{ marginBottom: 8 }}>Why it matters</p>
+              <p className="text-base" style={{ lineHeight: 1.55, marginBottom: 22 }}>{PATTERN_GUIDE[explain.key]}</p>
+            </>
+          )}
+          {PATTERN_TEST[explain.key] && (
+            <>
+              <p className="section-header" style={{ marginBottom: 8 }}>How to test it</p>
+              <p className="text-base" style={{ lineHeight: 1.55, marginBottom: 22 }}>{PATTERN_TEST[explain.key].setup}</p>
+              <p className="section-header" style={{ marginBottom: 8 }}>A clean rep looks like</p>
+              <p className="text-base" style={{ lineHeight: 1.55, marginBottom: 22 }}>{PATTERN_TEST[explain.key].clean}</p>
+            </>
+          )}
+          <p className="section-header" style={{ marginBottom: 10 }}>The 0–3 scale</p>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {[
+              ['0', 'Pain anywhere in the movement'],
+              ['1', "Can't complete it"],
+              ['2', 'Complete it, but with compensation or wobble'],
+              ['3', 'Clean and controlled'],
+            ].map(([n, text]) => (
+              <div key={n} style={{ display: 'flex', gap: 12 }}>
+                <span className="num text-signal" style={{ fontWeight: 700, flexShrink: 0 }}>{n}</span>
+                <span className="text-base" style={{ lineHeight: 1.5 }}>{text}</span>
+              </div>
+            ))}
+          </div>
+        </Sheet>
+      )}
     </div>
   )
 }
 
 function StrengthStep({
-  stepNo, data, onChange, onNext, onBack,
+  data, onChange, onNext, onBack,
 }: {
-  stepNo: number
   data: StrengthData
   onChange: (key: keyof StrengthData, val: string) => void
   onNext: () => void
   onBack: () => void
 }) {
-  const fields: Array<{ key: keyof StrengthData; label: string; placeholder: string }> = [
-    { key: 'squat_1rm_est', label: 'Back Squat — estimated 1RM (kg)', placeholder: '0' },
-    { key: 'hinge_1rm_est', label: 'Hip Hinge / Deadlift — estimated 1RM (kg)', placeholder: '0' },
-    { key: 'push_1rm_est',  label: 'Press (Bench or Push Press) — estimated 1RM (kg)', placeholder: '0' },
-    { key: 'pull_1rm_est',  label: 'Pull (Row or Pull-Up) — estimated 1RM (kg)', placeholder: '0' },
-    { key: 'plank_secs',    label: 'Plank hold — seconds', placeholder: '0' },
+  // The unit the athlete actually trains in. These fields were hard-coded to kg
+  // while the rest of the app defaults to lb, so a lifter typing "225" was
+  // recorded as 225 kg.
+  const unit = getWeightUnit()
+  const fields: Array<{ key: keyof StrengthData; label: string; suffix: string }> = [
+    { key: 'squat_1rm_est', label: 'Back Squat', suffix: unit },
+    { key: 'hinge_1rm_est', label: 'Deadlift / hinge', suffix: unit },
+    { key: 'push_1rm_est',  label: 'Press', suffix: unit },
+    { key: 'pull_1rm_est',  label: 'Pull / row', suffix: unit },
+    { key: 'plank_secs',    label: 'Plank hold', suffix: 'sec' },
   ]
 
   return (
     <div>
-      <SectionHeader>{String(stepNo).padStart(2, '0')} // STRENGTH BASELINES</SectionHeader>
-      <p className="text-dim" style={{ marginTop: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.6 }}>
-        Strength baselines next. Approximate is fine — these set your starting load, not your max.
-        Leave at 0 if untested.
+      <h1 className="screen-title" style={{ fontSize: 'var(--fs-xl)' }}>Rough numbers</h1>
+      <p className="text-sm text-dim" style={{ marginTop: 6, marginBottom: 24 }}>
+        Estimated 1-rep maxes. Approximate is fine — leave blank if untested.
       </p>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-        {fields.map(({ key, label, placeholder }) => (
-          <div key={key}>
-            <label className="text-xs text-dim" style={{ display: 'block', marginBottom: 6 }}>{label}</label>
-            <Input
-              type="number"
-              inputMode="decimal"
-              placeholder={placeholder}
-              value={data[key]}
-              onChange={(e) => onChange(key, e.target.value)}
-              mono
-            />
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {fields.map(({ key, label, suffix }) => (
+          <div
+            key={key}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 14,
+              padding: '12px 0', borderBottom: '1px solid var(--line)',
+            }}
+          >
+            <label htmlFor={key} className="text-base" style={{ flex: 1, minWidth: 0 }}>{label}</label>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <Input
+                id={key}
+                type="number"
+                inputMode="decimal"
+                placeholder="—"
+                value={data[key]}
+                onChange={(e) => onChange(key, e.target.value)}
+                mono
+                style={{ width: 96, textAlign: 'center' }}
+              />
+              <span className="text-xs text-dim" style={{ width: 26 }}>{suffix}</span>
+            </div>
           </div>
         ))}
       </div>
 
-      <div style={{ marginTop: 32, display: 'flex', gap: 8 }}>
+      <div style={{ marginTop: 32, display: 'flex', gap: 10 }}>
         <Button variant="ghost" onClick={onBack} style={{ flex: 1 }}>← Back</Button>
         <Button variant="primary" onClick={onNext} style={{ flex: 2 }}>Continue →</Button>
       </div>
@@ -362,9 +370,8 @@ function StrengthStep({
 }
 
 function SubjectiveStep({
-  stepNo, data, onChange, onSubmit, onBack, saving,
+  data, onChange, onSubmit, onBack, saving,
 }: {
-  stepNo: number
   data: SubjectiveData
   onChange: (key: keyof SubjectiveData, val: number | string) => void
   onSubmit: () => void
@@ -379,18 +386,18 @@ function SubjectiveStep({
 
   return (
     <div>
-      <SectionHeader>{String(stepNo).padStart(2, '0')} // READINESS</SectionHeader>
-      <p className="text-dim" style={{ marginTop: 8, marginBottom: 24, fontSize: 13, lineHeight: 1.6 }}>
-        Last check — how you're showing up today. Calibrates day-one load to where you actually are.
+      <h1 className="screen-title" style={{ fontSize: 'var(--fs-xl)' }}>Today</h1>
+      <p className="text-sm text-dim" style={{ marginTop: 6, marginBottom: 26 }}>
+        How you're showing up right now.
       </p>
 
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 26 }}>
         {scaleFields.map(({ key, label, anchor }) => (
           <div key={key}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8 }}>
-              <span style={{ fontSize: 14 }}>{label}</span>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10, gap: 10 }}>
+              <span className="text-base" style={{ fontWeight: 600 }}>{label}</span>
               {data[key] !== null ? (
-                <span className="num text-signal" style={{ fontSize: 14 }}>{data[key]}/3</span>
+                <span className="num text-signal text-base">{data[key]}/3</span>
               ) : (
                 <span className="text-xs text-dim">{anchor}</span>
               )}
@@ -400,12 +407,12 @@ function SubjectiveStep({
         ))}
 
         <div>
-          <label className="text-xs text-dim" style={{ display: 'block', marginBottom: 6 }}>
-            Pain or discomfort — describe or write "none"
+          <label className="text-base" style={{ display: 'block', marginBottom: 10, fontWeight: 600 }}>
+            Anything hurting?
           </label>
           <textarea
             className="input"
-            placeholder="e.g. Mild left knee ache, or: none"
+            placeholder="Mild left knee ache — or just: none"
             value={data.pain}
             onChange={(e) => onChange('pain', e.target.value)}
             rows={2}
@@ -413,7 +420,7 @@ function SubjectiveStep({
         </div>
       </div>
 
-      <div style={{ marginTop: 32, display: 'flex', gap: 8 }}>
+      <div style={{ marginTop: 32, display: 'flex', gap: 10 }}>
         <Button variant="ghost" onClick={onBack} style={{ flex: 1 }} disabled={saving}>← Back</Button>
         <Button variant="primary" onClick={onSubmit} style={{ flex: 2 }} disabled={saving || !data.pain.trim()}>
           {saving ? (
@@ -443,7 +450,6 @@ interface ScreeningProps {
 
 export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onComplete, onExit }: ScreeningProps) {
   const [step, setStep] = useState<Step>('movement')
-  const startedAtRef = useRef<number>(Date.now())
 
   const [movementScores, setMovementScores] = useState<Record<string, number | null>>(
     () => Object.fromEntries(MOVEMENT_PATTERNS.map((p) => [p.key, null])),
@@ -529,8 +535,9 @@ export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onCom
   )
 
   const stepForIndex: Step = step === 'saving' ? 'subjective' : step
+  // Position in the flow is carried by the step-indicator dots in the header;
+  // each step no longer prints its own "02 // STRENGTH BASELINES" heading.
   const currentStepIndex = Math.max(0, activeSteps.indexOf(stepForIndex))
-  const stepNo = (s: Step) => activeSteps.indexOf(s) + 1
 
   function goNext() {
     const next = activeSteps[activeSteps.indexOf(stepForIndex) + 1]
@@ -570,18 +577,15 @@ export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onCom
       <div style={{ flex: 1, padding: '24px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
         {step === 'movement' && (
           <MovementStep
-            stepNo={stepNo('movement')}
             scores={movementScores}
             onScore={handleMovementScore}
             revealedInsights={revealedInsights}
-            startedAtMs={startedAtRef.current}
             onNext={goNext}
           />
         )}
 
         {step === 'strength' && plan.includeStrength && (
           <StrengthStep
-            stepNo={stepNo('strength')}
             data={strength}
             onChange={(k, v) => setStrength((prev) => ({ ...prev, [k]: v }))}
             onNext={goNext}
@@ -591,7 +595,6 @@ export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onCom
 
         {(step === 'subjective' || step === 'saving') && (
           <SubjectiveStep
-            stepNo={stepNo('subjective')}
             data={subjective}
             onChange={(k, v) => setSubjective((prev) => ({ ...prev, [k]: v }))}
             onSubmit={handleSubmit}

@@ -1,7 +1,8 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Target, CalendarDays, Scale, Activity, LogOut } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
+import { useCachedLoader } from '../../lib/cache'
 import { getWeightUnit, setWeightUnit, type WeightUnit } from '../../lib/units'
 import {
   PageHeader, SectionHeader, Skeleton, Button, Input, Row, Sheet,
@@ -36,10 +37,29 @@ const FIELD_TITLE: Record<EditField, string> = {
  * settings list where every value is a row you can tap and change, and each
  * edit opens a focused sheet instead of expanding the page.
  */
+async function fetchMeta(athleteId: string): Promise<Meta> {
+  const { data, error } = await supabase
+    .from('athlete')
+    .select('sessions_per_week, training_age, goals')
+    .eq('id', athleteId)
+    .maybeSingle()
+  if (error) throw error
+  return (data as Meta | null) ?? { sessions_per_week: null, training_age: null, goals: null }
+}
+
 export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   const navigate = useNavigate()
-  const [meta, setMeta] = useState<Meta | null>(null)
-  const [loading, setLoading] = useState(true)
+  // Offline-first like every other loop screen: paint the last synced values
+  // instantly, revalidate behind. Reading this straight off the network left
+  // the whole screen on skeletons with no signal — which is exactly where a
+  // phone-only athlete usually is.
+  const { data: fetched, loading, refetch } = useCachedLoader(
+    `profile:${athleteId}`,
+    () => fetchMeta(athleteId),
+  )
+  // Local overlay so an edit shows immediately, before the refetch lands.
+  const [override, setOverride] = useState<Partial<Meta>>({})
+  const meta: Meta | null = fetched ? { ...fetched, ...override } : null
   const [unit, setUnit] = useState<WeightUnit>(() => getWeightUnit())
 
   const [editing, setEditing] = useState<EditField | null>(null)
@@ -65,25 +85,6 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     }
   }
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const { data } = await supabase
-        .from('athlete')
-        .select('sessions_per_week, training_age, goals')
-        .eq('id', athleteId)
-        .maybeSingle()
-      setMeta(data as Meta | null)
-    } catch {
-      // Offline: leave whatever we have rather than spinning forever. The old
-      // version had no catch, so a failed request left the screen on skeletons.
-    } finally {
-      setLoading(false)
-    }
-  }, [athleteId])
-
-  useEffect(() => { void load() }, [load])
-
   function openEdit(field: EditField) {
     setDraft(
       field === 'target' ? (meta?.goals ?? '')
@@ -108,8 +109,9 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
       editing === 'target' ? { goals: draft.trim() || null }
       : editing === 'sessions' ? { sessions_per_week: clampInt(draft, 1, 7) }
       : { training_age: clampInt(draft, 0, 60) }
+    setOverride((o) => ({ ...o, ...patch }))
     await supabase.from('athlete').update(patch).eq('id', athleteId)
-    setMeta((m) => (m ? { ...m, ...patch } as Meta : m))
+    refetch()
     setSaving(false)
     setEditing(null)
   }

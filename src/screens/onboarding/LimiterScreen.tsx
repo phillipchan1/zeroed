@@ -54,27 +54,16 @@ export function LimiterScreen({
   return (
     <div className="screen--centered">
       <div style={{ width: '100%', maxWidth: 460 }}>
-        <p className="section-header fade-rise" style={{ marginBottom: 14, textAlign: 'center' }}>
-          THE WEDGE
-        </p>
         <h1
-          className="fade-rise fade-rise-delay-1"
-          style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 22,
-            fontWeight: 700,
-            letterSpacing: '-0.01em',
-            lineHeight: 1.3,
-            textAlign: 'center',
-            marginBottom: 24,
-          }}
+          className="fade-rise screen-title"
+          style={{ textAlign: 'center', marginBottom: 28 }}
         >
           {q.question}
         </h1>
 
         <div
           className="fade-rise fade-rise-delay-2"
-          style={{ display: 'flex', flexDirection: 'column', gap: 8 }}
+          style={{ display: 'flex', flexDirection: 'column', gap: 10 }}
         >
           {q.options.map((opt) => {
             const isSel = choice === opt.axis
@@ -90,8 +79,9 @@ export function LimiterScreen({
                 onClick={() => setChoice(isSel ? null : opt.axis)}
                 style={{
                   textAlign: 'left',
-                  padding: '14px 16px',
-                  borderRadius: 10,
+                  minHeight: 72,
+                  padding: '16px 18px',
+                  borderRadius: 12,
                   background: isSel ? 'rgba(232,204,10,0.06)' : 'var(--surface)',
                   border: `1px solid ${isSel ? 'var(--signal)' : 'var(--line)'}`,
                   cursor: 'pointer',
@@ -100,16 +90,15 @@ export function LimiterScreen({
               >
                 <div
                   style={{
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 14,
+                    fontSize: 'var(--fs-lg)',
                     fontWeight: 700,
                     color: isSel ? 'var(--signal)' : 'var(--text)',
-                    marginBottom: 4,
+                    marginBottom: 5,
                   }}
                 >
                   {opt.label}
                 </div>
-                <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.35 }}>
+                <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text-dim)', lineHeight: 1.4 }}>
                   {resolved.label}
                 </div>
               </button>
@@ -121,13 +110,13 @@ export function LimiterScreen({
         <textarea
           className="input fade-rise fade-rise-delay-3"
           value={obstacle}
-          placeholder="Anything specific getting in the way? (optional)"
+          placeholder="Anything specific in the way? (optional)"
           onChange={(e) => setObstacle(e.target.value)}
           rows={2}
-          style={{ marginTop: 16, fontSize: 14, lineHeight: 1.5 }}
+          style={{ marginTop: 16, lineHeight: 1.5 }}
         />
 
-        <div className="fade-rise fade-rise-delay-4" style={{ marginTop: 20 }}>
+        <div className="fade-rise fade-rise-delay-4" style={{ marginTop: 24 }}>
           <Button variant="primary" full disabled={!choice} onClick={handleContinue}>
             Continue →
           </Button>

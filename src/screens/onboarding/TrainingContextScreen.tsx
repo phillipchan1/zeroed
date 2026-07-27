@@ -1,4 +1,4 @@
-import { Logo, Button, SectionHeader } from '../../components/ui'
+import { Logo, Button } from '../../components/ui'
 
 /**
  * Screen 05 · Training Context
@@ -26,15 +26,15 @@ export function TrainingContextScreen({
 
       <div style={{ flex: 1, padding: '32px 20px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
         <div className="fade-rise">
-          <SectionHeader>ORIENTATION</SectionHeader>
-          <h1 className="hero-headline" style={{ fontSize: 24, marginTop: 10, marginBottom: 32 }}>
+          <p className="eyebrow" style={{ marginBottom: 10 }}>Orientation</p>
+          <h1 className="hero-headline" style={{ marginBottom: 36 }}>
             How you train now.
           </h1>
         </div>
 
-        <div className="fade-rise fade-rise-delay-1" style={{ display: 'flex', flexDirection: 'column', gap: 36 }}>
+        <div className="fade-rise fade-rise-delay-1" style={{ display: 'flex', flexDirection: 'column', gap: 40 }}>
           <Slider
-            label="TRAINING AGE"
+            label="Training age"
             value={trainingAge}
             min={0}
             max={25}
@@ -42,7 +42,7 @@ export function TrainingContextScreen({
             onChange={(v) => onChange('trainingAge', v)}
           />
           <Slider
-            label="SESSIONS / WEEK"
+            label="Sessions / week"
             value={sessions}
             min={1}
             max={7}
@@ -77,14 +77,9 @@ function Slider({
 }) {
   return (
     <div>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 14 }}>
-        <span
-          className="num text-dim"
-          style={{ fontSize: 11, letterSpacing: '0.08em', textTransform: 'uppercase' }}
-        >
-          {label}
-        </span>
-        <span className="num text-signal" style={{ fontSize: 18, fontWeight: 600 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+        <span className="section-header">{label}</span>
+        <span className="num text-signal" style={{ fontSize: 'var(--fs-2xl)', fontWeight: 700 }}>
           {display}
         </span>
       </div>

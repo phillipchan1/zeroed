@@ -164,10 +164,10 @@ export function ConvergenceReticle({
 
       {showLabel && (
         <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, fontFamily: 'var(--font-mono)' }}>
-          <span style={{ fontSize: 11, letterSpacing: '0.12em', color: locked ? accent : 'var(--text-dim)' }}>
+          <span style={{ fontSize: 'var(--fs-micro)', letterSpacing: '0.12em', color: locked ? accent : 'var(--text-dim)' }}>
             {CONVERGENCE_LABEL[state]}
           </span>
-          <span className="num" style={{ fontSize: 11, color: 'var(--text-dim)' }}>
+          <span className="num" style={{ fontSize: 'var(--fs-micro)', color: 'var(--text-dim)' }}>
             {Math.round(agg * 100)}%{state === 'zeroed_in' ? ' · STILL SHARPENING' : ''}
           </span>
         </div>

@@ -248,10 +248,10 @@ export function ComputeScreen({ athleteId, results, onComplete }: ComputeProps) 
               key={i}
               style={{
                 fontFamily: 'var(--font-mono)',
-                fontSize: 14,
+                fontSize: 'var(--fs-base)',
                 letterSpacing: '0.02em',
                 color: 'var(--text-dim)',
-                lineHeight: 1.4,
+                lineHeight: 1.5,
               }}
             >
               <span style={{ color: 'var(--signal)' }}>{'> '}</span>

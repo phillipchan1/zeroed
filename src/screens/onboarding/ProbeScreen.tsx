@@ -145,7 +145,7 @@ function ReadingBeat({ lines }: { lines: string[] }) {
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0 24px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {lines.slice(0, visible).map((line, i) => (
-            <p key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 14, letterSpacing: '0.02em', color: 'var(--text-dim)', lineHeight: 1.4 }}>
+            <p key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-base)', letterSpacing: '0.02em', color: 'var(--text-dim)', lineHeight: 1.5 }}>
               <span style={{ color: 'var(--signal)' }}>{'> '}</span>
               <TypeOn text={line} delay={60} />
             </p>
@@ -172,13 +172,10 @@ function FollowupQuestion({
   return (
     <div className="screen--centered">
       <div style={{ width: '100%', maxWidth: 420 }}>
-        <p className="section-header fade-rise" style={{ marginBottom: 16, textAlign: 'center' }}>
-          ONE MORE THING
+        <p className="eyebrow fade-rise" style={{ marginBottom: 16, textAlign: 'center' }}>
+          One more thing
         </p>
-        <h1
-          className="fade-rise fade-rise-delay-1"
-          style={{ fontFamily: 'var(--font-mono)', fontSize: 20, fontWeight: 700, letterSpacing: '-0.01em', lineHeight: 1.3, textAlign: 'center', marginBottom: 24 }}
-        >
+        <h1 className="fade-rise fade-rise-delay-1 screen-title" style={{ textAlign: 'center', marginBottom: 28 }}>
           {question}
         </h1>
         <textarea
@@ -188,20 +185,15 @@ function FollowupQuestion({
           rows={3}
           autoFocus
           placeholder="A sentence is plenty."
-          style={{ fontSize: 15, lineHeight: 1.5 }}
+          style={{ lineHeight: 1.5 }}
         />
-        <div className="fade-rise fade-rise-delay-3" style={{ marginTop: 24 }}>
+        <div className="fade-rise fade-rise-delay-3" style={{ marginTop: 28 }}>
           <Button variant="primary" full disabled={!value.trim()} onClick={onContinue}>
             Continue →
           </Button>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            style={{ width: '100%', marginTop: 8, color: 'var(--text-dim)' }}
-            onClick={onSkip}
-          >
-            Skip — go on the read so far
-          </button>
+          <Button variant="ghost" full style={{ marginTop: 8 }} onClick={onSkip}>
+            Skip
+          </Button>
         </div>
       </div>
     </div>
@@ -216,14 +208,12 @@ function AxisRow({ axis, index }: { axis: ReadAxis; index: number }) {
     return () => clearTimeout(id)
   }, [pct, index])
   return (
-    <div style={{ padding: '12px 0', borderTop: index === 0 ? 'none' : '1px solid var(--line)' }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6 }}>
-        <span style={{ fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.08em', color: 'var(--text-dim)' }}>
-          {axis.label.toUpperCase()} · {axis.category.toUpperCase()}
-        </span>
-        <span className="num" style={{ fontFamily: 'var(--font-mono)', fontSize: 11, color: 'var(--text-dim)' }}>{pct}%</span>
+    <div style={{ padding: '16px 0', borderTop: index === 0 ? 'none' : '1px solid var(--line)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 8, gap: 10 }}>
+        <span className="section-header">{axis.label}</span>
+        <span className="num text-sm text-signal">{pct}%</span>
       </div>
-      <p className="text-sm" style={{ lineHeight: 1.45, marginBottom: 8 }}>{axis.claim}</p>
+      <p className="text-base" style={{ lineHeight: 1.5, marginBottom: 12 }}>{axis.claim}</p>
       <div className="confidence-meter__track">
         <div className="confidence-meter__fill" style={{ width: `${w}%`, transition: 'width .9s ease' }} />
       </div>
@@ -245,8 +235,8 @@ function Reveal({ read, onSave }: { read: ReadSynthesis; onSave: () => void }) {
         <Logo />
       </div>
 
-      <div style={{ flex: 1, padding: '32px 20px', maxWidth: 520, margin: '0 auto', width: '100%' }}>
-        <p className="section-header fade-rise" style={{ marginBottom: 16, textAlign: 'center' }}>YOUR FIRST READ</p>
+      <div style={{ flex: 1, padding: '32px 20px 40px', maxWidth: 520, margin: '0 auto', width: '100%' }}>
+        <p className="eyebrow fade-rise" style={{ marginBottom: 16, textAlign: 'center' }}>Your first read</p>
 
         {/* The payoff — the cloud collapses from scattered to the read's real
             tightness on mount (state-driven, not a timer). The convergence visual. */}
@@ -259,20 +249,20 @@ function Reveal({ read, onSave }: { read: ReadSynthesis; onSave: () => void }) {
           />
         </div>
 
-        <h1 className="hero-headline fade-rise fade-rise-delay-2" style={{ marginBottom: 4, textAlign: 'center' }}>
+        <h1 className="hero-headline fade-rise fade-rise-delay-2" style={{ marginBottom: 8, textAlign: 'center' }}>
           Here's the read.
         </h1>
-        <p className="hero-characterization fade-rise fade-rise-delay-2" style={{ marginBottom: 20, textAlign: 'center' }}>
-          Three answers, a read across {axes.length} axes. It's a hypothesis — every session you log sharpens it.
+        <p className="text-base text-dim fade-rise fade-rise-delay-2" style={{ marginBottom: 24, textAlign: 'center' }}>
+          A hypothesis. Every session you log sharpens it.
         </p>
 
-        <div className="card--data fade-rise fade-rise-delay-3" style={{ padding: '4px 16px' }}>
+        <div className="card fade-rise fade-rise-delay-3" style={{ padding: '4px 20px' }}>
           {axes.map((axis, i) => (
             <AxisRow key={axis.id} axis={axis} index={i} />
           ))}
         </div>
 
-        <div className="fade-rise fade-rise-delay-4" style={{ marginTop: 28 }}>
+        <div className="fade-rise fade-rise-delay-4" style={{ marginTop: 32 }}>
           <Button variant="primary" full onClick={onSave}>
             Save your read →
           </Button>

@@ -111,7 +111,7 @@ export function CalibrateScreen({ athleteId, profile, onComplete }: CalibratePro
       <div style={{ flex: 1, display: 'flex', flexDirection: 'column', justifyContent: 'center', padding: '0 24px', maxWidth: 480, margin: '0 auto', width: '100%' }}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {LINES.slice(0, visibleLines).map((line, i) => (
-            <p key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 14, letterSpacing: '0.02em', color: 'var(--text-dim)', lineHeight: 1.4 }}>
+            <p key={i} style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-base)', letterSpacing: '0.02em', color: 'var(--text-dim)', lineHeight: 1.5 }}>
               <span style={{ color: 'var(--computing)' }}>{'> '}</span>
               <TypeOn text={line} delay={60} />
             </p>

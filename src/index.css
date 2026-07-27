@@ -231,7 +231,7 @@ body {
 .funnel-brand__tag {
   margin-top: 22px;
   font-family: var(--font-mono);
-  font-size: 13px;
+  font-size: var(--fs-sm);
   line-height: 1.7;
   letter-spacing: 0.02em;
   color: var(--text-dim);
@@ -242,7 +242,7 @@ body {
   align-items: center;
   gap: 8px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.12em;
   color: var(--text-dim);
 }
@@ -420,14 +420,6 @@ textarea.input {
   color: var(--signal);
 }
 
-/* Inline text-action button (e.g. "Test me" on the movement screen) */
-.link-button {
-  transition: color 0.15s ease;
-}
-.link-button:hover {
-  color: var(--text);
-}
-
 /* --- Priority badges ------------------------------------------------------ */
 
 .badge {
@@ -492,26 +484,12 @@ textarea.input {
   color: var(--line);
 }
 
-/* --- Exercise info button (WorkoutScreen "why" surface) ------------------ */
-.exercise-info-btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  padding: 2px;
-  margin: 0;
-  background: none;
-  border: none;
-  color: var(--text-dim);
-  cursor: pointer;
-  transition: color 0.15s ease;
-}
-.exercise-info-btn:hover { color: var(--signal); }
-
 /* --- Debug reset (DEV only) ----------------------------------------------- */
 .debug-reset {
   position: fixed;
   left: 12px;
-  bottom: calc(12px + env(safe-area-inset-bottom, 0px));
+  /* Clear of the bottom tab bar — it used to sit on top of the Train tab. */
+  bottom: calc(80px + env(safe-area-inset-bottom, 0px));
   z-index: 500;
   display: inline-flex;
   align-items: center;
@@ -904,7 +882,7 @@ textarea.input {
   gap: 8px;
   padding: 12px;
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.12em;
   color: var(--text-dim);
 }
@@ -1237,14 +1215,6 @@ textarea.input {
   border-top-color: var(--signal);
   border-radius: 50%;
   animation: spin 600ms linear infinite;
-}
-
-/* RPE indicator */
-.rpe-label {
-  font-family: var(--font-mono);
-  font-size: 11px;
-  color: var(--text-dim);
-  white-space: nowrap;
 }
 
 /* --- Bottom sheet — the sub-screen primitive ------------------------------
@@ -1681,7 +1651,7 @@ textarea.input {
 
 .rail__head {
   font-family: var(--font-mono);
-  font-size: 10px;
+  font-size: var(--fs-micro);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--text-dim);

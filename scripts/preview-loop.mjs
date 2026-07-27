@@ -171,6 +171,7 @@ const WORKOUT_BOOT = {
 const CACHE = {
   [`app-state:${USER_ID}`]: APP_STATE,
   [`today:${ATHLETE_ID}`]: TODAY_VIEW,
+  [`profile:${ATHLETE_ID}`]: { sessions_per_week: 3, training_age: 8, goals: '315 lb squat' },
   [`weekpager:${ATHLETE_ID}`]: WEEK_PAGER,
   [`program:${ATHLETE_ID}`]: PROGRAM_VIEW,
   [`programmap:${ATHLETE_ID}`]: PROGRAM_MAP,

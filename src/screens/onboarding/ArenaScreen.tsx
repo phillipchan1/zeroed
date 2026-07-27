@@ -53,16 +53,8 @@ export function ArenaScreen({
     <div className="screen--centered">
       <div style={{ width: '100%', maxWidth: 460 }}>
         <h1
-          className="fade-rise"
-          style={{
-            fontFamily: 'var(--font-mono)',
-            fontSize: 24,
-            fontWeight: 700,
-            letterSpacing: '-0.01em',
-            lineHeight: 1.25,
-            textAlign: 'center',
-            marginBottom: 24,
-          }}
+          className="fade-rise screen-title"
+          style={{ textAlign: 'center', marginBottom: 28 }}
         >
           What do you want to be able to do?
         </h1>
@@ -72,7 +64,7 @@ export function ArenaScreen({
           style={{
             display: 'grid',
             gridTemplateColumns: '1fr 1fr',
-            gap: 8,
+            gap: 10,
           }}
         >
           {ARENA_TYPES.map((type) => {
@@ -85,8 +77,9 @@ export function ArenaScreen({
                 onClick={() => setSelected(isSel ? null : type)}
                 style={{
                   textAlign: 'left',
-                  padding: '14px 14px',
-                  borderRadius: 10,
+                  minHeight: 88,
+                  padding: '16px 16px',
+                  borderRadius: 12,
                   background: isSel ? 'rgba(232,204,10,0.06)' : 'var(--surface)',
                   border: `1px solid ${isSel ? 'var(--signal)' : 'var(--line)'}`,
                   cursor: 'pointer',
@@ -95,16 +88,15 @@ export function ArenaScreen({
               >
                 <div
                   style={{
-                    fontFamily: 'var(--font-mono)',
-                    fontSize: 14,
+                    fontSize: 'var(--fs-lg)',
                     fontWeight: 700,
                     color: isSel ? 'var(--signal)' : 'var(--text)',
-                    marginBottom: 4,
+                    marginBottom: 5,
                   }}
                 >
                   {meta.label}
                 </div>
-                <div style={{ fontSize: 12, color: 'var(--text-dim)', lineHeight: 1.35 }}>
+                <div style={{ fontSize: 'var(--fs-xs)', color: 'var(--text-dim)', lineHeight: 1.4 }}>
                   {meta.example}
                 </div>
               </button>
@@ -118,10 +110,10 @@ export function ArenaScreen({
           value={text}
           placeholder={placeholder}
           onChange={(e) => setText(e.target.value)}
-          style={{ marginTop: 12, fontSize: 15 }}
+          style={{ marginTop: 14 }}
         />
 
-        <div className="fade-rise fade-rise-delay-3" style={{ marginTop: 24 }}>
+        <div className="fade-rise fade-rise-delay-3" style={{ marginTop: 28 }}>
           <Button variant="primary" full disabled={!canContinue} onClick={handleContinue}>
             Continue →
           </Button>
