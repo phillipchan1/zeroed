@@ -18,7 +18,9 @@ function normalizeUrl(v: string | undefined): string {
   return withScheme.replace(/\/+$/, '') // drop trailing slash(es)
 }
 
-const supabaseUrl = normalizeUrl(import.meta.env.VITE_SUPABASE_URL) || 'https://placeholder.supabase.co'
+// Exported so the connectivity probe (useOnline.ts) can ask the API we actually
+// depend on whether it's reachable, rather than trusting `navigator.onLine`.
+export const supabaseUrl = normalizeUrl(import.meta.env.VITE_SUPABASE_URL) || 'https://placeholder.supabase.co'
 const supabaseAnonKey = clean(import.meta.env.VITE_SUPABASE_ANON_KEY) || 'placeholder'
 
 if (supabaseUrl.includes('placeholder') || supabaseAnonKey === 'placeholder') {

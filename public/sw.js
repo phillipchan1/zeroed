@@ -96,6 +96,10 @@ self.addEventListener('fetch', (event) => {
   const url = new URL(request.url)
   const sameOrigin = url.origin === self.location.origin
 
+  // Connectivity probes (useOnline.ts) only mean something if they touch the
+  // network — a cached answer would report "online" from a dead connection.
+  if (url.searchParams.has('zeroed-ping')) return
+
   // Cross-origin: only web fonts are cached; everything else (Supabase API,
   // auth, edge functions) goes straight to the network.
   if (!sameOrigin && !isFontRequest(url)) return

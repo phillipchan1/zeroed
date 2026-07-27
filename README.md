@@ -91,9 +91,9 @@ Zeroed is built to load and run on low/no connectivity:
   from the last sync too. Three rules keep the network off the critical path:
   a **freshness window** (a key fetched within 60s isn't refetched), **dedupe**
   (concurrent readers of a key share one in-flight request), and an **offline
-  skip** (revalidation waits for the `online` event rather than burning a
-  request that can only fail). Cache is namespaced by a schema version and
-  cleared on sign-out.
+  skip** (revalidation waits rather than burning a request that can only fail —
+  gated on *verified* connectivity, never on `navigator.onLine`). Cache is
+  namespaced by a schema version and cleared on sign-out.
 - **Instant auth.** `src/hooks/useAuth.ts` hydrates the signed-in athlete
   synchronously from the session Supabase has already persisted, so a returning
   athlete never waits on a token refresh to see the app. `supabase.auth` still
@@ -104,17 +104,28 @@ Zeroed is built to load and run on low/no connectivity:
   ripples (finishing a session, closing the week, a retest) marks every view due
   without any screen knowing about the others. Nothing is dropped, so nothing
   blanks: screens keep painting and refresh behind what they show.
-- **Connectivity surface.** `src/components/OfflineBar.tsx` shows an "offline"
-  strip (so cached data isn't mistaken for live) and a tap-to-refresh prompt
-  when a new build is waiting.
+- **Connectivity surface.** `src/components/OfflineBar.tsx` is a small status
+  pill in the top corner — "offline" (so cached data isn't mistaken for live) and
+  a tap-to-refresh prompt when a new build is waiting. Offline is normal here, so
+  it reads as a badge rather than an alert.
+- **Connectivity is proven, not assumed.** `src/lib/useOnline.ts` is the single
+  source of truth, and it does **not** trust `navigator.onLine`: that flag reads
+  `false` on a healthy iOS home-screen PWA (cold launch, or resume from the
+  background) and WebKit may never fire the `online` event that would correct it.
+  So online is the default and offline is a claim that has to be earned — a real
+  request failing triggers a probe against the Supabase health endpoint, and only
+  two consecutive failed probes flip the state. Any success flips it back
+  immediately, and while offline it keeps re-probing on a timer and on every
+  resume signal, so recovery never waits on a browser event.
 
 > **Writes** are optimistic and durable, not blocking. A finished session is
 > queued to the outbox (`src/lib/workoutOutbox.ts`) before any network call and
 > the app navigates immediately; the commit — and the AI debrief, the one
-> inherently online step — runs behind it and retries on the next `online`
-> event. Queued sessions are folded into the schedule and the week strip, so a
-> session logged offline reads as done straight away. Editing your target is
-> optimistic the same way. Only the AI surfaces (the coach chat, the weekly
+> inherently online step — runs behind it and retries on the next launch, the
+> next `online` event, a verified return to connectivity, or the app coming back
+> to the foreground. Queued sessions are folded into the schedule and the week
+> strip, so a session logged offline reads as done straight away. Editing your
+> target is optimistic the same way. Only the AI surfaces (the coach chat, the weekly
 > review, a retest re-scope) genuinely need a connection.
 
 ### PWA assets

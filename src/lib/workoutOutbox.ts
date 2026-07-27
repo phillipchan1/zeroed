@@ -13,6 +13,7 @@
 import { useEffect } from 'react'
 import { commitSession, type PendingSession, type CommitResult } from '../engine'
 import { invalidateLoopViews } from './loopCache'
+import { isKnownOffline, subscribeOnline } from './useOnline'
 
 const OUTBOX_KEY = 'zeroed:workout-outbox'
 
@@ -104,11 +105,25 @@ export async function flushOutbox(): Promise<void> {
 }
 
 // Flush on mount and whenever connectivity returns. Mount once near the app root.
+//
+// Three triggers, because a finished session sitting unsynced is the worst thing
+// this app can do and the browser's `online` event is not dependable: it never
+// fires at all in some iOS PWA resume paths. So we also flush on a verified
+// connectivity transition, and whenever the app is brought back to the
+// foreground. flushOutbox is a no-op on an empty queue and guards re-entry, so
+// the extra triggers cost nothing.
 export function useOutboxSync(): void {
   useEffect(() => {
-    void flushOutbox()
-    const onOnline = () => { void flushOutbox() }
-    window.addEventListener('online', onOnline)
-    return () => window.removeEventListener('online', onOnline)
+    const flush = () => { void flushOutbox() }
+    flush()
+    const onVisible = () => { if (document.visibilityState === 'visible') flush() }
+    window.addEventListener('online', flush)
+    document.addEventListener('visibilitychange', onVisible)
+    const unsubscribe = subscribeOnline(() => { if (!isKnownOffline()) flush() })
+    return () => {
+      window.removeEventListener('online', flush)
+      document.removeEventListener('visibilitychange', onVisible)
+      unsubscribe()
+    }
   }, [])
 }

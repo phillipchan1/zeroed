@@ -33,6 +33,7 @@
  * new deploy transparently invalidates everything stale.
  */
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { isKnownOffline, reportReachable, reportUnreachable, subscribeOnline } from './useOnline'
 
 // Bump when a cached object's SHAPE changes incompatibly — old entries under
 // the prior version are ignored (and swept on next write).
@@ -202,10 +203,6 @@ export function clearAllCache(): void {
 
 // ---- revalidation ----------------------------------------------------------
 
-function isOffline(): boolean {
-  return typeof navigator !== 'undefined' && navigator.onLine === false
-}
-
 /**
  * Fetch and store a key, subject to the three rules above. Resolves with the
  * value now held (fetched or skipped); rejects only when a fetch was actually
@@ -226,7 +223,12 @@ export function revalidate<T>(
     if (entry && Date.now() - entry.at < freshMs) return Promise.resolve(entry.data)
     // Offline: don't burn a request that can only fail. The `online` listener in
     // useCachedLoader picks this back up the moment connectivity returns.
-    if (isOffline()) return Promise.resolve(entry ? entry.data : null)
+    //
+    // This gate asks the connectivity store, NOT `navigator.onLine` — the flag
+    // reads false on a healthy iOS PWA often enough that trusting it here meant
+    // skipping every revalidation and serving stale data indefinitely. The store
+    // only reports offline once a probe has actually failed.
+    if (isKnownOffline()) return Promise.resolve(entry ? entry.data : null)
   }
 
   // A FORCED read follows a write, so it must not be answered by a request that
@@ -237,7 +239,15 @@ export function revalidate<T>(
     .then(() => loader())
     .then((fresh) => {
       setEntry(key, fresh)
+      // A completed read is the strongest connectivity evidence there is.
+      reportReachable()
       return fresh
+    })
+    .catch((err) => {
+      // Could be offline, could be a bad request — hand it to the connectivity
+      // store to verify, and rethrow so callers still see the failure.
+      reportUnreachable()
+      throw err
     })
     .finally(() => {
       if (inflight.get(key) === run) inflight.delete(key)
@@ -361,15 +371,22 @@ export function useCachedLoader<T>(
     run(false)
 
     // Catch up when the app comes back: connectivity returning, or the athlete
-    // switching back to the tab / re-opening the PWA. Both are freshness-gated,
-    // so a quick detour costs nothing.
+    // switching back to the tab / re-opening the PWA. All are freshness-gated, so
+    // a quick detour costs nothing.
+    //
+    // Both connectivity signals are wired up because they fail in opposite ways:
+    // the browser's `online` event can be missing entirely (iOS PWA), and the
+    // store only fires on a *verified* transition, which never happens if we
+    // never believed we were offline.
     const onOnline = () => run(false)
     const onVisible = () => { if (document.visibilityState === 'visible') run(false) }
     window.addEventListener('online', onOnline)
     document.addEventListener('visibilitychange', onVisible)
+    const unsubscribe = subscribeOnline(() => { if (!isKnownOffline()) run(false) })
     return () => {
       window.removeEventListener('online', onOnline)
       document.removeEventListener('visibilitychange', onVisible)
+      unsubscribe()
     }
   }, [key, run])
 

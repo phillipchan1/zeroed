@@ -164,7 +164,8 @@ export default function App() {
   useDisableShakeToUndo()
   return (
     <BrowserRouter>
-      {/* Connectivity / update bar — fixed, above everything. */}
+      {/* Connectivity / update pill — a corner badge, only when there's something
+          verified to say. */}
       <OfflineBar />
       <AppRoutes />
       {/* DEV-only: wipe onboarding state to re-test the funnel. No-op in prod. */}

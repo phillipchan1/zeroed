@@ -1976,45 +1976,56 @@ textarea.input {
   to   { opacity: 1; transform: none; }
 }
 
-/* ---- Connectivity / update bar -------------------------------------------
-   Offline-first: a quiet, fixed strip that surfaces "you're offline" (cached
-   data is in play) and a tap-to-refresh prompt when a new build is waiting.
-   Non-blocking — the app stays fully usable underneath. */
-.conn-bar {
+/* ---- Connectivity / update pill ------------------------------------------
+   Offline-first means offline is normal, so this is a badge in the corner, not a
+   banner across the top: it names the condition for anyone who looks, and
+   otherwise stays out of the way. The offline pill is inert (pointer-events:
+   none) so it can never intercept a tap meant for the screen beneath it; the
+   update pill is the only interactive one. */
+.conn-pill {
   position: fixed;
-  top: 0;
-  left: 0;
-  right: 0;
+  top: calc(6px + env(safe-area-inset-top, 0px));
+  right: 10px;
   z-index: 1000;
-  display: flex;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
-  gap: 8px;
-  width: 100%;
-  padding: calc(8px + env(safe-area-inset-top, 0px)) 12px 8px;
+  gap: 5px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
-  letter-spacing: 0.04em;
+  line-height: 1.35;
+  letter-spacing: 0.06em;
   text-transform: uppercase;
-  border: none;
-  border-bottom: 1px solid var(--line);
-  animation: conn-bar-in var(--dur-fast, 160ms) var(--ease-out, ease-out);
+  animation: conn-pill-in var(--dur-fast, 160ms) var(--ease-out, ease-out);
 }
-.conn-bar--offline {
-  background: var(--surface);
+.conn-pill--offline {
+  background: rgba(18, 18, 18, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
   color: var(--text-dim);
+  pointer-events: none;
 }
-.conn-bar--update {
+.conn-pill__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex-shrink: 0;
+}
+.conn-pill--update {
   background: var(--signal-dim);
+  border-color: var(--signal);
   color: var(--signal);
   cursor: pointer;
 }
-.conn-bar--update:hover { filter: brightness(1.15); }
-.conn-bar svg { flex-shrink: 0; }
+.conn-pill--update:hover { filter: brightness(1.15); }
+.conn-pill svg { flex-shrink: 0; }
 
-@keyframes conn-bar-in {
-  from { transform: translateY(-100%); opacity: 0; }
-  to   { transform: translateY(0);     opacity: 1; }
+@keyframes conn-pill-in {
+  from { opacity: 0; transform: translateY(-4px); }
+  to   { opacity: 1; transform: none; }
 }
 
 /* ==========================================================================
