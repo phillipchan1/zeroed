@@ -1106,9 +1106,12 @@ textarea.input {
 
 .set-row:last-child { border-bottom: none; }
 
-/* A completed set recedes — the eye lands on the next empty row. */
+/* A completed set recedes — but only its chrome. Dimming the fields made
+   autofilled numbers look like unfilled placeholders, so a logged set and an
+   empty one read the same at a glance. The tint plus the checked box carry it. */
+.set-row--done { background: rgba(232, 204, 10, 0.03); }
 .set-row--done .set-row__input,
-.set-row--done .set-row__rpe { opacity: 0.55; }
+.set-row--done .set-row__rpe { border-color: #232323; }
 
 /* Column templates per tracking type. Mobile omits the Previous column; the
    ≥720px override slots it in (the cell itself is display:none until then). */
@@ -1572,7 +1575,9 @@ textarea.input {
 /* --- Rest timer pill ------------------------------------------------------ */
 .rest-pill {
   position: fixed;
-  bottom: calc(112px + env(safe-area-inset-bottom, 0px));
+  /* Clears the workout footer, which is ~122px tall (day row + 54px CTA +
+     padding). At the old 112px the pill sat on top of the Complete button. */
+  bottom: calc(140px + env(safe-area-inset-bottom, 0px));
   left: 50%;
   transform: translateX(-50%);
   display: flex;
@@ -1609,7 +1614,9 @@ textarea.input {
 .workout-list {
   flex: 1;
   overflow-y: auto;
-  padding: 0 16px 140px;
+  /* Bottom padding clears the fixed footer (~122px) plus the rest pill that
+     floats above it, so the last exercise's chips are never trapped under it. */
+  padding: 0 16px 200px;
 }
 
 .workout-col {

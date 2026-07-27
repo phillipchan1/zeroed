@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Target, CalendarDays, Scale, Activity, LogOut } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
@@ -57,8 +57,12 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     `profile:${athleteId}`,
     () => fetchMeta(athleteId),
   )
-  // Local overlay so an edit shows immediately, before the refetch lands.
+  // Local overlay so an edit shows immediately, before the refetch lands. It's
+  // dropped as soon as fresh server data arrives, so the overlay can never mask
+  // a value changed elsewhere; offline, the refetch never resolves and the
+  // overlay correctly persists.
   const [override, setOverride] = useState<Partial<Meta>>({})
+  useEffect(() => { setOverride({}) }, [fetched])
   const meta: Meta | null = fetched ? { ...fetched, ...override } : null
   const [unit, setUnit] = useState<WeightUnit>(() => getWeightUnit())
 

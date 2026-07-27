@@ -208,6 +208,9 @@ await ctx.route('**/fonts.googleapis.com/**', (r) => r.abort())
 await ctx.route('**/fonts.gstatic.com/**', (r) => r.abort())
 
 const page = await ctx.newPage()
+const problems = []
+page.on('console', (m) => { if (m.type() === 'error') problems.push(`console: ${m.text()}`) })
+page.on('pageerror', (e) => problems.push(`pageerror: ${e.message}`))
 await page.goto(BASE)
 await page.evaluate(([cache, session, prefix]) => {
   localStorage.clear()
@@ -231,6 +234,13 @@ await page.locator('.obs-sheet .btn--primary').click()
 await page.waitForTimeout(500)
 await page.screenshot({ path: `${OUT}/workout-live.png`, fullPage: true })
 console.log('shot workout-live')
+// Complete a set so the rest pill is up — checks it clears the fixed footer.
+await page.locator('.set-row__done').first().click()
+await page.waitForTimeout(400)
+await page.screenshot({ path: `${OUT}/workout-rest.png` })
+console.log('shot workout-rest')
+await page.locator('.rest-pill').click()
+await page.waitForTimeout(200)
 await page.locator('.howto-tag').nth(1).click()
 await page.waitForTimeout(500)
 await page.screenshot({ path: `${OUT}/workout-details.png`, fullPage: true })
@@ -242,4 +252,6 @@ await page.waitForTimeout(1200)
 const card = page.locator('.card--tap').first()
 if (await card.count()) { await card.click(); await page.waitForTimeout(600); await page.screenshot({ path: `${OUT}/today-sheet.png`, fullPage: true }); console.log('shot today-sheet') }
 
+const real = problems.filter((p) => !/Failed to load resource|net::ERR|Supabase env missing|ERR_FAILED/.test(p))
+console.log(real.length ? 'PROBLEMS:\n' + real.join('\n') : 'no console errors')
 await browser.close()

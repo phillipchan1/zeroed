@@ -80,13 +80,14 @@ interface SetHeaderProps {
 }
 
 // A column label with the prescribed target under it. Columns with no
-// prescription (RPE) render the label alone — an em-dash there just read as a
-// value you were somehow failing to hit.
+// prescription (RPE) get an invisible target line rather than an em-dash: the
+// dash read as a value you were somehow failing to hit, and dropping the line
+// entirely bottom-aligned the RPE label out of step with the others.
 function headCell(label: string, target: string | null) {
   return (
     <div className="set-head__cell">
       <span className="set-head__label">{label}</span>
-      {target && <span className="set-head__target">{target}</span>}
+      <span className="set-head__target" aria-hidden={!target}>{target || '\u00A0'}</span>
     </div>
   )
 }
@@ -554,6 +555,9 @@ function DebriefSheet({ reading, saving, onSave, onSkip }: DebriefSheetProps) {
       subtitle="A sentence is plenty. I read the words, not just the numbers."
       onClose={onSkip}
       dismissOnBackdrop={false}
+      // No ×: the session is already finished at this point, so a "dismiss"
+      // would silently commit it without a debrief. Log it or Skip, explicitly.
+      hideClose
       actions={
         <>
           <Button

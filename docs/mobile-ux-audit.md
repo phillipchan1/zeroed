@@ -203,14 +203,32 @@ setup line, a test button, a hint, and a score picker — seven times over.
 - **Disabled primary buttons** rendered as signal yellow at 40% opacity, a muddy
   olive that still read as a live button. Disabled now has no fill.
 - **The dev reset pill** sat on top of the Train tab in the bottom nav.
-- Sheets didn't lock body scroll, so flicking past a sheet's end dragged the page
-  behind it on iOS.
+- **Sheets didn't lock the page behind them**, so flicking past a sheet's end
+  dragged the page on iOS. Locking `body` alone isn't enough here — `#root` is
+  the scroll container on mobile, so both are locked.
+- **The debrief sheet's × meant "commit without a debrief."** The session is
+  already finished by the time it opens, so a dismiss gesture silently submitted
+  it. The × is gone; Log it and Skip are the only exits. The close-week sheet
+  likewise drops its × once the crunch is in flight.
+- **The rest pill overlapped the Complete button** once the workout footer grew,
+  and the last exercise's chips could sit under the footer. Both now clear it.
+- **A completed set looked unfilled.** Dimming the whole row made autofilled
+  numbers read like placeholders; only the row's chrome recedes now.
+- **The RPE column header was bottom-aligned out of step** with the other column
+  labels once its em-dash was removed.
+- **Profile's optimistic overlay could mask a value changed elsewhere** — it's
+  cleared the moment fresh server data arrives, and correctly persists offline.
 
 ## Known dead code (not touched)
 
 `ZeroedInScreen`, `AuthScreen`, `ReframeScreen` and `HookQuestionScreen` are no
-longer reachable from any route. Left in place — deleting them is a separate
-call.
+longer reachable from any route, and `InsightMovementRow` / `Divider` have no
+consumers. That predates this work.
+
+This pass orphaned three more exports: `TelemetryStrip` and `LatencyTick` (the
+strips they rendered were removed from Train and Coach) and
+`ExerciseInsightSheet` (folded into the workout's single Details sheet). All
+left in place — deleting exported components is a separate call.
 
 ## Verifying visually
 

@@ -191,23 +191,43 @@ interface SheetProps {
   actions?: ReactNode
   /** Set false for a sheet that must be dismissed via its own controls. */
   dismissOnBackdrop?: boolean
+  /**
+   * Hides the × and disables Escape. For a sheet whose only exits are explicit
+   * choices — the debrief, where "dismiss" would silently mean "commit without
+   * one" and an × next to a Skip button is just ambiguous.
+   */
+  hideClose?: boolean
 }
 
 export function Sheet({
-  title, subtitle, onClose, children, actions, dismissOnBackdrop = true,
+  title, subtitle, onClose, children, actions,
+  dismissOnBackdrop = true, hideClose = false,
 }: SheetProps) {
-  // Escape closes, and the body underneath stops scrolling while a sheet is up
+  // Escape closes, and the page underneath stops scrolling while a sheet is up
   // (otherwise a flick past the sheet's end drags the page behind it on iOS).
+  // #root is the scroll container on mobile, not body — locking body alone
+  // leaves the page scrollable behind the sheet.
+  //
+  // onClose is read through a ref so an inline arrow from the parent doesn't
+  // re-run this effect on every render, briefly unlocking scroll mid-commit.
+  const closeRef = useRef(onClose)
+  closeRef.current = onClose
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !hideClose) closeRef.current()
+    }
     document.addEventListener('keydown', onKey)
-    const prev = document.body.style.overflow
+    const root = document.getElementById('root')
+    const prevBody = document.body.style.overflow
+    const prevRoot = root?.style.overflow ?? ''
     document.body.style.overflow = 'hidden'
+    if (root) root.style.overflow = 'hidden'
     return () => {
       document.removeEventListener('keydown', onKey)
-      document.body.style.overflow = prev
+      document.body.style.overflow = prevBody
+      if (root) root.style.overflow = prevRoot
     }
-  }, [onClose])
+  }, [hideClose])
 
   return (
     <div
@@ -223,9 +243,11 @@ export function Sheet({
             <h2 className="sheet-head__title">{title}</h2>
             {subtitle && <p className="sheet-head__sub">{subtitle}</p>}
           </div>
-          <button type="button" className="sheet-close" onClick={onClose} aria-label="Close">
-            <X size={20} strokeWidth={2} />
-          </button>
+          {!hideClose && (
+            <button type="button" className="sheet-close" onClick={onClose} aria-label="Close">
+              <X size={20} strokeWidth={2} />
+            </button>
+          )}
         </div>
         {children}
         {actions && <div className="sheet-actions">{actions}</div>}

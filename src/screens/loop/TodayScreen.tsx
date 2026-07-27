@@ -414,8 +414,11 @@ function CloseWeekSheet({
     <Sheet
       title="Close out the week"
       subtitle="The coach reads the week, sets next week's load, and leaves a note. You can still log more after."
+      // Once the crunch is running, closing would strand a write in flight —
+      // the × is dropped along with backdrop dismissal, not just the latter.
       onClose={onClose}
       dismissOnBackdrop={!closing}
+      hideClose={closing}
       actions={
         <>
           <Button variant="primary" full disabled={closing} onClick={onConfirm}>
