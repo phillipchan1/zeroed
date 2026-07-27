@@ -4,11 +4,11 @@ import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
 import { runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, type PagerWeekView, type WeekPagerData } from '../../engine'
 import { getWeightUnit } from '../../lib/units'
-import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, Flag } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
 import { loadDraftRoutineIds, weekStart } from '../../lib/workoutDraft'
 import { seedWorkoutBootstrap } from '../../lib/workoutBoot'
 import { invalidateLoopViews } from '../../lib/loopCache'
-import { pendingCount, pendingSessionsRaw } from '../../lib/workoutOutbox'
+import { pendingSessionsRaw, useOutboxStatus, retryBlocked, discardBlocked } from '../../lib/workoutOutbox'
 import { setIntendedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
 import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, Meter } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
@@ -450,6 +450,66 @@ function CloseWeekSheet({
 }
 
 /**
+ * The sessions the server refused. They're finished work that still counts on the
+ * week, so the sheet's job is to be honest about the state and offer the only two
+ * moves that exist: try again (after a fix has shipped, or a server hiccup has
+ * passed) or discard. Discarding is destructive — the set logs live nowhere else
+ * — so it's a second tap behind an explicit confirm.
+ */
+function StuckSessionsSheet({
+  count,
+  reasons,
+  retrying,
+  onRetry,
+  onDiscard,
+  onClose,
+}: {
+  count: number
+  reasons: string[]
+  retrying: boolean
+  onRetry: () => void
+  onDiscard: () => void
+  onClose: () => void
+}) {
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+  return (
+    <Sheet
+      title={`${count} session${count === 1 ? '' : 's'} couldn't sync`}
+      subtitle="They're saved on this device and still counted in your week — the server rejected the upload."
+      onClose={onClose}
+      actions={
+        <>
+          <Button variant="primary" full disabled={retrying} onClick={onRetry}>
+            {retrying ? 'Trying…' : 'Try again'}
+          </Button>
+          <Button
+            variant="ghost"
+            full
+            disabled={retrying}
+            style={{ marginTop: 6 }}
+            onClick={() => (confirmDiscard ? onDiscard() : setConfirmDiscard(true))}
+          >
+            {confirmDiscard ? 'Tap again to delete for good' : 'Discard them'}
+          </Button>
+        </>
+      }
+    >
+      <div className="card">
+        <p className="text-xs text-dim" style={{ marginBottom: reasons.length ? 10 : 0 }}>
+          Nothing is lost by waiting. If this keeps happening, the reason below is
+          what the server said.
+        </p>
+        {reasons.map((r, i) => (
+          <p key={i} className="text-micro text-dim num" style={{ wordBreak: 'break-word', marginTop: i ? 6 : 0 }}>
+            {r}
+          </p>
+        ))}
+      </div>
+    </Sheet>
+  )
+}
+
+/**
  * TRAIN — the week, in full. Every session is on the surface with its state
  * (to-do / in-progress / done), startable in any order. Mobile shape: one
  * summary instrument, at most one attention banner, then the session list.
@@ -467,15 +527,17 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // Planned day rides on routine.intended_dow (synced). Keep an optimistic
   // override so the chip/picker updates instantly before the refetch lands.
   const [dowOverride, setDowOverride] = useState<Record<string, number | null>>({})
+  const [stuckOpen, setStuckOpen] = useState(false)
+  const [retrying, setRetrying] = useState(false)
   const handlePlanDay = (routineId: string, dow: number | null) => {
     setDowOverride((o) => ({ ...o, [routineId]: dow }))
     void setIntendedDay(routineId, dow).then(() => refresh())
   }
   const plannedDowFor = (r: RoutineRow): number | null =>
     r.id in dowOverride ? dowOverride[r.id] : (r.intended_dow ?? null)
-  // Sessions finished offline, waiting to sync. Re-checked when connectivity
-  // returns so the note clears itself once the outbox drains.
-  const [pendingSync, setPendingSync] = useState(pendingCount())
+  // Sessions finished offline. Subscribed to the outbox, so the note appears and
+  // clears as the queue actually moves rather than on a guessed delay.
+  const outbox = useOutboxStatus()
 
   const { data: view, loading, refetch } = useCachedLoader(
     `today:${athleteId}`,
@@ -529,18 +591,6 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   useEffect(() => {
     void loadDraftRoutineIds(athleteId).then(setDraftRoutineIds).catch(() => setDraftRoutineIds([]))
   }, [athleteId, view])
-
-  // Keep the pending-sync note honest: the outbox flushes on `online`, so recount
-  // shortly after connectivity returns (and on focus) to clear it when drained.
-  useEffect(() => {
-    const recount = () => setTimeout(() => setPendingSync(pendingCount()), 1500)
-    window.addEventListener('online', recount)
-    window.addEventListener('focus', recount)
-    return () => {
-      window.removeEventListener('online', recount)
-      window.removeEventListener('focus', recount)
-    }
-  }, [])
 
   // Lazy outer-cadence triggers (§4.2, §5): run the weekly review + phase
   // advancement once per page-session, then refresh ONLY if something changed.
@@ -666,13 +716,16 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
         />
       )
     }
-    if (pendingSync > 0) {
+    // Sessions the server refused. This one earns a banner: it will not resolve
+    // on its own, and it's the only outbox state the athlete can act on.
+    if (outbox.blocked > 0) {
       return (
         <Banner
           tone="quiet"
-          icon={<CloudUpload size={20} strokeWidth={1.75} color="var(--text-dim)" />}
-          title={`${pendingSync} session${pendingSync === 1 ? '' : 's'} saved offline`}
-          sub="They sync when you're back online."
+          icon={<CloudAlert size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+          title={`${outbox.blocked} session${outbox.blocked === 1 ? '' : 's'} couldn't sync`}
+          sub="Still counted here. Tap to try again."
+          onClick={() => setStuckOpen(true)}
         />
       )
     }
@@ -749,6 +802,18 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                     </div>
                   </div>
                 </div>
+                {/* Sessions waiting on the wire. Deliberately a footnote, not a
+                    banner: they're already counted in the ring above, they need
+                    nothing from the athlete, and they clear themselves. */}
+                {outbox.pending > 0 && (
+                  <p
+                    className="text-micro text-dim"
+                    style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 14 }}
+                  >
+                    <CloudUpload size={13} strokeWidth={1.75} />
+                    {outbox.pending} saved on this device, syncing
+                  </p>
+                )}
               </div>
             )}
 
@@ -858,6 +923,23 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             const s = statusFor(openSession.id)
             if (s.kind === 'done') navigate(`/app/workout/${openSession.id}?w=${s.lastWorkout.id}`)
           }}
+        />
+      )}
+
+      {stuckOpen && outbox.blocked > 0 && (
+        <StuckSessionsSheet
+          count={outbox.blocked}
+          reasons={outbox.reasons}
+          retrying={retrying}
+          onClose={() => setStuckOpen(false)}
+          onRetry={() => {
+            setRetrying(true)
+            void retryBlocked().finally(() => {
+              setRetrying(false)
+              refetch()
+            })
+          }}
+          onDiscard={() => { discardBlocked(); setStuckOpen(false); refetch() }}
         />
       )}
 

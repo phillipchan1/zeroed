@@ -149,6 +149,16 @@ Zeroed is built to load and run on low/no connectivity:
 > strip, so a session logged offline reads as done straight away. Editing your
 > target is optimistic the same way. Only the AI surfaces (the coach chat, the weekly
 > review, a retest re-scope) genuinely need a connection.
+>
+> **One bad entry can't hold the queue.** A flush classifies each failure before
+> acting on it: *can't reach the server* ends the pass untouched (nothing behind
+> it could succeed either), while *the server rejected this one* is recorded
+> against that entry and the flush carries on. Rejections that never self-heal —
+> permission, foreign key, duplicate, row gone — retire the entry immediately;
+> murkier ones retire after five attempts. A retired session is kept and still
+> counts on your week, but it stops claiming it's about to sync and stops
+> standing in front of sessions that can. Train surfaces those with the server's
+> own reason, and a retry / discard choice.
 
 ### PWA assets
 
