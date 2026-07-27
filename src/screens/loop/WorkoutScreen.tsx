@@ -709,10 +709,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // sit open for a while, so the committed duration is this, not the live clock.
   const finalElapsedRef = useRef(0)
 
-  // "Why this session" brief — auto-shown on open (the slot the readiness gate
-  // used to hold), re-openable any time from the header. Resuming a seeded draft
-  // drops straight into training, so the brief starts closed there.
-  const [briefOpen, setBriefOpen] = useState<boolean>(() => !seedDraft)
+  // "Why this session" brief — opened on demand from the header's "Why"
+  // button, not auto-shown, so starting a workout is a single tap. Resuming a
+  // seeded draft still drops straight into training.
+  const [briefOpen, setBriefOpen] = useState(false)
   const [hasStarted, setHasStarted] = useState<boolean>(() => !!seedDraft)
 
   // Per-exercise felt signal (exIdx → feedback).
