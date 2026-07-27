@@ -116,6 +116,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   const [readOpen, setReadOpen]     = useState(() =>
     typeof window !== 'undefined' && window.innerWidth >= 1000)
   const threadEndRef = useRef<HTMLDivElement | null>(null)
+  const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
   // Coach-proposed changes awaiting the athlete's confirmation, plus a key that
   // forces a re-pull of the read after an apply so the screen reflects the write.
@@ -127,6 +128,15 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
     threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [turns.length, pending])
 
+  // Auto-grow the composer with the draft, capped by CSS max-height (chat-app
+  // convention — the input starts one line tall and only grows as needed).
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  }, [draft])
+
   const active = insights.filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
   const p1read = active[0] ?? null         // the anchor read, always shown
   const rest   = active.slice(1)           // the rest of the stack, one tap away
@@ -136,8 +146,8 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   // (no model call) so the conversation feels alive the instant it loads.
   const p1 = context?.insights[0] ?? null
   const opener = p1
-    ? `Your ${p1.category.toLowerCase()} is the read I'm watching closest — ${Math.round(p1.confidence * 100)}% confident. Ask me why, or anything about the program.`
-    : `Nothing tracked yet. Log a session and I'll have a read to talk through.`
+    ? `**${p1.category}** is what I'm watching closest right now (${Math.round(p1.confidence * 100)}% sure, ${p1.status}). Ask me why, or anything about your program.`
+    : `Nothing tracked yet. Log a session and I'll have something to talk through. Until then, ask me how this works.`
 
   async function send(question: string) {
     const q = question.trim()
@@ -379,10 +389,17 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             className="coach-input"
             onSubmit={(e) => { e.preventDefault(); void send(draft) }}
           >
-            <input
-              type="text"
+            <textarea
+              ref={inputRef}
+              rows={1}
               value={draft}
               onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  void send(draft)
+                }
+              }}
               placeholder={context ? 'Ask about your read, the program, the why…' : 'Loading your read…'}
               disabled={!context || pending}
               aria-label="Ask the coach"
@@ -391,7 +408,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
           </form>
 
           <p className="text-xs text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>
-            Nothing is written until you approve it.
+            Nothing is written until you approve it. Notice something mid-session? Log it next session so it counts.
           </p>
         </div>
       </div>

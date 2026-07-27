@@ -799,8 +799,8 @@ export async function runCoachChat(
   // correctly, and lean on the real read in context. No actions on this path.
   const p1 = context.insights[0] ?? null
   const reply = p1
-    ? `Can't reach my full read this second. The short version stands: your ${p1.category.toLowerCase()} is the working limiter — ${p1.claim} It's at ${Math.round(p1.confidence * 100)}% and sharpens every session you log.`
-    : `Can't reach my full read this second. Log a session and I'll have something concrete to work from.`
+    ? `Can't reach my full read right now. Short version: **${p1.category}** is the limiter — ${p1.claim} (${Math.round(p1.confidence * 100)}% sure).`
+    : `Can't reach my full read right now. Log a session and I'll have something concrete to work from.`
   return { source: 'fallback', reply, followups: [], actions: [] }
 }
 
