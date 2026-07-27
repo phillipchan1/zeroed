@@ -692,8 +692,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const seedBoot = seedRef.current.boot
   const seedDraft = seedRef.current.draft
 
-  // The day the session happened — defaults to today, editable so a forgotten
-  // session can be backdated. Stored as a yyyy-mm-dd input string.
+  // The day the session happened. For a new session this is just whenever the
+  // athlete hits Complete — no picker, no real estate spent on it. Editing a
+  // past log is the one case that still needs a picker (§ footer), since
+  // there the date itself may be what's being corrected.
   const [performedAt, setPerformedAt] = useState<string>(() => toDateInput(new Date()))
 
   const [routine, setRoutine]     = useState<RoutineRow | null>(() => seedBoot?.routine ?? null)
@@ -1060,7 +1062,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       onboardingTransition: isEdit ? null : onboardingTransition,
       debrief,
       editWorkoutId: isEdit ? editWorkoutId : null,
-      performedAt: dateInputToISO(performedAt),
+      performedAt: isEdit ? dateInputToISO(performedAt) : dateInputToISO(toDateInput(new Date())),
       queuedAt: new Date().toISOString(),
     }
   }
@@ -1465,23 +1467,25 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         }}
       >
         <div className="workout-footer__inner">
-          {/* Only shown when it's actually needed: today is the default, and a
-              backdated session is the rare case. The live set count moved to
-              the header, so this row no longer duplicates it. */}
-          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
-            <span className="text-xs text-dim">Day</span>
-            <input
-              type="date"
-              className="num"
-              value={performedAt}
-              max={toDateInput(new Date())}
-              onChange={(e) => setPerformedAt(e.target.value || toDateInput(new Date()))}
-              style={{
-                background: 'transparent', border: '1px solid var(--line)', borderRadius: 8,
-                color: 'var(--text)', padding: '6px 10px', fontSize: 'var(--fs-xs)',
-              }}
-            />
-          </label>
+          {/* A new session is just logged as today, the instant Complete is
+              tapped — no picker, no real estate spent on it. Editing a past
+              log is the one place the date itself might need correcting. */}
+          {isEdit && (
+            <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+              <span className="text-xs text-dim">Day</span>
+              <input
+                type="date"
+                className="num"
+                value={performedAt}
+                max={toDateInput(new Date())}
+                onChange={(e) => setPerformedAt(e.target.value || toDateInput(new Date()))}
+                style={{
+                  background: 'transparent', border: '1px solid var(--line)', borderRadius: 8,
+                  color: 'var(--text)', padding: '6px 10px', fontSize: 'var(--fs-xs)',
+                }}
+              />
+            </label>
+          )}
           <Button variant="primary" full onClick={handleCompleteWorkout} disabled={!hasAnyLog}>
             {isEdit ? 'Save changes →' : 'Complete workout →'}
           </Button>
