@@ -1,10 +1,27 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useState } from 'react'
 import { supabase } from '../../lib/supabaseClient'
+import { useCachedLoader, mutateCache } from '../../lib/cache'
 import { SectionHeader, Skeleton, Button, Input } from '../../components/ui'
 
 interface ProfileScreenProps {
   athleteId: string
   athleteName: string | null
+}
+
+interface ProfileMeta {
+  sessions_per_week: number | null
+  training_age: number | null
+  goals: string | null
+}
+
+export async function fetchProfileMeta(athleteId: string): Promise<ProfileMeta | null> {
+  const { data, error } = await supabase
+    .from('athlete')
+    .select('sessions_per_week, training_age, goals')
+    .eq('id', athleteId)
+    .maybeSingle()
+  if (error) throw error
+  return (data as ProfileMeta | null) ?? null
 }
 
 /**
@@ -13,8 +30,13 @@ interface ProfileScreenProps {
  * Program. This stays a calm "who you are + what you're chasing" surface.
  */
 export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
-  const [meta, setMeta] = useState<{ sessions_per_week: number | null; training_age: number | null; goals: string | null } | null>(null)
-  const [loading, setLoading] = useState(true)
+  const profileKey = `profile:${athleteId}`
+  // Offline-first: paints from the held value on frame one, so returning to
+  // Profile never shows a skeleton after the first visit.
+  const { data: meta, loading } = useCachedLoader<ProfileMeta | null>(
+    profileKey,
+    () => fetchProfileMeta(athleteId),
+  )
 
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState('')
@@ -39,26 +61,23 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     }
   }
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    const { data } = await supabase
-      .from('athlete')
-      .select('sessions_per_week, training_age, goals')
-      .eq('id', athleteId)
-      .maybeSingle()
-    setMeta(data as typeof meta)
-    setLoading(false)
-  }, [athleteId])
-
-  useEffect(() => { void load() }, [load])
-
-  async function saveTarget() {
-    setSaving(true)
+  // Optimistic: the new target paints and the editor closes on the same frame
+  // as the tap. The write goes out behind it — and if it fails (offline), the
+  // next revalidation restores the server's value rather than stranding a lie.
+  function saveTarget() {
+    if (saving) return
     const value = draft.trim() || null
-    await supabase.from('athlete').update({ goals: value }).eq('id', athleteId)
-    setMeta((m) => (m ? { ...m, goals: value } : m))
-    setSaving(false)
+    mutateCache<ProfileMeta | null>(profileKey, (m) => (m ? { ...m, goals: value } : m))
     setEditing(false)
+    setSaving(true)
+    void supabase
+      .from('athlete')
+      .update({ goals: value })
+      .eq('id', athleteId)
+      .then(
+        () => setSaving(false),
+        () => setSaving(false),
+      )
   }
 
   const target = meta?.goals ?? null

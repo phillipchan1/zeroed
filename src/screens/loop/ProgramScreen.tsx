@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Lock, Sparkles } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
+import { invalidateLoopViews } from '../../lib/loopCache'
 import { gatherProgramMap, gatherTrainingLog, redesignActivePhase, type NextWeekProjection, type MapPhase } from '../../engine'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { getWeightUnit } from '../../lib/units'
@@ -47,7 +48,7 @@ interface ProgramView {
   profile: AthleteProfileRow | null
 }
 
-async function fetchProgramView(athleteId: string): Promise<ProgramView> {
+export async function fetchProgramView(athleteId: string): Promise<ProgramView> {
   const [programRes, profileRes] = await Promise.all([
     supabase.from('program').select('*').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle(),
     supabase.from('athlete_profile').select('*').eq('athlete_id', athleteId).maybeSingle(),
@@ -98,7 +99,9 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
     setRedesigning(true)
     try {
       const ok = await redesignActivePhase(athleteId, getWeightUnit())
-      if (ok) { refetchProgram(); refetchMap() }
+      // A redesigned phase replaces the sessions themselves, so every view that
+      // names or schedules them is now wrong.
+      if (ok) { invalidateLoopViews(); refetchProgram(); refetchMap() }
     } catch (e) {
       console.error('[redesign] failed', e)
     } finally {

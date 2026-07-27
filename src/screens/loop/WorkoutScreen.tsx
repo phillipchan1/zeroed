@@ -6,6 +6,8 @@ import {
   restoreDraft, loadDraftLocal, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
 } from '../../lib/workoutDraft'
 import { loadCache, saveCache } from '../../lib/cache'
+import { workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
+import { invalidateLoopViews } from '../../lib/loopCache'
 import { enqueueSession, commitPending } from '../../lib/workoutOutbox'
 import {
   gatherSessionPrescription,
@@ -622,22 +624,11 @@ function performedSummary(t: TrackingType, logs: SetLog[], unit: string, distanc
 }
 
 // ---- offline-first bootstrap -----------------------------------------------
-// Everything the screen needs to paint the session and start logging, cached per
-// routine so a return visit (at the gym, on two bars) opens instantly and fully
-// offline — the network fetch below then revalidates in the background. Every
-// field is serializable so it round-trips through localStorage.
+// The cached-per-routine bootstrap (see lib/workoutBoot) is what lets a session
+// open instantly and fully offline; the network fetch below revalidates it in
+// the background.
 
-interface WorkoutBootstrap {
-  routine: RoutineRow
-  athleteId: string | null
-  athleteName: string | null
-  onboardingStep: OnboardingStep | null
-  prevByExercise: Record<number, SetLog[]>
-  insightMap: Record<string, InsightRow>
-  prescription: SessionPrescription | null
-}
-
-const bootKey = (routineId: string) => `workout:${routineId}`
+const bootKey = workoutBootKey
 
 // A fresh, empty set-log grid sized to the routine's exercises.
 function buildTemplate(routine: RoutineRow): Record<number, SetLog[]> {
@@ -1085,6 +1076,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     const pending = buildPending(debrief)
     enqueueSession(pending)                       // durable before any network
     if (!isEdit) clearDraft(athleteId, routineId!) // the outbox is its home now
+
+    // A finished session moves nearly every view: the week strip, the schedule,
+    // the training log, the program map, the read the coach works from, the
+    // convergence reticle. Mark them all due — nothing is dropped, so every
+    // screen still paints instantly; they just refresh behind what they show.
+    invalidateLoopViews()
 
     // First session with debrief: wait for the commit so the revelation screen
     // gets the AI-generated insight data for the "moved" animation. This path

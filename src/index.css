@@ -46,15 +46,35 @@
 
   /* Animation */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
-  --dur-fast:       150ms;
+  --dur-fast:       120ms;   /* hover/press feedback — must feel like a click */
+  --dur-enter:      160ms;   /* a screen or card arriving */
   --dur-mid:        250ms;
   --dur-transition: 400ms;
+}
+
+/* Motion is decoration here, never information: every animation in this app has
+   a readable static end state, so honouring the OS setting costs nothing. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 1ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 html, body {
   height: 100%;
   width: 100%;
   overscroll-behavior: none;
+}
+
+/* Kill the double-tap-to-zoom wait on touch. Without this, iOS holds every tap
+   for ~300ms to see whether a second one is coming — which reads as the whole
+   app being laggy no matter how fast the data is. */
+button, a, label, input, select, textarea, [role='button'], .nav__item, .sidebar__item {
+  touch-action: manipulation;
 }
 
 /* #root is the scroll container. In an iOS standalone PWA a height:100% body
@@ -528,19 +548,24 @@ textarea.input {
 
 /* --- Entry animations ----------------------------------------------------- */
 
+/* Screens paint from cache on the first frame, so the entry animation is there
+   to soften the swap, not to cover a wait. It's deliberately shorter than the
+   old 250ms/320ms-stagger: at that length a screen you've already seen reads as
+   "loading again". Opacity + transform only, so it composites on the GPU and
+   never blocks the main thread. */
 @keyframes fadeRise {
-  from { opacity: 0; transform: translateY(4px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; transform: translate3d(0, 3px, 0); }
+  to   { opacity: 1; transform: translate3d(0, 0, 0); }
 }
 
 .fade-rise {
-  animation: fadeRise var(--dur-mid) var(--ease-out) forwards;
+  animation: fadeRise var(--dur-enter) var(--ease-out) forwards;
 }
 
-.fade-rise-delay-1 { animation-delay: 80ms;  opacity: 0; }
-.fade-rise-delay-2 { animation-delay: 160ms; opacity: 0; }
-.fade-rise-delay-3 { animation-delay: 240ms; opacity: 0; }
-.fade-rise-delay-4 { animation-delay: 320ms; opacity: 0; }
+.fade-rise-delay-1 { animation-delay: 30ms; opacity: 0; }
+.fade-rise-delay-2 { animation-delay: 60ms; opacity: 0; }
+.fade-rise-delay-3 { animation-delay: 90ms; opacity: 0; }
+.fade-rise-delay-4 { animation-delay: 120ms; opacity: 0; }
 
 /* Hairline pulse — signals "this data just updated" */
 @keyframes hairlinePulse {

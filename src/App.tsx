@@ -1,8 +1,12 @@
-import { BrowserRouter, Routes, Route, Navigate, Outlet } from 'react-router-dom'
+import { useEffect } from 'react'
+import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
 import { useAppState } from './hooks/useAppState'
 import { useDisableShakeToUndo } from './hooks/useDisableShakeToUndo'
-import { useOutboxSync } from './lib/workoutOutbox'
+import { useOutboxSync, pendingSessionsRaw } from './lib/workoutOutbox'
+import { cacheKeys, useWarmLoopCaches } from './lib/loopCache'
+import { getWeightUnit } from './lib/units'
+import { gatherProgramMap, gatherTrainingLog, gatherWeekPager } from './engine'
 import { Spinner } from './components/ui'
 import { Nav, Sidebar } from './components/layout/Nav'
 import { DebugReset } from './components/DebugReset'
@@ -15,10 +19,10 @@ import { PostSessionRevelationScreen }  from './screens/onboarding/PostSessionRe
 
 // Loop
 import { TodayScreen }   from './screens/loop/TodayScreen'
-import { ProfileScreen } from './screens/loop/ProfileScreen'
+import { ProfileScreen, fetchProfileMeta } from './screens/loop/ProfileScreen'
 import { WorkoutScreen } from './screens/loop/WorkoutScreen'
-import { ProgramScreen } from './screens/loop/ProgramScreen'
-import { CoachScreen }   from './screens/loop/CoachScreen'
+import { ProgramScreen, fetchProgramView } from './screens/loop/ProgramScreen'
+import { CoachScreen, fetchCoachView }   from './screens/loop/CoachScreen'
 import { HistoryScreen } from './screens/loop/HistoryScreen'
 import { RecapScreen }   from './screens/loop/RecapScreen'
 import { RetestScreen }  from './screens/loop/RetestScreen'
@@ -35,6 +39,20 @@ function Splash() {
 
 // ---- Loop layout (persistent nav) -----------------------------------------
 
+// Screens are swapped inside a persistent scroll container, so without this a
+// tab opened after scrolling down another one appears already scrolled. Reset
+// synchronously (no smooth scroll) so the new screen's first painted frame is
+// already at the top.
+function useScrollReset() {
+  const { pathname } = useLocation()
+  useEffect(() => {
+    // Desktop: .app-main owns the scroll. Mobile: #root does. Reset whichever
+    // is actually scrolled.
+    document.querySelector('.app-main')?.scrollTo({ top: 0 })
+    document.getElementById('root')?.scrollTo({ top: 0 })
+  }, [pathname])
+}
+
 function LoopLayout({
   athleteId,
   athleteName,
@@ -46,6 +64,20 @@ function LoopLayout({
   todayRoutine: import('./types/database').RoutineRow | null
   refresh: () => void
 }) {
+  useScrollReset()
+
+  // Warm the tabs the athlete hasn't opened yet, once, in the background. Today
+  // loads its own view; these are the ones that would otherwise cost a wait on
+  // first tap. Ordered by how likely they are to be opened next.
+  useWarmLoopCaches(athleteId, [
+    { key: cacheKeys.weekPager(athleteId),   load: () => gatherWeekPager(athleteId, getWeightUnit()) },
+    { key: cacheKeys.program(athleteId),     load: () => fetchProgramView(athleteId) },
+    { key: cacheKeys.history(athleteId),     load: () => gatherTrainingLog(athleteId, pendingSessionsRaw()) },
+    { key: cacheKeys.programMap(athleteId),  load: () => gatherProgramMap(athleteId, getWeightUnit()) },
+    { key: cacheKeys.profile(athleteId),     load: () => fetchProfileMeta(athleteId) },
+    { key: cacheKeys.coach(athleteId),       load: () => fetchCoachView(athleteId) },
+  ])
+
   return (
     <div className="app-shell">
       <Sidebar athleteId={athleteId} />

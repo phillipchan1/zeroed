@@ -5,8 +5,10 @@ import { useCachedLoader } from '../../lib/cache'
 import { runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, type PagerWeekView, type WeekPagerData } from '../../engine'
 import { getWeightUnit } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock } from 'lucide-react'
-import { loadDraftRoutineIds } from '../../lib/workoutDraft'
-import { pendingCount } from '../../lib/workoutOutbox'
+import { loadDraftRoutineIds, weekStart } from '../../lib/workoutDraft'
+import { seedWorkoutBootstrap } from '../../lib/workoutBoot'
+import { invalidateLoopViews } from '../../lib/loopCache'
+import { pendingCount, pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { setIntendedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
 import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
@@ -20,6 +22,7 @@ interface TodayScreenProps {
 
 interface LoopContext {
   refresh: () => void
+  athleteName: string | null
 }
 
 // Athletes whose lazy triggers have already run this page-session. Module-level
@@ -82,7 +85,7 @@ interface TodayView {
   lastDoneByRoutine: Record<string, string>   // routineId → most recent performed_at (any week)
 }
 
-async function fetchTodayView(athleteId: string): Promise<TodayView> {
+export async function fetchTodayView(athleteId: string): Promise<TodayView> {
   const days = getWeekDays()
   const weekEnd = new Date(days[6].getFullYear(), days[6].getMonth(), days[6].getDate(), 23, 59, 59)
 
@@ -551,7 +554,7 @@ function CloseWeekSheet({
  */
 export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
-  const { refresh } = (useOutletContext<LoopContext>() ?? { refresh: () => {} })
+  const { refresh, athleteName } = (useOutletContext<LoopContext>() ?? { refresh: () => {}, athleteName: null })
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [draftRoutineIds, setDraftRoutineIds] = useState<string[]>([])
   const [recapDismissed, setRecapDismissed] = useState(false)
@@ -586,7 +589,23 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const lastSignalAt  = view?.lastSignalAt ?? null
   const p1            = view?.p1 ?? null
   const retestDue     = isRetestDue(view?.retestDate ?? null)
-  const weekWorkouts  = view?.weekWorkouts ?? []
+
+  // Sessions finished but not yet committed (offline, or a commit still in
+  // flight) are folded in alongside the synced ones, so a session reads DONE the
+  // instant it's finished — with no connection and no refetch. They drop out on
+  // their own once the outbox drains and the real rows arrive.
+  const weekWorkouts: WeekWorkout[] = (() => {
+    const committed = view?.weekWorkouts ?? []
+    const monday = weekStart()
+    const queued = pendingSessionsRaw()
+      // A session can be backdated, so the day it counts for is performedAt.
+      .map((p) => ({ id: `pending:${p.id}`, routineId: p.routineId, performedAt: p.performedAt ?? p.queuedAt }))
+      .filter((p) => new Date(p.performedAt) >= monday)
+      .filter((p) => !committed.some(
+        (w) => w.routineId === p.routineId && isSameDay(new Date(w.performedAt), new Date(p.performedAt)),
+      ))
+    return [...committed, ...queued]
+  })()
 
   // Week strip — recomputed from the workouts against the current day, so "today"
   // and the Mon–Sun window are always correct even from a stale cache.
@@ -597,6 +616,14 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     logged: loggedDates.some((ld) => isSameDay(ld, d)),
     isToday: isSameDay(d, today),
   }))
+
+  // Plant a bootstrap for every session on the week list, so the FIRST tap on
+  // one paints its exercises immediately instead of spinning on the network.
+  // Existing (fetched) bootstraps — which carry last session's numbers and the
+  // prescription — are left alone; the workout screen revalidates either way.
+  useEffect(() => {
+    routines.forEach((r) => seedWorkoutBootstrap(r, athleteId, athleteName, onboardingStep ?? null))
+  }, [routines, athleteId, athleteName, onboardingStep])
 
   // Which sessions are mid-flight (a live draft). Offline-tolerant — the local
   // scan alone is enough, so the markers show with no connection.
@@ -624,6 +651,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     void (async () => {
       const changed = await runLoopTriggers(athleteId)
       if (changed) {
+        invalidateLoopViews()
         refetch()
         refresh()
       }
@@ -703,6 +731,9 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     try {
       const res = await closeOutCurrentWeek(athleteId, { injury })
       setShowCloseSheet(false)
+      // Closing the week cuts a review and can advance the phase — that lands in
+      // the recap, the program map, the coach log and the schedule alike.
+      invalidateLoopViews()
       refetch()
       refresh()
       if (res) navigate(`/app/recap/${res.reviewId}`)
