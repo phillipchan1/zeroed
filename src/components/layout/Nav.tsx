@@ -3,11 +3,14 @@ import { Activity, User, LayoutGrid, MessageSquare } from 'lucide-react'
 import { Logo } from '../ui'
 import { MonitorReticle } from '../convergence/MonitorReticle'
 
+// Ordered by how often a tab is actually opened, left to right: you train most
+// days, check the plan weekly, ask the coach occasionally, and touch settings
+// almost never. Profile used to sit in slot two, next to the most-used tab.
 const ITEMS = [
-  { to: '/app/today',   label: 'Train',   Icon: Activity    },
-  { to: '/app/profile', label: 'Profile', Icon: User        },
-  { to: '/app/program', label: 'Program', Icon: LayoutGrid  },
+  { to: '/app/today',   label: 'Train',   Icon: Activity      },
+  { to: '/app/program', label: 'Program', Icon: LayoutGrid    },
   { to: '/app/coach',   label: 'Coach',   Icon: MessageSquare },
+  { to: '/app/profile', label: 'You',     Icon: User          },
 ]
 
 // Bottom tab bar — the mobile surface. Hidden on desktop, where Sidebar takes over.
@@ -25,9 +28,9 @@ export function Nav() {
           {({ isActive }) => (
             <>
               <Icon
-                size={20}
-                strokeWidth={1.5}
-                color={isActive ? 'var(--text)' : 'var(--text-dim)'}
+                size={24}
+                strokeWidth={isActive ? 2 : 1.75}
+                color={isActive ? 'var(--signal)' : 'var(--text-dim)'}
               />
               <span className="nav__label">{label}</span>
             </>

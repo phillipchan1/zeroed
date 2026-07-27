@@ -1,11 +1,10 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { ChevronLeft } from 'lucide-react'
 import { useCachedLoader } from '../../lib/cache'
 import { gatherTrainingLog, gatherExerciseHistory, type LogSession, type ExerciseHistory } from '../../engine'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
-import { SectionHeader, Skeleton } from '../../components/ui'
+import { SectionHeader, Skeleton, PageHeader, Sheet, Chip, Stat, StatGrid } from '../../components/ui'
 import type { SetLog } from '../../types/database'
 
 function fmtRange(startISO: string, endISO: string): string {
@@ -38,38 +37,36 @@ function LogSessionCard({
 }) {
   return (
     <div
-      className="card"
-      style={{ marginBottom: 8, cursor: s.pending ? 'default' : 'pointer', borderColor: s.pending ? 'var(--line)' : undefined }}
+      className={`card${s.pending ? '' : ' card--tap'}`}
+      style={{ marginBottom: 10 }}
       onClick={s.pending ? undefined : onOpen}
     >
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-        <h3 style={{ fontSize: 15, fontWeight: 600 }}>{s.routineName}</h3>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+        <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700, minWidth: 0 }}>{s.routineName}</h3>
         <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
           {dayAndDate(s.performedAt)}
         </span>
       </div>
-      <p
-        className="text-xs"
-        style={{
-          marginTop: 6, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', textTransform: 'uppercase',
-          color: s.pending ? 'var(--pending)' : 'var(--text-dim)',
-        }}
-      >
-        {s.pending ? '⟳ Saved offline · syncing' : `✓ ${s.setsDone} set${s.setsDone === 1 ? '' : 's'}`}
-        {!s.pending && s.rpe != null ? ` · RPE ${s.rpe}` : ''}
-        {s.phaseName ? ` · ${s.phaseName}` : ''}
-      </p>
+      <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        {s.pending
+          ? <Chip tone="pending">Syncing</Chip>
+          : <Chip tone="done">{s.setsDone} sets</Chip>}
+        {/* Phase is constant across a block, so it was repeating on every row
+            for no information. It stays in the week header's context. */}
+        {!s.pending && s.rpe != null && <Chip tone="todo">RPE {s.rpe}</Chip>}
+      </div>
       {s.highlights.length > 0 && (
-        <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: '4px 10px' }} onClick={(e) => e.stopPropagation()}>
+        <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 }} onClick={(e) => e.stopPropagation()}>
           {s.highlights.map((h, i) => (
             <button
               key={i}
               type="button"
               onClick={() => onExercise(h.name)}
-              className="num text-xs"
+              className="num"
               style={{
-                background: 'none', border: 'none', padding: 0, cursor: 'pointer',
-                color: 'var(--text-dim)', borderBottom: '1px dotted var(--line)', lineHeight: 1.4,
+                minHeight: 36, padding: '6px 12px', cursor: 'pointer',
+                background: 'var(--ground)', border: '1px solid var(--line)', borderRadius: 999,
+                color: 'var(--text-dim)', fontSize: 'var(--fs-xs)',
               }}
             >
               {h.name} {fmtSet(h.set, unit, distanceUnit)}
@@ -85,7 +82,7 @@ function LogSessionCard({
 
 function Sparkline({ values }: { values: number[] }) {
   if (values.length < 2) return null
-  const w = 240, h = 48, pad = 4
+  const w = 240, h = 80, pad = 6
   const min = Math.min(...values), max = Math.max(...values)
   const span = max - min || 1
   const pts = values.map((v, i) => {
@@ -96,8 +93,8 @@ function Sparkline({ values }: { values: number[] }) {
   const last = pts[pts.length - 1].split(',')
   return (
     <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} style={{ display: 'block' }} preserveAspectRatio="none">
-      <polyline points={pts.join(' ')} fill="none" stroke="var(--signal)" strokeWidth={1.5} strokeLinejoin="round" strokeLinecap="round" />
-      <circle cx={last[0]} cy={last[1]} r={3} fill="var(--signal)" />
+      <polyline points={pts.join(' ')} fill="none" stroke="var(--signal)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+      <circle cx={last[0]} cy={last[1]} r={4} fill="var(--signal)" />
     </svg>
   )
 }
@@ -109,59 +106,55 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
   const series = (hist?.points ?? []).map((p) => p.e1rm ?? p.topWeight).filter((v): v is number => v != null)
 
   return (
-    <div className="obs-sheet" onClick={onClose}>
-      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 10 }}>
-          <p className="section-header">{name}</p>
-          <button type="button" onClick={onClose} style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}>×</button>
-        </div>
-
-        {loading && !hist ? (
-          <Skeleton height={48} width="100%" />
-        ) : !hist || hist.points.length === 0 ? (
-          <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>No logged sets for this lift yet.</p>
-        ) : (
-          <>
-            <div style={{ display: 'flex', gap: 16, marginBottom: 14 }}>
-              {hist.bestWeight != null && (
-                <div>
-                  <p className="num" style={{ fontSize: 20, fontWeight: 600 }}>{hist.bestWeight}{unit}</p>
-                  <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Top set</p>
-                </div>
-              )}
-              {hist.bestE1rm != null && (
-                <div>
-                  <p className="num" style={{ fontSize: 20, fontWeight: 600, color: 'var(--signal)' }}>{hist.bestE1rm}{unit}</p>
-                  <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>Est. 1RM</p>
-                </div>
-              )}
+    <Sheet title={name} onClose={onClose}>
+      {loading && !hist ? (
+        <Skeleton height={60} width="100%" />
+      ) : !hist || hist.points.length === 0 ? (
+        <p className="text-base text-dim">No logged sets for this lift yet.</p>
+      ) : (
+        <>
+          {(hist.bestWeight != null || hist.bestE1rm != null) && (
+            <div style={{ marginBottom: 20 }}>
+              <StatGrid>
+                {hist.bestWeight != null && <Stat value={`${hist.bestWeight}${unit}`} label="Top set" />}
+                {hist.bestE1rm != null && <Stat value={`${hist.bestE1rm}${unit}`} label="Est. 1RM" tone="var(--signal)" />}
+                <Stat value={hist.points.length} label="Sessions" />
+              </StatGrid>
             </div>
+          )}
 
-            {series.length >= 2 && (
-              <div style={{ marginBottom: 14 }}>
-                <Sparkline values={series} />
-                <p className="text-xs text-dim" style={{ marginTop: 4, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
-                  {hist.points[0].e1rm != null ? 'Est. 1RM' : 'Top set'} over {hist.points.length} sessions
-                </p>
+          {/* The trend, drawn. This is the whole reason to open this sheet. */}
+          {series.length >= 2 && (
+            <div style={{ marginBottom: 22 }}>
+              <Sparkline values={series} />
+              <p className="text-xs text-dim" style={{ marginTop: 8, fontFamily: 'var(--font-mono)' }}>
+                {hist.points[0].e1rm != null ? 'Est. 1RM' : 'Top set'} · {hist.points.length} sessions
+              </p>
+            </div>
+          )}
+
+          <SectionHeader>Every session</SectionHeader>
+          <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column' }}>
+            {[...hist.points].reverse().map((p, i) => (
+              <div
+                key={i}
+                style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                  gap: 12, padding: '12px 0', borderBottom: '1px solid var(--line)',
+                }}
+              >
+                <span className="text-sm text-dim" style={{ fontFamily: 'var(--font-mono)' }}>{dayAndDate(p.performedAt)}</span>
+                <span className="num text-sm" style={{ textAlign: 'right' }}>
+                  {p.topWeight != null ? `${p.topWeight}${unit}×${p.topReps ?? '?'}` : `${p.topReps ?? '?'} reps`}
+                  {p.e1rm != null ? `  ·  ${p.e1rm}${unit} e1RM` : ''}
+                  {p.rpe != null ? `  ·  RPE ${p.rpe}` : ''}
+                </span>
               </div>
-            )}
-
-            <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {[...hist.points].reverse().map((p, i) => (
-                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                  <span className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)' }}>{dayAndDate(p.performedAt)}</span>
-                  <span className="num text-xs">
-                    {p.topWeight != null ? `${p.topWeight}${unit}×${p.topReps ?? '?'}` : `${p.topReps ?? '?'} reps`}
-                    {p.e1rm != null ? `  ·  ${p.e1rm}${unit} e1RM` : ''}
-                    {p.rpe != null ? `  ·  RPE ${p.rpe}` : ''}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </>
-        )}
-      </div>
-    </div>
+            ))}
+          </div>
+        </>
+      )}
+    </Sheet>
   )
 }
 
@@ -183,45 +176,34 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
   )
   const weeks = data?.weeks ?? []
 
-  const back = (
-    <button
-      type="button"
-      className="btn btn--ghost"
-      style={{ padding: '0 8px', height: 32, minWidth: 36, marginBottom: 8 }}
-      onClick={() => navigate('/app/today')}
-      aria-label="Back"
-    >
-      <ChevronLeft size={20} strokeWidth={1.5} />
-    </button>
-  )
-
   return (
     <div className="screen with-nav">
       <div className="page"><div className="page__main">
-        {back}
-        <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-          The log
-        </p>
-        <h2 style={{ fontSize: 22, fontWeight: 600, marginTop: 4, marginBottom: 20 }}>History</h2>
+        <PageHeader
+          eyebrow="The log"
+          title="History"
+          subtitle="Tap a session to review it, or a lift to see its progression."
+          onBack={() => navigate('/app/today')}
+        />
 
         {loading && weeks.length === 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {Array.from({ length: 3 }).map((_, i) => (
-              <div key={i} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <Skeleton height={14} width={140} /><Skeleton height={10} width={90} />
+              <div key={i} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                <Skeleton height={18} width={160} /><Skeleton height={12} width={100} />
               </div>
             ))}
           </div>
         ) : weeks.length === 0 ? (
           <div className="card">
-            <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
-              Nothing logged yet. Once you finish a session it lands here — every week, every lift, kept.
+            <p className="text-base text-dim">
+              Nothing logged yet. Finish a session and it lands here.
             </p>
           </div>
         ) : (
           weeks.map((wk) => (
-            <div key={wk.weekEnding} style={{ marginBottom: 24 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 10 }}>
+            <div key={wk.weekEnding} style={{ marginBottom: 28 }}>
+              <div className="section__head">
                 <SectionHeader>{fmtRange(wk.weekStart, wk.weekEnding)}</SectionHeader>
                 <span className="num text-xs text-dim">
                   {wk.sessions.length} session{wk.sessions.length === 1 ? '' : 's'} · {wk.totalSets} sets

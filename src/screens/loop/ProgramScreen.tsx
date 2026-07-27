@@ -6,29 +6,30 @@ import { useCachedLoader } from '../../lib/cache'
 import { gatherProgramMap, gatherTrainingLog, redesignActivePhase, type NextWeekProjection, type MapPhase } from '../../engine'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { getWeightUnit } from '../../lib/units'
-import { SectionHeader, Skeleton, BracketFrame } from '../../components/ui'
+import {
+  PageHeader, SectionHeader, Skeleton, Disclosure, Chip, Row, Button,
+} from '../../components/ui'
 import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName, WeeklyDirective } from '../../types/database'
 
-// Directive → colour, matching the recap banner so "the call" reads the same
+// Directive → chip tone, matching the recap banner so "the call" reads the same
 // everywhere it appears.
-const DIRECTIVE_COLOR: Record<WeeklyDirective, string> = {
-  PROGRESS:        'var(--confirmed)',
-  HOLD:            'var(--text-dim)',
-  'HOLD (missed)': 'var(--pending)',
-  DELOAD:          'var(--pending)',
-  RECOVERY:        'var(--pending)',
+const DIRECTIVE_TONE: Record<WeeklyDirective, 'done' | 'todo' | 'pending'> = {
+  PROGRESS:        'done',
+  HOLD:            'todo',
+  'HOLD (missed)': 'pending',
+  DELOAD:          'pending',
+  RECOVERY:        'pending',
 }
 
 /**
- * PROGRAM — "you are here." The macro view (per the Notion Screen Architecture
- * spec): the phase arc Stability → Strength → Power → Sport, where you are in it,
- * the gates that graduate you, the session structure, and the non-negotiables.
+ * PROGRAM — "you are here." One instrument at the top (the phase arc, the week
+ * position, the countdown to retest), then everything else folded into
+ * disclosure rows.
  *
- * Doctrine: this is an INSTRUMENT showing position, not a game. No streaks, no
- * levels, no XP bar. The arc is static (a phase changes every ~5 weeks, not live
- * — only the moment of advancement would earn a one-time pulse). Phase is
- * data-driven from phase.name, so the arc moves on its own once the coach-driven
- * advancement engine flips it. Gates show pending (amber) until that lands.
+ * The previous version stacked seven full sections — gate, sessions, next week,
+ * road ahead, recent, non-negotiables — each with its own explanatory paragraph,
+ * for roughly six screens of scrolling on a phone. The detail hasn't been
+ * removed; it's behind a row that tells you how much is in there.
  */
 
 const PHASES: PhaseName[] = ['Stability', 'Strength', 'Power', 'Sport']
@@ -107,7 +108,7 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
   }
   const nextWeek = map?.nextWeek ?? null
   const aheadPhases = (map?.phases ?? []).filter((p) => p.state === 'upcoming')
-  const recentWeeks = (log?.weeks ?? []).slice(0, 2)
+  const recentWeeks = (log?.weeks ?? []).slice(0, 3)
   const program  = data?.program ?? null
   const phase     = data?.phase ?? null
   const routines  = data?.routines ?? []
@@ -136,37 +137,26 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
 
   return (
     <div className="screen with-nav">
-      <div className="page page--rail">
+      <div className="page">
        <div className="page__main">
-        <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)', marginBottom: 4 }}>
-          The plan
-        </p>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 24, gap: 12 }}>
-          <h2 style={{ fontSize: 22, fontWeight: 600 }}>Program</h2>
-          <button
-            type="button"
-            onClick={() => navigate('/app/history')}
-            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-dim)' }}
-          >
-            ‹ History
-          </button>
-        </div>
+        <PageHeader eyebrow="The plan" title="Program" />
 
         {loading ? (
-          <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-            <Skeleton height={10} width={80} /><Skeleton height={28} width="100%" /><Skeleton height={22} width={140} />
+          <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <Skeleton height={12} width={90} /><Skeleton height={34} width="100%" /><Skeleton height={24} width={150} />
           </div>
         ) : !program ? (
           <div className="card">
-            <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
+            <p className="text-base text-dim">
               No active program yet. Finish onboarding and your first session builds here.
             </p>
           </div>
         ) : (
           <>
-            {/* THE "YOU ARE HERE" INSTRUMENT — the focal surface (bracket-framed) */}
-            <BracketFrame className="card fade-rise" style={{ marginBottom: 28 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 18 }}>
+            {/* THE INSTRUMENT — where you are, at a glance. The only thing on
+                this screen that is always open. */}
+            <div className="card fade-rise" style={{ marginBottom: 28 }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 22 }}>
                 <SectionHeader>Current phase</SectionHeader>
                 {retestDays !== null && (
                   <span className={`num text-xs${retestDays <= 7 ? ' text-signal' : ' text-dim'}`}>
@@ -175,16 +165,14 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
                 )}
               </div>
 
-              {/* The arc */}
               <PhaseArc currentIdx={currentIdx} />
 
-              {/* Phase name + week position */}
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 22 }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 24, fontWeight: 600, color: 'var(--signal)', letterSpacing: '-0.01em' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 26 }}>
+                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-2xl)', fontWeight: 700, color: 'var(--signal)', letterSpacing: '-0.01em' }}>
                   {phaseName}
                 </span>
                 <div style={{ textAlign: 'right' }}>
-                  <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.08em', marginBottom: 6 }}>
+                  <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', marginBottom: 8 }}>
                     WEEK <span className="num text-signal">{weekCurrent}</span>/{weekTotal}
                   </p>
                   <WeekDots current={weekCurrent} total={weekTotal} />
@@ -192,144 +180,108 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
               </div>
 
               {program.goal && (
-                <p className="text-sm text-dim" style={{ marginTop: 14, lineHeight: 1.5 }}>{program.goal}</p>
+                <p className="text-sm text-dim" style={{ marginTop: 16, lineHeight: 1.55 }}>{program.goal}</p>
               )}
-            </BracketFrame>
+            </div>
 
-            {/* THE GATE — what graduates you (coach reads it; code disposes) */}
-            {advancement.length > 0 && (
-              <div className="fade-rise fade-rise-delay-1" style={{ marginBottom: 28 }}>
-                <SectionHeader>The gate</SectionHeader>
-                <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 12, lineHeight: 1.6 }}>
-                  What graduates you{nextPhase ? ` to ${nextPhase}` : ''}. Awaiting evidence.
-                </p>
-                <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {advancement.map((c, i) => (
-                    <li key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5 }}>
-                      <span
-                        title="Awaiting evidence"
-                        style={{ marginTop: 5, flexShrink: 0, width: 7, height: 7, borderRadius: '50%', border: '1px solid var(--pending)', background: 'transparent' }}
-                      />
-                      <span>{c}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
+            {/* Everything else folds away. Each row states its own size so you
+                know what's behind it before you open it. */}
+
+            {nextWeek && (
+              <Disclosure
+                label="Next week"
+                meta={
+                  nextWeek.directive
+                    ? <Chip tone={DIRECTIVE_TONE[nextWeek.directive] ?? 'todo'}>{nextWeek.directive}</Chip>
+                    : <span>Not set</span>
+                }
+              >
+                <NextWeekBody nextWeek={nextWeek} />
+              </Disclosure>
             )}
 
-            {/* SESSIONS — the work in this phase */}
-            <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 28 }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                <SectionHeader>Sessions</SectionHeader>
-                <button
-                  type="button"
-                  onClick={handleRedesign}
-                  disabled={redesigning}
-                  style={{
-                    display: 'inline-flex', alignItems: 'center', gap: 5, background: 'none', border: 'none', padding: 0,
-                    cursor: redesigning ? 'default' : 'pointer', opacity: redesigning ? 0.6 : 1,
-                    fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--signal)',
-                  }}
-                >
-                  <Sparkles size={12} strokeWidth={1.5} />
-                  {redesigning ? 'Rebuilding…' : 'Rebuild from my lifts'}
-                </button>
-              </div>
-              <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 12, lineHeight: 1.6 }}>
-                Coach-designed around the lifts you actually log — same names, so your loading carries forward.
-              </p>
-              <div style={{ marginTop: 0, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <Disclosure label="Sessions" meta={<span className="num">{routines.length}</span>}>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {routines.length > 0 ? routines.map((r) => (
                   <div key={r.id} className="card">
                     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                      <h3 style={{ fontSize: 15, fontWeight: 600 }}>{r.name}</h3>
+                      <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{r.name}</h3>
                       <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
-                        {(r.exercises as unknown[]).length} exercises
+                        {r.exercises.length} ex
                       </span>
                     </div>
-                    {r.intent && <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{r.intent}</p>}
+                    {r.intent && <p className="text-sm text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>{r.intent}</p>}
                   </div>
                 )) : (
                   <p className="text-sm text-dim">No sessions in this phase yet.</p>
                 )}
+                <Button variant="outline" full onClick={handleRedesign} disabled={redesigning} style={{ marginTop: 4 }}>
+                  <Sparkles size={16} strokeWidth={1.75} style={{ marginRight: 8 }} />
+                  {redesigning ? 'Rebuilding…' : 'Rebuild from my lifts'}
+                </Button>
               </div>
-            </div>
+            </Disclosure>
 
-            {/* NEXT WEEK — the standing prescription read forward. Provisional:
-                the real numbers lock when the week closes (check-in / Sunday). */}
-            {nextWeek && <NextWeekCard nextWeek={nextWeek} />}
+            {advancement.length > 0 && (
+              <Disclosure
+                label={nextPhase ? `What graduates you to ${nextPhase}` : 'What graduates you'}
+                meta={<span className="num">{advancement.length}</span>}
+              >
+                <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  {advancement.map((c, i) => (
+                    <li key={i} style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                      <span
+                        title="Awaiting evidence"
+                        style={{ marginTop: 7, flexShrink: 0, width: 9, height: 9, borderRadius: '50%', border: '1.5px solid var(--pending)' }}
+                      />
+                      <span className="text-base" style={{ lineHeight: 1.5 }}>{c}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Disclosure>
+            )}
 
-            {/* THE ROAD AHEAD — phases after this one. Concept only: their
-                sessions don't exist until you graduate into them. */}
+            {nonNegotiables.length > 0 && (
+              <Disclosure label="Non-negotiables" meta={<span className="num">{nonNegotiables.length}</span>}>
+                <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  {nonNegotiables.map((rule, i) => (
+                    <li key={i} style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                      <span className="num text-signal" style={{ fontSize: 'var(--fs-sm)', flexShrink: 0, fontWeight: 700, lineHeight: 1.55 }}>
+                        {String(i + 1).padStart(2, '0')}
+                      </span>
+                      <span className="text-base" style={{ lineHeight: 1.5 }}>{rule}</span>
+                    </li>
+                  ))}
+                </ul>
+              </Disclosure>
+            )}
+
             {aheadPhases.length > 0 && (
-              <div className="fade-rise fade-rise-delay-3" style={{ marginBottom: 28 }}>
-                <SectionHeader>The road ahead</SectionHeader>
-                <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 12, lineHeight: 1.6 }}>
-                  What's after {phaseName}. The shape is set; the exact sessions build when you graduate in.
-                </p>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              <Disclosure label="The road ahead" meta={<span className="num">{aheadPhases.length}</span>}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                   {aheadPhases.map((p) => <RoadAheadCard key={p.name} phase={p} />)}
                 </div>
-              </div>
+              </Disclosure>
             )}
 
-            {/* RECENT — a glance back; the full log lives in History. Completes
-                the timeline: road ahead above, what you've banked below. */}
             {recentWeeks.length > 0 && (
-              <div className="fade-rise fade-rise-delay-3" style={{ marginBottom: 28 }}>
-                <SectionHeader>Recent</SectionHeader>
-                <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {recentWeeks.map((wk) => (
-                    <button
-                      key={wk.weekEnding}
-                      type="button"
-                      onClick={() => navigate('/app/history')}
-                      className="card"
-                      style={{ textAlign: 'left', cursor: 'pointer', width: '100%' }}
-                    >
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                        <span className="text-sm" style={{ fontWeight: 600 }}>{fmtWeekRange(wk.weekStart, wk.weekEnding)}</span>
-                        <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
-                          {wk.sessions.length} session{wk.sessions.length === 1 ? '' : 's'} · {wk.totalSets} sets
-                        </span>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-                <button
-                  type="button"
-                  onClick={() => navigate('/app/history')}
-                  style={{ marginTop: 10, background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-dim)' }}
-                >
-                  View full history ›
-                </button>
-              </div>
+              <Disclosure label="Recent weeks" meta={<span className="num">{recentWeeks.length}</span>}>
+                {recentWeeks.map((wk) => (
+                  <Row
+                    key={wk.weekEnding}
+                    title={fmtWeekRange(wk.weekStart, wk.weekEnding)}
+                    value={`${wk.sessions.length} · ${wk.totalSets} sets`}
+                    onClick={() => navigate('/app/history')}
+                  />
+                ))}
+                <Button variant="ghost" full style={{ marginTop: 12 }} onClick={() => navigate('/app/history')}>
+                  View full history →
+                </Button>
+              </Disclosure>
             )}
-
           </>
         )}
        </div>
-
-       {/* NON-NEGOTIABLES — the rules. Desktop rail; stacked under sessions on
-           mobile with a separator. */}
-       <aside className="page__rail">
-        {!loading && program && nonNegotiables.length > 0 && (
-          <div className="fade-rise fade-rise-delay-3 program-rules">
-            <SectionHeader>Non-negotiables</SectionHeader>
-            <p className="text-xs text-dim" style={{ marginTop: 6, marginBottom: 10, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              Rules — every session, no skips
-            </p>
-            <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {nonNegotiables.map((rule, i) => (
-                <li key={i} style={{ display: 'flex', gap: 10, alignItems: 'flex-start', fontSize: 13, lineHeight: 1.5 }}>
-                  <span className="num text-signal" style={{ fontSize: 13, flexShrink: 0 }}>{String(i + 1).padStart(2, '0')}</span>
-                  <span>{rule}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
-       </aside>
       </div>
     </div>
   )
@@ -344,10 +296,10 @@ function PhaseArc({ currentIdx }: { currentIdx: number }) {
         const last = i === PHASES.length - 1
         const dot =
           state === 'current'
-            ? { width: 12, height: 12, background: 'var(--signal)', border: 'none', boxShadow: '0 0 0 4px var(--signal-dim)' }
+            ? { width: 14, height: 14, background: 'var(--signal)', border: 'none', boxShadow: '0 0 0 5px var(--signal-dim)' }
             : state === 'done'
-            ? { width: 10, height: 10, background: 'var(--confirmed)', border: 'none', boxShadow: 'none' }
-            : { width: 10, height: 10, background: 'transparent', border: '1px solid var(--pending)', boxShadow: 'none' }
+            ? { width: 11, height: 11, background: 'var(--confirmed)', border: 'none', boxShadow: 'none' }
+            : { width: 11, height: 11, background: 'transparent', border: '1.5px solid var(--pending)', boxShadow: 'none' }
         const labelColor = state === 'current' ? 'var(--signal)' : state === 'done' ? 'var(--confirmed)' : 'var(--text-dim)'
         return (
           <Fragment key={p}>
@@ -355,8 +307,8 @@ function PhaseArc({ currentIdx }: { currentIdx: number }) {
               <span style={{ borderRadius: '50%', ...dot }} />
               <span
                 style={{
-                  marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.08em',
-                  textTransform: 'uppercase', color: labelColor, opacity: state === 'pending' ? 0.6 : 1, whiteSpace: 'nowrap',
+                  marginTop: 10, fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-micro)', letterSpacing: '0.04em',
+                  textTransform: 'uppercase', color: labelColor, opacity: state === 'pending' ? 0.7 : 1, whiteSpace: 'nowrap',
                 }}
               >
                 {p}
@@ -365,7 +317,7 @@ function PhaseArc({ currentIdx }: { currentIdx: number }) {
             {!last && (
               <div
                 style={{
-                  flex: 1, height: 0, margin: '0 6px', marginBottom: 22,
+                  flex: 1, height: 0, margin: '0 6px', marginBottom: 24,
                   borderTop: i < currentIdx ? '1px solid var(--confirmed)' : '1px dashed var(--line)',
                 }}
               />
@@ -378,97 +330,67 @@ function PhaseArc({ currentIdx }: { currentIdx: number }) {
 }
 
 // ---- Next-week projection — the call + per-session projected loads, provisional.
-function NextWeekCard({ nextWeek }: { nextWeek: NextWeekProjection }) {
-  const directive = nextWeek.directive
-  const color = directive ? DIRECTIVE_COLOR[directive] ?? 'var(--text-dim)' : 'var(--text-dim)'
-  // Only show per-session rows once they carry real projected loads — otherwise
-  // they just duplicate the Sessions list above (e.g. a freshly-started phase
-  // with no logged history yet).
+function NextWeekBody({ nextWeek }: { nextWeek: NextWeekProjection }) {
   const sessionsWithLines = nextWeek.sessions.filter((s) => s.lines.length > 0)
+  if (!nextWeek.directive) {
+    return (
+      <p className="text-base text-dim">
+        No call yet — train this week and the projection sharpens.
+      </p>
+    )
+  }
   return (
-    <div className="fade-rise fade-rise-delay-2" style={{ marginBottom: 28 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-        <SectionHeader>Next week</SectionHeader>
-        {nextWeek.provisional && (
-          <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--pending)' }}>
-            Projection
-          </span>
+    <>
+      {nextWeek.rationale && (
+        <p className="text-base" style={{ marginBottom: 14, lineHeight: 1.55 }}>{nextWeek.rationale}</p>
+      )}
+      <div style={{ display: 'flex', gap: 10, marginBottom: 18, flexWrap: 'wrap' }}>
+        {nextWeek.loadDeltaPct !== 0 && (
+          <Chip tone={nextWeek.loadDeltaPct > 0 ? 'done' : 'pending'}>
+            {nextWeek.loadDeltaPct > 0 ? '+' : ''}{nextWeek.loadDeltaPct}% load
+          </Chip>
         )}
+        {nextWeek.rpeTarget != null && <Chip tone="todo">Target RPE {nextWeek.rpeTarget}</Chip>}
+        {nextWeek.provisional && <Chip tone="pending">Provisional</Chip>}
       </div>
 
-      {/* The call — directive read forward, or a nudge if there's no read yet. */}
-      <div className="card" style={{ marginTop: 10, marginBottom: 10, borderColor: directive ? color : undefined }}>
-        {directive ? (
-          <>
-            <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-              <span style={{ fontFamily: 'var(--font-mono)', fontSize: 16, fontWeight: 600, letterSpacing: '0.04em', color }}>
-                {directive}
-              </span>
-              {nextWeek.loadDeltaPct !== 0 && (
-                <span className="num text-xs" style={{ color }}>
-                  {nextWeek.loadDeltaPct > 0 ? '+' : ''}{nextWeek.loadDeltaPct}% load
-                </span>
-              )}
-            </div>
-            {nextWeek.rationale && (
-              <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>{nextWeek.rationale}</p>
-            )}
-            {nextWeek.rpeTarget != null && (
-              <p className="num text-xs text-dim" style={{ marginTop: 8 }}>Target RPE {nextWeek.rpeTarget}</p>
-            )}
-          </>
-        ) : (
-          <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
-            No call yet — train this week and the projection sharpens once the coach reads it.
-          </p>
-        )}
-      </div>
-
-      {/* Per-session projected loads — only when they carry real numbers. */}
       {sessionsWithLines.length > 0 ? (
-        <>
-          {sessionsWithLines.map((s) => (
-            <div key={s.routineId} className="card" style={{ marginBottom: 8 }}>
-              <h3 style={{ fontSize: 14, fontWeight: 600 }}>{s.routineName}</h3>
-              <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 5 }}>
-                {s.lines.map((l, i) => (
-                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                    <span className="text-xs" style={{ color: 'var(--text)' }}>{l.name}</span>
-                    <span className="num text-xs" style={{ color: l.held ? 'var(--pending)' : 'var(--text-dim)', textAlign: 'right' }}>{l.hint}</span>
-                  </div>
-                ))}
-              </div>
+        sessionsWithLines.map((s) => (
+          <div key={s.routineId} className="card" style={{ marginBottom: 10 }}>
+            <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{s.routineName}</h3>
+            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {s.lines.map((l, i) => (
+                <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                  <span className="text-sm">{l.name}</span>
+                  <span className="num text-sm" style={{ color: l.held ? 'var(--pending)' : 'var(--text-dim)', textAlign: 'right' }}>{l.hint}</span>
+                </div>
+              ))}
             </div>
-          ))}
-          {nextWeek.provisional && (
-            <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
-              Projection — locks in when you close the week.
-            </p>
-          )}
-        </>
+          </div>
+        ))
       ) : (
-        <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>
-          Per-lift targets appear once you've logged a session this phase — the projection reads off your last working sets.
+        <p className="text-sm text-dim">
+          Per-lift targets appear once you've logged a session this phase.
         </p>
       )}
-    </div>
+    </>
   )
 }
 
 // ---- A future phase — concept only (its sessions build on advancement). Locked.
 function RoadAheadCard({ phase }: { phase: MapPhase }) {
   return (
-    <div className="card" style={{ opacity: 0.82 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Lock size={13} strokeWidth={1.5} color="var(--text-dim)" />
-        <h3 style={{ fontSize: 15, fontWeight: 600 }}>{phase.name}</h3>
+    <div className="card" style={{ opacity: 0.85 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Lock size={16} strokeWidth={1.75} color="var(--text-dim)" />
+        <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{phase.name}</h3>
       </div>
       {phase.goal && (
-        <p className="text-xs text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>{phase.goal}</p>
+        <p className="text-sm text-dim" style={{ marginTop: 8, lineHeight: 1.5 }}>{phase.goal}</p>
       )}
       {phase.gate.length > 0 && (
-        <p className="text-xs text-dim" style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.04em', lineHeight: 1.5 }}>
-          UNLOCKS WHEN · {phase.gate[0]}
+        <p className="text-xs text-dim" style={{ marginTop: 10, fontFamily: 'var(--font-mono)', lineHeight: 1.5 }}>
+          UNLOCKS · {phase.gate[0]}
         </p>
       )}
     </div>
@@ -483,9 +405,9 @@ function WeekDots({ current, total }: { current: number; total: number }) {
         <span
           key={i}
           style={{
-            width: i === current - 1 ? 16 : 8,
-            height: 4,
-            borderRadius: 2,
+            width: i === current - 1 ? 18 : 9,
+            height: 5,
+            borderRadius: 3,
             background: i < current ? 'var(--signal)' : 'var(--line)',
           }}
         />

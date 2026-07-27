@@ -1,9 +1,8 @@
 import { useNavigate, useParams } from 'react-router-dom'
-import { ChevronLeft } from 'lucide-react'
 import { useCachedLoader } from '../../lib/cache'
 import { gatherWeeklyRecap, type RecapSession } from '../../engine'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
-import { Button, SectionHeader, Skeleton } from '../../components/ui'
+import { Button, SectionHeader, Skeleton, PageHeader, Stat, StatGrid } from '../../components/ui'
 import type { SetLog, WeeklyDirective, WeeklyPrescription, WeeklyReviewAdjustments } from '../../types/database'
 
 // Directive → colour + plain-language gist for the recap banner.
@@ -33,30 +32,19 @@ function fmtSet(s: SetLog, unit: string, distanceUnit: string): string {
   return `${s.reps ?? '?'} reps`
 }
 
-function StatTile({ value, label, tone }: { value: string | number; label: string; tone?: string }) {
-  return (
-    <div style={{ flex: 1, minWidth: 72 }}>
-      <p className="num" style={{ fontSize: 22, fontWeight: 600, color: tone ?? 'var(--text)' }}>{value}</p>
-      <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', marginTop: 2 }}>
-        {label}
-      </p>
-    </div>
-  )
-}
-
 function SessionRow({ s }: { s: RecapSession }) {
   const unit = getWeightUnit()
   const distanceUnit = getDistanceUnit(unit)
   return (
-    <div className="card" style={{ marginBottom: 8 }}>
+    <div className="card" style={{ marginBottom: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-        <h3 style={{ fontSize: 15, fontWeight: 600 }}>{s.routineName}</h3>
+        <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{s.routineName}</h3>
         <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
-          {shortDay(s.performedAt)} · {s.setsDone} set{s.setsDone === 1 ? '' : 's'}{s.rpe != null ? ` · RPE ${s.rpe}` : ''}
+          {shortDay(s.performedAt)} · {s.setsDone} sets{s.rpe != null ? ` · RPE ${s.rpe}` : ''}
         </span>
       </div>
       {s.highlights.length > 0 && (
-        <p className="num text-xs text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>
+        <p className="num text-xs text-dim" style={{ marginTop: 8, lineHeight: 1.5 }}>
           {s.highlights.map((h) => `${h.name} ${fmtSet(h.set, unit, distanceUnit)}`).join('  ·  ')}
         </p>
       )}
@@ -78,26 +66,14 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
     () => gatherWeeklyRecap(athleteId, reviewId),
   )
 
-  const back = (
-    <button
-      type="button"
-      className="btn btn--ghost"
-      style={{ padding: '0 8px', height: 32, minWidth: 36, marginBottom: 8 }}
-      onClick={() => navigate('/app/today')}
-      aria-label="Back"
-    >
-      <ChevronLeft size={20} strokeWidth={1.5} />
-    </button>
-  )
+  const back = () => navigate('/app/today')
 
   if (loading) {
     return (
       <div className="screen with-nav">
         <div className="page"><div className="page__main">
-          {back}
-          <Skeleton height={12} width={90} /><div style={{ height: 10 }} />
-          <Skeleton height={26} width={180} /><div style={{ height: 18 }} />
-          <div className="card"><Skeleton height={60} width="100%" /></div>
+          <PageHeader eyebrow="Weekly recap" title="…" onBack={back} />
+          <div className="card"><Skeleton height={70} width="100%" /></div>
         </div></div>
       </div>
     )
@@ -107,11 +83,10 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
     return (
       <div className="screen with-nav">
         <div className="page"><div className="page__main">
-          {back}
-          <h2 style={{ fontSize: 22, fontWeight: 600, marginBottom: 12 }}>Weekly recap</h2>
+          <PageHeader eyebrow="Weekly recap" title="Nothing yet" onBack={back} />
           <div className="card">
-            <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
-              No recap yet — your first one lands after a full week of training. Log a few sessions and check back.
+            <p className="text-base text-dim">
+              Your first recap lands after a full week of training.
             </p>
           </div>
         </div></div>
@@ -130,81 +105,78 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
     <div className="screen with-nav">
       <div className="page page--rail">
        <div className="page__main">
-        {back}
-        <p className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-          Weekly recap
-        </p>
-        <h2 style={{ fontSize: 22, fontWeight: 600, marginTop: 4, marginBottom: 20 }}>
-          {fmtRange(recap.weekStart, recap.weekEnd)}
-        </h2>
+        <PageHeader eyebrow="Weekly recap" title={fmtRange(recap.weekStart, recap.weekEnd)} onBack={back} />
 
         {/* The call — the directive for next week, the headline of the recap. */}
-        <div className="card fade-rise" style={{ marginBottom: 20, borderColor: tone.color }}>
+        <div className="card fade-rise" style={{ marginBottom: 28, borderLeft: `3px solid ${tone.color}` }}>
+          <p className="section-header" style={{ marginBottom: 8 }}>Next week</p>
           <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 18, fontWeight: 600, letterSpacing: '0.04em', color: tone.color }}>
+            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-2xl)', fontWeight: 700, letterSpacing: '-0.01em', color: tone.color }}>
               {directive}
             </span>
             {delta !== 0 && (
-              <span className="num text-xs" style={{ color: tone.color }}>
+              <span className="num text-sm" style={{ color: tone.color }}>
                 {delta > 0 ? '+' : ''}{delta}% load
               </span>
             )}
           </div>
-          <p className="text-xs text-dim" style={{ marginTop: 2, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', textTransform: 'uppercase' }}>
-            Next week · {tone.gist}
-          </p>
+          <p className="text-sm text-dim" style={{ marginTop: 4 }}>{tone.gist}</p>
           {presc?.rationale && (
-            <p className="text-sm" style={{ marginTop: 10, lineHeight: 1.5 }}>{presc.rationale}</p>
+            <p className="text-base" style={{ marginTop: 14, lineHeight: 1.55 }}>{presc.rationale}</p>
           )}
           {presc?.rpe_target != null && (
-            <p className="num text-xs text-dim" style={{ marginTop: 8 }}>Target RPE {presc.rpe_target}</p>
+            <p className="num text-xs text-dim" style={{ marginTop: 12 }}>Target RPE {presc.rpe_target}</p>
           )}
         </div>
 
-        {/* What you did — the week's training tally. */}
-        <SectionHeader>The week</SectionHeader>
-        <div className="card fade-rise" style={{ marginTop: 10, marginBottom: 20, display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          <StatTile value={`${recap.sessions.length}/${recap.planned}`} label="Sessions" />
-          {adherencePct !== null && <StatTile value={`${adherencePct}%`} label="Adherence" />}
-          <StatTile value={recap.totalSets} label="Sets" />
-          <StatTile value={adj?.avgRPE ?? '—'} label="Avg RPE" />
-          {adj && adj.painCount > 0 && <StatTile value={adj.painCount} label="Pain flags" tone="var(--pending)" />}
-          {adj && adj.positiveCount > 0 && <StatTile value={adj.positiveCount} label="Strong sets" tone="var(--confirmed)" />}
+        {/* What you did — the week's training tally, as numbers. */}
+        <div className="section">
+          <SectionHeader>The week</SectionHeader>
+          <div className="fade-rise" style={{ marginTop: 10 }}>
+            <StatGrid>
+              <Stat value={`${recap.sessions.length}/${recap.planned}`} label="Sessions" />
+              {adherencePct !== null && <Stat value={`${adherencePct}%`} label="Adherence" />}
+              <Stat value={recap.totalSets} label="Sets" />
+              <Stat value={adj?.avgRPE ?? '—'} label="Avg RPE" />
+              {adj && adj.painCount > 0 && <Stat value={adj.painCount} label="Pain flags" tone="var(--pending)" />}
+              {adj && adj.positiveCount > 0 && <Stat value={adj.positiveCount} label="Strong sets" tone="var(--confirmed)" />}
+            </StatGrid>
+          </div>
         </div>
 
         {/* What moved — the reads that shifted this week. */}
         {recap.movements.length > 0 && (
-          <>
+          <div className="section">
             <SectionHeader>What the coach saw</SectionHeader>
-            <div style={{ marginTop: 10, marginBottom: 20, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div style={{ marginTop: 10, display: 'flex', flexDirection: 'column', gap: 10 }}>
               {recap.movements.map((m) => (
                 <div key={m.id} className="card">
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                    <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--computing)' }}>
-                      {m.category}
-                    </span>
+                    <span className="section-header" style={{ color: 'var(--computing)' }}>{m.category}</span>
                     <span className="num text-xs text-dim">
                       {m.prevStatus && m.prevStatus !== m.status ? `${m.prevStatus} → ${m.status}` : `${Math.round(m.confidence * 100)}%`}
                     </span>
                   </div>
-                  <p className="text-sm" style={{ marginTop: 6, lineHeight: 1.5 }}>{m.claim}</p>
+                  <p className="text-base" style={{ marginTop: 8, lineHeight: 1.5 }}>{m.claim}</p>
                 </div>
               ))}
             </div>
-          </>
+          </div>
         )}
 
         {/* The sessions themselves. */}
-        <SectionHeader>Sessions logged</SectionHeader>
-        <div style={{ marginTop: 10 }}>
-          {recap.sessions.length > 0 ? (
-            recap.sessions.map((s) => <SessionRow key={s.workoutId} s={s} />)
-          ) : (
-            <p className="text-sm text-dim">No sessions logged this week.</p>
-          )}
+        <div className="section">
+          <SectionHeader>Sessions logged</SectionHeader>
+          <div style={{ marginTop: 10 }}>
+            {recap.sessions.length > 0 ? (
+              recap.sessions.map((s) => <SessionRow key={s.workoutId} s={s} />)
+            ) : (
+              <p className="text-sm text-dim">No sessions logged this week.</p>
+            )}
+          </div>
         </div>
 
-        <Button variant="ghost" full style={{ marginTop: 16 }} onClick={() => navigate('/app/coach')}>
+        <Button variant="outline" full onClick={() => navigate('/app/coach')}>
           Ask the coach about this week →
         </Button>
        </div>

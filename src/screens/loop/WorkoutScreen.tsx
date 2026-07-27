@@ -79,11 +79,14 @@ interface SetHeaderProps {
   prescribedLoad: string | null  // raw load, e.g. "225 lbs" or "bodyweight"
 }
 
+// A column label with the prescribed target under it. Columns with no
+// prescription (RPE) render the label alone — an em-dash there just read as a
+// value you were somehow failing to hit.
 function headCell(label: string, target: string | null) {
   return (
     <div className="set-head__cell">
       <span className="set-head__label">{label}</span>
-      <span className="set-head__target">{target || '—'}</span>
+      {target && <span className="set-head__target">{target}</span>}
     </div>
   )
 }

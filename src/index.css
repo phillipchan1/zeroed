@@ -306,8 +306,17 @@ body {
 }
 
 .btn:disabled {
-  opacity: 0.4;
+  opacity: 0.5;
   cursor: not-allowed;
+}
+
+/* A disabled primary used to be signal-yellow at 40% — a muddy olive that still
+   read as a live button. Disabled now looks disabled: no fill, dim label. */
+.btn--primary:disabled {
+  opacity: 1;
+  background: var(--surface);
+  color: var(--text-dim);
+  box-shadow: inset 0 0 0 1px var(--line);
 }
 
 /* Primary: signal yellow — one per screen. Tallest target on the page. */
@@ -1853,8 +1862,14 @@ textarea.input {
   background: #f0d420;
   border-color: #f0d420;
 }
-.coach-input button:disabled,
 .coach-input input:disabled { opacity: 0.5; cursor: default; }
+/* Disabled Ask reads as unavailable, not as a dimmed live button. */
+.coach-input button:disabled {
+  background: var(--surface);
+  border-color: var(--line);
+  color: var(--text-dim);
+  cursor: default;
+}
 
 /* --- Coach: full-screen chat treatment ------------------------------------
    The conversation is the screen. The read instrument folds behind a header

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import {
-  InsightCard, Markdown, SectionHeader, Skeleton, StatusCounts, TelemetryStrip,
+  InsightCard, Markdown, SectionHeader, Skeleton, StatusCounts, Button,
 } from '../../components/ui'
 import {
   countInsightsByStatus, gatherCoachContext, coachStarterPrompts, runCoachChat,
@@ -124,22 +124,13 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   const p1read = active[0] ?? null         // the anchor read, always shown
   const rest   = active.slice(1)           // the rest of the stack, one tap away
   const statusCounts = countInsightsByStatus(insights)
-  const lastSignalAt = insights.reduce<string | null>((max, i) =>
-    !max || i.updated_at > max ? i.updated_at : max, null)
-
-  const countBy = (s: string) => insights.filter((i) => i.status === s).length
-  const telemetryItems: Array<{ label: string; value: string | number; signal?: boolean }> = [
-    { label: String(countBy('confirmed')), value: 'CONFIRMED' },
-    { label: String(countBy('likely')), value: 'LIKELY' },
-    { label: String(countBy('hypothesis')), value: 'HYP' },
-  ]
 
   // The pre-emptive opener — the system has already noticed something. Deterministic
   // (no model call) so the conversation feels alive the instant it loads.
   const p1 = context?.insights[0] ?? null
   const opener = p1
-    ? `I'm tracking ${context!.insights.length} read${context!.insights.length === 1 ? '' : 's'} on you. Your ${p1.category.toLowerCase()} is the one I'm watching closest — ${Math.round(p1.confidence * 100)}%, ${p1.status}. Ask me why, or anything about the program.`
-    : `Nothing tracked yet. Log a session and I'll have a read to talk through. Until then, ask me how this works.`
+    ? `Your ${p1.category.toLowerCase()} is the read I'm watching closest — ${Math.round(p1.confidence * 100)}% confident. Ask me why, or anything about the program.`
+    : `Nothing tracked yet. Log a session and I'll have a read to talk through.`
 
   async function send(question: string) {
     const q = question.trim()
@@ -179,8 +170,9 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
 
   return (
     <div className="screen with-nav coach-screen">
-      {!loading && <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />}
-
+      {/* The telemetry strip that used to sit here read "0 CONFIRMED · 2 LIKELY
+          · 3 HYP" — jargon counts nobody acts on, above the conversation that
+          is the point of the screen. The same statuses live inside the read. */}
       <div className="page page--split">
        <div className="page__main coach-read-pane">
         {/* On mobile the read folds behind this header so the conversation owns
@@ -192,11 +184,9 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
           onClick={() => setReadOpen((o) => !o)}
           aria-expanded={readOpen}
         >
-          <span style={{ display: 'flex', flexDirection: 'column', gap: 2, textAlign: 'left' }}>
-            <span className="text-xs text-dim" style={{ letterSpacing: '0.06em', textTransform: 'uppercase', fontFamily: 'var(--font-mono)' }}>
-              The read
-            </span>
-            <span style={{ fontSize: 22, fontWeight: 600 }}>Coach</span>
+          <span style={{ display: 'flex', flexDirection: 'column', gap: 4, textAlign: 'left' }}>
+            <span className="eyebrow">The read</span>
+            <span className="screen-title">Coach</span>
           </span>
           <span className="coach-read-toggle__hint text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.04em' }}>
             {readOpen ? 'Hide ⌄' : `${active.length} read${active.length === 1 ? '' : 's'} ›`}
@@ -362,18 +352,13 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
                     </div>
                   ))}
                 </div>
-                <div style={{ display: 'flex', gap: 8 }}>
-                  <button type="button" onClick={() => void applyProposed()} disabled={applying}>
+                <div style={{ display: 'flex', gap: 10 }}>
+                  <Button variant="primary" onClick={() => void applyProposed()} disabled={applying} style={{ flex: 2 }}>
                     {applying ? 'Applying…' : 'Apply'}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setProposed([])}
-                    disabled={applying}
-                    style={{ background: 'transparent', color: 'var(--text-dim)' }}
-                  >
+                  </Button>
+                  <Button variant="ghost" onClick={() => setProposed([])} disabled={applying} style={{ flex: 1 }}>
                     Dismiss
-                  </button>
+                  </Button>
                 </div>
               </div>
             )}
@@ -395,8 +380,8 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             <button type="submit" disabled={!context || pending || !draft.trim()}>Ask</button>
           </form>
 
-          <p className="text-xs text-dim" style={{ marginTop: 8, lineHeight: 1.5, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
-            The coach can propose changes — you approve each before anything is written. Noticed something mid-session? Still log it next session; that's where it counts as evidence.
+          <p className="text-xs text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>
+            Nothing is written until you approve it.
           </p>
         </div>
       </div>
