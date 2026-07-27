@@ -276,6 +276,7 @@ export function callPhaseDesign(payload: {
   profile: { goal: string | null; target: string | null; obstacle: string | null; training_age: number | null; sessions_per_week: number | null }
   insights: Array<{ priority: string; category: string; claim: string; confidence: number; status: string }>
   recent_lifts: Array<{ name: string; top_set: string; rpe: number | null }>
+  emphasis?: string   // optional athlete steer, e.g. "more explosive jumping + eccentric protective work"
 }): Promise<AgentResult<PhaseDesignResult>> {
   return invokeAgent<PhaseDesignResult>('phase_design', payload)
 }

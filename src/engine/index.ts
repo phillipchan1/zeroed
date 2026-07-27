@@ -2791,7 +2791,7 @@ function disposePhaseDesign(
 // deterministic template on ANY failure — the app always produces a safe phase.
 async function designPhasePlan(
   athleteId: string, programId: string, phaseName: PhaseName, startDateStr: string,
-  category: string, p1InsightId: string | null, unit: string,
+  category: string, p1InsightId: string | null, unit: string, emphasis?: string,
 ): Promise<GeneratedProgram> {
   try {
     const [{ data: ath }, { data: insightRows }] = await Promise.all([
@@ -2801,6 +2801,7 @@ async function designPhasePlan(
     const recent_lifts = await gatherRecentLifts(programId, unit)
     const insights = ((insightRows ?? []) as Array<{ priority: string; category: string; claim: string; confidence: number; status: string }>)
       .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
+    const trimmedEmphasis = emphasis?.trim()
     const res = await callPhaseDesign({
       phase_name: phaseName,
       profile: {
@@ -2812,6 +2813,7 @@ async function designPhasePlan(
       },
       insights,
       recent_lifts,
+      ...(trimmedEmphasis ? { emphasis: trimmedEmphasis } : {}),
     })
     if (!res.ok) return generatePhase(phaseName, category, startDateStr, { p1InsightId })
     return disposePhaseDesign(res.data, phaseName, category, startDateStr, p1InsightId)
@@ -2820,52 +2822,225 @@ async function designPhasePlan(
   }
 }
 
+// ---- Phase redesign: propose, preview, then dispose ------------------------
+//
+// A rebuild overwrites the routine rows in place — there is no version history
+// to roll back to. So the write is split in two: planPhaseRedesign() designs and
+// DIFFS against the current week without touching the DB, and applyPhaseRedesign()
+// commits a plan the athlete has actually looked at. The diff is what makes the
+// "will this dilute my main goal?" question answerable BEFORE the damage.
+
+/** One movement's fate in a proposed rebuild. */
+export interface ExerciseChange {
+  kind: 'added' | 'removed' | 'changed' | 'kept'
+  name: string
+  before?: string   // "3×5 · heavy" — absent when added
+  after?: string    // absent when removed
+}
+
+export interface SessionDiff {
+  name: string
+  previousName?: string  // set when the rebuild renames the session
+  isNew: boolean         // a surplus session with no current counterpart
+  intent: string
+  changes: ExerciseChange[]
+  added: number
+  removed: number
+  changed: number
+}
+
+export interface PhaseRedesignPlan {
+  phaseId: string
+  phaseName: PhaseName
+  goal: string
+  emphasis?: string
+  routineIds: string[]
+  programId: string
+  routines: GeneratedProgram['routines']
+  nonNegotiables: string[]
+  sessions: SessionDiff[]
+  /** Main lifts in the CURRENT week that the rebuild drops — the dilution alarm. */
+  mainLiftsDropped: string[]
+  added: number
+  removed: number
+  changed: number
+}
+
+// Compound barbell work: the movements a strength goal actually rides on. Used
+// only to raise a flag on the preview — never to block a rebuild.
+const MAIN_LIFT = /\b(squat|bench|deadlift|overhead\s*press|militar|press|row|chin-?up|pull-?up|clean|snatch)\b/i
+
+// "Squat (no belt)" and "squat" are the same lift for diffing purposes.
+function normalizeExerciseName(name: string): string {
+  return name.toLowerCase().replace(/\([^)]*\)/g, ' ').replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
+function describePrescription(ex: ExerciseTemplate): string {
+  const bits = [`${ex.sets}×${ex.reps}`]
+  if (ex.load) bits.push(ex.load)
+  if (ex.target_rpe != null) bits.push(`RPE ${ex.target_rpe}`)
+  return bits.join(' · ')
+}
+
+// Pair by normalized name, then by containment either way ("Squat" ↔ "Front
+// Squat" never pairs; "Bench press" ↔ "Bench Press (paused)" does).
+function findCounterpart(name: string, pool: ExerciseTemplate[], taken: Set<number>): number {
+  const want = normalizeExerciseName(name)
+  let idx = pool.findIndex((e, i) => !taken.has(i) && normalizeExerciseName(e.name) === want)
+  if (idx >= 0) return idx
+  idx = pool.findIndex((e, i) => {
+    if (taken.has(i)) return false
+    const other = normalizeExerciseName(e.name)
+    return other.startsWith(want) || want.startsWith(other)
+  })
+  return idx
+}
+
+function diffSession(before: ExerciseTemplate[], after: ExerciseTemplate[]): ExerciseChange[] {
+  const changes: ExerciseChange[] = []
+  const taken = new Set<number>()
+
+  for (const prev of before) {
+    const idx = findCounterpart(prev.name, after, taken)
+    if (idx < 0) {
+      changes.push({ kind: 'removed', name: prev.name, before: describePrescription(prev) })
+      continue
+    }
+    taken.add(idx)
+    const next = after[idx]
+    const b = describePrescription(prev)
+    const a = describePrescription(next)
+    const renamed = prev.name !== next.name
+    if (b === a && !renamed) {
+      changes.push({ kind: 'kept', name: next.name, before: b, after: a })
+    } else {
+      // Only carry the old NAME when the movement itself was swapped — otherwise
+      // the row header already says it and the before/after is pure noise.
+      changes.push({ kind: 'changed', name: next.name, before: renamed ? `${prev.name} — ${b}` : b, after: a })
+    }
+  }
+  after.forEach((ex, i) => {
+    if (!taken.has(i)) changes.push({ kind: 'added', name: ex.name, after: describePrescription(ex) })
+  })
+  return changes
+}
+
 /**
- * Redesign the CURRENT active phase in place — the "this phase isn't my real
- * training" escape hatch. Overwrites the existing routine rows (RLS allows
- * update, not delete) with an agent-designed week built around the athlete's
- * real logged lifts; inserts any extra designed sessions. Keeps the phase window.
+ * Design a rebuild of the CURRENT active phase and diff it against what's live —
+ * WITHOUT writing anything. The "this phase isn't my real training" escape hatch,
+ * as a proposal. `emphasis` is the athlete's free-text steer for THIS rebuild
+ * (e.g. "more explosive jumping + eccentric protective work"); the agent weaves
+ * it in, the deterministic dispose step still clamps sets/counts.
+ *
+ * Returns null when there's no active program/phase or the design came back empty.
  */
-export async function redesignActivePhase(athleteId: string, unit: string): Promise<boolean> {
+export async function planPhaseRedesign(
+  athleteId: string, unit: string, emphasis?: string,
+): Promise<PhaseRedesignPlan | null> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
-  if (!prog?.id) return false
+  if (!prog?.id) return null
   const { data: phaseRow } = await supabase
     .from('phase').select('*').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
-  if (!phaseRow) return false
+  if (!phaseRow) return null
   const phase = phaseRow as PhaseRow
 
   const { data: existing } = await supabase
-    .from('routine').select('id').eq('phase_id', phase.id).order('name')
-  const routineIds = ((existing ?? []) as Array<{ id: string }>).map((r) => r.id)
+    .from('routine').select('id, name, exercises').eq('phase_id', phase.id).order('name')
+  const current = (existing ?? []) as Array<{ id: string; name: string; exercises: ExerciseTemplate[] | null }>
 
   const { data: insightRows } = await supabase
     .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
   const p1 = ((insightRows ?? []) as InsightRow[]).filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
   const category = p1?.category ?? 'Lower Chain'
 
-  const plan = await designPhasePlan(athleteId, prog.id, phase.name, phase.week_start, category, p1?.id ?? null, unit)
+  const design = await designPhasePlan(athleteId, prog.id, phase.name, phase.week_start, category, p1?.id ?? null, unit, emphasis)
+  if (!design.routines.length) return null
+
+  // Sessions pair by position — the same order applyPhaseRedesign writes them.
+  const sessions: SessionDiff[] = design.routines.map((r, i) => {
+    const prev = current[i]
+    const changes = diffSession(prev ? (prev.exercises ?? []) : [], r.exercises)
+    return {
+      name: r.name,
+      previousName: prev && prev.name !== r.name ? prev.name : undefined,
+      isNew: !prev,
+      intent: r.intent,
+      changes,
+      added: changes.filter((c) => c.kind === 'added').length,
+      removed: changes.filter((c) => c.kind === 'removed').length,
+      changed: changes.filter((c) => c.kind === 'changed').length,
+    }
+  })
+
+  // The dilution check: a main lift that's programmed today and gone tomorrow.
+  // Compared across the WHOLE week, not per session — a rebuild may legitimately
+  // move the squat from Monday to Wednesday.
+  const plannedNames = new Set(design.routines.flatMap((r) => r.exercises.map((e) => normalizeExerciseName(e.name))))
+  const stillProgrammed = (name: string) => {
+    const want = normalizeExerciseName(name)
+    if (plannedNames.has(want)) return true
+    return [...plannedNames].some((p) => p.startsWith(want) || want.startsWith(p))
+  }
+  const mainLiftsDropped = [
+    ...new Set(
+      current
+        .flatMap((r) => r.exercises ?? [])
+        .filter((e) => MAIN_LIFT.test(e.name) && !stillProgrammed(e.name))
+        .map((e) => e.name),
+    ),
+  ]
+
+  return {
+    phaseId: phase.id,
+    phaseName: phase.name,
+    goal: design.goal,
+    emphasis: emphasis?.trim() || undefined,
+    routineIds: current.map((r) => r.id),
+    programId: prog.id,
+    routines: design.routines,
+    nonNegotiables: design.phase.non_negotiables,
+    sessions,
+    mainLiftsDropped,
+    added: sessions.reduce((n, s) => n + s.added, 0),
+    removed: sessions.reduce((n, s) => n + s.removed, 0),
+    changed: sessions.reduce((n, s) => n + s.changed, 0),
+  }
+}
+
+/**
+ * Commit a plan the athlete confirmed. Overwrites the existing routine rows in
+ * place (RLS allows update, not delete) and inserts any surplus designed ones —
+ * so the routine ids Today and the outbox reference stay valid.
+ */
+export async function applyPhaseRedesign(athleteId: string, plan: PhaseRedesignPlan): Promise<boolean> {
   if (!plan.routines.length) return false
 
-  // Overwrite existing routine rows in place; insert any surplus designed ones.
   for (let i = 0; i < plan.routines.length; i++) {
     const r = plan.routines[i]
-    if (i < routineIds.length) {
+    if (i < plan.routineIds.length) {
       await supabase.from('routine')
         .update({ name: r.name, session_type: r.session_type, exercises: r.exercises, intent: r.intent })
-        .eq('id', routineIds[i])
+        .eq('id', plan.routineIds[i])
     } else {
       await supabase.from('routine')
-        .insert({ program_id: prog.id, phase_id: phase.id, name: r.name, session_type: r.session_type, exercises: r.exercises, intent: r.intent })
+        .insert({ program_id: plan.programId, phase_id: plan.phaseId, name: r.name, session_type: r.session_type, exercises: r.exercises, intent: r.intent })
     }
   }
-  await supabase.from('phase').update({ non_negotiables: plan.phase.non_negotiables }).eq('id', phase.id)
+  await supabase.from('phase').update({ non_negotiables: plan.nonNegotiables }).eq('id', plan.phaseId)
   await insertCoachMessage(athleteId, {
     kind: 'phase_change',
-    body: `Rebuilt your ${phase.name} block around your real lifts. ${plan.goal}`,
-    ref_id: phase.id,
+    body: `Rebuilt your ${plan.phaseName} block around your real lifts. ${plan.goal}`,
+    ref_id: plan.phaseId,
   })
   return true
+}
+
+/** Plan + apply in one step, unpreviewed. Kept for non-interactive callers. */
+export async function redesignActivePhase(athleteId: string, unit: string, emphasis?: string): Promise<boolean> {
+  const plan = await planPhaseRedesign(athleteId, unit, emphasis)
+  if (!plan) return false
+  return applyPhaseRedesign(athleteId, plan)
 }
 
 /**
