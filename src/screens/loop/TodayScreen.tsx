@@ -1,14 +1,14 @@
-import { useEffect, useState, type CSSProperties } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
 import { runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, type PagerWeekView, type WeekPagerData } from '../../engine'
 import { getWeightUnit } from '../../lib/units'
-import { ChevronLeft, ChevronRight, Lock } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, Flag } from 'lucide-react'
 import { loadDraftRoutineIds } from '../../lib/workoutDraft'
 import { pendingCount } from '../../lib/workoutOutbox'
 import { setIntendedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
-import { Button, SectionHeader, Skeleton, TelemetryStrip } from '../../components/ui'
+import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, Meter } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
 
 interface TodayScreenProps {
@@ -33,7 +33,7 @@ interface WeekDayStatus {
   isToday: boolean
 }
 
-const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+const DAY_LABELS = ['M', 'T', 'W', 'T', 'F', 'S', 'S']
 
 function getWeekDays(): Date[] {
   const today = new Date()
@@ -56,7 +56,7 @@ function isSameDay(a: Date, b: Date) {
 }
 
 const shortDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short' })
-const dayAndDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
+const shortDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
 // Local YYYY-MM-DD (matches the engine's week_ending, which is local-time Sunday).
 const localIso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
@@ -75,7 +75,7 @@ interface TodayView {
   p1Count: number
   lastSignalAt: string | null
   goal: string | null
-  p1: { category: string; confidence: number } | null
+  p1: { category: string; confidence: number; claim: string } | null
   retestDate: string | null
   sessionsPerWeek: number | null
   latestReview: { id: string; weekEnding: string } | null
@@ -143,7 +143,7 @@ async function fetchTodayView(athleteId: string): Promise<TodayView> {
     p1Count: active.filter((i) => i.priority === 'P1').length,
     lastSignalAt: all.reduce<string | null>((max, i) => (!max || i.updated_at > max ? i.updated_at : max), null),
     goal: (ath?.goals as string | null) || (ath?.obstacle as string | null) || null,
-    p1: top ? { category: top.category, confidence: top.confidence } : null,
+    p1: top ? { category: top.category, confidence: top.confidence, claim: top.claim } : null,
     retestDate: (profileRes.data?.retest_date as string | null) ?? null,
     sessionsPerWeek: (ath?.sessions_per_week as number | null) ?? null,
     latestReview,
@@ -171,238 +171,156 @@ type SessionState =
   | { kind: 'in_progress' }
   | { kind: 'done'; lastWorkout: WeekWorkout; count: number }
 
-function WorkoutPreviewSheet({
-  routine, recommended, state, plannedDow, onPlanDay, onClose, onStart, onResume, onEdit, onLogAgain,
+const STATE_CHIP: Record<SessionState['kind'], { tone: 'todo' | 'doing' | 'done'; label: string }> = {
+  todo:        { tone: 'todo',  label: 'To do' },
+  in_progress: { tone: 'doing', label: 'In progress' },
+  done:        { tone: 'done',  label: 'Done' },
+}
+
+/**
+ * The session detail sub-screen. Everything that used to crowd the card — the
+ * intent, the exercise list, the day-pinning, the secondary actions — lives
+ * here, one tap away, so the week list stays scannable.
+ */
+function SessionSheet({
+  routine, state, plannedDow, onPlanDay, onClose, onStart, onEdit, onLogAgain,
 }: {
   routine: RoutineRow
-  recommended: boolean
   state: SessionState
   plannedDow: number | null
   onPlanDay: (dow: number | null) => void
   onClose: () => void
   onStart: () => void
-  onResume: () => void
   onEdit: () => void
   onLogAgain: () => void
 }) {
+  const exercises = routine.exercises
+  const chip = STATE_CHIP[state.kind]
+
+  const actions =
+    state.kind === 'done' ? (
+      <>
+        <Button variant="primary" full onClick={onEdit}>Review / edit →</Button>
+        <Button variant="ghost" full style={{ marginTop: 6 }} onClick={onLogAgain}>Log it again</Button>
+      </>
+    ) : (
+      <Button variant="primary" full onClick={onStart}>
+        {state.kind === 'in_progress' ? 'Resume session →' : 'Start session →'}
+      </Button>
+    )
+
   return (
-    <div className="obs-sheet" onClick={onClose}>
-      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 4 }}>
-          <p className="section-header">{routine.name}</p>
-          <button
-            type="button"
-            onClick={onClose}
-            style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}
+    <Sheet title={routine.name} onClose={onClose} actions={actions}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
+        <Chip tone={chip.tone}>{chip.label}</Chip>
+        <span className="text-xs text-dim num">{exercises.length} exercises</span>
+      </div>
+
+      {routine.intent && (
+        <p className="text-sm text-dim" style={{ marginBottom: 20, lineHeight: 1.55 }}>{routine.intent}</p>
+      )}
+
+      <SectionHeader>The work</SectionHeader>
+      <div style={{ marginTop: 10, marginBottom: 24 }}>
+        {exercises.map((ex, i) => (
+          <div
+            key={i}
+            style={{
+              display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+              gap: 14, padding: '12px 0', borderBottom: '1px solid var(--line)',
+            }}
           >
-            ×
-          </button>
-        </div>
-
-        {routine.intent && (
-          <p className="text-xs text-dim" style={{ marginBottom: 14, lineHeight: 1.5 }}>{routine.intent}</p>
-        )}
-
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
-          {routine.exercises.map((ex, i) => (
-            <div key={i} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-              <div style={{ flex: 1 }}>
-                <p className="text-sm" style={{ fontWeight: 500 }}>{ex.name}</p>
-                {ex.cue && (
-                  <p className="text-xs text-dim" style={{ marginTop: 2, lineHeight: 1.4 }}>{ex.cue}</p>
-                )}
-              </div>
-              <p
-                className="num text-xs"
-                style={{ whiteSpace: 'nowrap', fontFamily: 'var(--font-mono)', color: 'var(--text-dim)', paddingTop: 2 }}
-              >
-                {ex.sets}×{ex.reps}{ex.load ? ` · ${ex.load}` : ''}
-              </p>
-            </div>
-          ))}
-        </div>
-
-        {/* Plan for — soft day-pinning. A suggestion, never enforced: scheduling
-            stays count-based; this just lets you lay out the week. */}
-        <div style={{ marginBottom: 16 }}>
-          <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 8 }}>
-            Plan for
-          </p>
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {PLAN_DAYS.map((label, dow) => {
-              const active = plannedDow === dow
-              return (
-                <button
-                  key={dow}
-                  type="button"
-                  onClick={() => onPlanDay(active ? null : dow)}
-                  className="num text-xs"
-                  style={{
-                    flex: '1 0 auto', minWidth: 38, padding: '6px 0', borderRadius: 6, cursor: 'pointer',
-                    fontFamily: 'var(--font-mono)', letterSpacing: '0.02em',
-                    border: `1px solid ${active ? 'var(--signal)' : 'var(--line)'}`,
-                    background: active ? 'var(--signal-dim)' : 'transparent',
-                    color: active ? 'var(--signal)' : 'var(--text-dim)',
-                  }}
-                >
-                  {label}
-                </button>
-              )
-            })}
+            <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
+            <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
+              {ex.sets}×{ex.reps}{ex.load ? ` · ${ex.load}` : ''}
+            </span>
           </div>
-          {plannedDow != null && (
-            <button
-              type="button"
-              onClick={() => onPlanDay(null)}
-              style={{ marginTop: 8, background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', color: 'var(--text-dim)' }}
-            >
-              Clear day
-            </button>
-          )}
-        </div>
+        ))}
+      </div>
 
-        {state.kind === 'todo' && (
-          <Button variant={recommended ? 'primary' : 'ghost'} full onClick={onStart}>
-            {recommended ? 'Start session →' : 'Start →'}
-          </Button>
-        )}
-        {state.kind === 'in_progress' && (
-          <Button variant="primary" full onClick={onResume}>Resume session →</Button>
-        )}
-        {state.kind === 'done' && (
-          <>
-            <Button variant="ghost" full onClick={onEdit}>Review / edit →</Button>
+      {/* Day-pinning — a suggestion, never enforced. */}
+      <SectionHeader>Plan for a day</SectionHeader>
+      <div style={{ display: 'flex', gap: 6, marginTop: 10 }}>
+        {PLAN_DAYS.map((label, dow) => {
+          const active = plannedDow === dow
+          return (
             <button
+              key={dow}
               type="button"
-              onClick={onLogAgain}
+              onClick={() => onPlanDay(active ? null : dow)}
+              className="num"
               style={{
-                display: 'block', margin: '10px auto 0', background: 'none', border: 'none', cursor: 'pointer',
-                fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', color: 'var(--text-dim)',
+                flex: 1, minWidth: 0, height: 46, borderRadius: 10, cursor: 'pointer',
+                fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-xs)',
+                border: `1px solid ${active ? 'var(--signal)' : 'var(--line)'}`,
+                background: active ? 'var(--signal-dim)' : 'transparent',
+                color: active ? 'var(--signal)' : 'var(--text-dim)',
               }}
             >
-              Log again
+              {label}
             </button>
-          </>
-        )}
+          )
+        })}
       </div>
-    </div>
+    </Sheet>
   )
 }
 
+/**
+ * One session in the week list. Deliberately thin: name, state, one metadata
+ * line. No intent paragraph, no stacked buttons — the whole card is the tap
+ * target for the detail sheet, and only the next-up session carries a CTA.
+ */
 function SessionCard({
-  routine, recommended, state, lastDone, plannedDow, onPlanDay, onStart, onResume, onEdit, onLogAgain,
+  routine, recommended, state, lastDone, plannedDow, onOpen, onStart,
 }: {
   routine: RoutineRow
   recommended: boolean
   state: SessionState
   lastDone: string | null
   plannedDow: number | null
-  onPlanDay: (dow: number | null) => void
+  onOpen: () => void
   onStart: () => void
-  onResume: () => void
-  onEdit: () => void
-  onLogAgain: () => void
 }) {
-  const [showPreview, setShowPreview] = useState(false)
-  const exCount = (routine.exercises as unknown[]).length
-  const done = state.kind === 'done'
-  const inProg = state.kind === 'in_progress'
-  const borderColor = inProg ? 'var(--signal)' : done ? 'var(--confirmed)' : undefined
+  const exCount = routine.exercises.length
+  const chip = STATE_CHIP[state.kind]
+  const showCta = recommended && state.kind !== 'done'
+
+  // One line of metadata, in priority order — never more.
+  const meta =
+    state.kind === 'done'
+      ? `Logged ${shortDay(state.lastWorkout.performedAt)}${state.count > 1 ? ` · ×${state.count}` : ''}`
+      : plannedDow != null
+        ? `${exCount} exercises · planned ${PLAN_DAYS[plannedDow]}`
+        : lastDone
+          ? `${exCount} exercises · last ${shortDate(lastDone)}`
+          : `${exCount} exercises`
 
   return (
-    <>
-      <div
-        className="card fade-rise"
-        style={{ marginBottom: 10, borderColor, cursor: 'pointer' }}
-        onClick={() => setShowPreview(true)}
-      >
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-          <h3 style={{ fontSize: 15, fontWeight: 600, display: 'flex', alignItems: 'baseline', gap: 8, flexWrap: 'wrap' }}>
-            {routine.name}
-            {recommended && state.kind === 'todo' && (
-              <span className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                Next up
-              </span>
-            )}
-          </h3>
-          <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, whiteSpace: 'nowrap' }}>
-            {plannedDow != null && (
-              <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--signal)' }}>
-                {PLAN_DAYS[plannedDow]}
-              </span>
-            )}
-            <span className="num text-xs text-dim">{exCount} ex</span>
-          </div>
+    <div
+      className="card card--tap fade-rise"
+      style={{
+        marginBottom: 10,
+        borderColor: state.kind === 'in_progress' ? 'var(--signal)' : undefined,
+      }}
+      onClick={onOpen}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700, lineHeight: 1.3 }}>{routine.name}</h3>
+          <p className="text-xs text-dim num" style={{ marginTop: 4 }}>{meta}</p>
         </div>
-
-        {/* Status line */}
-        <p
-          className="text-xs"
-          style={{
-            marginTop: 6, fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', textTransform: 'uppercase',
-            color: done ? 'var(--confirmed)' : inProg ? 'var(--signal)' : 'var(--text-dim)',
-          }}
-        >
-          {state.kind === 'done'
-            ? `✓ Logged · ${shortDay(state.lastWorkout.performedAt)}${state.count > 1 ? ` · ×${state.count}` : ''}`
-            : inProg ? '● In progress' : '○ To do'}
-        </p>
-
-        {/* History — proves a session logged even when it was a prior week, so a
-            rolled-over week never looks like the work vanished. */}
-        {state.kind !== 'done' && lastDone && (
-          <p className="text-xs text-dim" style={{ marginTop: 4, fontFamily: 'var(--font-mono)', letterSpacing: '0.02em' }}>
-            Last done {dayAndDate(lastDone)}
-          </p>
-        )}
-
-        {routine.intent && state.kind === 'todo' && (
-          <p className="text-xs text-dim" style={{ marginTop: 4, lineHeight: 1.5 }}>{routine.intent}</p>
-        )}
-
-        {/* Action — one clear CTA per state. */}
-        <div style={{ marginTop: 12 }} onClick={(e) => e.stopPropagation()}>
-          {state.kind === 'todo' && (
-            <Button variant={recommended ? 'primary' : 'ghost'} full onClick={onStart}>
-              {recommended ? 'Start session →' : 'Start →'}
-            </Button>
-          )}
-          {state.kind === 'in_progress' && (
-            <Button variant="primary" full onClick={onResume}>Resume session →</Button>
-          )}
-          {state.kind === 'done' && (
-            <>
-              <Button variant="ghost" full onClick={onEdit}>Review / edit →</Button>
-              <button
-                type="button"
-                onClick={onLogAgain}
-                style={{
-                  display: 'block', margin: '10px auto 0', background: 'none', border: 'none', cursor: 'pointer',
-                  fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', color: 'var(--text-dim)',
-                }}
-              >
-                Log again
-              </button>
-            </>
-          )}
-        </div>
+        <Chip tone={chip.tone}>{chip.label}</Chip>
       </div>
 
-      {showPreview && (
-        <WorkoutPreviewSheet
-          routine={routine}
-          recommended={recommended}
-          state={state}
-          plannedDow={plannedDow}
-          onPlanDay={onPlanDay}
-          onClose={() => setShowPreview(false)}
-          onStart={onStart}
-          onResume={onResume}
-          onEdit={onEdit}
-          onLogAgain={onLogAgain}
-        />
+      {showCta && (
+        <div style={{ marginTop: 16 }} onClick={(e) => e.stopPropagation()}>
+          <Button variant="primary" full onClick={onStart}>
+            {state.kind === 'in_progress' ? 'Resume →' : 'Start session →'}
+          </Button>
+        </div>
       )}
-    </>
+    </div>
   )
 }
 
@@ -411,14 +329,6 @@ const fmtWeekRange = (startISO: string, endISO: string) => {
   const mon = (d: Date) => d.toLocaleDateString(undefined, { month: 'short' })
   return mon(s) === mon(e) ? `${mon(s)} ${s.getDate()}–${e.getDate()}` : `${mon(s)} ${s.getDate()} – ${mon(e)} ${e.getDate()}`
 }
-
-const pagerArrowStyle = (disabled: boolean): CSSProperties => ({
-  display: 'inline-flex', alignItems: 'center', justifyContent: 'center',
-  width: 34, height: 34, borderRadius: 8, flexShrink: 0,
-  border: '1px solid var(--line)', background: 'transparent',
-  color: disabled ? 'var(--line)' : 'var(--text-dim)',
-  cursor: disabled ? 'default' : 'pointer',
-})
 
 // A non-current week in the pager: past (real, logged) or future (projected).
 // Read-only; past sessions tap through to the log.
@@ -430,8 +340,8 @@ function PagerWeekBody({ week, mode, onTapSession }: {
   if (week.sessions.length === 0) {
     return (
       <div className="card">
-        <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
-          {mode === 'past' ? 'Nothing logged this week.' : 'Projected loads appear once you’ve logged a session in this phase.'}
+        <p className="text-sm text-dim">
+          {mode === 'past' ? 'Nothing logged this week.' : 'Projections appear once you log a session this phase.'}
         </p>
       </div>
     )
@@ -441,22 +351,22 @@ function PagerWeekBody({ week, mode, onTapSession }: {
       {week.sessions.map((s, i) => (
         <div
           key={`${s.routineId}-${i}`}
-          className="card"
-          style={{ cursor: mode === 'past' && onTapSession ? 'pointer' : 'default', opacity: mode === 'future' ? 0.92 : 1 }}
+          className={`card${mode === 'past' && onTapSession ? ' card--tap' : ''}`}
+          style={{ opacity: mode === 'future' ? 0.9 : 1 }}
           onClick={mode === 'past' && onTapSession ? () => onTapSession(s.routineId) : undefined}
         >
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-            <h3 style={{ fontSize: 15, fontWeight: 600 }}>{s.routineName}</h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+            <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700 }}>{s.routineName}</h3>
             {s.tag
               ? <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>{s.tag}</span>
-              : <span className="text-xs" style={{ fontFamily: 'var(--font-mono)', fontSize: 9.5, letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--pending)' }}>Projected</span>}
+              : <Chip tone="pending">Projected</Chip>}
           </div>
           {s.lines.length > 0 && (
-            <div style={{ marginTop: 8, display: 'flex', flexDirection: 'column', gap: 5 }}>
+            <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
               {s.lines.map((l, j) => (
                 <div key={j} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                  <span className="text-xs" style={{ color: 'var(--text)' }}>{l.name}</span>
-                  <span className="num text-xs text-dim">{l.detail}</span>
+                  <span className="text-sm">{l.name}</span>
+                  <span className="num text-sm text-dim">{l.detail}</span>
                 </div>
               ))}
             </div>
@@ -471,20 +381,18 @@ function PagerWeekBody({ week, mode, onTapSession }: {
 // exist until you graduate in).
 function PagerBoundary({ boundary }: { boundary: NonNullable<WeekPagerData['boundary']> }) {
   return (
-    <div className="card" style={{ opacity: 0.9 }}>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <Lock size={13} strokeWidth={1.5} color="var(--text-dim)" />
-        <h3 style={{ fontSize: 15, fontWeight: 600 }}>{boundary.phaseName} phase</h3>
+    <div className="card">
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Lock size={16} strokeWidth={1.75} color="var(--text-dim)" />
+        <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700 }}>{boundary.phaseName}</h3>
       </div>
-      {boundary.goal && <p className="text-xs text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>{boundary.goal}</p>}
+      {boundary.goal && <p className="text-sm text-dim" style={{ marginTop: 10 }}>{boundary.goal}</p>}
       {boundary.gate.length > 0 && (
-        <p className="text-xs text-dim" style={{ marginTop: 8, fontFamily: 'var(--font-mono)', fontSize: 10, letterSpacing: '0.04em', lineHeight: 1.5 }}>
-          UNLOCKS WHEN · {boundary.gate[0]}
-        </p>
+        <>
+          <p className="section-header" style={{ marginTop: 18, marginBottom: 6 }}>Unlocks when</p>
+          <p className="text-sm">{boundary.gate[0]}</p>
+        </>
       )}
-      <p className="text-xs text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>
-        Sessions build when you graduate in — the program reads your phase before it writes the next one.
-      </p>
     </div>
   )
 }
@@ -503,59 +411,51 @@ function CloseWeekSheet({
   onInjury: () => void
 }) {
   return (
-    <div className="obs-sheet" onClick={closing ? undefined : onClose}>
-      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 4 }}>
-          <p className="section-header">Close out the week</p>
-          {!closing && (
-            <button
-              type="button"
-              onClick={onClose}
-              style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}
-            >
-              ×
-            </button>
-          )}
+    <Sheet
+      title="Close out the week"
+      subtitle="The coach reads the week, sets next week's load, and leaves a note. You can still log more after."
+      onClose={onClose}
+      dismissOnBackdrop={!closing}
+      actions={
+        <>
+          <Button variant="primary" full disabled={closing} onClick={onConfirm}>
+            {closing ? 'Crunching…' : 'Crunch my week →'}
+          </Button>
+          <Button variant="ghost" full disabled={closing} style={{ marginTop: 6 }} onClick={onInjury}>
+            Injured / taking time off
+          </Button>
+        </>
+      }
+    >
+      <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <Ring value={planned ? doneCount / planned : 0} size={64}>
+          <span style={{ fontSize: 'var(--fs-lg)', fontWeight: 700 }}>{doneCount}</span>
+          <span className="text-micro text-dim" style={{ marginTop: 1 }}>/{planned}</span>
+        </Ring>
+        <div style={{ minWidth: 0 }}>
+          <p className="text-lg" style={{ fontWeight: 700 }}>
+            {doneCount === planned ? 'Full week' : `${doneCount} of ${planned} logged`}
+          </p>
+          <p className="text-xs text-dim" style={{ marginTop: 2 }}>Sessions this week</p>
         </div>
-
-        <p className="text-sm text-dim" style={{ marginBottom: 16, lineHeight: 1.5 }}>
-          {doneCount}/{planned} sessions logged. The coach crunches the week, sets next week's load and effort, and leaves you a note. You can still log more after — this just draws the line.
-        </p>
-
-        <Button variant="primary" full disabled={closing} onClick={onConfirm}>
-          {closing ? 'Crunching the week…' : "I'm done — crunch my week →"}
-        </Button>
-        <button
-          type="button"
-          disabled={closing}
-          onClick={onInjury}
-          style={{
-            display: 'block', margin: '12px auto 0', background: 'none', border: 'none',
-            cursor: closing ? 'default' : 'pointer', opacity: closing ? 0.5 : 1,
-            fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', color: 'var(--text-dim)',
-          }}
-        >
-          Injured / taking time off →
-        </button>
       </div>
-    </div>
+    </Sheet>
   )
 }
 
 /**
- * TRAIN — the week, in full. Every session for the week is on the surface with
- * its state (to-do / in-progress / done), startable, resumable, and editable in
- * any order. Sessions aren't pinned to days — you pick what fits the gym, the
- * gear, the time you've got. The read sharpens underneath as you train; the
- * end-of-week recap lives in Coach.
+ * TRAIN — the week, in full. Every session is on the surface with its state
+ * (to-do / in-progress / done), startable in any order. Mobile shape: one
+ * summary instrument, at most one attention banner, then the session list.
+ * Detail lives in sheets, never inline.
  */
 export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
   const { refresh } = (useOutletContext<LoopContext>() ?? { refresh: () => {} })
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [draftRoutineIds, setDraftRoutineIds] = useState<string[]>([])
-  const [recapDismissed, setRecapDismissed] = useState(false)
   const [showCloseSheet, setShowCloseSheet] = useState(false)
+  const [openSessionId, setOpenSessionId] = useState<string | null>(null)
   const [closing, setClosing] = useState(false)
   const [weekOffset, setWeekOffset] = useState(0)   // 0 = this week, <0 past, >0 future/boundary
   // Planned day rides on routine.intended_dow (synced). Keep an optimistic
@@ -580,10 +480,6 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     () => gatherWeekPager(athleteId, getWeightUnit()),
   )
 
-  const totalInsights = view?.totalInsights ?? 0
-  const likelyCount   = view?.likelyCount ?? 0
-  const p1Count       = view?.p1Count ?? 0
-  const lastSignalAt  = view?.lastSignalAt ?? null
   const p1            = view?.p1 ?? null
   const retestDue     = isRetestDue(view?.retestDate ?? null)
   const weekWorkouts  = view?.weekWorkouts ?? []
@@ -641,12 +537,6 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     return { kind: 'todo' }
   }
 
-  const telemetryItems: Array<{ label: string; value: string | number; signal?: boolean }> = [
-    { label: 'INSIGHTS', value: totalInsights },
-    { label: String(likelyCount), value: 'LIKELY' },
-    { label: String(p1Count), value: 'P1', signal: p1Count > 0 },
-  ]
-
   const confidencePct = p1 ? Math.round(p1.confidence * 100) : null
   const doneCount = routines.filter((r) => statusFor(r.id).kind === 'done').length
   const lastDoneByRoutine = view?.lastDoneByRoutine ?? {}
@@ -656,6 +546,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // CTA even when the week has rolled over and there's no scheduled "today".
   const primaryRoutineId =
     (todayRoutine && statusFor(todayRoutine.id).kind === 'todo' ? todayRoutine.id : null)
+    ?? routines.find((r) => statusFor(r.id).kind === 'in_progress')?.id
     ?? routines.find((r) => statusFor(r.id).kind === 'todo')?.id
     ?? null
 
@@ -666,7 +557,9 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const recapRecent = latestReview
     ? Date.now() - new Date(`${latestReview.weekEnding}T12:00:00`).getTime() < 11 * 864e5
     : false
-  const showRecap = !loading && !!latestReview && recapRecent && !recapDismissed && !recapSeen(latestReview.id)
+  // No separate dismiss control: opening the recap marks it seen, and it
+  // self-expires after ~11 days. One banner, one action.
+  const showRecap = !loading && !!latestReview && recapRecent && !recapSeen(latestReview.id)
 
   // ── Week pager — ← real past weeks · this week · projected future → · phase edge.
   const pastWeeks = pager?.past ?? []
@@ -682,11 +575,11 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     : null
   const curRange = fmtWeekRange(localIso(weekDays[0]?.date ?? today), localIso(weekDays[6]?.date ?? today))
   const weekTitle = wOffset === 0 ? 'This week'
-    : atBoundary ? `${boundary!.phaseName} phase`
+    : atBoundary ? boundary!.phaseName
     : wOffset === 1 ? 'Next week'
     : pagerWeek ? fmtWeekRange(pagerWeek.weekStart, pagerWeek.weekEnd) : ''
   const weekSub = wOffset === 0 ? curRange
-    : atBoundary ? 'Upcoming'
+    : atBoundary ? 'Upcoming phase'
     : wOffset < 0 ? `${pagerWeek ? fmtWeekRange(pagerWeek.weekStart, pagerWeek.weekEnd) : ''} · logged`
     : `${pagerWeek?.phaseName ? pagerWeek.phaseName + ' · ' : ''}projected`
 
@@ -713,162 +606,146 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     }
   }
 
+  const openSession = routines.find((r) => r.id === openSessionId) ?? null
+
+  // At most ONE attention banner. Ranked by urgency so the screen never stacks
+  // three competing yellow boxes the way it used to.
+  const banner = (() => {
+    if (loading) return null
+    if (retestDue) {
+      return (
+        <Banner
+          icon={<Activity size={20} strokeWidth={1.75} color="var(--signal)" />}
+          title="Retest due"
+          sub="A quick rescreen re-scopes your program."
+          onClick={() => navigate('/app/retest')}
+        />
+      )
+    }
+    if (showRecap && latestReview) {
+      return (
+        <Banner
+          icon={<Sparkles size={20} strokeWidth={1.75} color="var(--signal)" />}
+          title="Your weekly recap is ready"
+          sub="What moved, and the call for this week."
+          onClick={() => { markRecapSeen(latestReview.id); navigate(`/app/recap/${latestReview.id}`) }}
+        />
+      )
+    }
+    if (pendingSync > 0) {
+      return (
+        <Banner
+          tone="quiet"
+          icon={<CloudUpload size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+          title={`${pendingSync} session${pendingSync === 1 ? '' : 's'} saved offline`}
+          sub="They sync when you're back online."
+        />
+      )
+    }
+    return null
+  })()
+
   return (
     <div className="screen with-nav">
-      {isFirstVisit && (
-        <p
-          className="fade-rise"
-          style={{ padding: '12px 16px', fontSize: 14, color: 'var(--text)', lineHeight: 1.5, borderBottom: '1px solid var(--line)' }}
-        >
-          This is your week. Every session's here — start any of them, in any order, and pick up where you left off. The read sharpens underneath as you train.
-        </p>
-      )}
-
-      {!loading && <TelemetryStrip items={telemetryItems} lastSignalAt={lastSignalAt} />}
-
       <div className="page page--rail">
        <div className="page__main">
 
-        {/* Offline-completed sessions waiting to sync. */}
-        {pendingSync > 0 && (
-          <div
-            className="fade-rise"
-            style={{
-              marginBottom: 16, padding: '10px 14px', borderRadius: 8,
-              background: 'var(--surface)', border: '1px solid var(--line)',
-            }}
-          >
-            <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
-              {pendingSync} session{pendingSync === 1 ? '' : 's'} saved offline — {pendingSync === 1 ? 'it syncs' : 'they sync'} and the coach reads {pendingSync === 1 ? 'it' : 'them'} when you're back online.
-            </p>
-          </div>
-        )}
-
-        {/* Weekly recap — last week's review, the end-of-week payoff. */}
-        {showRecap && latestReview && (
-          <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-              <SectionHeader>Weekly recap</SectionHeader>
-              <button
-                type="button"
-                aria-label="Dismiss"
-                onClick={() => { markRecapSeen(latestReview.id); setRecapDismissed(true) }}
-                style={{ background: 'none', border: 'none', color: 'var(--text-dim)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: 0 }}
-              >
-                ×
-              </button>
-            </div>
-            <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              Last week's in — what you did, what moved, and the call for this week.
-            </p>
-            <Button
-              variant="primary"
-              full
-              style={{ marginTop: 14 }}
-              onClick={() => { markRecapSeen(latestReview.id); navigate(`/app/recap/${latestReview.id}`) }}
-            >
-              View recap →
-            </Button>
-          </div>
-        )}
-
-        {/* The read — a quick glance that taps through to Coach. The goal
-            ("chasing") anchor lives in Profile, so it isn't duplicated here. */}
-        {!loading && p1 && confidencePct !== null && (
+        {/* Week pager — the one header. Arrows are 44px targets. */}
+        <div className="pager">
           <button
-            type="button"
-            onClick={() => navigate('/app/coach')}
-            className="fade-rise"
-            style={{
-              marginBottom: 20, padding: 0, background: 'none', border: 'none', cursor: 'pointer',
-              fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em',
-              color: 'var(--text-dim)', display: 'inline-flex', alignItems: 'center', gap: 6,
-            }}
+            type="button" aria-label="Previous week"
+            className="pager__btn"
+            disabled={wOffset <= minWeekOffset}
+            onClick={() => setWeekOffset(wOffset - 1)}
           >
-            THE READ · {p1.category.toUpperCase()} ·{' '}
-            <span className="num text-signal">{confidencePct}%</span> CONFIDENT
-            <span style={{ opacity: 0.6 }}>›</span>
+            <ChevronLeft size={22} strokeWidth={2} />
           </button>
-        )}
-
-        {/* Retest due — the program cadence CTA (§6). Routes into the rescreen. */}
-        {!loading && retestDue && (
-          <div className="card fade-rise" style={{ marginBottom: 16, borderColor: 'var(--signal)' }}>
-            <SectionHeader>Retest due</SectionHeader>
-            <p className="text-sm" style={{ marginTop: 8, lineHeight: 1.5 }}>
-              Time to re-read where you are. A quick movement rescreen shows what's moved since baseline and re-scopes the program.
-            </p>
-            <Button variant="primary" full style={{ marginTop: 14 }} onClick={() => navigate('/app/retest')}>
-              Start retest →
-            </Button>
+          <div className="pager__label">
+            <p className="pager__title">{weekTitle}</p>
+            {weekSub && <p className="pager__sub">{weekSub}</p>}
           </div>
-        )}
+          <button
+            type="button" aria-label="Next week"
+            className="pager__btn"
+            disabled={wOffset >= maxWeekOffset}
+            onClick={() => setWeekOffset(wOffset + 1)}
+          >
+            <ChevronRight size={22} strokeWidth={2} />
+          </button>
+        </div>
 
-        {/* THE WEEK PAGER — ← past (logged) · this week · projected → · phase edge */}
-        <div style={{ marginBottom: 8 }}>
-          {/* Pager header: arrows + which week you're looking at */}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginBottom: 14 }}>
-            <button
-              type="button" aria-label="Previous week"
-              disabled={wOffset <= minWeekOffset}
-              onClick={() => setWeekOffset(wOffset - 1)}
-              style={pagerArrowStyle(wOffset <= minWeekOffset)}
-            >
-              <ChevronLeft size={18} strokeWidth={1.5} />
-            </button>
-            <div style={{ textAlign: 'center', flex: 1, minWidth: 0 }}>
-              <p style={{ fontSize: 14, fontWeight: 600 }}>{weekTitle}</p>
-              {weekSub && (
-                <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.04em', marginTop: 2 }}>{weekSub}</p>
-              )}
-            </div>
-            <button
-              type="button" aria-label="Next week"
-              disabled={wOffset >= maxWeekOffset}
-              onClick={() => setWeekOffset(wOffset + 1)}
-              style={pagerArrowStyle(wOffset >= maxWeekOffset)}
-            >
-              <ChevronRight size={18} strokeWidth={1.5} />
-            </button>
-          </div>
+        {wOffset === 0 ? (
+          <>
+            {isFirstVisit && (
+              <Banner
+                tone="quiet"
+                title="Start anywhere"
+                sub="Every session for the week is here — do whichever fits your day."
+              />
+            )}
 
-          {/* Body — current week is fully interactive; other weeks are read-only. */}
-          {wOffset === 0 ? (
-            <>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 12 }}>
-                <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
-                  Do whichever fits — gym, gear, time. Tap a logged one to edit.
-                </p>
-                <div style={{ display: 'flex', alignItems: 'baseline', gap: 12, whiteSpace: 'nowrap' }}>
-                  {!loading && routines.length > 0 && (
-                    <span className="num text-xs text-dim">{doneCount}/{routines.length} done</span>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => navigate('/app/history')}
-                    style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em', textTransform: 'uppercase', color: 'var(--text-dim)' }}
-                  >
-                    All ›
-                  </button>
+            {banner}
+
+            {/* THE WEEK, AT A GLANCE — a ring and seven dots instead of a
+                sentence. Replaces the old "2/4 done" text plus a separate
+                day strip stranded in a desktop-only rail. */}
+            {!loading && routines.length > 0 && (
+              <div className="card fade-rise" style={{ marginBottom: 24 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
+                  <Ring value={doneCount / routines.length} size={72}>
+                    <span style={{ fontSize: 'var(--fs-xl)', fontWeight: 700 }}>{doneCount}</span>
+                    <span className="text-micro text-dim" style={{ marginTop: 2 }}>of {routines.length}</span>
+                  </Ring>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <p className="text-lg" style={{ fontWeight: 700, lineHeight: 1.25 }}>
+                      {doneCount === 0 ? 'Nothing logged yet'
+                        : doneCount >= routines.length ? 'Week complete'
+                        : `${routines.length - doneCount} to go`}
+                    </p>
+                    <div className="week-strip" style={{ marginTop: 12, padding: 0, gap: 2 }}>
+                      {weekDays.map((day, i) => (
+                        <div
+                          key={i}
+                          className={`week-day${day.isToday ? ' week-day--today' : ''}${day.logged ? ' week-day--logged' : ''}`}
+                        >
+                          <span className="week-day__label">{DAY_LABELS[(day.date.getDay() + 6) % 7]}</span>
+                          <div className="week-day__dot" />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
                 </div>
               </div>
+            )}
 
-              {loading && routines.length === 0 ? (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                  {Array.from({ length: 3 }).map((_, i) => (
-                    <div key={i} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-                      <Skeleton height={14} width={160} /><Skeleton height={10} width={90} /><Skeleton height={36} width="100%" />
-                    </div>
-                  ))}
+            {/* Sessions */}
+            {loading && routines.length === 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                {Array.from({ length: 3 }).map((_, i) => (
+                  <div key={i} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+                    <Skeleton height={18} width={170} /><Skeleton height={12} width={110} />
+                  </div>
+                ))}
+              </div>
+            ) : routines.length === 0 ? (
+              <div className="card">
+                <p className="text-base text-dim">
+                  No sessions yet. Finish onboarding and your program builds here.
+                </p>
+              </div>
+            ) : (
+              <>
+                <div className="section__head">
+                  <SectionHeader>Sessions</SectionHeader>
+                  <button
+                    type="button"
+                    className="page-head__action"
+                    onClick={() => navigate('/app/history')}
+                  >
+                    History ›
+                  </button>
                 </div>
-              ) : routines.length === 0 ? (
-                <div className="card">
-                  <p className="text-sm text-dim" style={{ lineHeight: 1.6 }}>
-                    No sessions in this phase yet. Finish onboarding and your program builds here.
-                  </p>
-                </div>
-              ) : (
-                routines.map((r) => (
+                {routines.map((r) => (
                   <SessionCard
                     key={r.id}
                     routine={r}
@@ -876,93 +753,79 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                     state={statusFor(r.id)}
                     lastDone={lastDoneByRoutine[r.id] ?? null}
                     plannedDow={plannedDowFor(r)}
-                    onPlanDay={(dow) => handlePlanDay(r.id, dow)}
+                    onOpen={() => setOpenSessionId(r.id)}
                     onStart={() => navigate(`/app/workout/${r.id}`)}
-                    onResume={() => navigate(`/app/workout/${r.id}`)}
-                    onLogAgain={() => navigate(`/app/workout/${r.id}`)}
-                    onEdit={() => {
-                      const s = statusFor(r.id)
-                      if (s.kind === 'done') navigate(`/app/workout/${r.id}?w=${s.lastWorkout.id}`)
-                    }}
                   />
-                ))
-              )}
-            </>
-          ) : atBoundary && boundary ? (
-            <PagerBoundary boundary={boundary} />
-          ) : pagerWeek ? (
-            <PagerWeekBody
-              week={pagerWeek}
-              mode={wOffset < 0 ? 'past' : 'future'}
-              onTapSession={() => navigate('/app/history')}
-            />
-          ) : null}
-        </div>
+                ))}
+              </>
+            )}
 
-        {/* End-of-week — the manual "I'm done" close-out. Hidden until a program
-            exists; swaps to a "closed" state once this week's review is cut. */}
-        {!loading && routines.length > 0 && (
-          weekClosed ? (
-            <button
-              type="button"
-              onClick={() => latestReview && navigate(`/app/recap/${latestReview.id}`)}
-              className="fade-rise"
-              style={{
-                marginTop: 18, padding: 0, background: 'none', border: 'none', cursor: 'pointer',
-                fontFamily: 'var(--font-mono)', fontSize: 11, letterSpacing: '0.04em',
-                color: 'var(--confirmed)', display: 'inline-flex', alignItems: 'center', gap: 6,
-              }}
-            >
-              ✓ WEEK CLOSED · VIEW RECAP <span style={{ opacity: 0.6 }}>›</span>
-            </button>
-          ) : (
-            <button
-              type="button"
-              onClick={() => setShowCloseSheet(true)}
-              className="fade-rise"
-              style={{
-                marginTop: 18, width: '100%', padding: '12px 14px', borderRadius: 8, cursor: 'pointer',
-                background: 'var(--surface)', border: '1px solid var(--line)', color: 'var(--text)',
-                fontSize: 13, textAlign: 'left',
-              }}
-            >
-              <span style={{ fontWeight: 600 }}>Done with the week?</span>
-              <span className="text-dim" style={{ display: 'block', marginTop: 3, fontSize: 12, lineHeight: 1.4 }}>
-                Crunch the numbers, set next week, and get the coach's note.
-              </span>
-            </button>
-          )
-        )}
+            {/* The read — a glance that taps through to Coach. A meter, not a
+                mono string of telemetry nobody could parse. */}
+            {!loading && p1 && confidencePct !== null && (
+              <button
+                type="button"
+                onClick={() => navigate('/app/coach')}
+                className="card card--tap fade-rise"
+                style={{ width: '100%', textAlign: 'left', marginTop: 24, color: 'var(--text)' }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                  <span className="section-header">The read</span>
+                  <span className="num text-sm text-signal">{confidencePct}% confident</span>
+                </div>
+                <p className="text-base prose-clamp" style={{ marginTop: 8, lineHeight: 1.45 }}>{p1.claim}</p>
+                <div style={{ marginTop: 12 }}><Meter value={p1.confidence} /></div>
+              </button>
+            )}
+
+            {/* End-of-week close-out. */}
+            {!loading && routines.length > 0 && (
+              weekClosed ? (
+                <Banner
+                  tone="good"
+                  icon={<Flag size={20} strokeWidth={1.75} color="var(--confirmed)" />}
+                  title="Week closed"
+                  sub="View the recap"
+                  onClick={() => latestReview && navigate(`/app/recap/${latestReview.id}`)}
+                />
+              ) : (
+                <Banner
+                  tone="quiet"
+                  icon={<Flag size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+                  title="Done with the week?"
+                  sub="Crunch the numbers and set next week."
+                  onClick={() => setShowCloseSheet(true)}
+                />
+              )
+            )}
+          </>
+        ) : atBoundary && boundary ? (
+          <PagerBoundary boundary={boundary} />
+        ) : pagerWeek ? (
+          <PagerWeekBody
+            week={pagerWeek}
+            mode={wOffset < 0 ? 'past' : 'future'}
+            onTapSession={() => navigate('/app/history')}
+          />
+        ) : null}
        </div>
-
-       {/* Week strip — cadence, de-emphasised. Right rail on desktop. */}
-       <aside className="page__rail">
-        <div className="fade-rise fade-rise-delay-2 today-week">
-          <SectionHeader>This week</SectionHeader>
-          <div className="week-strip" style={{ marginTop: 10, opacity: 0.7, padding: 0 }}>
-            {loading
-              ? Array.from({ length: 7 }).map((_, i) => (
-                  <div key={i} className="week-day" style={{ minWidth: 36 }}>
-                    <Skeleton height={9} width={24} />
-                    <Skeleton height={12} width={18} />
-                    <div style={{ width: 4, height: 4 }} />
-                  </div>
-                ))
-              : weekDays.map((day, i) => (
-                  <div
-                    key={i}
-                    className={`week-day${day.isToday ? ' week-day--today' : ''}${day.logged ? ' week-day--logged' : ''}`}
-                  >
-                    <span className="week-day__label">{DAY_LABELS[(day.date.getDay() + 6) % 7]}</span>
-                    <span className="week-day__num">{day.date.getDate()}</span>
-                    <div className="week-day__dot" />
-                  </div>
-                ))
-            }
-          </div>
-        </div>
-       </aside>
       </div>
+
+      {openSession && (
+        <SessionSheet
+          routine={openSession}
+          state={statusFor(openSession.id)}
+          plannedDow={plannedDowFor(openSession)}
+          onPlanDay={(dow) => handlePlanDay(openSession.id, dow)}
+          onClose={() => setOpenSessionId(null)}
+          onStart={() => navigate(`/app/workout/${openSession.id}`)}
+          onLogAgain={() => navigate(`/app/workout/${openSession.id}`)}
+          onEdit={() => {
+            const s = statusFor(openSession.id)
+            if (s.kind === 'done') navigate(`/app/workout/${openSession.id}?w=${s.lastWorkout.id}`)
+          }}
+        />
+      )}
 
       {showCloseSheet && (
         <CloseWeekSheet

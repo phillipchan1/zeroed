@@ -2,7 +2,7 @@ import {
   type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes,
   useEffect, useRef, useState,
 } from 'react'
-import { X } from 'lucide-react'
+import { X, ChevronRight, ChevronDown, ChevronLeft } from 'lucide-react'
 
 // ---- Logo / Wordmark -------------------------------------------------------
 
@@ -168,6 +168,258 @@ export function ScorePicker({ value, onChange }: ScorePickerProps) {
         </button>
       ))}
     </div>
+  )
+}
+
+// ============================================================================
+// MOBILE PRIMITIVES
+// The vocabulary the screens are built from. Each one exists so a screen can
+// show something instead of explaining it — and so touch targets, type sizes
+// and sheet behaviour are decided once, here, not re-invented per screen.
+// ============================================================================
+
+// ---- Bottom sheet — the sub-screen ------------------------------------------
+// Detail that used to live inline on a page now lives in one of these: capped
+// height, internal scroll, a grab handle, and a close target you can hit.
+
+interface SheetProps {
+  title: string
+  subtitle?: string
+  onClose: () => void
+  children: ReactNode
+  /** Rendered in a sticky footer so the action never scrolls out of reach. */
+  actions?: ReactNode
+  /** Set false for a sheet that must be dismissed via its own controls. */
+  dismissOnBackdrop?: boolean
+}
+
+export function Sheet({
+  title, subtitle, onClose, children, actions, dismissOnBackdrop = true,
+}: SheetProps) {
+  // Escape closes, and the body underneath stops scrolling while a sheet is up
+  // (otherwise a flick past the sheet's end drags the page behind it on iOS).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    document.addEventListener('keydown', onKey)
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prev
+    }
+  }, [onClose])
+
+  return (
+    <div
+      className="obs-sheet"
+      onClick={dismissOnBackdrop ? onClose : undefined}
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+    >
+      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
+        <div className="sheet-head">
+          <div style={{ minWidth: 0 }}>
+            <h2 className="sheet-head__title">{title}</h2>
+            {subtitle && <p className="sheet-head__sub">{subtitle}</p>}
+          </div>
+          <button type="button" className="sheet-close" onClick={onClose} aria-label="Close">
+            <X size={20} strokeWidth={2} />
+          </button>
+        </div>
+        {children}
+        {actions && <div className="sheet-actions">{actions}</div>}
+      </div>
+    </div>
+  )
+}
+
+// ---- Page header — every screen opens the same way --------------------------
+
+interface PageHeaderProps {
+  eyebrow?: string
+  title: string
+  subtitle?: string
+  action?: { label: string; onClick: () => void }
+  onBack?: () => void
+}
+
+export function PageHeader({ eyebrow, title, subtitle, action, onBack }: PageHeaderProps) {
+  return (
+    <>
+      {onBack && (
+        <button type="button" className="icon-btn" onClick={onBack} aria-label="Back">
+          <ChevronLeft size={24} strokeWidth={2} />
+        </button>
+      )}
+      <div className="page-head">
+        <div style={{ minWidth: 0 }}>
+          {eyebrow && <p className="eyebrow" style={{ marginBottom: 6 }}>{eyebrow}</p>}
+          <h1 className="screen-title">{title}</h1>
+          {subtitle && <p className="page-head__sub">{subtitle}</p>}
+        </div>
+        {action && (
+          <button type="button" className="page-head__action" onClick={action.onClick}>
+            {action.label}
+          </button>
+        )}
+      </div>
+    </>
+  )
+}
+
+// ---- Stat tiles — a number beats a sentence ---------------------------------
+
+export function Stat({ value, label, tone }: { value: ReactNode; label: string; tone?: string }) {
+  return (
+    <div className="stat">
+      <p className="stat__value" style={tone ? { color: tone } : undefined}>{value}</p>
+      <p className="stat__label">{label}</p>
+    </div>
+  )
+}
+
+export function StatGrid({ children }: { children: ReactNode }) {
+  return <div className="stat-grid">{children}</div>
+}
+
+// ---- Meter — a proportion, drawn ---------------------------------------------
+
+export function Meter({ value, tone }: { value: number; tone?: string }) {
+  const pct = Math.max(0, Math.min(1, value)) * 100
+  return (
+    <div className="meter">
+      <div className="meter__fill" style={{ width: `${pct}%`, background: tone }} />
+    </div>
+  )
+}
+
+// ---- Progress ring — "3 of 4" as one glyph ----------------------------------
+
+interface RingProps {
+  value: number          // 0–1
+  size?: number
+  stroke?: number
+  tone?: string
+  children?: ReactNode   // centred label
+}
+
+export function Ring({ value, size = 72, stroke = 6, tone, children }: RingProps) {
+  const r = (size - stroke) / 2
+  const circ = 2 * Math.PI * r
+  const pct = Math.max(0, Math.min(1, value))
+  return (
+    <div className="ring-wrap" style={{ width: size, height: size }}>
+      <svg className="ring" width={size} height={size} aria-hidden>
+        <circle className="ring__track" cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke} />
+        <circle
+          className="ring__fill"
+          cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke}
+          stroke={tone}
+          strokeDasharray={circ}
+          strokeDashoffset={circ * (1 - pct)}
+        />
+      </svg>
+      {children && <div className="ring-wrap__label">{children}</div>}
+    </div>
+  )
+}
+
+// ---- Status chip ------------------------------------------------------------
+
+type ChipTone = 'todo' | 'doing' | 'done' | 'pending' | 'info'
+
+export function Chip({ tone = 'todo', children }: { tone?: ChipTone; children: ReactNode }) {
+  return <span className={`chip chip--${tone}`}>{children}</span>
+}
+
+// ---- Tappable row — the way into a sub-screen -------------------------------
+
+interface RowProps {
+  title: ReactNode
+  sub?: ReactNode
+  value?: ReactNode
+  onClick?: () => void
+  leading?: ReactNode
+  chevron?: boolean
+}
+
+export function Row({ title, sub, value, onClick, leading, chevron = true }: RowProps) {
+  const Tag = onClick ? 'button' : 'div'
+  return (
+    <Tag
+      className="row"
+      onClick={onClick}
+      {...(onClick ? { type: 'button' as const } : {})}
+    >
+      {leading}
+      <span className="row__body">
+        <span className="row__title" style={{ display: 'block' }}>{title}</span>
+        {sub && <span className="row__sub" style={{ display: 'block' }}>{sub}</span>}
+      </span>
+      {value != null && <span className="row__value">{value}</span>}
+      {onClick && chevron && (
+        <span className="row__chev"><ChevronRight size={20} strokeWidth={2} /></span>
+      )}
+    </Tag>
+  )
+}
+
+// ---- Disclosure — detail that stays folded until asked for ------------------
+
+interface DisclosureProps {
+  label: string
+  meta?: ReactNode
+  defaultOpen?: boolean
+  children: ReactNode
+}
+
+export function Disclosure({ label, meta, defaultOpen = false, children }: DisclosureProps) {
+  const [open, setOpen] = useState(defaultOpen)
+  return (
+    <div className="disclosure">
+      <button
+        type="button"
+        className="disclosure__btn"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <span>{label}</span>
+        <span className="disclosure__meta">
+          {meta}
+          <span className={`disclosure__chev${open ? ' disclosure__chev--open' : ''}`}>
+            <ChevronDown size={18} strokeWidth={2} />
+          </span>
+        </span>
+      </button>
+      {open && <div className="disclosure__body">{children}</div>}
+    </div>
+  )
+}
+
+// ---- Banner — the single attention slot ------------------------------------
+
+interface BannerProps {
+  title: string
+  sub?: string
+  tone?: 'signal' | 'good' | 'quiet'
+  icon?: ReactNode
+  onClick?: () => void
+  trailing?: ReactNode
+}
+
+export function Banner({ title, sub, tone = 'signal', icon, onClick, trailing }: BannerProps) {
+  const cls = `banner${tone === 'good' ? ' banner--good' : tone === 'quiet' ? ' banner--quiet' : ''}`
+  const Tag = onClick ? 'button' : 'div'
+  return (
+    <Tag className={cls} onClick={onClick} {...(onClick ? { type: 'button' as const } : {})}>
+      {icon}
+      <span className="banner__body">
+        <span className="banner__title" style={{ display: 'block' }}>{title}</span>
+        {sub && <span className="banner__sub" style={{ display: 'block' }}>{sub}</span>}
+      </span>
+      {trailing ?? (onClick ? <ChevronRight size={20} strokeWidth={2} color="var(--text-dim)" /> : null)}
+    </Tag>
   )
 }
 
@@ -477,11 +729,11 @@ export function InsightCard({ insight, pulse, typeOn }: InsightCardProps) {
           )}
         </div>
       </div>
-      <p className="text-sm" style={{ lineHeight: 1.5 }}>
+      <p className="text-base" style={{ lineHeight: 1.5 }}>
         {typeOn ? <TypeOn text={insight.claim} delay={18} /> : insight.claim}
       </p>
       {insight.program_impact && (
-        <p className="text-xs text-dim" style={{ marginTop: 6 }}>{insight.program_impact}</p>
+        <p className="text-xs text-dim" style={{ marginTop: 8, lineHeight: 1.5 }}>{insight.program_impact}</p>
       )}
       <InsightAttribution insight={insight} />
     </Card>
@@ -508,7 +760,7 @@ export function InsightMovementRow({ movement }: InsightMovementRowProps) {
           className="num"
           style={{
             marginLeft: 'auto',
-            fontSize: 11,
+            fontSize: 'var(--fs-micro)',
             letterSpacing: '0.02em',
             color: accent,
             display: 'flex',
@@ -556,43 +808,24 @@ interface ExerciseInsightSheetProps {
 
 export function ExerciseInsightSheet({ insight, onClose }: ExerciseInsightSheetProps) {
   return (
-    <div className="obs-sheet" onClick={onClose}>
-      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 12 }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <PriorityBadge priority={insight.priority} />
-            <span className="text-xs text-dim">{insight.category}</span>
-            <StatusDot status={insight.status} />
-            <span className="text-xs text-dim" style={{ textTransform: 'capitalize' }}>
-              {insight.status}
-            </span>
-          </div>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            style={{ padding: 0, height: 28, minWidth: 28, color: 'var(--text-dim)' }}
-            onClick={onClose}
-            aria-label="Close"
-          >
-            <X size={18} strokeWidth={1.5} />
-          </button>
-        </div>
-
-        <p className="text-sm" style={{ lineHeight: 1.5, marginBottom: 12 }}>{insight.claim}</p>
-
-        {insight.program_impact && (
-          <div className="card--data" style={{ marginBottom: 12 }}>
-            <p className="text-xs text-dim" style={{ marginBottom: 4, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              Program impact
-            </p>
-            <p className="text-sm" style={{ lineHeight: 1.5 }}>{insight.program_impact}</p>
-          </div>
-        )}
-
-        <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
-          This exercise is in your program because of this.
-        </p>
+    <Sheet title="Why this exercise" onClose={onClose}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14, flexWrap: 'wrap' }}>
+        <PriorityBadge priority={insight.priority} />
+        <span className="text-xs text-dim">{insight.category}</span>
+        <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+          <StatusDot status={insight.status} />
+          <span className="text-xs text-dim" style={{ textTransform: 'capitalize' }}>{insight.status}</span>
+        </span>
       </div>
-    </div>
+
+      <p className="text-lg" style={{ lineHeight: 1.45, marginBottom: 16 }}>{insight.claim}</p>
+
+      {insight.program_impact && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <p className="section-header" style={{ marginBottom: 6 }}>Program impact</p>
+          <p className="text-sm" style={{ lineHeight: 1.55 }}>{insight.program_impact}</p>
+        </div>
+      )}
+    </Sheet>
   )
 }

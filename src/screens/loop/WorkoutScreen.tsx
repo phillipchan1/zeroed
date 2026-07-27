@@ -15,7 +15,7 @@ import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import {
-  Button, Spinner, ExerciseInsightSheet, TelemetryStrip,
+  Button, Spinner, Sheet, Chip,
 } from '../../components/ui'
 import type {
   RoutineRow, ExerciseTemplate, SetLog, InsightRow, TrackingType,
@@ -226,7 +226,7 @@ function SetRow({
       onClick={toggleDone}
       aria-label={log.done ? 'Mark set not done' : 'Complete set'}
     >
-      {log.done && <Check size={14} strokeWidth={2.5} color="var(--signal)" />}
+      {log.done && <Check size={22} strokeWidth={2.5} color="var(--signal)" />}
     </button>
   )
 
@@ -319,7 +319,7 @@ function SetRow({
   }
 
   return (
-    <div className={`set-row ${gridClass(trackingType)}`}>
+    <div className={`set-row ${gridClass(trackingType)}${log.done ? ' set-row--done' : ''}`}>
       <span className="set-row__num">{setNum}</span>
       <span className="set-row__prev num">{prevText ?? '·'}</span>
       {cells}
@@ -337,7 +337,11 @@ interface FeltChipsProps {
   onNote: (n: string) => void
 }
 
+// The note field is folded away until it's wanted. With seven exercises on a
+// screen, seven always-open textareas were most of the page's height and most
+// of its visual noise — for a field almost nobody fills in mid-session.
 function FeltChips({ value, note, onFelt, onNote }: FeltChipsProps) {
+  const [noteOpen, setNoteOpen] = useState(() => note.trim().length > 0)
   return (
     <div className="felt">
       <div className="felt__row">
@@ -353,13 +357,28 @@ function FeltChips({ value, note, onFelt, onNote }: FeltChipsProps) {
           </button>
         ))}
       </div>
-      <textarea
-        className="input felt__note"
-        rows={2}
-        placeholder="Note for coach — e.g. weaker on the left side, shoulder twinge on set 3"
-        value={note}
-        onChange={(e) => onNote(e.target.value)}
-      />
+
+      {noteOpen ? (
+        <textarea
+          className="input felt__note"
+          rows={2}
+          autoFocus={!note}
+          placeholder="Anything the coach should know?"
+          value={note}
+          onChange={(e) => onNote(e.target.value)}
+        />
+      ) : (
+        <button
+          type="button"
+          onClick={() => setNoteOpen(true)}
+          style={{
+            marginTop: 10, minHeight: 40, padding: 0, background: 'none', border: 'none',
+            color: 'var(--text-dim)', fontSize: 'var(--fs-sm)', cursor: 'pointer',
+          }}
+        >
+          + Add a note
+        </button>
+      )}
     </div>
   )
 }
@@ -379,18 +398,15 @@ function sessionBriefLines(opts: {
 }): string[] {
   const { routine, primaryInsight, leadExercise, readingWhy, isFirst } = opts
   const lines: string[] = []
-  const opener = isFirst ? 'Your first real session. ' : ''
 
-  // 1. The read this session is built around.
+  // 1. The read this session is built around. One sentence, not three.
   if (primaryInsight) {
     const pct = Math.round(primaryInsight.confidence * 100)
     lines.push(
-      `${opener}I built this around your ${primaryInsight.category.toLowerCase()} — ${pct}% confident, ${primaryInsight.status}. It's the read I'm watching closest, so it's where the training teaches us the most.`,
+      `Built around your ${primaryInsight.category.toLowerCase()} — ${pct}% confident. It's the read I'm watching closest.`,
     )
   } else if (routine.intent) {
-    lines.push(`${opener}${routine.intent}`)
-  } else if (opener) {
-    lines.push(opener.trim())
+    lines.push(routine.intent)
   }
 
   // 2. The working half — what the opener actually is.
@@ -398,8 +414,8 @@ function sessionBriefLines(opts: {
     const working = leadExercise.load === 'moderate' || leadExercise.sets >= 4
     lines.push(
       working
-        ? `Open with ${leadExercise.name} — real working sets, not a warm-up. Own the pattern, then we keep loading it.`
-        : `Open with ${leadExercise.name} — controlled and clean. We earn the pattern before we pile on load.`,
+        ? `Open with ${leadExercise.name} — real working sets, not a warm-up.`
+        : `Open with ${leadExercise.name} — controlled and clean before we add load.`,
     )
   }
 
@@ -409,8 +425,8 @@ function sessionBriefLines(opts: {
   // 4. The close — what makes today count.
   lines.push(
     isFirst
-      ? `At the end I'll ask how it went — that's what turns today into a read.`
-      : `Log how it felt at the end — honest signal is what moves the read.`,
+      ? `At the end I'll ask how it went. That's what turns today into a read.`
+      : `Log how it felt at the end — honest signal moves the read.`,
   )
 
   return lines
@@ -420,20 +436,17 @@ function SessionBrief({
   lines, ctaLabel, onClose,
 }: { lines: string[]; ctaLabel: string; onClose: () => void }) {
   return (
-    <div className="obs-sheet" onClick={onClose}>
-      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
-        <p className="section-header" style={{ color: 'var(--computing)', marginBottom: 4 }}>Why this session</p>
-        <p className="text-xs text-dim" style={{ marginBottom: 14, lineHeight: 1.5 }}>
-          The thinking behind today — read it or jump straight in.
-        </p>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-          {lines.map((l, i) => (
-            <p key={i} className="text-sm" style={{ lineHeight: 1.55 }}>{l}</p>
-          ))}
-        </div>
-        <Button variant="primary" full style={{ marginTop: 18 }} onClick={onClose}>{ctaLabel}</Button>
+    <Sheet
+      title="Why this session"
+      onClose={onClose}
+      actions={<Button variant="primary" full onClick={onClose}>{ctaLabel}</Button>}
+    >
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {lines.map((l, i) => (
+          <p key={i} className="text-base" style={{ lineHeight: 1.55 }}>{l}</p>
+        ))}
       </div>
-    </div>
+    </Sheet>
   )
 }
 
@@ -443,81 +456,80 @@ function SessionBrief({
 // for THIS lift is folded in underneath, so it reads as guidance for your plan,
 // not a generic wiki entry.
 
-interface CoachNotesSheetProps {
+interface ExerciseSheetProps {
   name: string
   note: CoachingNote | null
   cue: string | null
+  insight: InsightRow | null
+  reading: string | null
   onClose: () => void
 }
 
-function CoachNotesSheet({ name, note, cue, onClose }: CoachNotesSheetProps) {
+/**
+ * ONE sheet per exercise. This used to be three separate tap targets crammed
+ * beside the exercise name — an (i) for the insight, a READING chip, and a
+ * How-to tag — each opening its own sheet. They're all "tell me more about this
+ * lift", so they're one surface now, sectioned.
+ */
+function ExerciseSheet({ name, note, cue, insight, reading, onClose }: ExerciseSheetProps) {
+  const hasAnything = note || cue || insight || reading
   return (
-    <div className="obs-sheet" onClick={onClose}>
-      <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
-        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14 }}>
-          <div>
-            <p className="section-header" style={{ marginBottom: 2 }}>Coach's notes</p>
-            <p className="text-sm" style={{ fontWeight: 600 }}>{name}</p>
-          </div>
-          <button
-            type="button"
-            className="btn btn--ghost"
-            style={{ padding: 0, height: 28, minWidth: 28, color: 'var(--text-dim)' }}
-            onClick={onClose}
-            aria-label="Close"
-          >
-            <X size={18} strokeWidth={1.5} />
-          </button>
+    <Sheet title={name} onClose={onClose}>
+      {note && (
+        <div style={{ marginBottom: 24 }}>
+          <p className="section-header" style={{ marginBottom: 12 }}>How to</p>
+          <ol style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 12 }}>
+            {note.howTo.map((step, i) => (
+              <li key={i} style={{ display: 'flex', gap: 12 }}>
+                <span className="num text-signal" style={{ fontSize: 'var(--fs-sm)', flexShrink: 0, lineHeight: 1.6, fontWeight: 700 }}>
+                  {i + 1}
+                </span>
+                <span className="text-base" style={{ lineHeight: 1.55 }}>{step}</span>
+              </li>
+            ))}
+          </ol>
         </div>
+      )}
 
-        {note && (
-          <div style={{ marginBottom: cue || note.watchFor.length ? 16 : 0 }}>
-            <p className="text-xs text-dim" style={{ marginBottom: 8, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              How to
-            </p>
-            <ol style={{ margin: 0, paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 8 }}>
-              {note.howTo.map((step, i) => (
-                <li key={i} style={{ display: 'flex', gap: 10 }}>
-                  <span className="num text-signal" style={{ fontSize: 12, flexShrink: 0, lineHeight: 1.5 }}>{i + 1}</span>
-                  <span className="text-sm" style={{ lineHeight: 1.5 }}>{step}</span>
-                </li>
-              ))}
-            </ol>
-          </div>
-        )}
+      {note && note.watchFor.length > 0 && (
+        <div style={{ marginBottom: 24 }}>
+          <p className="section-header" style={{ marginBottom: 12 }}>Watch for</p>
+          <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10 }}>
+            {note.watchFor.map((fault, i) => (
+              <li key={i} style={{ display: 'flex', gap: 12 }}>
+                <span style={{ color: 'var(--pending)', flexShrink: 0, lineHeight: 1.55, fontWeight: 700 }}>!</span>
+                <span className="text-base" style={{ lineHeight: 1.55 }}>{fault}</span>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
 
-        {note && note.watchFor.length > 0 && (
-          <div style={{ marginBottom: cue ? 16 : 0 }}>
-            <p className="text-xs text-dim" style={{ marginBottom: 8, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              Watch for
-            </p>
-            <ul style={{ margin: 0, paddingLeft: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6 }}>
-              {note.watchFor.map((fault, i) => (
-                <li key={i} style={{ display: 'flex', gap: 10 }}>
-                  <span style={{ color: 'var(--pending)', flexShrink: 0, lineHeight: 1.5 }}>!</span>
-                  <span className="text-sm" style={{ lineHeight: 1.5 }}>{fault}</span>
-                </li>
-              ))}
-            </ul>
-          </div>
-        )}
+      {cue && (
+        <div className="card" style={{ marginBottom: 16 }}>
+          <p className="section-header" style={{ marginBottom: 6 }}>Your cue</p>
+          <p className="text-base" style={{ lineHeight: 1.55 }}>{cue}</p>
+        </div>
+      )}
 
-        {cue && (
-          <div className="card--data">
-            <p className="text-xs text-dim" style={{ marginBottom: 4, fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-              For your program
-            </p>
-            <p className="text-sm" style={{ lineHeight: 1.5 }}>{cue}</p>
-          </div>
-        )}
+      {insight && (
+        <div className="card" style={{ marginBottom: 16, borderLeft: '3px solid var(--signal)' }}>
+          <p className="section-header" style={{ marginBottom: 6 }}>Why it's in your program</p>
+          <p className="text-base" style={{ lineHeight: 1.55 }}>{insight.claim}</p>
+        </div>
+      )}
 
-        {!note && !cue && (
-          <p className="text-sm text-dim" style={{ lineHeight: 1.5 }}>
-            No notes for this one yet — train it clean and controlled.
-          </p>
-        )}
-      </div>
-    </div>
+      {reading && (
+        <div className="card" style={{ marginBottom: 16, borderLeft: '3px solid var(--computing)' }}>
+          <p className="section-header" style={{ marginBottom: 6, color: 'var(--computing)' }}>We're reading this one</p>
+          <p className="text-base" style={{ lineHeight: 1.55 }}>{reading}</p>
+        </div>
+      )}
+
+      {!hasAnything && (
+        <p className="text-base text-dim">No notes for this one yet — train it clean and controlled.</p>
+      )}
+    </Sheet>
   )
 }
 
@@ -534,51 +546,50 @@ function DebriefSheet({ reading, saving, onSave, onSkip }: DebriefSheetProps) {
   const [reflection, setReflection] = useState('')
   const [readingAnswer, setReadingAnswer] = useState('')
   return (
-    <div className="obs-sheet">
-      <div className="obs-sheet__inner">
-        <p className="section-header" style={{ marginBottom: 4 }}>Debrief</p>
-        <p className="text-xs text-dim" style={{ marginBottom: 16, lineHeight: 1.5 }}>
-          How did that go? Talk freely — I read the whole thing, not just the numbers.
-        </p>
-
-        {reading && (
-          <div style={{ marginBottom: 14 }}>
-            <p className="text-xs" style={{ color: 'var(--computing)', marginBottom: 6, lineHeight: 1.4 }}>
-              {reading.question}
-            </p>
-            <input
-              className="input"
-              type="text"
-              placeholder={`On ${reading.name}…`}
-              value={readingAnswer}
-              onChange={(e) => setReadingAnswer(e.target.value)}
-            />
-          </div>
-        )}
-
-        <textarea
-          className="input"
-          style={{ minHeight: 96, resize: 'none', lineHeight: 1.5 }}
-          placeholder="Felt strong on the second set, knee was quiet, left side still lagging…"
-          value={reflection}
-          onChange={(e) => setReflection(e.target.value)}
-        />
-
-        <div style={{ display: 'flex', gap: 8, marginTop: 16 }}>
-          <Button variant="ghost" style={{ flex: 1 }} onClick={onSkip} disabled={saving}>
-            Skip
-          </Button>
+    <Sheet
+      title="How did that go?"
+      subtitle="A sentence is plenty. I read the words, not just the numbers."
+      onClose={onSkip}
+      dismissOnBackdrop={false}
+      actions={
+        <>
           <Button
             variant="primary"
-            style={{ flex: 2 }}
+            full
             disabled={saving}
             onClick={() => onSave(reflection.trim(), readingAnswer.trim())}
           >
             {saving ? <Spinner /> : 'Log it →'}
           </Button>
+          <Button variant="ghost" full style={{ marginTop: 6 }} onClick={onSkip} disabled={saving}>
+            Skip
+          </Button>
+        </>
+      }
+    >
+      {reading && (
+        <div style={{ marginBottom: 18 }}>
+          <p className="text-sm" style={{ color: 'var(--computing)', marginBottom: 8, lineHeight: 1.45 }}>
+            {reading.question}
+          </p>
+          <input
+            className="input"
+            type="text"
+            placeholder={`On ${reading.name}…`}
+            value={readingAnswer}
+            onChange={(e) => setReadingAnswer(e.target.value)}
+          />
         </div>
-      </div>
-    </div>
+      )}
+
+      <textarea
+        className="input"
+        style={{ minHeight: 120, resize: 'none', lineHeight: 1.55, fontSize: 'var(--fs-base)' }}
+        placeholder="Felt strong on the second set, knee was quiet, left side still lagging…"
+        value={reflection}
+        onChange={(e) => setReflection(e.target.value)}
+      />
+    </Sheet>
   )
 }
 
@@ -717,10 +728,14 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   // insight_id → insight, for the per-exercise "why" surface
   const [insightMap, setInsightMap] = useState<Record<string, InsightRow>>(() => seedBoot?.insightMap ?? {})
-  const [openInsight, setOpenInsight] = useState<InsightRow | null>(null)
-  const [openReading, setOpenReading] = useState<{ name: string; why: string } | null>(null)
-  // Coach's notes (how-to) sheet for one exercise.
-  const [openCoachNotes, setOpenCoachNotes] = useState<{ name: string; note: CoachingNote | null; cue: string | null } | null>(null)
+  // The single per-exercise detail sheet (how-to + cue + why + reading).
+  const [openExercise, setOpenExercise] = useState<{
+    name: string
+    note: CoachingNote | null
+    cue: string | null
+    insight: InsightRow | null
+    reading: string | null
+  } | null>(null)
 
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>(() => {
     if (!seedBoot) return {}
@@ -1191,13 +1206,6 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const rpeLive   = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
   const avgRpeLive = rpeLive.length ? Math.round(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length) : null
 
-  const workoutStripItems: Array<{ label: string; value: string | number }> = [
-    { label: 'WORKOUT', value: routine.name },
-    { label: 'ELAPSED', value: formatElapsed(elapsed) },
-    { label: 'SETS', value: `${setsDone}/${setsTotal}` },
-  ]
-  if (avgRpeLive !== null) workoutStripItems.push({ label: 'RPE', value: avgRpeLive })
-
   const restLeft = restEndsAt ? Math.max(0, Math.ceil((restEndsAt - Date.now()) / 1000)) : 0
 
   // Desktop rail context: the exercise whose field was last focused.
@@ -1206,9 +1214,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
+      {/* Session header. The old version crammed four mono telemetry fields into
+          a 28px strip; this is the same information as a title, one metadata
+          line, and a progress bar you can read without stopping. */}
       <div
         style={{
-          display: 'flex', alignItems: 'stretch', borderBottom: '1px solid var(--line)',
+          borderBottom: '1px solid var(--line)',
           position: 'sticky', top: 0, background: 'var(--ground)', zIndex: 10,
           // Workout is a full-screen route (no app-shell), so it reserves the
           // status-bar inset itself — the ground-filled padding sits behind the
@@ -1216,27 +1227,42 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           paddingTop: 'env(safe-area-inset-top, 0px)',
         }}
       >
-        <button
-          type="button"
-          className="btn btn--ghost"
-          style={{ padding: '0 8px', height: 28, minWidth: 36 }}
-          onClick={() => navigate(-1)}
-          aria-label="Back"
-        >
-          <ChevronLeft size={20} strokeWidth={1.5} />
-        </button>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <TelemetryStrip items={workoutStripItems} lastSignalAt={new Date(startRef.current)} />
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '6px 12px 10px' }}>
+          <button
+            type="button"
+            className="icon-btn"
+            style={{ marginLeft: 0 }}
+            onClick={() => navigate(-1)}
+            aria-label="Back"
+          >
+            <ChevronLeft size={24} strokeWidth={2} />
+          </button>
+          <div style={{ flex: 1, minWidth: 0 }}>
+            <p style={{ fontSize: 'var(--fs-base)', fontWeight: 700, lineHeight: 1.25, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+              {routine.name}
+            </p>
+            <p className="num text-xs text-dim" style={{ marginTop: 2 }}>
+              {formatElapsed(elapsed)} · {setsDone}/{setsTotal} sets
+              {avgRpeLive !== null ? ` · RPE ${avgRpeLive}` : ''}
+            </p>
+          </div>
+          <button
+            type="button"
+            className="howto-tag"
+            style={{ color: 'var(--computing)', borderColor: 'rgba(90,143,184,0.35)' }}
+            onClick={() => setBriefOpen(true)}
+            aria-label="Why this session"
+          >
+            <Info size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Why
+          </button>
         </div>
-        <button
-          type="button"
-          className="btn btn--ghost"
-          style={{ padding: '0 10px', height: 28, fontSize: 12, color: 'var(--computing)', whiteSpace: 'nowrap' }}
-          onClick={() => setBriefOpen(true)}
-          aria-label="Why this session"
-        >
-          <Info size={13} strokeWidth={2} style={{ marginRight: 4 }} /> Why
-        </button>
+        {/* Progress — the session's completion, drawn. */}
+        <div className="meter" style={{ height: 3, borderRadius: 0 }}>
+          <div
+            className="meter__fill"
+            style={{ width: `${setsTotal ? (setsDone / setsTotal) * 100 : 0}%`, borderRadius: 0 }}
+          />
+        </div>
       </div>
 
       {/* Exercise list (left) + desktop context rail (right) */}
@@ -1246,15 +1272,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         {/* Intelligence Rule in effect — stated out loud (the felt difference) */}
         {prescription?.rule && (
           <div
-            style={{
-              marginTop: 16, padding: '12px 14px', borderRadius: 8,
-              background: 'var(--surface)', border: '1px solid var(--signal)',
-            }}
+            className="card"
+            style={{ marginTop: 20, borderLeft: '3px solid var(--signal)' }}
           >
-            <p className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase', marginBottom: 6 }}>
-              RULE · {prescription.rule.name}
+            <p className="section-header text-signal" style={{ marginBottom: 8 }}>
+              {prescription.rule.name}
             </p>
-            <p className="text-sm" style={{ lineHeight: 1.5 }}>{prescription.rule.reasoning}</p>
+            <p className="text-base" style={{ lineHeight: 1.5 }}>{prescription.rule.reasoning}</p>
           </div>
         )}
 
@@ -1264,61 +1288,49 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           const pReps = leadingInt(ex.reps)
           const pDur  = trackingType === 'time' ? leadingInt(ex.reps) : null
           const pLoad = leadingInt(ex.load ?? undefined)
-          // How-to notes: hardcoded library + the program-specific cue. Show the
-          // affordance whenever either exists (the cue is on every agent lift).
+          // Details sheet: the hardcoded how-to library, the program-specific
+          // cue, the insight this lift serves, and the reading note. Show the
+          // affordance whenever any of them exists.
           const coachNote = getCoachingNote(ex.name)
-          const hasNotes  = !!coachNote || !!ex.cue
+          const hasDetails =
+            !!coachNote || !!ex.cue || !!(ex.insight_id && insightMap[ex.insight_id]) || !!ex.reading
 
           return (
-            <div key={exIdx} style={{ paddingTop: 20, paddingBottom: 12, borderBottom: '1px solid var(--line)' }}>
-              <div style={{ marginBottom: 10 }}>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  <p style={{ fontWeight: 600, fontSize: 15 }}>{ex.name}</p>
-                  {ex.insight_id && insightMap[ex.insight_id] && (
-                    <button
-                      type="button"
-                      className="exercise-info-btn"
-                      aria-label="Why this exercise"
-                      onClick={() => setOpenInsight(insightMap[ex.insight_id!])}
-                    >
-                      <Info size={12} strokeWidth={2} />
-                    </button>
-                  )}
-                  {ex.reading && (
-                    <button
-                      type="button"
-                      className="reading-tag"
-                      aria-label="Why we're reading this"
-                      onClick={() => setOpenReading({ name: ex.name, why: ex.reading_why ?? '' })}
-                    >
-                      READING
-                    </button>
-                  )}
-                  {hasNotes && (
+            <div key={exIdx} style={{ paddingTop: 26, paddingBottom: 16, borderBottom: '1px solid var(--line)' }}>
+              <div style={{ marginBottom: 14 }}>
+                <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
+                  <h2 style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 'var(--fs-xl)', lineHeight: 1.25, letterSpacing: '-0.01em' }}>
+                    {ex.name}
+                  </h2>
+                  {/* One affordance, not three. Everything about this lift —
+                      how-to, faults, your cue, the read it serves — is behind it. */}
+                  {hasDetails && (
                     <button
                       type="button"
                       className="howto-tag"
-                      aria-label={`How to do ${ex.name}`}
-                      style={{ marginLeft: 'auto' }}
-                      onClick={() => setOpenCoachNotes({ name: ex.name, note: coachNote, cue: ex.cue ?? null })}
+                      style={{ flexShrink: 0 }}
+                      aria-label={`About ${ex.name}`}
+                      onClick={() => setOpenExercise({
+                        name: ex.name,
+                        note: coachNote,
+                        cue: ex.cue ?? null,
+                        insight: (ex.insight_id ? insightMap[ex.insight_id] : null) ?? null,
+                        reading: ex.reading ? (ex.reading_why ?? '') : null,
+                      })}
                     >
-                      <Info size={11} strokeWidth={2} style={{ marginRight: 3 }} /> How-to
+                      <Info size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Details
                     </button>
                   )}
                 </div>
-                {ex.cue && (
-                  <p className="text-xs text-dim" style={{ marginTop: 3, lineHeight: 1.5 }}>{ex.cue}</p>
-                )}
-                {prescription?.hints[exIdx] && (
-                  <p
-                    className="num text-xs"
-                    style={{
-                      marginTop: 4, letterSpacing: '0.02em',
-                      color: prescription.held[exIdx] ? 'var(--pending)' : 'var(--signal)',
-                    }}
-                  >
-                    {prescription.hints[exIdx]}
-                  </p>
+                {(ex.reading || prescription?.hints[exIdx]) && (
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
+                    {ex.reading && <Chip tone="info">Reading</Chip>}
+                    {prescription?.hints[exIdx] && (
+                      <Chip tone={prescription.held[exIdx] ? 'pending' : 'doing'}>
+                        {prescription.hints[exIdx]}
+                      </Chip>
+                    )}
+                  </div>
                 )}
               </div>
 
@@ -1367,10 +1379,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
               <button
                 type="button"
                 className="btn btn--ghost"
-                style={{ marginTop: 8, height: 44, fontSize: 13, padding: '0 8px', color: 'var(--text-dim)' }}
+                style={{ marginTop: 10, padding: '0 8px', color: 'var(--text-dim)' }}
                 onClick={() => addSet(exIdx)}
               >
-                <Plus size={12} strokeWidth={2} style={{ marginRight: 4 }} />
+                <Plus size={16} strokeWidth={2} style={{ marginRight: 6 }} />
                 Add set
               </button>
 
@@ -1449,26 +1461,23 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         }}
       >
         <div className="workout-footer__inner">
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              <span className="text-xs text-dim">Day</span>
-              <input
-                type="date"
-                className="num text-xs"
-                value={performedAt}
-                max={toDateInput(new Date())}
-                onChange={(e) => setPerformedAt(e.target.value || toDateInput(new Date()))}
-                style={{
-                  background: 'transparent', border: '1px solid var(--line)', borderRadius: 6,
-                  color: 'var(--text)', padding: '2px 6px', fontSize: 12,
-                }}
-              />
-            </label>
-            <div>
-              <span className="text-xs text-dim">Sets  </span>
-              <span className="num text-xs">{setsDone}</span>
-            </div>
-          </div>
+          {/* Only shown when it's actually needed: today is the default, and a
+              backdated session is the rare case. The live set count moved to
+              the header, so this row no longer duplicates it. */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+            <span className="text-xs text-dim">Day</span>
+            <input
+              type="date"
+              className="num"
+              value={performedAt}
+              max={toDateInput(new Date())}
+              onChange={(e) => setPerformedAt(e.target.value || toDateInput(new Date()))}
+              style={{
+                background: 'transparent', border: '1px solid var(--line)', borderRadius: 8,
+                color: 'var(--text)', padding: '6px 10px', fontSize: 'var(--fs-xs)',
+              }}
+            />
+          </label>
           <Button variant="primary" full onClick={handleCompleteWorkout} disabled={!hasAnyLog}>
             {isEdit ? 'Save changes →' : 'Complete workout →'}
           </Button>
@@ -1494,31 +1503,16 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         />
       )}
 
-      {/* Coach's notes (how-to) sheet */}
-      {openCoachNotes && (
-        <CoachNotesSheet
-          name={openCoachNotes.name}
-          note={openCoachNotes.note}
-          cue={openCoachNotes.cue}
-          onClose={() => setOpenCoachNotes(null)}
+      {/* The one per-exercise detail sheet */}
+      {openExercise && (
+        <ExerciseSheet
+          name={openExercise.name}
+          note={openExercise.note}
+          cue={openExercise.cue}
+          insight={openExercise.insight}
+          reading={openExercise.reading}
+          onClose={() => setOpenExercise(null)}
         />
-      )}
-
-      {/* Exercise "why" sheet */}
-      {openInsight && <ExerciseInsightSheet insight={openInsight} onClose={() => setOpenInsight(null)} />}
-
-      {openReading && (
-        <div className="obs-sheet" onClick={() => setOpenReading(null)}>
-          <div className="obs-sheet__inner" onClick={(e) => e.stopPropagation()}>
-            <p className="section-header" style={{ color: 'var(--computing)', marginBottom: 10 }}>
-              READING · {openReading.name}
-            </p>
-            <p className="text-sm" style={{ lineHeight: 1.5, marginBottom: 12 }}>{openReading.why}</p>
-            <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
-              How this one goes feeds the read — no need to score it, just train it honestly.
-            </p>
-          </div>
-        </div>
       )}
     </div>
   )
