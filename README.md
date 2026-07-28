@@ -63,6 +63,30 @@ supabase db push
 
 Migrations live in `supabase/migrations/`. Create new ones with `supabase migration new <name>`.
 
+### ⚠️ Backend changes do NOT ride the web deploy
+
+Pushing to `master` redeploys the **frontend only** (Vercel). Anything under
+`supabase/` ships separately, by hand:
+
+```bash
+npm run deploy:backend   # = supabase db push && supabase functions deploy agent
+```
+
+Run it whenever a pulled change touches `supabase/migrations/` or
+`supabase/functions/`. The client is built to degrade rather than crash when
+the backend lags, and the two degradations look like app bugs:
+
+- **"Change the program" answers every message with a can't-reach/older-coach
+  line** → the deployed `agent` function predates the `program_edit` task.
+  Fix: `npm run deploy:agent`.
+- **Edited sessions pile up as "N sessions couldn't sync" with
+  `[42501] permission denied for table workout`** → the database is missing
+  the `allow_session_edit` migration (editing a logged session UPDATEs a
+  table that used to be append-only). Fix: `npm run deploy:db`, then tap
+  **Try again** on the sync sheet — the queued sessions upload exactly as
+  logged. Never discard them for this error; nothing is wrong with the
+  sessions themselves.
+
 ### The `agent` Edge Function
 
 Every model call in the app goes through one function, `supabase/functions/agent`.

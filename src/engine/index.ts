@@ -809,10 +809,18 @@ export async function runCoachChat(
 
   // Deterministic floor — never dead-end the surface. Stay in voice, route
   // correctly, and lean on the real read in context. No actions on this path.
+  // A stale deployment is named outright: "can't reach" on a healthy connection
+  // would read as the chat being broken, when the fix is a one-line redeploy.
   const p1 = context.insights[0] ?? null
+  const cause =
+    res.error === 'stale_function'
+      ? 'The server is running an older coach — deploy the latest agent Edge Function (`supabase functions deploy agent`) to bring the chat back.'
+      : res.error === 'rate_limited'
+        ? `Rate-limited for a minute — try that again shortly.`
+        : `Can't reach my full read right now.`
   const reply = p1
-    ? `Can't reach my full read right now. Short version: **${p1.category}** is the limiter — ${p1.claim} (${Math.round(p1.confidence * 100)}% sure).`
-    : `Can't reach my full read right now. Log a session and I'll have something concrete to work from.`
+    ? `${cause} Short version: **${p1.category}** is the limiter — ${p1.claim} (${Math.round(p1.confidence * 100)}% sure).`
+    : `${cause} Log a session and I'll have something concrete to work from.`
   return { source: 'fallback', reply, followups: [], actions: [] }
 }
 

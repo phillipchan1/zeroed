@@ -472,6 +472,11 @@ function StuckSessionsSheet({
   onClose: () => void
 }) {
   const [confirmDiscard, setConfirmDiscard] = useState(false)
+  // A known signature gets a known fix. 42501 on `workout` is the database
+  // missing the allow_session_edit migration (editing a logged session UPDATEs
+  // a table that was append-only until 20260727000002) — these sessions sync
+  // as-is the moment it's applied, so say that instead of leaving a bare code.
+  const missingEditMigration = reasons.some((r) => /42501/.test(r) && /workout/i.test(r))
   return (
     <Sheet
       title={`${count} session${count === 1 ? '' : 's'} couldn't sync`}
@@ -504,6 +509,14 @@ function StuckSessionsSheet({
             {r}
           </p>
         ))}
+        {missingEditMigration && (
+          <p className="text-xs" style={{ marginTop: 12, lineHeight: 1.5 }}>
+            Permission denied on <span className="num">workout</span> means the database
+            hasn&apos;t been given the session-edit migration yet. Apply the committed
+            migrations (<span className="num">supabase db push</span>), then tap Try
+            again — these sessions upload exactly as logged.
+          </p>
+        )}
       </div>
     </Sheet>
   )
