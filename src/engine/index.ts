@@ -3641,6 +3641,62 @@ function topHighlights(aw: Record<string, SetLog[]> | null, exercises: ExerciseT
   return out
 }
 
+// ---- One logged session, as performed --------------------------------------
+// What a finished session ACTUALLY was: the set logs, keyed by exercise index so
+// they line up with the routine's template, plus the session-level numbers. This
+// is what any "what did I do" surface reads — a preview of a done session must
+// show what was logged, not what was prescribed.
+
+export interface SessionActuals {
+  workoutId: string | null   // null while the session is still only in the outbox
+  performedAt: string
+  durationMins: number | null
+  rpe: number | null
+  setLogs: Record<number, SetLog[]>
+}
+
+/** Count the sets in an actuals grid that carry real signal. */
+export function countLoggedSets(setLogs: Record<number, SetLog[]>): number {
+  return Object.values(setLogs).flat().filter(isSetDone).length
+}
+
+/** The as-performed view of a queued (not yet committed) session. No network. */
+export function actualsFromPending(p: PendingSession | null): SessionActuals | null {
+  if (!p) return null
+  const setLogs: Record<number, SetLog[]> = {}
+  Object.entries(p.actualWeights ?? {}).forEach(([k, v]) => { setLogs[Number(k)] = v })
+  return {
+    workoutId: null,
+    performedAt: p.performedAt ?? p.queuedAt,
+    durationMins: p.durationMins,
+    rpe: p.rpe,
+    setLogs,
+  }
+}
+
+/** The as-performed view of a committed session. */
+export async function gatherSessionActuals(workoutId: string): Promise<SessionActuals | null> {
+  const { data } = await supabase
+    .from('workout')
+    .select('id, performed_at, duration_mins, rpe, actual_weights')
+    .eq('id', workoutId)
+    .maybeSingle()
+  if (!data) return null
+  const w = data as {
+    id: string; performed_at: string; duration_mins: number | null
+    rpe: number | null; actual_weights: Record<string, SetLog[]> | null
+  }
+  const setLogs: Record<number, SetLog[]> = {}
+  Object.entries(w.actual_weights ?? {}).forEach(([k, v]) => { setLogs[Number(k)] = v })
+  return {
+    workoutId: w.id,
+    performedAt: w.performed_at,
+    durationMins: w.duration_mins,
+    rpe: w.rpe,
+    setLogs,
+  }
+}
+
 /**
  * The full training history for the active program, newest first, grouped by
  * week. `pending` is the raw outbox (pass pendingSessionsRaw()); those sessions

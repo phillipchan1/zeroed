@@ -36,10 +36,13 @@ function LogSessionCard({
   onExercise: (name: string) => void
 }) {
   return (
+    // A not-yet-synced session opens too: it's edited straight out of the outbox,
+    // so there's no reason to make the athlete wait for a round trip to fix a
+    // number they just mistyped.
     <div
-      className={`card${s.pending ? '' : ' card--tap'}`}
+      className="card card--tap"
       style={{ marginBottom: 10 }}
-      onClick={s.pending ? undefined : onOpen}
+      onClick={onOpen}
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
         <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700, minWidth: 0 }}>{s.routineName}</h3>
