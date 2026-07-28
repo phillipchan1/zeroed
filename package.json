@@ -7,7 +7,10 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "deploy:db": "supabase db push",
+    "deploy:agent": "supabase functions deploy agent",
+    "deploy:backend": "supabase db push && supabase functions deploy agent"
   },
   "dependencies": {
     "@capacitor/core": "^6.2.0",

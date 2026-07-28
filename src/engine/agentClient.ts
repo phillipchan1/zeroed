@@ -16,7 +16,15 @@ import { supabase } from '../lib/supabaseClient'
 
 export type AgentResult<T> =
   | { ok: true; data: T }
-  | { ok: false; error: 'model_failed' | 'rate_limited' | 'unauthorized' | 'network'; reason?: string }
+  | {
+      ok: false
+      // stale_function: the server answered but rejected the task as unknown —
+      // the deployed agent function predates this client and needs a redeploy
+      // (`supabase functions deploy agent`). Distinct from 'network' so surfaces
+      // can say what's actually wrong instead of blaming the connection.
+      error: 'model_failed' | 'rate_limited' | 'unauthorized' | 'stale_function' | 'network'
+      reason?: string
+    }
 
 // ---- structured-output types (mirror supabase/functions/agent/schemas.ts) ----
 
@@ -316,7 +324,10 @@ async function invokeAgent<T>(
       }
       if (parsed?.error === 'rate_limited') return { ok: false, error: 'rate_limited' }
       if (parsed?.error === 'unauthorized') return { ok: false, error: 'unauthorized' }
-      return { ok: false, error: 'network', reason: error.message }
+      if (typeof parsed?.error === 'string' && parsed.error.startsWith('unknown task')) {
+        return { ok: false, error: 'stale_function', reason: parsed.error }
+      }
+      return { ok: false, error: 'network', reason: parsed?.error ?? error.message }
     }
 
     if (!data || data.ok !== true) {

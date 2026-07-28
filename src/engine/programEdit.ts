@@ -251,13 +251,18 @@ export async function runProgramEditChat(
       edits: Array.isArray(res.data.edits) ? res.data.edits : [],
     }
   }
-  return {
-    source: 'fallback',
-    reply:
-      "Couldn't reach the coach just now — nothing was changed. Your staged edits are still here; try that again in a moment.",
-    followups: [],
-    edits: [],
-  }
+  // Name the real failure. "Couldn't reach the coach" on a healthy connection
+  // reads as "this feature doesn't work" — and when the server rejected the task
+  // as unknown, that reading is exactly right until the function is redeployed.
+  const reply =
+    res.error === 'stale_function'
+      ? 'The server is running an older coach that doesn\'t know this screen yet — nothing was changed. Deploy the latest agent Edge Function (`supabase functions deploy agent`) and program editing switches on.'
+      : res.error === 'rate_limited'
+        ? 'The coach is rate-limited right now — nothing was changed. Give it a minute and send that again.'
+        : res.error === 'model_failed'
+          ? `The coach hit an error drafting that change — nothing was changed. Try it again${res.reason ? ` (server said: ${String(res.reason).slice(0, 140)})` : ''}.`
+          : "Couldn't reach the coach just now — nothing was changed. Your staged edits are still here; try that again in a moment."
+  return { source: 'fallback', reply, followups: [], edits: [] }
 }
 
 // ---- committing -------------------------------------------------------------
