@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
-import { useCachedLoader } from '../../lib/cache'
-import { runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, type PagerWeekView, type WeekPagerData } from '../../engine'
+import { loadCache, mutateCache, useCachedLoader } from '../../lib/cache'
+import { runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, gatherSessionPrescription, type PagerWeekView, type WeekPagerData } from '../../engine'
 import { getWeightUnit } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
 import { loadDraftRoutineIds, weekStart } from '../../lib/workoutDraft'
-import { seedWorkoutBootstrap } from '../../lib/workoutBoot'
-import { invalidateLoopViews } from '../../lib/loopCache'
+import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
+import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
 import { pendingSessionsRaw, useOutboxStatus, retryBlocked, discardBlocked } from '../../lib/workoutOutbox'
 import { setIntendedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
 import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, Meter } from '../../components/ui'
@@ -186,10 +186,14 @@ const STATE_CHIP: Record<SessionState['kind'], { tone: 'todo' | 'doing' | 'done'
  * here, one tap away, so the week list stays scannable.
  */
 function SessionSheet({
-  routine, state, plannedDow, onPlanDay, onClose, onStart, onEdit, onLogAgain,
+  routine, state, targets, unit, plannedDow, onPlanDay, onClose, onStart, onEdit, onLogAgain,
 }: {
   routine: RoutineRow
   state: SessionState
+  // Per-exercise recommended working load (athlete's unit), from the same
+  // prescription the workout screen shows. Null/missing → no history yet.
+  targets: Record<number, number | null> | null
+  unit: string
   plannedDow: number | null
   onPlanDay: (dow: number | null) => void
   onClose: () => void
@@ -225,20 +229,27 @@ function SessionSheet({
 
       <SectionHeader>The work</SectionHeader>
       <div style={{ marginTop: 10, marginBottom: 24 }}>
-        {exercises.map((ex, i) => (
-          <div
-            key={i}
-            style={{
-              display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-              gap: 14, padding: '12px 0', borderBottom: '1px solid var(--line)',
-            }}
-          >
-            <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
-            <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
-              {ex.sets}×{ex.reps}{ex.load ? ` · ${ex.load}` : ''}
-            </span>
-          </div>
-        ))}
+        {exercises.map((ex, i) => {
+          // The concrete recommended weight beats the vague label ("50lb" over
+          // "moderate") — it's the number you prep the bar with. The label is
+          // the fallback for lifts with no logged history yet.
+          const target = targets?.[i]
+          return (
+            <div
+              key={i}
+              style={{
+                display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                gap: 14, padding: '12px 0', borderBottom: '1px solid var(--line)',
+              }}
+            >
+              <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
+              <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
+                {ex.sets}×{ex.reps}
+                {target != null ? ` · ${target}${unit}` : ex.load ? ` · ${ex.load}` : ''}
+              </span>
+            </div>
+          )
+        })}
       </div>
 
       {/* Day-pinning — a suggestion, never enforced. */}
@@ -692,6 +703,26 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
 
   const openSession = routines.find((r) => r.id === openSessionId) ?? null
 
+  // The open sheet's prescription — the concrete lb/kg number per lift, from the
+  // same engine read the workout screen shows. Cached per routine so a re-open
+  // paints instantly and offline; the fetch also refreshes the workout
+  // bootstrap's copy, so the number the preview promises is the one the session
+  // opens with.
+  const unit = getWeightUnit()
+  const { data: openRx } = useCachedLoader(
+    openSession ? cacheKeys.sessionRx(openSession.id) : null,
+    async () => {
+      const rx = await gatherSessionPrescription(athleteId, openSession!.id, openSession!.exercises, unit)
+      mutateCache<WorkoutBootstrap>(workoutBootKey(openSession!.id), (b) => ({ ...b, prescription: rx }))
+      return rx
+    },
+  )
+  // Cold rx key (first-ever open, maybe offline): fall back to the bootstrap's
+  // copy, planted by a previous visit to the workout screen.
+  const openTargets = openSession
+    ? (openRx ?? loadCache<WorkoutBootstrap>(workoutBootKey(openSession.id))?.prescription)?.targets ?? null
+    : null
+
   // At most ONE attention banner. Ranked by urgency so the screen never stacks
   // three competing yellow boxes the way it used to.
   const banner = (() => {
@@ -915,6 +946,8 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
         <SessionSheet
           routine={openSession}
           state={statusFor(openSession.id)}
+          targets={openTargets}
+          unit={unit}
           plannedDow={plannedDowFor(openSession)}
           onPlanDay={(dow) => handlePlanDay(openSession.id, dow)}
           onClose={() => setOpenSessionId(null)}

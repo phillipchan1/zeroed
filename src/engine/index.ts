@@ -2384,12 +2384,25 @@ export interface SessionPrescription {
   rationale: string | null
   hints: Record<number, string>   // exercise index → one-line hint ('' = none)
   held: Record<number, boolean>   // exercise index → load cap held (rule fired)
+  // exercise index → the concrete recommended working load (athlete's unit) —
+  // the number the hint narrates, on its own so previews can show "50lb" instead
+  // of "moderate". Null when the lift has no weighted history to recommend from.
+  // Absent on cached copies written before this field existed — read with `?.`.
+  targets: Record<number, number | null>
   rule: IntelligenceRule | null   // standing rule in effect this session, or null
 }
 
 // Round a computed load to the nearest 5 units — a real, rackable number.
 function roundLoad(w: number): number {
   return Math.max(0, Math.round(w / 5) * 5)
+}
+
+// The concrete recommended working load for a lift: its last top weight with the
+// autoregulated delta applied, rounded rackable (delta 0 = repeat the load as
+// lifted). Null when the lift has no weighted history to recommend from.
+function recommendedLoad(top: SetLog | null, delta: number): number | null {
+  if (top?.weight == null) return null
+  return delta === 0 ? top.weight : roundLoad(top.weight * (1 + delta / 100))
 }
 
 // Per-exercise RPE autoregulation. The weekly review sets a TARGET RPE; this
@@ -2416,13 +2429,12 @@ function autoregulateDelta(
   return Math.max(-10, Math.min(maxUp, weeklyDelta))
 }
 
-function buildHint(top: SetLog | null, unit: string, directive: WeeklyDirective | null, delta: number, rpe: number | null): string {
+function buildHint(top: SetLog | null, unit: string, directive: WeeklyDirective | null, delta: number, rpe: number | null, target: number | null): string {
   const rpeStr = rpe != null ? `RPE ${rpe}` : null
   if (top && top.weight != null) {
     const last = `${top.weight}${unit} last`
-    if (delta !== 0) {
+    if (delta !== 0 && target != null) {
       // Concrete recommended weight, not just a percentage — the actionable number.
-      const target = roundLoad(top.weight * (1 + delta / 100))
       const pct = `${delta > 0 ? '+' : ''}${delta}%`
       return `${last} → ${target}${unit} (${pct})${rpeStr ? `, aim ${rpeStr}` : ''}`
     }
@@ -2507,6 +2519,7 @@ export async function gatherSessionPrescription(
 
   const hints: Record<number, string> = {}
   const held: Record<number, boolean> = {}
+  const targets: Record<number, number | null> = {}
   exercises.forEach((ex, i) => {
     const top = (lastWeights ? topWorkingSet(lastWeights[String(i)]) : null) ?? byName.get(ex.name) ?? null
     // Held when the rule is in effect AND this lift addresses the P1 insight.
@@ -2514,6 +2527,8 @@ export async function gatherSessionPrescription(
     held[i] = isHeld
     if (isHeld && directive === 'PROGRESS') {
       // Suppress the +5%: state the hold and why, grounded in the last load.
+      // The recommendation under a held cap is the last load itself.
+      targets[i] = top?.weight ?? null
       hints[i] = top && top.weight != null
         ? `Hold ${top.weight}${unit} — cap stays until ${p1!.category} clears`
         : `Hold steady — ${p1!.category} not cleared yet`
@@ -2523,11 +2538,12 @@ export async function gatherSessionPrescription(
       // its load step — capped by phase — instead of one program-wide delta.
       const exTarget = ex.target_rpe ?? rpeTarget
       const exDelta = autoregulateDelta(top?.rpe, exTarget, loadDeltaPct, directive, maxUp)
-      hints[i] = buildHint(top, unit, directive, exDelta, exTarget)
+      targets[i] = recommendedLoad(top, exDelta)
+      hints[i] = buildHint(top, unit, directive, exDelta, exTarget, targets[i])
     }
   })
 
-  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, rule }
+  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, rule }
 }
 
 // ════════════════════════════════════════════════════════════════════════════

@@ -32,6 +32,9 @@ export const cacheKeys = {
   convergence: (athleteId: string) => `convergence:${athleteId}`,
   recap:       (athleteId: string, reviewId?: string) => `recap:${athleteId}:${reviewId ?? 'latest'}`,
   workoutBoot: (routineId: string) => `workout:${routineId}`,
+  // The per-routine session prescription on its own — what the Train screen's
+  // session sheet reads to show concrete lb/kg targets without the full bootstrap.
+  sessionRx:   (routineId: string) => `rx:${routineId}`,
 }
 
 /**

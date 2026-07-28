@@ -165,6 +165,7 @@ const WORKOUT_BOOT = {
     rule: { name: 'Progressive overload', reasoning: 'You cleared last week at RPE 7 with clean depth, so we add a plate per side.' },
     hints: { 0: '225 lbs · +5 from last week', 1: 'Match last week', 2: '', 3: '' },
     held: { 0: false, 1: true, 2: false, 3: false },
+    targets: { 0: 225, 1: 40, 2: 185, 3: null },
   },
 }
 
@@ -240,11 +241,9 @@ for (const [name, path] of shots) {
   console.log('shot', name)
 }
 
-// Workout, past the opening brief.
+// Workout — the brief is on-demand now (header "Why"), so the screen opens live.
 await page.goto(BASE + `/app/workout/${R1}`)
 await page.waitForTimeout(1400)
-await page.locator('.obs-sheet .btn--primary').click()
-await page.waitForTimeout(500)
 await page.screenshot({ path: `${OUT}/workout-live.png`, fullPage: true })
 console.log('shot workout-live')
 // Complete a set so the rest pill is up — checks it clears the fixed footer.
