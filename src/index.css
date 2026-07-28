@@ -1009,6 +1009,37 @@ textarea.input {
   background: var(--text-dim);
 }
 
+/* --- Week card footnote --------------------------------------------------- */
+/* Upload state, hung off the bottom of the week instrument rather than given a
+   card of its own. Rules the same size as the ring's own sub-labels, so it reads
+   as part of that instrument instead of competing with it. The tappable variant
+   is still a footnote — it just admits there's a decision behind it. */
+
+.ring-card__note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  margin: 14px 0 0;
+  padding: 0;
+  border: none;
+  background: none;
+  text-align: left;
+  font-family: var(--font-sans);
+  font-size: var(--fs-micro);
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+.ring-card__note svg { flex-shrink: 0; }
+.ring-card__note--tap {
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+/* Nudge the chevron to the end so the row reads as tappable without a border,
+   a background, or any of the weight a banner carries. */
+.ring-card__note--tap > span { flex: 1; min-width: 0; }
+.ring-card__note--tap:hover { color: var(--text); }
+
 /* --- Week strip ----------------------------------------------------------- */
 
 .week-strip {

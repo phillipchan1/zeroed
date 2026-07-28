@@ -716,19 +716,10 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
         />
       )
     }
-    // Sessions the server refused. This one earns a banner: it will not resolve
-    // on its own, and it's the only outbox state the athlete can act on.
-    if (outbox.blocked > 0) {
-      return (
-        <Banner
-          tone="quiet"
-          icon={<CloudAlert size={20} strokeWidth={1.75} color="var(--text-dim)" />}
-          title={`${outbox.blocked} session${outbox.blocked === 1 ? '' : 's'} couldn't sync`}
-          sub="Still counted here. Tap to try again."
-          onClick={() => setStuckOpen(true)}
-        />
-      )
-    }
+    // Sync state, in either direction, is NOT banner material — see the footnote
+    // under the week ring. A banner is for something the week needs from you;
+    // sessions that are already logged and already counted aren't that, even when
+    // the upload is stuck.
     return null
   })()
 
@@ -802,18 +793,28 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                     </div>
                   </div>
                 </div>
-                {/* Sessions waiting on the wire. Deliberately a footnote, not a
-                    banner: they're already counted in the ring above, they need
-                    nothing from the athlete, and they clear themselves. */}
-                {outbox.pending > 0 && (
-                  <p
-                    className="text-micro text-dim"
-                    style={{ display: 'flex', alignItems: 'center', gap: 6, marginTop: 14 }}
+                {/* Upload state lives here, as one line at the bottom of the
+                    instrument that already counts these sessions — not as a card
+                    of its own. Both states are footnotes; the stuck one is merely
+                    a tappable footnote, because there's a decision behind it. */}
+                {outbox.blocked > 0 ? (
+                  <button
+                    type="button"
+                    className="ring-card__note ring-card__note--tap"
+                    onClick={() => setStuckOpen(true)}
                   >
+                    <CloudAlert size={13} strokeWidth={1.75} />
+                    <span>
+                      {outbox.blocked} couldn&apos;t upload — counted here, tap to fix
+                    </span>
+                    <ChevronRight size={13} strokeWidth={2} />
+                  </button>
+                ) : outbox.pending > 0 ? (
+                  <p className="ring-card__note">
                     <CloudUpload size={13} strokeWidth={1.75} />
-                    {outbox.pending} saved on this device, syncing
+                    <span>{outbox.pending} saved on this device, syncing</span>
                   </p>
-                )}
+                ) : null}
               </div>
             )}
 
