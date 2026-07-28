@@ -8,7 +8,9 @@ import {
 import { loadCache, saveCache } from '../../lib/cache'
 import { workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
 import { invalidateLoopViews } from '../../lib/loopCache'
-import { enqueueSession, commitPending } from '../../lib/workoutOutbox'
+import {
+  enqueueSession, commitPending, parsePendingRef, pendingSessionById, committedWorkoutIdFor,
+} from '../../lib/workoutOutbox'
 import {
   gatherSessionPrescription,
   type SessionPrescription, type PendingSession, type PendingDebrief, type DebriefExerciseInput,
@@ -544,13 +546,16 @@ function ExerciseSheet({ name, note, cue, insight, reading, onClose }: ExerciseS
 interface DebriefSheetProps {
   reading: { name: string; question: string } | null
   saving: boolean
+  // What was written the first time round, when this is an edit of a session
+  // that hasn't synced — editing shouldn't ask for the story again.
+  initial: { reflection: string; readingAnswer: string } | null
   onSave: (reflection: string, readingAnswer: string) => void
   onSkip: () => void
 }
 
-function DebriefSheet({ reading, saving, onSave, onSkip }: DebriefSheetProps) {
-  const [reflection, setReflection] = useState('')
-  const [readingAnswer, setReadingAnswer] = useState('')
+function DebriefSheet({ reading, saving, initial, onSave, onSkip }: DebriefSheetProps) {
+  const [reflection, setReflection] = useState(initial?.reflection ?? '')
+  const [readingAnswer, setReadingAnswer] = useState(initial?.readingAnswer ?? '')
   return (
     <Sheet
       title="How did that go?"
@@ -667,13 +672,45 @@ function overlayDraft(
   return merged
 }
 
+// The felt chips / notes back out of a queued session's debrief. Its exercise
+// list is built in template order, so the index is the exercise index.
+function feedbackFromDebrief(debrief: PendingDebrief | null): Record<number, ExerciseFeedback> {
+  const out: Record<number, ExerciseFeedback> = {}
+  ;(debrief?.exercises ?? []).forEach((ex, i) => {
+    if (!ex.felt && !ex.note) return
+    out[i] = { name: ex.name, felt: ex.felt, note: ex.note ?? '' }
+  })
+  return out
+}
+
 export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}) {
   const { routineId } = useParams<{ routineId: string }>()
   const navigate      = useNavigate()
   const [searchParams] = useSearchParams()
   // ?w=<id> → editing an already-logged session (re-runs the coach on save).
-  const editWorkoutId = searchParams.get('w')
-  const isEdit = !!editWorkoutId
+  // A session finished in the last few seconds — or offline, or one the server
+  // refused — has no `workout` row yet, so it's referenced as `pending:<id>` and
+  // edited straight out of the outbox. Querying the database for that id was how
+  // "Review / edit" on a just-finished session came up blank.
+  const editRef      = searchParams.get('w')
+  const pendingRefId = parsePendingRef(editRef)
+  // That reference can go stale under the athlete's thumb: the commit finishes
+  // while the sheet is open. A queued session that has already become a row is
+  // edited as the row, so saving updates it instead of logging it twice. Resolved
+  // once, at mount, so the screen doesn't change mode mid-session; the save path
+  // re-resolves (see buildPending) for a commit that lands while editing.
+  const modeRef = useRef<{ pendingEditId: string | null; editWorkoutId: string | null }>()
+  if (!modeRef.current) {
+    const promoted = pendingRefId && !pendingSessionById(pendingRefId)
+      ? committedWorkoutIdFor(pendingRefId)
+      : null
+    modeRef.current = {
+      pendingEditId: promoted ? null : pendingRefId,
+      editWorkoutId: promoted ?? (editRef && !pendingRefId ? editRef : null),
+    }
+  }
+  const { pendingEditId, editWorkoutId } = modeRef.current
+  const isEdit = !!editRef
 
   const unit = getWeightUnit()
   const distanceUnit = getDistanceUnit(unit)
@@ -682,21 +719,35 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // draft exactly once, so the very first paint already shows the session — no
   // spinner, no network round-trip. Edit mode hydrates from the logged workout
   // row instead, so it doesn't seed from a draft.
-  const seedRef = useRef<{ boot: WorkoutBootstrap | null; draft: DraftPayload | null }>()
+  const seedRef = useRef<{
+    boot: WorkoutBootstrap | null
+    draft: DraftPayload | null
+    pending: PendingSession | null
+  }>()
   if (!seedRef.current) {
     seedRef.current = {
       boot: routineId ? loadCache<WorkoutBootstrap>(bootKey(routineId)) : null,
       draft: routineId && !isEdit ? loadDraftLocal(routineId) : null,
+      // The outbox is localStorage, so an uncommitted session hydrates on the
+      // first frame — no network, works offline, no blank grid to type into.
+      pending: pendingEditId ? pendingSessionById(pendingEditId) : null,
     }
   }
   const seedBoot = seedRef.current.boot
   const seedDraft = seedRef.current.draft
+  const seedPending = seedRef.current.pending
 
   // The day the session happened. For a new session this is just whenever the
   // athlete hits Complete — no picker, no real estate spent on it. Editing a
   // past log is the one case that still needs a picker (§ footer), since
   // there the date itself may be what's being corrected.
-  const [performedAt, setPerformedAt] = useState<string>(() => toDateInput(new Date()))
+  const [performedAt, setPerformedAt] = useState<string>(() => toDateInput(
+    seedPending?.performedAt ? new Date(seedPending.performedAt) : new Date(),
+  ))
+  // An edit with nothing to edit — the row is gone, the queued session was
+  // dropped, or we're offline and the log only exists on the server. Say so
+  // instead of showing an empty session that looks like the log was lost.
+  const [editMissing, setEditMissing] = useState(false)
 
   const [routine, setRoutine]     = useState<RoutineRow | null>(() => seedBoot?.routine ?? null)
   const [athleteId, setAthleteId] = useState<string | null>(() => seedBoot?.athleteId ?? null)
@@ -704,7 +755,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const [onboardingStep, setOnboardingStep] = useState<OnboardingStep | null>(() => seedBoot?.onboardingStep ?? null)
   // Cache hit → paint immediately (no spinner). Cold open still shows one.
   const [loading, setLoading]     = useState<boolean>(() => !seedBoot)
-  const [elapsed, setElapsed]     = useState<number>(() => seedDraft?.elapsedSeconds ?? 0)
+  const [elapsed, setElapsed]     = useState<number>(
+    () => (seedPending ? seedPending.durationMins * 60 : seedDraft?.elapsedSeconds ?? 0),
+  )
   const [showDebrief, setShowDebrief] = useState(false)
   const [savingDebrief, setSavingDebrief] = useState(false)
   // Elapsed frozen at the moment "Complete" was tapped — the debrief sheet can
@@ -715,11 +768,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // button, not auto-shown, so starting a workout is a single tap. Resuming a
   // seeded draft still drops straight into training.
   const [briefOpen, setBriefOpen] = useState(false)
-  const [hasStarted, setHasStarted] = useState<boolean>(() => !!seedDraft)
+  const [hasStarted, setHasStarted] = useState<boolean>(() => !!seedDraft || !!seedPending)
 
   // Per-exercise felt signal (exIdx → feedback).
   const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>(
-    () => (seedDraft?.feedback ?? {}) as Record<number, ExerciseFeedback>,
+    () => (seedPending
+      ? feedbackFromDebrief(seedPending.debrief)
+      : (seedDraft?.feedback ?? {}) as Record<number, ExerciseFeedback>),
   )
 
   // Rest timer (epoch ms when rest ends, or null).
@@ -740,6 +795,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>(() => {
     if (!seedBoot) return {}
     const base = buildTemplate(seedBoot.routine)
+    if (seedPending) return overlayDraft(base, seedPending.actualWeights as Record<number, SetLog[]>)
     return seedDraft ? overlayDraft(base, seedDraft.setLogs) : base
   })
 
@@ -755,7 +811,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // Seed the clock from the resumed draft so the timer continues where it left
   // off (true stop/continue — time away isn't counted).
   const startRef = useRef<number>(
-    seedDraft ? Date.now() - seedDraft.elapsedSeconds * 1000 : Date.now(),
+    seedPending ? Date.now() - seedPending.durationMins * 60_000
+    : seedDraft ? Date.now() - seedDraft.elapsedSeconds * 1000
+    : Date.now(),
   )
 
   // Draft persistence (§ start/stop/continue). With an offline seed the draft is
@@ -867,7 +925,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
     if (!data) {
       // Offline with nothing cached is the only way here — leave the seed (if
-      // any) on screen and stop the spinner.
+      // any) on screen and stop the spinner. A committed session being edited
+      // lives only on the server, so there's nothing to edit until we reach it.
+      if (editWorkoutId && !startedLoggingRef.current) setEditMissing(true)
       setLoading(false)
       return
     }
@@ -949,7 +1009,29 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       prescription: nextPresc,
     })
 
-    if (isEdit && editWorkoutId) {
+    if (pendingEditId) {
+      // Editing a session that's still in the outbox — it has no `workout` row to
+      // read, so the queue IS the record. Already seeded synchronously above; this
+      // re-reads for the cold-open case (no cached bootstrap, so no grid was laid
+      // down before the routine arrived).
+      completedRef.current = true
+      const p = pendingSessionById(pendingEditId)
+      if (!p) {
+        // Gone from the queue since mount means it committed while the screen was
+        // opening — the numbers seeded on the first frame are still the right
+        // ones, and buildPending re-resolves the row to update. Only a session
+        // we never had is actually missing.
+        if (!seedPending) setEditMissing(true)
+      } else if (!startedLoggingRef.current) {
+        setSetLogs(overlayDraft(initial, p.actualWeights as Record<number, SetLog[]>))
+        setFeedback(feedbackFromDebrief(p.debrief))
+        setElapsed(p.durationMins * 60)
+        startRef.current = Date.now() - p.durationMins * 60_000
+        if (p.performedAt) setPerformedAt(toDateInput(new Date(p.performedAt)))
+      }
+      setHasStarted(true)
+      setBriefOpen(false)
+    } else if (isEdit && editWorkoutId) {
       // Editing a logged session: hydrate from the workout row, not a draft.
       // No autosave (completedRef), no brief — straight into the numbers.
       completedRef.current = true
@@ -958,6 +1040,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         .select('actual_weights, duration_mins, performed_at')
         .eq('id', editWorkoutId)
         .maybeSingle()
+      if (!w) {
+        // The row is gone (or unreadable). Saving from here would write an empty
+        // session over a real one, so refuse the edit rather than show a grid.
+        setEditMissing(true)
+        setLoading(false)
+        return
+      }
       const aw = (w as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
       if (aw && !startedLoggingRef.current) {
         setSetLogs(overlayDraft(initial, aw as Record<number, SetLog[]>))
@@ -1049,8 +1138,17 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         ? (debrief ? 'first_session_complete' : 'complete')
         : null
 
+    // Editing a queued session REPLACES its outbox entry rather than adding one:
+    // same id, so there's still exactly one record of the session. Its target is
+    // re-resolved here because the original may have committed while the athlete
+    // was editing — in which case this save has to update that row.
+    const base = pendingEditId ? pendingSessionById(pendingEditId) : null
+    const pendingTarget = pendingEditId
+      ? base?.editWorkoutId ?? committedWorkoutIdFor(pendingEditId)
+      : null
+
     return {
-      id: crypto.randomUUID(),
+      id: pendingEditId ?? crypto.randomUUID(),
       athleteId: athleteId!,
       routineId: routineId!,
       actualWeights,
@@ -1059,9 +1157,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       durationMins: Math.ceil(finalElapsedRef.current / 60),
       setsDone: allSetsFlat.filter((s) => s.done).length,
       athleteName,
-      onboardingTransition: isEdit ? null : onboardingTransition,
+      // A queued first-ever session keeps its transition — editing it before it
+      // syncs mustn't be what strands onboarding half-finished.
+      onboardingTransition: pendingEditId
+        ? base?.onboardingTransition ?? null
+        : isEdit ? null : onboardingTransition,
       debrief,
-      editWorkoutId: isEdit ? editWorkoutId : null,
+      editWorkoutId: pendingEditId ? pendingTarget : isEdit ? editWorkoutId : null,
       performedAt: isEdit ? dateInputToISO(performedAt) : dateInputToISO(toDateInput(new Date())),
       queuedAt: new Date().toISOString(),
     }
@@ -1110,7 +1212,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     // First session with debrief: wait for the commit so the revelation screen
     // gets the AI-generated insight data for the "moved" animation. This path
     // happens once ever per athlete so the wait is acceptable.
-    if (pending.onboardingTransition === 'first_session_complete') {
+    if (!isEdit && pending.onboardingTransition === 'first_session_complete') {
       setSavingDebrief(true)
       let result = null
       try {
@@ -1161,23 +1263,44 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     void commitPending(pending).catch(() => { /* stays queued */ })
   }
 
+  // What the athlete wrote the first time, when the session being edited is still
+  // in the outbox (a committed one's words live in session_observation).
+  const priorDebrief = seedPending?.debrief ?? null
+
   function handleDebrief(reflection: string, readingAnswer: string) {
     if (!routine) return
     void finishSession(buildDebrief(reflection, readingAnswer))
   }
 
   // Skipping still re-runs the coach on an edit (the chosen behaviour: every edit
-  // re-reads the session), just with no fresh reflection text. A brand-new
-  // session skips the debrief entirely (workout numbers only).
+  // re-reads the session), just with no fresh reflection text. Editing a session
+  // that hasn't synced carries its original words forward instead of blanking
+  // them — skipping the debrief means "leave it as it was", not "delete it".
+  // A brand-new session skips the debrief entirely (workout numbers only).
   function handleDebriefSkip() {
     if (!routine) return
-    void finishSession(isEdit ? buildDebrief('', '') : null)
+    if (!isEdit) { void finishSession(null); return }
+    void finishSession(buildDebrief(priorDebrief?.reflection ?? '', priorDebrief?.readingAnswer ?? ''))
   }
 
   // ---- loading / error ------------------------------------------------------
 
   if (loading) {
     return <div className="screen--centered"><Spinner /></div>
+  }
+  // An edit we can't load. Showing the empty grid here is what made a logged
+  // session read as blank — and one Save away from overwriting it with nothing.
+  if (editMissing) {
+    return (
+      <div className="screen--centered">
+        <p className="text-base" style={{ fontWeight: 700 }}>Couldn&apos;t open that session</p>
+        <p className="text-sm text-dim" style={{ marginTop: 8, maxWidth: 300, lineHeight: 1.5 }}>
+          Its log isn&apos;t on this device and we couldn&apos;t reach the server. Nothing has
+          been changed — try again once you&apos;re back online.
+        </p>
+        <Button variant="ghost" onClick={() => navigate('/app/today')} style={{ marginTop: 16 }}>Back</Button>
+      </div>
+    )
   }
   if (!routine) {
     return (
@@ -1506,6 +1629,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         <DebriefSheet
           reading={readingEx ? { name: readingEx.name, question: readingEx.reading_why ?? 'How did the read item feel?' } : null}
           saving={savingDebrief}
+          initial={priorDebrief ? { reflection: priorDebrief.reflection, readingAnswer: priorDebrief.readingAnswer } : null}
           onSave={handleDebrief}
           onSkip={handleDebriefSkip}
         />

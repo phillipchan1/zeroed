@@ -29,11 +29,18 @@
 // standing in front of sessions that can.
 
 import { useEffect, useState } from 'react'
-import { commitSession, type PendingSession, type CommitResult } from '../engine'
-import { invalidateLoopViews } from './loopCache'
+import { actualsFromPending, commitSession, type PendingSession, type CommitResult } from '../engine'
+import { saveCache } from './cache'
+import { cacheKeys, invalidateLoopViews } from './loopCache'
 import { isKnownOffline, subscribeOnline } from './useOnline'
 
 const OUTBOX_KEY = 'zeroed:workout-outbox'
+// Queued-session id → the `workout` row it became. A screen can hold a
+// `pending:<id>` reference across the moment that session commits (the sheet was
+// opened a second earlier); this is what lets that stale reference resolve to the
+// real row instead of reading as a session that vanished.
+const COMMITTED_KEY = 'zeroed:workout-outbox-committed'
+const COMMITTED_KEEP = 30
 
 // How many times a session is retried against an error we can't classify before
 // we stop calling it "syncing". Definite rejections don't get this many.
@@ -46,6 +53,27 @@ export interface OutboxEntry {
   lastError: string | null
   /** Retired: it won't be retried automatically, and it isn't "about to sync". */
   blocked: boolean
+  /**
+   * Bumped every time the entry is rewritten in place (the athlete edited a
+   * session that hadn't synced yet). A commit that started before the rewrite
+   * must not delete what it never sent — see settleCommitted.
+   */
+  rev: number
+}
+
+/**
+ * A queued session doesn't have a `workout` row to point at, so screens that
+ * link to "the session I just did" reference it by this prefixed id instead.
+ * Anything taking a workout id from a screen must resolve it through
+ * `parsePendingRef` before handing it to the database.
+ */
+export const PENDING_REF_PREFIX = 'pending:'
+
+export const pendingRef = (sessionId: string) => `${PENDING_REF_PREFIX}${sessionId}`
+
+/** The queued-session id behind a `pending:` reference, or null for a real row. */
+export function parsePendingRef(ref: string | null | undefined): string | null {
+  return ref && ref.startsWith(PENDING_REF_PREFIX) ? ref.slice(PENDING_REF_PREFIX.length) : null
 }
 
 // ---- storage ---------------------------------------------------------------
@@ -75,11 +103,12 @@ function normalize(raw: unknown): OutboxEntry | null {
       attempts: typeof e.attempts === 'number' ? e.attempts : 0,
       lastError: typeof e.lastError === 'string' ? e.lastError : null,
       blocked: e.blocked === true,
+      rev: typeof e.rev === 'number' ? e.rev : 0,
     }
   }
   const session = raw as PendingSession
   if (!session.id) return null
-  return { session, attempts: 0, lastError: null, blocked: false }
+  return { session, attempts: 0, lastError: null, blocked: false, rev: 0 }
 }
 
 function readQueue(): OutboxEntry[] {
@@ -101,15 +130,44 @@ function writeQueue(q: OutboxEntry[]): void {
 
 // Enqueue (or replace by id) — call this BEFORE attempting a commit so the
 // session is durable the instant the athlete finishes, even if the tab dies.
+// Replacing an existing entry (editing a session that hasn't synced) bumps its
+// revision, so an in-flight commit of the OLD numbers can tell it's been
+// superseded instead of dropping the edit on success.
 export function enqueueSession(p: PendingSession): void {
+  const queue = readQueue()
+  const prior = queue.find((e) => e.session.id === p.id)
   writeQueue([
-    ...readQueue().filter((e) => e.session.id !== p.id),
-    { session: p, attempts: 0, lastError: null, blocked: false },
+    ...queue.filter((e) => e.session.id !== p.id),
+    { session: p, attempts: 0, lastError: null, blocked: false, rev: prior ? prior.rev + 1 : 0 },
   ])
 }
 
 function removeFromQueue(id: string): void {
   writeQueue(readQueue().filter((e) => e.session.id !== id))
+}
+
+// ---- committed-id trail ----------------------------------------------------
+
+function readCommitted(): Array<[string, string]> {
+  try {
+    const raw = localStorage.getItem(COMMITTED_KEY)
+    const parsed = raw ? (JSON.parse(raw) as unknown) : null
+    return Array.isArray(parsed) ? (parsed as Array<[string, string]>) : []
+  } catch {
+    return []
+  }
+}
+
+function recordCommitted(sessionId: string, workoutId: string): void {
+  try {
+    const next = [...readCommitted().filter(([id]) => id !== sessionId), [sessionId, workoutId]]
+    localStorage.setItem(COMMITTED_KEY, JSON.stringify(next.slice(-COMMITTED_KEEP)))
+  } catch { /* quota — non-fatal, the reference just won't resolve */ }
+}
+
+/** The `workout` row a queued session became, if it committed recently. */
+export function committedWorkoutIdFor(sessionId: string): string | null {
+  return readCommitted().find(([id]) => id === sessionId)?.[1] ?? null
 }
 
 // ---- failure classification ------------------------------------------------
@@ -201,11 +259,58 @@ export function pendingSessionsRaw(): PendingSession[] {
   return readQueue().map((e) => e.session)
 }
 
+/**
+ * One queued session by id — what the workout screen edits when the session it
+ * was sent to review is still in the queue rather than in the `workout` table.
+ * Synchronous (localStorage), so an edit opens instantly and offline.
+ */
+export function pendingSessionById(id: string): PendingSession | null {
+  return readQueue().find((e) => e.session.id === id)?.session ?? null
+}
+
 // ---- committing ------------------------------------------------------------
 
 // Ids currently being committed — guards against the live commit and a concurrent
 // flush (e.g. reconnecting mid-submit) double-inserting the workout.
 const inFlight = new Set<string>()
+
+function entryRev(id: string): number {
+  return readQueue().find((e) => e.session.id === id)?.rev ?? 0
+}
+
+/**
+ * Retire a queued entry once its numbers are on the server — unless it was
+ * rewritten while the commit was in flight. That happens on the app's tightest
+ * loop: finish a session, tap Review / edit, fix a number, save, all inside the
+ * few seconds a commit (AI debrief included) takes. Removing the entry there
+ * would delete an edit that was never sent. So the newer version stays queued and
+ * is retargeted at the row this commit just wrote, turning the next flush into an
+ * update of that row instead of a second copy of the session.
+ */
+function settleCommitted(id: string, revAtStart: number, workoutId: string): void {
+  recordCommitted(id, workoutId)
+  const current = readQueue().find((e) => e.session.id === id)
+  if (!current || current.rev === revAtStart) {
+    removeFromQueue(id)
+    return
+  }
+  writeQueue(
+    readQueue().map((e) => (
+      e.session.id === id
+        ? {
+            ...e,
+            attempts: 0,
+            lastError: null,
+            blocked: false,
+            session: { ...e.session, editWorkoutId: e.session.editWorkoutId ?? workoutId },
+          }
+        : e
+    )),
+  )
+  // Don't leave the edit sitting until the next launch. The flush is a no-op if
+  // one is already running; visibility/online remain the backstop.
+  setTimeout(() => { void flushOutbox() }, 2000)
+}
 
 // Commit one queued session, removing it on success. Returns null if it's already
 // being committed elsewhere. Throws (leaving it queued, with the failure recorded
@@ -213,13 +318,21 @@ const inFlight = new Set<string>()
 export async function commitPending(p: PendingSession): Promise<CommitResult | null> {
   if (inFlight.has(p.id)) return null
   inFlight.add(p.id)
+  const revAtStart = entryRev(p.id)
   try {
     const result = await commitSession(p)
-    removeFromQueue(p.id)
+    settleCommitted(p.id, revAtStart, result.workoutId)
     // The session is now a real row, and the queued copy that screens were
     // folding in is gone. Mark every view due so whatever is on screen catches
     // up to the committed truth without the athlete doing anything.
     invalidateLoopViews()
+    // We just sent these numbers, so we know what the row says without asking
+    // for it back. Seeding the as-performed cache here is what lets "what did I
+    // log" open offline for a session that has already synced — otherwise the
+    // only copy would be on the server, and the queued one is about to be gone.
+    // Seeded AFTER the sweep above, or it would be marked stale on arrival.
+    const actuals = actualsFromPending(p)
+    if (actuals) saveCache(cacheKeys.sessionActuals(result.workoutId), { ...actuals, workoutId: result.workoutId })
     return result
   } catch (err) {
     // Only a rejection tells us anything about this session; an unreachable

@@ -2,16 +2,24 @@ import { useEffect, useState } from 'react'
 import { useNavigate, useOutletContext } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
 import { loadCache, mutateCache, useCachedLoader } from '../../lib/cache'
-import { runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, gatherSessionPrescription, type PagerWeekView, type WeekPagerData } from '../../engine'
-import { getWeightUnit } from '../../lib/units'
+import {
+  runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, gatherSessionPrescription,
+  gatherSessionActuals, actualsFromPending,
+  type PagerWeekView, type WeekPagerData, type SessionActuals,
+} from '../../engine'
+import { resolveTrackingType } from '../../engine/exerciseLibrary'
+import { getWeightUnit, getDistanceUnit } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
 import { loadDraftRoutineIds, weekStart } from '../../lib/workoutDraft'
 import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
 import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
-import { pendingSessionsRaw, useOutboxStatus, retryBlocked, discardBlocked } from '../../lib/workoutOutbox'
+import {
+  pendingSessionsRaw, useOutboxStatus, retryBlocked, discardBlocked,
+  pendingRef, parsePendingRef, pendingSessionById,
+} from '../../lib/workoutOutbox'
 import { setIntendedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
 import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, Meter } from '../../components/ui'
-import type { RoutineRow, InsightRow, OnboardingStep } from '../../types/database'
+import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate } from '../../types/database'
 
 interface TodayScreenProps {
   athleteId: string
@@ -180,20 +188,89 @@ const STATE_CHIP: Record<SessionState['kind'], { tone: 'todo' | 'doing' | 'done'
   done:        { tone: 'done',  label: 'Done' },
 }
 
+// ---- what a finished session actually was ----------------------------------
+
+const isSetLogged = (s: SetLog) => s.done || s.reps != null || s.duration != null || s.distance != null
+
+// One performed set, in the shape its tracking type is read in.
+function fmtSet(t: TrackingType, s: SetLog, unit: string, distanceUnit: string): string {
+  if (t === 'time')     return s.duration != null ? `${s.duration}s` : '—'
+  if (t === 'distance') return s.distance != null ? `${s.distance}${distanceUnit}` : '—'
+  if (t === 'bodyweight_reps') return `${s.reps ?? '?'}${s.weight ? `+${s.weight}${unit}` : ''}`
+  return `${s.weight != null ? `${s.weight}${unit}` : 'BW'}×${s.reps ?? '?'}`
+}
+
+// What was prescribed, as one string: "3×8 · moderate".
+function fmtPrescribed(ex: ExerciseTemplate): string {
+  return `${ex.sets}×${ex.reps}${ex.load ? ` · ${ex.load}` : ''}`
+}
+
+const CMP_LABEL: React.CSSProperties = {
+  fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-micro)',
+  letterSpacing: '0.06em', textTransform: 'uppercase', color: 'var(--text-dim)',
+}
+
+/**
+ * One exercise, prescribed against performed. The whole point of opening a
+ * finished session: what was asked for, what actually happened, and where the two
+ * parted company — which sets went missing, which load was different.
+ */
+function PerformedRow({
+  ex, logs, unit, distanceUnit,
+}: {
+  ex: ExerciseTemplate
+  logs: SetLog[]
+  unit: string
+  distanceUnit: string
+}) {
+  const t = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
+  const done = logs.filter(isSetLogged)
+  const rpes = done.map((s) => s.rpe).filter((r): r is number => r != null)
+  const avgRpe = rpes.length ? Math.round(rpes.reduce((a, b) => a + b, 0) / rpes.length) : null
+  const short = done.length < ex.sets
+  const tone = done.length === 0 ? 'var(--text-dim)' : short ? 'var(--pending)' : 'var(--confirmed)'
+
+  return (
+    <div style={{ padding: '14px 0', borderBottom: '1px solid var(--line)' }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+        <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
+        <span className="num text-xs" style={{ whiteSpace: 'nowrap', color: tone }}>
+          {done.length}/{ex.sets} sets
+        </span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '5px 12px', marginTop: 10 }}>
+        <span style={CMP_LABEL}>Planned</span>
+        <span className="num text-sm text-dim">{fmtPrescribed(ex)}</span>
+        <span style={CMP_LABEL}>Logged</span>
+        <span className="num text-sm" style={{ color: done.length ? 'var(--text)' : 'var(--text-dim)' }}>
+          {done.length
+            ? done.map((s) => fmtSet(t, s, unit, distanceUnit)).join(', ')
+                + (avgRpe != null ? ` · RPE ${avgRpe}` : '')
+            : 'Not logged'}
+        </span>
+      </div>
+    </div>
+  )
+}
+
 /**
  * The session detail sub-screen. Everything that used to crowd the card — the
  * intent, the exercise list, the day-pinning, the secondary actions — lives
  * here, one tap away, so the week list stays scannable.
  */
 function SessionSheet({
-  routine, state, targets, unit, plannedDow, onPlanDay, onClose, onStart, onEdit, onLogAgain,
+  routine, state, targets, actuals, unit, distanceUnit, plannedDow, onPlanDay, onClose, onStart, onEdit, onLogAgain,
 }: {
   routine: RoutineRow
   state: SessionState
   // Per-exercise recommended working load (athlete's unit), from the same
   // prescription the workout screen shows. Null/missing → no history yet.
   targets: Record<number, number | null> | null
+  // The session as performed, once it's done. Null until it loads (or if the
+  // log can't be reached) — the sheet falls back to the plan.
+  actuals: SessionActuals | null
   unit: string
+  distanceUnit: string
   plannedDow: number | null
   onPlanDay: (dow: number | null) => void
   onClose: () => void
@@ -203,6 +280,12 @@ function SessionSheet({
 }) {
   const exercises = routine.exercises
   const chip = STATE_CHIP[state.kind]
+  // A finished session is read for what happened, not what was asked for.
+  const showPerformed = state.kind === 'done' && !!actuals
+  const loggedSets = actuals
+    ? Object.values(actuals.setLogs).flat().filter(isSetLogged).length
+    : 0
+  const plannedSets = exercises.reduce((n, ex) => n + ex.sets, 0)
 
   const actions =
     state.kind === 'done' ? (
@@ -220,36 +303,56 @@ function SessionSheet({
     <Sheet title={routine.name} onClose={onClose} actions={actions}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
         <Chip tone={chip.tone}>{chip.label}</Chip>
-        <span className="text-xs text-dim num">{exercises.length} exercises</span>
+        <span className="text-xs text-dim num">
+          {showPerformed
+            ? [
+                `${loggedSets} of ${plannedSets} sets`,
+                actuals!.rpe != null ? `RPE ${actuals!.rpe}` : null,
+                actuals!.durationMins ? `${actuals!.durationMins} min` : null,
+              ].filter(Boolean).join(' · ')
+            : `${exercises.length} exercises`}
+        </span>
       </div>
 
-      {routine.intent && (
+      {/* The intent is the pitch for work not yet done; a finished session is
+          past being sold on. */}
+      {routine.intent && !showPerformed && (
         <p className="text-sm text-dim" style={{ marginBottom: 20, lineHeight: 1.55 }}>{routine.intent}</p>
       )}
 
-      <SectionHeader>The work</SectionHeader>
+      <SectionHeader>{showPerformed ? 'What you logged' : 'The work'}</SectionHeader>
       <div style={{ marginTop: 10, marginBottom: 24 }}>
-        {exercises.map((ex, i) => {
-          // The concrete recommended weight beats the vague label ("50lb" over
-          // "moderate") — it's the number you prep the bar with. The label is
-          // the fallback for lifts with no logged history yet.
-          const target = targets?.[i]
-          return (
-            <div
-              key={i}
-              style={{
-                display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-                gap: 14, padding: '12px 0', borderBottom: '1px solid var(--line)',
-              }}
-            >
-              <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
-              <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
-                {ex.sets}×{ex.reps}
-                {target != null ? ` · ${target}${unit}` : ex.load ? ` · ${ex.load}` : ''}
-              </span>
-            </div>
-          )
-        })}
+        {showPerformed
+          ? exercises.map((ex, i) => (
+              <PerformedRow
+                key={i}
+                ex={ex}
+                logs={actuals!.setLogs[i] ?? []}
+                unit={unit}
+                distanceUnit={distanceUnit}
+              />
+            ))
+          : exercises.map((ex, i) => {
+            // The concrete recommended weight beats the vague label ("50lb" over
+            // "moderate") — it's the number you prep the bar with. The label is
+            // the fallback for lifts with no logged history yet.
+            const target = targets?.[i]
+            return (
+              <div
+                key={i}
+                style={{
+                  display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                  gap: 14, padding: '12px 0', borderBottom: '1px solid var(--line)',
+                }}
+              >
+                <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
+                <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
+                  {ex.sets}×{ex.reps}
+                  {target != null ? ` · ${target}${unit}` : ex.load ? ` · ${ex.load}` : ''}
+                </span>
+              </div>
+            )
+          })}
       </div>
 
       {/* Day-pinning — a suggestion, never enforced. */}
@@ -584,7 +687,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     const monday = weekStart()
     const queued = pendingSessionsRaw()
       // A session can be backdated, so the day it counts for is performedAt.
-      .map((p) => ({ id: `pending:${p.id}`, routineId: p.routineId, performedAt: p.performedAt ?? p.queuedAt }))
+      .map((p) => ({ id: pendingRef(p.id), routineId: p.routineId, performedAt: p.performedAt ?? p.queuedAt }))
       .filter((p) => new Date(p.performedAt) >= monday)
       .filter((p) => !committed.some(
         (w) => w.routineId === p.routineId && isSameDay(new Date(w.performedAt), new Date(p.performedAt)),
@@ -735,6 +838,20 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const openTargets = openSession
     ? (openRx ?? loadCache<WorkoutBootstrap>(workoutBootKey(openSession.id))?.prescription)?.targets ?? null
     : null
+
+  // A finished session opens on what it actually was. The numbers come from the
+  // outbox while it's still queued (so a session finished seconds ago reads
+  // correctly, offline included) and from the workout row once it has synced.
+  const openState = openSession ? statusFor(openSession.id) : null
+  const doneRef = openState?.kind === 'done' ? openState.lastWorkout.id : null
+  const donePendingId = parsePendingRef(doneRef)
+  const { data: committedActuals } = useCachedLoader(
+    doneRef && !donePendingId ? cacheKeys.sessionActuals(doneRef) : null,
+    () => gatherSessionActuals(doneRef!),
+  )
+  const openActuals = donePendingId
+    ? actualsFromPending(pendingSessionById(donePendingId))
+    : committedActuals
 
   // At most ONE attention banner. Ranked by urgency so the screen never stacks
   // three competing yellow boxes the way it used to.
@@ -960,7 +1077,9 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           routine={openSession}
           state={statusFor(openSession.id)}
           targets={openTargets}
+          actuals={openActuals}
           unit={unit}
+          distanceUnit={getDistanceUnit(unit)}
           plannedDow={plannedDowFor(openSession)}
           onPlanDay={(dow) => handlePlanDay(openSession.id, dow)}
           onClose={() => setOpenSessionId(null)}
