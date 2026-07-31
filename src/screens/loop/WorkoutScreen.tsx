@@ -7,13 +7,14 @@ import {
 } from '../../lib/workoutDraft'
 import { loadCache, saveCache } from '../../lib/cache'
 import { workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
-import { invalidateLoopViews } from '../../lib/loopCache'
+import { invalidateLoopViews, cacheKeys } from '../../lib/loopCache'
 import {
   enqueueSession, commitPending, parsePendingRef, pendingSessionById, committedWorkoutIdFor,
 } from '../../lib/workoutOutbox'
 import {
-  gatherSessionPrescription,
-  type SessionPrescription, type PendingSession, type PendingDebrief, type DebriefExerciseInput,
+  gatherSessionPrescription, actualsFromPending,
+  type SessionPrescription, type SessionActuals,
+  type PendingSession, type PendingDebrief, type DebriefExerciseInput,
 } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
@@ -717,37 +718,55 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   // Offline-first seed: read the cached bootstrap and the (synchronous, local)
   // draft exactly once, so the very first paint already shows the session — no
-  // spinner, no network round-trip. Edit mode hydrates from the logged workout
-  // row instead, so it doesn't seed from a draft.
+  // spinner, no network round-trip. An edit seeds from what the session actually
+  // was instead of from a draft.
   const seedRef = useRef<{
     boot: WorkoutBootstrap | null
     draft: DraftPayload | null
     pending: PendingSession | null
+    actuals: SessionActuals | null
   }>()
   if (!seedRef.current) {
+    // The outbox is localStorage, so an uncommitted session hydrates on the
+    // first frame — no network, works offline, no blank grid to type into.
+    const pending = pendingEditId ? pendingSessionById(pendingEditId) : null
     seedRef.current = {
       boot: routineId ? loadCache<WorkoutBootstrap>(bootKey(routineId)) : null,
       draft: routineId && !isEdit ? loadDraftLocal(routineId) : null,
-      // The outbox is localStorage, so an uncommitted session hydrates on the
-      // first frame — no network, works offline, no blank grid to type into.
-      pending: pendingEditId ? pendingSessionById(pendingEditId) : null,
+      pending,
+      // A COMMITTED session's numbers are held too — the as-performed cache,
+      // written when the session committed and refreshed every time the Train
+      // sheet previews it. Reading it here is what stops "Review / edit" on a
+      // synced session from opening on an empty grid: the workout row is ten
+      // sequential round trips away (routine, athlete, previous session,
+      // insights, prescription), and the athlete is looking at the screen now.
+      actuals: pending
+        ? actualsFromPending(pending)
+        : editWorkoutId ? loadCache<SessionActuals>(cacheKeys.sessionActuals(editWorkoutId)) : null,
     }
   }
   const seedBoot = seedRef.current.boot
   const seedDraft = seedRef.current.draft
   const seedPending = seedRef.current.pending
+  const seedActuals = seedRef.current.actuals
 
   // The day the session happened. For a new session this is just whenever the
   // athlete hits Complete — no picker, no real estate spent on it. Editing a
   // past log is the one case that still needs a picker (§ footer), since
   // there the date itself may be what's being corrected.
   const [performedAt, setPerformedAt] = useState<string>(() => toDateInput(
-    seedPending?.performedAt ? new Date(seedPending.performedAt) : new Date(),
+    seedActuals?.performedAt ? new Date(seedActuals.performedAt) : new Date(),
   ))
   // An edit with nothing to edit — the row is gone, the queued session was
   // dropped, or we're offline and the log only exists on the server. Say so
   // instead of showing an empty session that looks like the log was lost.
   const [editMissing, setEditMissing] = useState(false)
+  // An edit whose numbers aren't in hand yet. It holds the spinner rather than
+  // painting the empty template: a blank grid over a logged session reads as
+  // lost work, and anything typed into it suppresses the hydration that would
+  // have filled it (see startedLoggingRef) — one Save from overwriting the log
+  // with nothing. Seeded above → already hydrated, so no spinner.
+  const [editHydrating, setEditHydrating] = useState<boolean>(() => isEdit && !seedActuals)
 
   const [routine, setRoutine]     = useState<RoutineRow | null>(() => seedBoot?.routine ?? null)
   const [athleteId, setAthleteId] = useState<string | null>(() => seedBoot?.athleteId ?? null)
@@ -756,7 +775,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // Cache hit → paint immediately (no spinner). Cold open still shows one.
   const [loading, setLoading]     = useState<boolean>(() => !seedBoot)
   const [elapsed, setElapsed]     = useState<number>(
-    () => (seedPending ? seedPending.durationMins * 60 : seedDraft?.elapsedSeconds ?? 0),
+    () => (seedActuals ? (seedActuals.durationMins ?? 0) * 60 : seedDraft?.elapsedSeconds ?? 0),
   )
   const [showDebrief, setShowDebrief] = useState(false)
   const [savingDebrief, setSavingDebrief] = useState(false)
@@ -768,7 +787,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // button, not auto-shown, so starting a workout is a single tap. Resuming a
   // seeded draft still drops straight into training.
   const [briefOpen, setBriefOpen] = useState(false)
-  const [hasStarted, setHasStarted] = useState<boolean>(() => !!seedDraft || !!seedPending)
+  const [hasStarted, setHasStarted] = useState<boolean>(() => !!seedDraft || !!seedActuals)
 
   // Per-exercise felt signal (exIdx → feedback).
   const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>(
@@ -795,7 +814,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const [setLogs, setSetLogs] = useState<Record<number, SetLog[]>>(() => {
     if (!seedBoot) return {}
     const base = buildTemplate(seedBoot.routine)
-    if (seedPending) return overlayDraft(base, seedPending.actualWeights as Record<number, SetLog[]>)
+    if (seedActuals) return overlayDraft(base, seedActuals.setLogs)
     return seedDraft ? overlayDraft(base, seedDraft.setLogs) : base
   })
 
@@ -811,7 +830,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // Seed the clock from the resumed draft so the timer continues where it left
   // off (true stop/continue — time away isn't counted).
   const startRef = useRef<number>(
-    seedPending ? Date.now() - seedPending.durationMins * 60_000
+    seedActuals ? Date.now() - (seedActuals.durationMins ?? 0) * 60_000
     : seedDraft ? Date.now() - seedDraft.elapsedSeconds * 1000
     : Date.now(),
   )
@@ -832,7 +851,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   useEffect(() => {
     if (!routineId) return
-    loadRoutine()
+    // A read that blows up mid-flight must not strand an edit on a spinner that
+    // never clears — or, worse, on the empty grid behind it.
+    void loadRoutine().catch(() => {
+      if (isEdit && !seedActuals) setEditMissing(true)
+      setEditHydrating(false)
+      setLoading(false)
+    })
     // startRef is seeded above (fresh now, or now minus a resumed draft's
     // elapsed) — don't reset it here or a resumed clock would jump back to 0.
     timerRef.current = setInterval(() => {
@@ -917,17 +942,33 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     if (!routineId) return
     const cold = !seedRef.current!.boot
 
-    const { data } = await supabase
-      .from('routine')
-      .select('*, program:program_id(athlete_id)')
-      .eq('id', routineId)
-      .single()
+    // The template and — on an edit — the session's own numbers, together and
+    // ahead of everything else. They're what the athlete came here to see; the
+    // Previous column, the insights and the prescription are context and can
+    // land behind the screen. Hydrating the edit LAST, after five sequential
+    // reads, is what left a logged session sitting blank for seconds at a time.
+    const [{ data }, editRow] = await Promise.all([
+      supabase
+        .from('routine')
+        .select('*, program:program_id(athlete_id)')
+        .eq('id', routineId)
+        .single(),
+      editWorkoutId
+        ? supabase
+            .from('workout')
+            .select('actual_weights, duration_mins, performed_at, rpe, exercises_snapshot')
+            .eq('id', editWorkoutId)
+            .maybeSingle()
+        : Promise.resolve({ data: null }),
+    ])
 
     if (!data) {
       // Offline with nothing cached is the only way here — leave the seed (if
-      // any) on screen and stop the spinner. A committed session being edited
-      // lives only on the server, so there's nothing to edit until we reach it.
-      if (editWorkoutId && !startedLoggingRef.current) setEditMissing(true)
+      // any) on screen and stop the spinner. The edit can still go ahead when
+      // this device already holds what was logged; it's only unopenable when the
+      // session exists nowhere but the server.
+      if (isEdit && !seedActuals) setEditMissing(true)
+      setEditHydrating(false)
       setLoading(false)
       return
     }
@@ -939,6 +980,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     // Cold open only: no cached template was seeded, so lay down the empty grid
     // now. A warm open already painted it (plus any local draft) synchronously.
     if (cold) setSetLogs(initial)
+
+    if (isEdit && !hydrateEdit(initial, editRow.data)) {
+      setEditHydrating(false)
+      setLoading(false)
+      return
+    }
+    setEditHydrating(false)
 
     let nextAthleteId: string | null = null
     let nextAthleteName: string | null = null
@@ -1009,56 +1057,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       prescription: nextPresc,
     })
 
-    if (pendingEditId) {
-      // Editing a session that's still in the outbox — it has no `workout` row to
-      // read, so the queue IS the record. Already seeded synchronously above; this
-      // re-reads for the cold-open case (no cached bootstrap, so no grid was laid
-      // down before the routine arrived).
-      completedRef.current = true
-      const p = pendingSessionById(pendingEditId)
-      if (!p) {
-        // Gone from the queue since mount means it committed while the screen was
-        // opening — the numbers seeded on the first frame are still the right
-        // ones, and buildPending re-resolves the row to update. Only a session
-        // we never had is actually missing.
-        if (!seedPending) setEditMissing(true)
-      } else if (!startedLoggingRef.current) {
-        setSetLogs(overlayDraft(initial, p.actualWeights as Record<number, SetLog[]>))
-        setFeedback(feedbackFromDebrief(p.debrief))
-        setElapsed(p.durationMins * 60)
-        startRef.current = Date.now() - p.durationMins * 60_000
-        if (p.performedAt) setPerformedAt(toDateInput(new Date(p.performedAt)))
-      }
-      setHasStarted(true)
-      setBriefOpen(false)
-    } else if (isEdit && editWorkoutId) {
-      // Editing a logged session: hydrate from the workout row, not a draft.
-      // No autosave (completedRef), no brief — straight into the numbers.
-      completedRef.current = true
-      const { data: w } = await supabase
-        .from('workout')
-        .select('actual_weights, duration_mins, performed_at')
-        .eq('id', editWorkoutId)
-        .maybeSingle()
-      if (!w) {
-        // The row is gone (or unreadable). Saving from here would write an empty
-        // session over a real one, so refuse the edit rather than show a grid.
-        setEditMissing(true)
-        setLoading(false)
-        return
-      }
-      const aw = (w as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
-      if (aw && !startedLoggingRef.current) {
-        setSetLogs(overlayDraft(initial, aw as Record<number, SetLog[]>))
-      }
-      const dur = (w as { duration_mins: number | null } | null)?.duration_mins ?? 0
-      setElapsed(dur * 60)
-      startRef.current = Date.now() - dur * 60 * 1000
-      const performed = (w as { performed_at: string | null } | null)?.performed_at
-      if (performed) setPerformedAt(toDateInput(new Date(performed)))
-      setHasStarted(true)
-      setBriefOpen(false)
-    } else if (programData && routineId && !startedLoggingRef.current) {
+    if (!isEdit && programData && routineId && !startedLoggingRef.current) {
       // Resume an in-progress session if one was autosaved this week. restoreDraft
       // merges the local (already seeded) and remote tiers by recency, so this
       // also picks up a session continued on another device. Skipped once the
@@ -1076,6 +1075,92 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     }
     setDraftReady(true)
     setLoading(false)
+  }
+
+  /**
+   * Put the session being edited on screen, over the routine's empty template.
+   * Returns false when there's nothing to edit — the caller stops there rather
+   * than leaving a blank grid up, which reads as lost work and is one Save away
+   * from becoming it.
+   *
+   * Both sources are already applied by the first-frame seed; this is the cold
+   * open (no cached bootstrap, so no grid existed until the routine arrived) and
+   * the revalidation of what the seed showed.
+   */
+  function hydrateEdit(
+    initial: Record<number, SetLog[]>,
+    row: unknown,
+  ): boolean {
+    completedRef.current = true   // an edit never autosaves a draft
+    setHasStarted(true)
+    setBriefOpen(false)
+
+    if (pendingEditId) {
+      // Still in the outbox — it has no `workout` row to read, so the queue IS
+      // the record.
+      const p = pendingSessionById(pendingEditId)
+      if (!p) {
+        // Gone from the queue since mount means it committed while the screen
+        // was opening — the numbers seeded on the first frame are still the
+        // right ones, and buildPending re-resolves the row to update. Only a
+        // session we never had is actually missing.
+        if (seedActuals) return true
+        setEditMissing(true)
+        return false
+      }
+      if (!startedLoggingRef.current) {
+        setSetLogs(overlayDraft(initial, p.actualWeights as Record<number, SetLog[]>))
+        setFeedback(feedbackFromDebrief(p.debrief))
+        setElapsed(p.durationMins * 60)
+        startRef.current = Date.now() - p.durationMins * 60_000
+        if (p.performedAt) setPerformedAt(toDateInput(new Date(p.performedAt)))
+      }
+      return true
+    }
+
+    const w = row as {
+      actual_weights: Record<string, SetLog[]> | null
+      duration_mins: number | null
+      performed_at: string | null
+      rpe: number | null
+      exercises_snapshot: ExerciseTemplate[] | null
+    } | null
+    if (!w) {
+      // The row is gone, unreadable, or we never reached the server. The seed is
+      // the session if we have one; otherwise refuse the edit.
+      if (seedActuals) return true
+      setEditMissing(true)
+      return false
+    }
+
+    const setLogsFromRow: Record<number, SetLog[]> = {}
+    Object.entries(w.actual_weights ?? {}).forEach(([k, v]) => { setLogsFromRow[Number(k)] = v })
+    if (w.actual_weights && !startedLoggingRef.current) {
+      setSetLogs(overlayDraft(initial, setLogsFromRow))
+    }
+    const dur = w.duration_mins ?? 0
+    setElapsed(dur * 60)
+    startRef.current = Date.now() - dur * 60 * 1000
+    if (w.performed_at) setPerformedAt(toDateInput(new Date(w.performed_at)))
+
+    // Hold what we just read, so the next open of this session — Train's preview
+    // or another edit — paints from the first frame, offline included. The
+    // snapshot rides along: it's what these set indices are indexed into, and a
+    // reader handed the numbers without it would label them off the routine's
+    // live list.
+    if (editWorkoutId && w.performed_at) {
+      saveCache<SessionActuals>(cacheKeys.sessionActuals(editWorkoutId), {
+        workoutId: editWorkoutId,
+        performedAt: w.performed_at,
+        durationMins: w.duration_mins,
+        rpe: w.rpe,
+        setLogs: setLogsFromRow,
+        exercisesSnapshot: Array.isArray(w.exercises_snapshot) && w.exercises_snapshot.length
+          ? w.exercises_snapshot
+          : null,
+      })
+    }
+    return true
   }
 
   function handleSetChange(exIdx: number, setIdx: number, updated: SetLog) {
@@ -1214,6 +1299,19 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     // screen still paints instantly; they just refresh behind what they show.
     invalidateLoopViews()
 
+    // An edit of a session that already has a row: hold the corrected numbers
+    // under that row's key now, so re-opening it shows the edit rather than the
+    // pre-edit copy while the commit (AI debrief included) is still in flight.
+    // Seeded AFTER the sweep above, or it would be marked stale on arrival.
+    if (pending.editWorkoutId) {
+      const edited = actualsFromPending(pending)
+      if (edited) {
+        saveCache<SessionActuals>(cacheKeys.sessionActuals(pending.editWorkoutId), {
+          ...edited, workoutId: pending.editWorkoutId,
+        })
+      }
+    }
+
     // First session with debrief: wait for the commit so the revelation screen
     // gets the AI-generated insight data for the "moved" animation. This path
     // happens once ever per athlete so the wait is acceptable.
@@ -1290,7 +1388,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   // ---- loading / error ------------------------------------------------------
 
-  if (loading) {
+  // editHydrating: an edit whose numbers haven't arrived. The template alone is
+  // not this session, so it waits rather than showing an empty one.
+  if (loading || editHydrating) {
     return <div className="screen--centered"><Spinner /></div>
   }
   // An edit we can't load. Showing the empty grid here is what made a logged
