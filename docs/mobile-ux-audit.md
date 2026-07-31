@@ -195,6 +195,37 @@ setup line, a test button, a hint, and a score picker — seven times over.
 
 ---
 
+## The composer (follow-up pass)
+
+The chat surfaces — Coach and Change my program — were still unpleasant to
+actually type into on a phone. Three separate causes, one shared fix: both
+screens had hand-rolled the same textarea, so both had the same faults.
+
+- **Return couldn't break a line on mobile.** Enter sent, and Shift+Enter added
+  the newline — a key combination a touch keyboard does not have. A second
+  paragraph was unreachable on the only device this app runs on. The composer
+  now asks *what kind of keyboard is this* (`(hover: hover) and (pointer: fine)`)
+  and behaves accordingly: hardware keyboard keeps Enter-sends / Shift+Enter,
+  touch gets return-is-a-newline with the arrow button as the only way to send.
+  The field also declares `enterKeyHint`, so iOS draws the right return key, and
+  Enter mid-IME-composition is left to the IME.
+- **It felt too small for real text.** The font can't shrink — anything under
+  16px makes iOS zoom the page on focus — so the room came from everywhere else:
+  padding trimmed to `11px 15px`, the cap raised 140px → 176px (about seven
+  lines before it scrolls), the pill radius dropped to 20px (a pill only looks
+  right one line tall), and the `ASK` / `SEND` label replaced by a round arrow,
+  which handed ~90px of phone width back to the draft. The Coach placeholder was
+  also too long to fit on one line, which made an empty field look overflowed.
+- **The waiting animation read as "still loading", not "reply coming".** It was
+  the same shimmer bar the app uses for skeletons. It's now three pulsing dots
+  in a coach bubble (`TypingDots`) — the one waiting signal everyone already
+  reads correctly — with a resting opacity so reduced-motion leaves them visible.
+
+Both screens now render `ChatComposer` and `TypingDots` from the UI kit, so the
+next chat surface inherits all of this instead of re-deriving it.
+
+---
+
 ## Bugs found and fixed along the way
 
 - **Strength baselines were hard-coded to kg** while the app defaults to `lb`, so

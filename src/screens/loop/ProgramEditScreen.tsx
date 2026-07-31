@@ -11,7 +11,9 @@ import {
   type SessionDiff, type ExerciseChange,
 } from '../../engine'
 import type { ProgramEditTurn } from '../../engine/agentClient'
-import { Button, Markdown, SectionHeader, Skeleton, Chip } from '../../components/ui'
+import {
+  Button, Markdown, SectionHeader, Skeleton, Chip, ChatComposer, TypingDots,
+} from '../../components/ui'
 
 /**
  * CHANGE THE PROGRAM — the steering wheel.
@@ -94,7 +96,6 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
     typeof window !== 'undefined' && window.innerWidth >= 1000)
 
   const threadEndRef = useRef<HTMLDivElement | null>(null)
-  const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
   const base = state?.base ?? null
   const working = stages.length ? stages[stages.length - 1].draft : base
@@ -124,13 +125,6 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
     if (stages.length > stageCountRef.current) setBoardOpen(true)
     stageCountRef.current = stages.length
   }, [stages.length])
-
-  useEffect(() => {
-    const el = inputRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${el.scrollHeight}px`
-  }, [draftText])
 
   async function send(message: string) {
     const q = message.trim()
@@ -328,7 +322,7 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
 
             {pending && (
               <div className="coach-msg coach-msg--coach">
-                <div className="coach-msg__thinking thinking-shimmer" />
+                <TypingDots />
               </div>
             )}
 
@@ -402,21 +396,14 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
             </div>
           )}
 
-          <form className="coach-input" onSubmit={(e) => { e.preventDefault(); void send(draftText) }}>
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={draftText}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void send(draftText) }
-              }}
-              placeholder={state ? 'Add jumps, a HIIT day, more volume…' : 'Loading your program…'}
-              disabled={!state || pending}
-              aria-label="Tell the coach what to change"
-            />
-            <button type="submit" disabled={!state || pending || !draftText.trim()}>Send</button>
-          </form>
+          <ChatComposer
+            value={draftText}
+            onChange={setDraft}
+            onSend={() => void send(draftText)}
+            placeholder={state ? 'Add jumps, a HIIT day, volume…' : 'Loading your program…'}
+            disabled={!state || pending}
+            ariaLabel="Tell the coach what to change"
+          />
 
           <p className="text-xs text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>
             Nothing is saved until you tap Apply. {state && `Back to `}

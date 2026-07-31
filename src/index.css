@@ -1810,13 +1810,33 @@ textarea.input {
   color: var(--text-dim);
 }
 
-/* Generating placeholder — the thinking shimmer is the real-computation signal */
+/* Generating — three dots inside a coach bubble. The shimmer bar this replaced
+   read as a piece of the page still loading; dots read as "a reply is coming",
+   which is the only thing this element has to say. */
 .coach-msg__thinking {
-  height: 38px;
-  width: 200px;
-  border-radius: 10px;
-  border-top-left-radius: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 42px;
+  padding: 0 16px;
+  background: var(--surface);
   border: 1px solid var(--line);
+  border-radius: 14px;
+  border-top-left-radius: 3px;
+}
+.typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  opacity: 0.55;   /* the resting value reduced-motion falls back to */
+  animation: typingDot 1300ms ease-in-out infinite;
+}
+.typing-dot:nth-child(2) { animation-delay: 180ms; }
+.typing-dot:nth-child(3) { animation-delay: 360ms; }
+@keyframes typingDot {
+  0%, 65%, 100% { opacity: 0.28; transform: translateY(0); }
+  30%           { opacity: 1;    transform: translateY(-3px); }
 }
 
 /* Suggestion bubbles — grounded prompts, tap to ask. Quiet chips, not buttons:
@@ -1851,8 +1871,10 @@ textarea.input {
 }
 
 /* Input row — an auto-growing composer (chat-app convention): starts one line
-   tall, grows with the draft up to a cap, then scrolls. Enter sends,
-   Shift+Enter adds a line, so the button sits at the bottom of the row. */
+   tall, grows with the draft up to a cap, then scrolls. The button sits at the
+   bottom of the row so it stays put as the field grows. Enter sends only where
+   Shift+Enter exists to break the line — on touch, return is a newline and this
+   button is the only way to send (see ChatComposer). */
 .coach-input {
   display: flex;
   align-items: flex-end;
@@ -1864,16 +1886,23 @@ textarea.input {
   min-width: 0;
   min-height: var(--tap);
   resize: none;
-  max-height: 140px;
+  /* Room for a real paragraph — roughly seven lines before it scrolls, so a
+     long message can be read back before it's sent. */
+  max-height: 176px;
   overflow-y: auto;
-  padding: 12px 16px;
+  /* Tighter than a single-line field: the padding was eating the width that
+     the text needs, which is most of why this felt cramped. */
+  padding: 11px 15px;
   background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: 999px;
+  /* Not a pill — a pill only looks right one line tall. */
+  border-radius: 20px;
   color: var(--text);
   font-family: var(--font-sans);
   line-height: 1.4;
-  /* 16px — keep iOS from zooming the page when the chat field is focused. */
+  /* 16px, and it has to stay 16px: anything smaller makes iOS zoom the page on
+     focus, which is a worse trade than a slightly large glyph. Density comes
+     from the padding and the line cap above instead. */
   font-size: var(--fs-base);
 }
 .coach-input textarea:focus {
@@ -1881,21 +1910,22 @@ textarea.input {
   border-color: var(--computing);
 }
 .coach-input textarea::placeholder { color: var(--text-dim); }
+/* A round arrow, not a word: the "ASK" pill spent ~90px of a phone's width on
+   a label the arrow already carries. That width goes to the draft. */
 .coach-input button {
   flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  width: var(--tap);
   height: var(--tap);
-  padding: 0 20px;
+  padding: 0;
   background: var(--signal);
   border: 1px solid var(--signal);
-  border-radius: 999px;
+  border-radius: 50%;
   color: #0A0A0A;
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  font-weight: 700;
-  letter-spacing: 0.08em;
-  text-transform: uppercase;
   cursor: pointer;
-  transition: border-color var(--dur-fast) var(--ease-out),
+  transition: background-color var(--dur-fast) var(--ease-out),
+              border-color var(--dur-fast) var(--ease-out),
               color var(--dur-fast) var(--ease-out);
 }
 .coach-input button:not(:disabled):hover {

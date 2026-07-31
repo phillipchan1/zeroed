@@ -5,6 +5,7 @@ import { useCachedLoader } from '../../lib/cache'
 import { invalidateLoopViews } from '../../lib/loopCache'
 import {
   InsightCard, Markdown, SectionHeader, Skeleton, StatusCounts, Button,
+  ChatComposer, TypingDots,
 } from '../../components/ui'
 import {
   countInsightsByStatus, gatherCoachContext, coachStarterPrompts, runCoachChat,
@@ -116,7 +117,6 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   const [readOpen, setReadOpen]     = useState(() =>
     typeof window !== 'undefined' && window.innerWidth >= 1000)
   const threadEndRef = useRef<HTMLDivElement | null>(null)
-  const inputRef = useRef<HTMLTextAreaElement | null>(null)
 
   // Coach-proposed changes awaiting the athlete's confirmation, plus a key that
   // forces a re-pull of the read after an apply so the screen reflects the write.
@@ -127,15 +127,6 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   useEffect(() => {
     threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
   }, [turns.length, pending])
-
-  // Auto-grow the composer with the draft, capped by CSS max-height (chat-app
-  // convention — the input starts one line tall and only grows as needed).
-  useEffect(() => {
-    const el = inputRef.current
-    if (!el) return
-    el.style.height = 'auto'
-    el.style.height = `${el.scrollHeight}px`
-  }, [draft])
 
   const active = insights.filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
   const p1read = active[0] ?? null         // the anchor read, always shown
@@ -335,10 +326,11 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
               ),
             )}
 
-            {/* Generating — thinking shimmer, the real-computation signal */}
+            {/* Generating — typing dots, the one waiting signal that reads as
+                "a reply is coming" rather than "this part hasn't loaded". */}
             {pending && (
               <div className="coach-msg coach-msg--coach">
-                <div className="coach-msg__thinking thinking-shimmer" />
+                <TypingDots />
               </div>
             )}
 
@@ -384,28 +376,17 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             )}
           </div>
 
-          {/* Input */}
-          <form
-            className="coach-input"
-            onSubmit={(e) => { e.preventDefault(); void send(draft) }}
-          >
-            <textarea
-              ref={inputRef}
-              rows={1}
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  void send(draft)
-                }
-              }}
-              placeholder={context ? 'Ask about your read, the program, the why…' : 'Loading your read…'}
-              disabled={!context || pending}
-              aria-label="Ask the coach"
-            />
-            <button type="submit" disabled={!context || pending || !draft.trim()}>Ask</button>
-          </form>
+          {/* Input. The placeholder is short enough to sit on one line at phone
+              width — a wrapped one made the field look already overflowed. */}
+          <ChatComposer
+            value={draft}
+            onChange={setDraft}
+            onSend={() => void send(draft)}
+            placeholder={context ? 'Ask about your read or program…' : 'Loading your read…'}
+            disabled={!context || pending}
+            ariaLabel="Ask the coach"
+            sendLabel="Ask"
+          />
 
           <p className="text-xs text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>
             Nothing is written until you approve it. Notice something mid-session? Log it next session so it counts.
