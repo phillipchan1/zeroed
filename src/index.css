@@ -2414,6 +2414,157 @@ textarea.input {
   line-height: 1;
 }
 
+/* The secondary of the pair. Looking back matters, but it is never the thing
+   the athlete came to this screen to do — so it reads as a sibling, not a rival. */
+.program-edit-cta--quiet { border-color: var(--line); }
+.program-edit-cta--quiet .program-edit-cta__icon {
+  background: var(--ground);
+  color: var(--text-dim);
+}
+
+/* --- The journey ----------------------------------------------------------
+   A lift's arc, and the timeline of everything that shaped it. */
+
+.traj { padding: 14px 16px; }
+.traj__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+.traj__name {
+  font-size: var(--fs-base);
+  font-weight: 700;
+  min-width: 0;
+}
+.traj__dir {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.04em;
+}
+
+.traj__arc {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  flex-wrap: wrap;
+}
+.traj__cell { display: flex; flex-direction: column; gap: 2px; }
+.traj__cell--best { margin-left: auto; opacity: 0.75; }
+.traj__label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.traj__val { font-size: var(--fs-lg); font-weight: 700; }
+.traj__arrow { color: var(--text-dim); padding-bottom: 3px; }
+.traj__meta {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-micro);
+  color: var(--text-dim);
+}
+
+.journey {
+  list-style: none;
+  margin-top: var(--sp-3);
+  padding-left: 0;
+}
+.journey__row {
+  position: relative;
+  display: flex;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-5);
+}
+/* The spine. Drawn from each marker down to the next row, so the last entry
+   doesn't trail a line into empty space. */
+.journey__row:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 11px;
+  top: 24px;
+  bottom: 0;
+  width: 1px;
+  background: var(--line);
+}
+.journey__marker {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 23px;
+  height: 23px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-dim);
+}
+.journey__row--change .journey__marker {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.journey__content { min-width: 0; flex: 1; }
+.journey__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.journey__date {
+  font-size: var(--fs-micro);
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.journey__title {
+  margin-top: 3px;
+  font-size: var(--fs-base);
+  font-weight: 700;
+}
+.journey__detail {
+  margin-top: 3px;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.journey__asks {
+  list-style: none;
+  margin-top: var(--sp-2);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--signal-dim);
+}
+.journey__asks li {
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text);
+  font-style: italic;
+}
+.journey__diff {
+  margin-top: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.journey__session-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.journey__session ul { list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.journey__session li { font-size: var(--fs-sm); line-height: 1.45; }
+.journey__delta { color: var(--text-dim); font-size: var(--fs-xs); }
+
 /* Per-reply receipt — what that message actually did to the week. Sits under
    the bubble so the thread reads as a ledger, not a promise. */
 .edit-receipt {
@@ -2453,6 +2604,198 @@ textarea.input {
 }
 .edit-discard:hover:not(:disabled) { color: var(--veto); }
 .edit-discard:disabled { opacity: 0.5; cursor: default; }
+
+/* --- Apply confirm — "when does this start?" -------------------------------
+   Full screen, not a sheet. The 88%-capped sheet is right for detail you glance
+   at; this is a decision with a consequence the athlete has to SEE (which of
+   this week's logged sessions a change lands on), and it deserves the whole
+   viewport with its own scroll and a CTA pinned to the bottom. */
+.apply-confirm {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  background: var(--ground);
+  display: flex;
+  flex-direction: column;
+  animation: sheet-fade var(--dur-enter) var(--ease-out);
+}
+
+.apply-confirm__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: calc(env(safe-area-inset-top, 0px) + var(--sp-3)) var(--sp-4) var(--sp-3);
+  border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+
+.apply-confirm__body {
+  flex: 1;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: var(--sp-6) var(--sp-4) var(--sp-8);
+}
+
+.apply-confirm__actions {
+  flex-shrink: 0;
+  padding: var(--sp-4) var(--sp-4) calc(env(safe-area-inset-bottom, 0px) + var(--sp-4));
+  border-top: 1px solid var(--line);
+  background: var(--ground);
+}
+
+@media (min-width: 720px) {
+  .apply-confirm__body,
+  .apply-confirm__actions { width: min(640px, 100%); margin-inline: auto; }
+}
+
+/* One of the two answers. Unselected stays legible rather than greyed out —
+   both options are real choices, and dimming one pre-answers the question. */
+.timing-option {
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  margin-bottom: var(--sp-3);
+  overflow: hidden;
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.timing-option.is-selected { border-color: var(--signal); }
+
+.timing-option__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  width: 100%;
+  min-height: var(--tap);
+  padding: var(--sp-4);
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* Dim only the option that is genuinely unavailable. A merely-unselected option
+   stays at full strength — greying it out would pre-answer the question. */
+.timing-option__head:disabled { cursor: default; }
+.timing-option.is-unavailable { opacity: 0.6; }
+.timing-option.is-unavailable .timing-option__radio { border-style: dashed; }
+
+.timing-option__radio {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  flex-shrink: 0;
+  border: 1.5px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--ground);
+  transition: background var(--dur-fast), border-color var(--dur-fast);
+}
+.timing-option__radio.is-on { background: var(--signal); border-color: var(--signal); }
+
+.timing-option__title {
+  display: block;
+  font-size: var(--fs-base);
+  font-weight: 700;
+}
+.timing-option__meta {
+  display: block;
+  margin-top: 2px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+
+.timing-option__body {
+  padding: 0 var(--sp-4) var(--sp-4);
+}
+
+.apply-note {
+  margin-top: var(--sp-3);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
+/* The week, as seven days. A logged day is a tick; the band underneath is the
+   change's actual reach — the part a sentence could never make obvious. */
+.week-strip { margin-top: var(--sp-3); }
+.week-strip__label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: var(--sp-2);
+}
+.week-strip__days {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 4px;
+}
+.week-strip__day {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  padding: var(--sp-2) 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.week-strip__day.is-covered { border-color: var(--signal); background: var(--signal-dim); }
+.week-strip__day.is-today   { box-shadow: inset 0 0 0 1px var(--text-dim); }
+.week-strip__day.is-done    { color: var(--confirmed); }
+
+.week-strip__dow {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-dim);
+}
+.week-strip__mark {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 14px;
+}
+.week-strip__dot {
+  width: 5px;
+  height: 5px;
+  border-radius: var(--radius-pill);
+  background: var(--line);
+}
+
+.week-strip__band {
+  position: relative;
+  height: 3px;
+  margin-top: 6px;
+  border-radius: var(--radius-pill);
+  background: var(--line);
+  overflow: hidden;
+}
+.week-strip__band-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--signal);
+  border-radius: var(--radius-pill);
+  opacity: 0;
+  transition: opacity var(--dur-mid) var(--ease-out);
+}
+.week-strip__band.is-on .week-strip__band-fill { opacity: 1; }
+
+.week-strip__caption {
+  margin-top: 5px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+
+.apply-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin-top: var(--sp-3);
+}
 
 /* An inline text link inside a sentence (not a button that looks like a link). */
 .link-inline {

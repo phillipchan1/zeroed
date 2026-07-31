@@ -23,6 +23,7 @@ import { ProfileScreen, fetchProfileMeta } from './screens/loop/ProfileScreen'
 import { WorkoutScreen } from './screens/loop/WorkoutScreen'
 import { ProgramScreen, fetchProgramView } from './screens/loop/ProgramScreen'
 import { ProgramEditScreen } from './screens/loop/ProgramEditScreen'
+import { ProgramJourneyScreen } from './screens/loop/ProgramJourneyScreen'
 import { CoachScreen, fetchCoachView }   from './screens/loop/CoachScreen'
 import { HistoryScreen } from './screens/loop/HistoryScreen'
 import { RecapScreen }   from './screens/loop/RecapScreen'
@@ -144,6 +145,7 @@ function AppRoutes() {
         <Route path="profile" element={<ProfileScreen athleteId={athleteId} athleteName={athleteName} />} />
         <Route path="program" element={<ProgramScreen athleteId={athleteId} />} />
         <Route path="program/edit" element={<ProgramEditScreen athleteId={athleteId} />} />
+        <Route path="program/journey" element={<ProgramJourneyScreen athleteId={athleteId} />} />
         <Route path="coach"   element={<CoachScreen athleteId={athleteId} />} />
         <Route path="history" element={<HistoryScreen athleteId={athleteId} />} />
         <Route path="recap"             element={<RecapScreen athleteId={athleteId} />} />

@@ -323,7 +323,11 @@ function SessionSheet({
       <SectionHeader>{showPerformed ? 'What you logged' : 'The work'}</SectionHeader>
       <div style={{ marginTop: 10, marginBottom: 24 }}>
         {showPerformed
-          ? exercises.map((ex, i) => (
+          // What you logged is read against the prescription you logged it
+          // against — not the routine's current shape, which the program editor
+          // may have reshaped since. Falls back to the routine for sessions
+          // logged before snapshots existed.
+          ? (actuals!.exercisesSnapshot ?? exercises).map((ex, i) => (
               <PerformedRow
                 key={i}
                 ex={ex}

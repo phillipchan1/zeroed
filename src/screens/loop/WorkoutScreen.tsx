@@ -1166,6 +1166,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       editWorkoutId: pendingEditId ? pendingTarget : isEdit ? editWorkoutId : null,
       performedAt: isEdit ? dateInputToISO(performedAt) : dateInputToISO(toDateInput(new Date())),
       queuedAt: new Date().toISOString(),
+      // Freeze the prescription these set indices were logged against. The
+      // program editor rewrites routine.exercises in place, so a session read
+      // back through the routine's LIVE list is one edit away from being
+      // relabeled with movements the athlete never did.
+      exercisesSnapshot: (routine!.exercises as ExerciseTemplate[]) ?? null,
     }
   }
 
