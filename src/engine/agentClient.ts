@@ -233,6 +233,8 @@ export interface ProgramEditContext {
   insights: Array<{ id: string; priority: string; category: string; claim: string; confidence: number; status: string }>
   recent_lifts: Array<{ name: string; top_set: string; rpe: number | null }>
   recent_sessions: Array<{ session: string; performed_at: string; rpe: number | null; duration_mins: number | null; sets: string[] }>
+  /** The long arc — see TrainingHistory. Absent only when it couldn't be read. */
+  history?: TrainingHistory
 }
 
 /** One exercise inside an add_session edit. */
@@ -381,8 +383,39 @@ export function callPhaseDesign(payload: {
   insights: Array<{ priority: string; category: string; claim: string; confidence: number; status: string }>
   recent_lifts: Array<{ name: string; top_set: string; rpe: number | null }>
   emphasis?: string   // optional athlete steer, e.g. "more explosive jumping + eccentric protective work"
+  history?: TrainingHistory   // what came before this block — see the type
 }): Promise<AgentResult<PhaseDesignResult>> {
   return invokeAgent<PhaseDesignResult>('phase_design', payload)
+}
+
+/**
+ * What came BEFORE the block being designed.
+ *
+ * Phase design used to see exactly one thing about the athlete's training: the
+ * newest top set per lift. That cannot tell a squat that climbed 225 → 315 over
+ * four months from one stuck at 225 the whole time — and those two athletes need
+ * opposite blocks. It also could not see which phases had already been run, what
+ * the weekly reviews kept saying, or which questions were already settled, so
+ * every boundary designed as though the athlete had just walked in.
+ */
+export interface TrainingHistory {
+  /** Blocks already run, oldest first: "Stability (Jun 2 → Jun 29, completed)". */
+  blocks: string[]
+  /** Per-lift arcs: where it started, its best, where it is now, and which way it's going. */
+  trajectories: Array<{
+    name: string
+    first: string
+    best: string
+    current: string
+    sessions: number
+    direction: 'up' | 'flat' | 'down'
+  }>
+  /** Recent weekly-review coach notes, newest first. */
+  weekly_notes: string[]
+  /** Questions already answered — do not re-litigate these. */
+  settled: string[]
+  /** Reprogramming events already made, newest first, with the athlete's asks. */
+  revisions: string[]
 }
 
 /** Information-gain selection — post-auth. → the next pattern to screen. */

@@ -208,6 +208,13 @@ function isoToday(): string {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
+/** The window a trajectory is computed over. */
+function oneYearAgoISO(): string {
+  const d = new Date()
+  d.setFullYear(d.getFullYear() - 1)
+  return d.toISOString()
+}
+
 // ---- the memory, for reprogramming -----------------------------------------
 
 /**
@@ -288,10 +295,14 @@ export async function gatherProgramHistory(
       supabase.from('program_revision')
         .select('effective_on, requests, summary')
         .eq('program_id', programId).order('created_at', { ascending: false }).limit(MAX_REVISIONS),
-      // Ascending: the arc needs its START, which a newest-first cap would cut off.
+      // Ascending, because the arc needs its START — a newest-first row cap would
+      // cut off exactly the end that makes it an arc. Bounded by DATE instead:
+      // "first" means first in the last year, which is both honest and the window
+      // that says anything useful about where a lift is going.
       supabase.from('workout')
         .select('performed_at, actual_weights, exercises_snapshot, routine!inner(exercises, program_id)')
         .eq('routine.program_id', programId)
+        .gte('performed_at', oneYearAgoISO())
         .order('performed_at', { ascending: true }),
     ])
 
@@ -355,6 +366,24 @@ export async function gatherProgramHistory(
     })
 
   return { blocks, trajectories, weekly_notes, settled, revisions }
+}
+
+/**
+ * gatherProgramHistory for callers that only hold an athlete id — the journey
+ * screen, which has no reason to know how a program is resolved. Null when there
+ * is no active program, or when the read fails (this is context, never a gate).
+ */
+export async function gatherProgramArc(
+  athleteId: string, unit: string,
+): Promise<ProgramHistorySummary | null> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return null
+  try {
+    return await gatherProgramHistory(athleteId, (prog as { id: string }).id, unit)
+  } catch {
+    return null
+  }
 }
 
 /** The draft shape a snapshot restores to — used by the journey view. */

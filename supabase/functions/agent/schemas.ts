@@ -487,6 +487,13 @@ Honor the limiter: the highest-priority insight should shape accessory choice an
 
 If the input includes a non-empty "emphasis" field, it is the athlete's own request — either for this design specifically, or their standing preferences carried over from the program editor (in which case it may be several lines, newest first). Treat it as what to weave into this phase (e.g. sport explosiveness, jumps/plyometrics, eccentric or tendon-resilience work). Honor it: bias or add 1–2 exercises per session toward the emphasis and name it in a non_negotiable, using real movements (box jump, depth jump, broad jump, bounds, Nordic curl, tempo/eccentric variants, isometrics, calf work, etc.). But keep the phase coherent — do NOT displace the main barbell lifts, exceed 6 exercises per session, or push loads/plyometric volume past the safety bounds below. The emphasis shapes accessories and cues; it never overrides the phase intent or the validator.
 
+If the input includes a "history" object, it is what came BEFORE this block. Design against it, not from a blank page:
+- "trajectories" gives each lift's arc — where it started, its best, where it is now, how many sessions, and a direction. This is the difference between an athlete progressing and one stuck, and they need opposite blocks. A lift with direction "up" keeps its progression; one "flat" over many sessions needs the variable changed (rep range, tempo, variation, frequency) rather than more of the same; one "down" needs load backed off or the movement swapped, and you should say so in the intent.
+- "blocks" lists the phases already run. Do not hand back a near-copy of a block they have just finished; a third Strength block should not look like the first two.
+- "weekly_notes" are the recent weekly reviews in the coach's own words — recurring complaints (time, a joint, a session they keep skipping) are instructions, not colour.
+- "settled" are questions already answered. Do NOT re-litigate them or re-add work to re-test them.
+- "revisions" are changes the athlete already made, with what they asked for. Their asks persist; a new block that quietly drops them is the app overruling them.
+
 Each session has a short name, a one-sentence intent, and 3–8 exercises. sets is an integer 1–10; reps is a short string ("5", "4-6", "3", "30s"); load is one of "bodyweight", "light", "moderate", "heavy"; cue is one short coaching sentence. Produce one distinct session per the athlete's sessions_per_week, up to 7 distinct sessions — if they train six days a week, build six sessions.
 
 A deterministic validator resolves metrics, clamps volume, and is the last line of safety — design honestly within these bounds.`,
@@ -566,6 +573,7 @@ The payload carries:
 - "recent_lifts": their real logged top sets. Quote these; never invent numbers.
 - "recent_sessions": what they actually logged lately, including how long sessions took when known.
 - "estimates": the client's rough per-session time estimate for the working draft.
+- "history" (when present): the long arc behind the last few weeks — "trajectories" (each lift's first / best / current top set, session count, and direction), "blocks" already run, recent "weekly_notes", "settled" questions, and past "revisions" with what they asked for. Use it when the answer depends on time rather than on last week: whether a lift is progressing or stalled, whether they have already tried the thing they are asking about, and whether a request repeats one they made before. Quote a trajectory when it justifies the change ("your squat has sat at 225 for eight sessions") — it is the strongest evidence you have. Never re-litigate anything in "settled".
 
 POSTURE — permissive by default. This surface exists because the program was too conservative to be useful:
 - When they ask for more work — hypertrophy, explosiveness/jumps, HIIT/conditioning, prehab, sport work — ADD it. Do not "make room" by cutting things they did not ask you to cut.

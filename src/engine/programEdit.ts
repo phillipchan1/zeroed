@@ -27,7 +27,7 @@ import {
   type ProgramEditContext, type ProgramEditTurn, type EditWeekSession, type ProgramEdit,
 } from './agentClient'
 import { readLoggedExercises, type LoggedWorkoutLike } from './loggedSets'
-import { recordProgramRevision } from './programHistory'
+import { recordProgramRevision, gatherProgramHistory } from './programHistory'
 import type {
   ExerciseTemplate, PhaseName, PhaseRow, RoutineRow, SetLog,
 } from '../types/database'
@@ -60,6 +60,15 @@ export interface ProgramEditState {
    * see which ones before deciding.
    */
   loggedThisWeek: Array<{ routineId: string; sessionName: string; performedAt: string }>
+  /**
+   * A block already queued to start later — from a mid-week retest, or from an
+   * earlier deferral in this same week. Its existence rules OUT deferring again:
+   * this editor works on the ACTIVE week, so a second scheduled block would
+   * either be built on the wrong base (discarding a retest's re-scope) or leave
+   * two pending phases racing to activate, which stalls phase advancement
+   * outright. Named on screen instead of silently mishandled.
+   */
+  scheduledPhase: { id: string; name: string; weekStart: string } | null
 }
 
 /** When a confirmed change takes effect. */
@@ -195,6 +204,11 @@ export async function gatherProgramEditState(athleteId: string, unit: string): P
     }
   })
 
+  // The long arc, so the editor answers "am I actually getting stronger?" from
+  // the record instead of from the last thirty sessions. Non-fatal: a failure
+  // here costs the coach context, never the ability to edit.
+  const history = await gatherProgramHistory(athleteId, prog.id, unit).catch(() => null)
+
   const context: ProgramEditContext = {
     name: (athlete?.name as string | null) ?? null,
     profile: {
@@ -214,17 +228,24 @@ export async function gatherProgramEditState(athleteId: string, unit: string): P
     insights,
     recent_lifts: [...liftSeen.entries()].map(([name, v]) => ({ name, top_set: v.top_set, rpe: v.rpe })).slice(0, 20),
     recent_sessions,
+    ...(history ? { history } : {}),
   }
 
   // What's already been trained this week. An edit applied now rewrites the
   // prescription behind these sessions; deferring to Monday leaves them alone.
   const weekMonday = startOfWeekMonday(new Date())
-  const { data: weekRows } = await supabase
-    .from('workout')
-    .select('performed_at, routine_id, routine!inner(name, program_id)')
-    .eq('routine.program_id', prog.id)
-    .gte('performed_at', weekMonday.toISOString())
-    .order('performed_at', { ascending: false })
+  const [{ data: weekRows }, { data: queued }] = await Promise.all([
+    supabase
+      .from('workout')
+      .select('performed_at, routine_id, routine!inner(name, program_id)')
+      .eq('routine.program_id', prog.id)
+      .gte('performed_at', weekMonday.toISOString())
+      .order('performed_at', { ascending: false }),
+    supabase
+      .from('phase').select('id, name, week_start')
+      .eq('program_id', prog.id).eq('status', 'pending')
+      .order('week_start').limit(1).maybeSingle(),
+  ])
   const loggedThisWeek = ((weekRows ?? []) as unknown as Array<{
     performed_at: string; routine_id: string; routine: { name: string }
   }>).map((w) => ({
@@ -251,6 +272,13 @@ export async function gatherProgramEditState(athleteId: string, unit: string): P
       advancementCriteria: Array.isArray(phase.advancement_criteria) ? (phase.advancement_criteria as string[]) : [],
     },
     loggedThisWeek,
+    scheduledPhase: queued
+      ? {
+          id: (queued as { id: string }).id,
+          name: (queued as { name: string }).name,
+          weekStart: (queued as { week_start: string }).week_start,
+        }
+      : null,
   }
 }
 
@@ -360,11 +388,21 @@ export async function applyProgramDraft(
   const errors: string[] = []
   let written = 0
   const diff = diffDraft(state.base, draft)
-
-  // The record comes first, and it records the week BEFORE either path runs —
-  // an immediate apply overwrites the routine rows it snapshots, so a snapshot
-  // taken afterwards would capture the change rather than what preceded it.
   const effectiveOn = timing === 'next_week' ? nextMondayISO() : isoDate(new Date())
+
+  if (timing === 'next_week') {
+    written = await scheduleDraftForNextWeek(state, draft, errors, effectiveOn)
+    // Scheduling is all-or-nothing and self-repairing on failure. If it didn't
+    // take, stop here: writing preferences and a coach note for a change that
+    // isn't happening would tell the athlete it worked.
+    if (!written) return { ok: false, written: 0, errors, effectiveOn, scheduled: false }
+  } else {
+    written = await writeDraftInPlace(state, draft, errors)
+  }
+
+  // Record what happened, now that something has. The snapshot is taken from
+  // state.base — the week as it was read at load time — so it still describes
+  // what preceded the change even though the rows have already been rewritten.
   await recordProgramRevision({
     programId: state.programId,
     phaseId: state.phaseId,
@@ -374,12 +412,6 @@ export async function applyProgramDraft(
     before: state.base.sessions,
     diff,
   })
-
-  if (timing === 'next_week') {
-    written = await scheduleDraftForNextWeek(state, draft, errors, effectiveOn)
-  } else {
-    written = await writeDraftInPlace(state, draft, errors)
-  }
 
   const athletePatch: Record<string, unknown> = {}
   if (draft.sessionsPerWeek !== state.base.sessionsPerWeek) {
@@ -483,6 +515,23 @@ async function writeDraftInPlace(
 async function scheduleDraftForNextWeek(
   state: ProgramEditState, draft: ProgramDraft, errors: string[], startsOn: string,
 ): Promise<number> {
+  // Refuse rather than race. activateDueScheduledPhase promotes ONE due pending
+  // phase and runPhaseAdvancement stands down while any pending phase exists, so
+  // a second queued block doesn't just get ignored — it strands the loser as
+  // pending forever and stops the arc advancing at all. The screen already hides
+  // this option when a block is queued; this is the backstop for a stale load.
+  const { data: existing } = await supabase
+    .from('phase').select('id, week_start')
+    .eq('program_id', state.programId).eq('status', 'pending')
+    .order('week_start').limit(1).maybeSingle()
+  if (existing) {
+    errors.push(
+      `a block is already scheduled to start ${(existing as { week_start: string }).week_start}. ` +
+      'Apply now instead, or wait for that block to begin and change it then.',
+    )
+    return 0
+  }
+
   // Run the block through to the end of this week, then hand over. If the block
   // was already due to end sooner, the handover date wins — a phase must never
   // end before the one replacing it begins.

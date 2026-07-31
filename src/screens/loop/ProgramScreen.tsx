@@ -1,6 +1,6 @@
 import { Fragment } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Lock, Sparkles } from 'lucide-react'
+import { History, Lock, Sparkles } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
 import {
@@ -184,6 +184,20 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
                 <span className="program-edit-cta__sub">
                   Add explosiveness, conditioning, size, or just more work — in conversation,
                   with the whole week in front of you.
+                </span>
+              </span>
+              <span className="program-edit-cta__chev">›</span>
+            </button>
+
+            {/* The other half of steering: what you've already changed, and what
+                your lifts did about it. A program you can change but not look
+                back on is one you have to hold in your head. */}
+            <button type="button" className="program-edit-cta program-edit-cta--quiet" onClick={() => navigate('/app/program/journey')}>
+              <span className="program-edit-cta__icon"><History size={18} strokeWidth={1.75} /></span>
+              <span style={{ minWidth: 0 }}>
+                <span className="program-edit-cta__title">Your training so far</span>
+                <span className="program-edit-cta__sub">
+                  Every block you've run, every change you've made, and where each lift has actually gone.
                 </span>
               </span>
               <span className="program-edit-cta__chev">›</span>

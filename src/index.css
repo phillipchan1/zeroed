@@ -2414,6 +2414,157 @@ textarea.input {
   line-height: 1;
 }
 
+/* The secondary of the pair. Looking back matters, but it is never the thing
+   the athlete came to this screen to do — so it reads as a sibling, not a rival. */
+.program-edit-cta--quiet { border-color: var(--line); }
+.program-edit-cta--quiet .program-edit-cta__icon {
+  background: var(--ground);
+  color: var(--text-dim);
+}
+
+/* --- The journey ----------------------------------------------------------
+   A lift's arc, and the timeline of everything that shaped it. */
+
+.traj { padding: 14px 16px; }
+.traj__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-3);
+}
+.traj__name {
+  font-size: var(--fs-base);
+  font-weight: 700;
+  min-width: 0;
+}
+.traj__dir {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.04em;
+}
+
+.traj__arc {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--sp-3);
+  margin-top: var(--sp-3);
+  flex-wrap: wrap;
+}
+.traj__cell { display: flex; flex-direction: column; gap: 2px; }
+.traj__cell--best { margin-left: auto; opacity: 0.75; }
+.traj__label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.traj__val { font-size: var(--fs-lg); font-weight: 700; }
+.traj__arrow { color: var(--text-dim); padding-bottom: 3px; }
+.traj__meta {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-micro);
+  color: var(--text-dim);
+}
+
+.journey {
+  list-style: none;
+  margin-top: var(--sp-3);
+  padding-left: 0;
+}
+.journey__row {
+  position: relative;
+  display: flex;
+  gap: var(--sp-3);
+  padding-bottom: var(--sp-5);
+}
+/* The spine. Drawn from each marker down to the next row, so the last entry
+   doesn't trail a line into empty space. */
+.journey__row:not(:last-child)::before {
+  content: '';
+  position: absolute;
+  left: 11px;
+  top: 24px;
+  bottom: 0;
+  width: 1px;
+  background: var(--line);
+}
+.journey__marker {
+  position: relative;
+  z-index: 1;
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 23px;
+  height: 23px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text-dim);
+}
+.journey__row--change .journey__marker {
+  border-color: var(--signal);
+  color: var(--signal);
+}
+
+.journey__content { min-width: 0; flex: 1; }
+.journey__head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.journey__date {
+  font-size: var(--fs-micro);
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+}
+.journey__title {
+  margin-top: 3px;
+  font-size: var(--fs-base);
+  font-weight: 700;
+}
+.journey__detail {
+  margin-top: 3px;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.journey__asks {
+  list-style: none;
+  margin-top: var(--sp-2);
+  padding-left: var(--sp-3);
+  border-left: 2px solid var(--signal-dim);
+}
+.journey__asks li {
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text);
+  font-style: italic;
+}
+.journey__diff {
+  margin-top: var(--sp-3);
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+}
+.journey__session-name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 4px;
+}
+.journey__session ul { list-style: none; display: flex; flex-direction: column; gap: 3px; }
+.journey__session li { font-size: var(--fs-sm); line-height: 1.45; }
+.journey__delta { color: var(--text-dim); font-size: var(--fs-xs); }
+
 /* Per-reply receipt — what that message actually did to the week. Sits under
    the bubble so the thread reads as a ledger, not a promise. */
 .edit-receipt {
@@ -2521,7 +2672,11 @@ textarea.input {
   text-align: left;
   cursor: pointer;
 }
+/* Dim only the option that is genuinely unavailable. A merely-unselected option
+   stays at full strength — greying it out would pre-answer the question. */
 .timing-option__head:disabled { cursor: default; }
+.timing-option.is-unavailable { opacity: 0.6; }
+.timing-option.is-unavailable .timing-option__radio { border-style: dashed; }
 
 .timing-option__radio {
   display: flex;

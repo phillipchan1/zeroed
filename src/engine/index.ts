@@ -64,6 +64,7 @@ export * from './programEdit'
 // The append-only record of every reprogramming event: the athlete's journey on
 // one side, and the memory phase design reads back on the other.
 export * from './programHistory'
+import { gatherProgramHistory } from './programHistory'
 
 // ---- Types -----------------------------------------------------------------
 
@@ -2839,7 +2840,13 @@ async function designPhasePlan(
       supabase.from('athlete').select('goals, obstacle, training_age, sessions_per_week, training_preferences').eq('id', athleteId).maybeSingle(),
       supabase.from('insight').select('priority, category, claim, confidence, status').eq('athlete_id', athleteId).order('priority'),
     ])
-    const recent_lifts = await gatherRecentLifts(programId, unit)
+    // The newest top set per lift, AND the arc behind it. Without the arc the
+    // designer cannot tell progress from a plateau, and every block is built for
+    // an athlete who just arrived.
+    const [recent_lifts, history] = await Promise.all([
+      gatherRecentLifts(programId, unit),
+      gatherProgramHistory(athleteId, programId, unit).catch(() => null),
+    ])
     const insights = ((insightRows ?? []) as Array<{ priority: string; category: string; claim: string; confidence: number; status: string }>)
       .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
     // An explicit steer for THIS design wins; otherwise the athlete's standing
@@ -2858,6 +2865,7 @@ async function designPhasePlan(
       insights,
       recent_lifts,
       ...(trimmedEmphasis ? { emphasis: trimmedEmphasis } : {}),
+      ...(history ? { history } : {}),
     })
     if (!res.ok) return generatePhase(phaseName, category, startDateStr, { p1InsightId })
     return disposePhaseDesign(res.data, phaseName, category, startDateStr, p1InsightId)
@@ -2908,11 +2916,12 @@ async function activateDueScheduledPhase(athleteId: string): Promise<boolean> {
 
   const today = isoDate(new Date())
   const { data: due } = await supabase
-    .from('phase').select('id, name')
+    .from('phase').select('id, name, week_start')
     .eq('program_id', prog.id).eq('status', 'pending').lte('week_start', today)
     .order('week_start').limit(1).maybeSingle()
   if (!due) return false
-  const { id: dueId, name: dueName } = due as { id: string; name: PhaseName }
+  const { id: dueId, name: dueName, week_start: dueStart } =
+    due as { id: string; name: PhaseName; week_start: string }
 
   await supabase.from('phase').update({ status: 'completed' })
     .eq('program_id', prog.id).eq('status', 'active')
@@ -2925,9 +2934,11 @@ async function activateDueScheduledPhase(athleteId: string): Promise<boolean> {
   // athlete deferring their own edit to the boundary. Greeting a change someone
   // made by hand as though the system re-scoped them is a small lie that makes
   // the app feel like it isn't listening, so name the one that actually happened.
+  // Matched on the block's OWN start date, not on today: activation fires the
+  // next time the app opens, which for a Monday handover is often Tuesday.
   const { data: steer } = await supabase
     .from('program_revision').select('requests')
-    .eq('program_id', prog.id).eq('trigger', 'editor').eq('effective_on', today)
+    .eq('program_id', prog.id).eq('trigger', 'editor').eq('effective_on', dueStart)
     .order('created_at', { ascending: false }).limit(1).maybeSingle()
   const asked = ((steer as { requests: string[] | null } | null)?.requests ?? [])[0]
   await insertCoachMessage(athleteId, {

@@ -485,10 +485,16 @@ function ApplyConfirm({
   onCancel: () => void
 }) {
   const logged = state.loggedThisWeek
+  // A block already queued for the boundary takes deferral off the table: this
+  // editor works on the ACTIVE week, so a second scheduled block would be built
+  // on the wrong base and would stall the arc. Say so rather than fail on apply.
+  const queued = state.scheduledPhase
   // Default to the safe answer. Mid-week with work already logged, "now" changes
   // a week the athlete has largely spent — so the burden of the extra tap goes on
   // the disruptive option, not the careful one.
-  const [timing, setTiming] = useState<ApplyTiming>(logged.length > 0 ? 'next_week' : 'now')
+  const [timing, setTiming] = useState<ApplyTiming>(
+    queued ? 'now' : logged.length > 0 ? 'next_week' : 'now',
+  )
 
   const today = new Date()
   const todayIdx = mondayIndex(today)
@@ -576,27 +582,42 @@ function ApplyConfirm({
 
         <TimingOption
           selected={timing === 'next_week'}
-          onSelect={() => setTiming('next_week')}
+          onSelect={() => { if (!queued) setTiming('next_week') }}
           title={`Start Monday · ${formatDay(monday)}`}
-          meta="This week finishes as planned"
-          disabled={applying}
+          meta={queued ? 'Unavailable — a block is already queued' : 'This week finishes as planned'}
+          disabled={applying || !!queued}
+          unavailable={!!queued}
         >
-          <WeekStrip
-            todayIdx={todayIdx}
-            loggedByDay={loggedByDay}
-            changeFromIdx={null}
-            label="This week"
-          />
-          <WeekStrip
-            todayIdx={null}
-            loggedByDay={new Map()}
-            changeFromIdx={0}
-            label="Next week"
-          />
-          <p className="apply-note">
-            This week is left exactly as it is. Your reshaped week is queued as a new block and goes
-            live on its own — you don't have to come back and do anything.
-          </p>
+          {queued && (
+            <p className="apply-note" style={{ color: 'var(--pending)' }}>
+              Your {queued.name} block is already scheduled to start {formatDay(queued.weekStart)}, so
+              there's nothing to defer into — a second queued block would stall the arc. Apply now to
+              change this week, or wait for that block to begin and reshape it then. Either way your
+              asks are saved as standing preferences and carry into it.
+            </p>
+          )}
+          {!queued && (
+            <>
+              <WeekStrip
+                todayIdx={todayIdx}
+                loggedByDay={loggedByDay}
+                changeFromIdx={null}
+                label="This week"
+              />
+              <WeekStrip
+                todayIdx={null}
+                loggedByDay={new Map()}
+                changeFromIdx={0}
+                label="Next week"
+              />
+            </>
+          )}
+          {!queued && (
+            <p className="apply-note">
+              This week is left exactly as it is. Your reshaped week is queued as a new block and goes
+              live on its own — you don't have to come back and do anything.
+            </p>
+          )}
           {blockEndsFirst && (
             <p className="apply-note" style={{ color: 'var(--pending)' }}>
               Heads up: your {state.phaseName} block already ends {formatDay(state.phase.weekEnd)}, so
@@ -669,17 +690,23 @@ function ApplyConfirm({
 
 /** One of the two answers, as a big tap target that shows its own consequence. */
 function TimingOption({
-  selected, onSelect, title, meta, disabled, children,
+  selected, onSelect, title, meta, disabled, unavailable, children,
 }: {
   selected: boolean
   onSelect: () => void
   title: string
   meta: string
   disabled?: boolean
+  /** Ruled out by the program's state, not merely not-chosen. */
+  unavailable?: boolean
   children: React.ReactNode
 }) {
   return (
-    <div className={`timing-option${selected ? ' is-selected' : ''}`}>
+    <div className={[
+      'timing-option',
+      selected ? 'is-selected' : '',
+      unavailable ? 'is-unavailable' : '',
+    ].filter(Boolean).join(' ')}>
       <button
         type="button"
         className="timing-option__head"
