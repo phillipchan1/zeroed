@@ -2,7 +2,7 @@ import {
   type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes,
   useEffect, useRef, useState,
 } from 'react'
-import { X, ChevronRight, ChevronDown, ChevronLeft } from 'lucide-react'
+import { X, ChevronRight, ChevronDown, ChevronLeft, ArrowUp } from 'lucide-react'
 
 // ---- Logo / Wordmark -------------------------------------------------------
 
@@ -818,6 +818,100 @@ export function StatusCounts({ counts }: StatusCountsProps) {
         </span>
       ))}
     </div>
+  )
+}
+
+// ---- Chat: typing indicator ------------------------------------------------
+
+/**
+ * The coach is composing. Three dots — the one waiting animation everybody
+ * already knows means "a reply is coming", which the shimmer bar it replaced
+ * did not: that read as a piece of the layout still loading.
+ */
+export function TypingDots({ label = 'Coach is thinking' }: { label?: string }) {
+  return (
+    <div className="coach-msg__thinking" role="status" aria-label={label}>
+      <span className="typing-dot" />
+      <span className="typing-dot" />
+      <span className="typing-dot" />
+    </div>
+  )
+}
+
+// ---- Chat: composer --------------------------------------------------------
+
+// A hardware keyboard can hold Shift and press Enter; a touch keyboard cannot.
+// That single fact decides what Enter does below.
+function hasHardwareKeyboard(): boolean {
+  return typeof window !== 'undefined'
+    && typeof window.matchMedia === 'function'
+    && window.matchMedia('(hover: hover) and (pointer: fine)').matches
+}
+
+interface ChatComposerProps {
+  value: string
+  onChange: (v: string) => void
+  onSend: () => void
+  placeholder: string
+  /** Announced name for the field. */
+  ariaLabel: string
+  /** Announced name for the send control (the button itself draws an arrow). */
+  sendLabel?: string
+  disabled?: boolean
+}
+
+/**
+ * The composer, shared by every chat surface. Two things it gets right that a
+ * bare textarea did not:
+ *
+ *  - ENTER MEANS WHAT THE KEYBOARD SAYS IT MEANS. With a hardware keyboard,
+ *    Enter sends and Shift+Enter breaks the line. On a phone there is no
+ *    Shift+Enter, so return breaks the line and the arrow sends — otherwise a
+ *    second paragraph is literally unreachable on mobile.
+ *  - MULTI-LINE IS FIRST CLASS. It opens one line tall and grows with the
+ *    draft, holding a short paragraph on screen (CSS caps it, then it scrolls)
+ *    so you can read back what you wrote before you send it.
+ */
+export function ChatComposer({
+  value, onChange, onSend, placeholder, ariaLabel, sendLabel = 'Send', disabled,
+}: ChatComposerProps) {
+  const ref = useRef<HTMLTextAreaElement | null>(null)
+  const [enterSends] = useState(hasHardwareKeyboard)
+
+  // Grow with the draft, capped by CSS max-height (then the field scrolls).
+  useEffect(() => {
+    const el = ref.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${el.scrollHeight}px`
+  }, [value])
+
+  return (
+    <form
+      className="coach-input"
+      onSubmit={(e) => { e.preventDefault(); onSend() }}
+    >
+      <textarea
+        ref={ref}
+        rows={1}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        onKeyDown={(e) => {
+          // Mid-composition Enter belongs to the IME, never to us.
+          if (e.key !== 'Enter' || e.nativeEvent.isComposing) return
+          if (!enterSends || e.shiftKey) return   // let the newline through
+          e.preventDefault()
+          onSend()
+        }}
+        enterKeyHint={enterSends ? 'send' : 'enter'}
+        placeholder={placeholder}
+        disabled={disabled}
+        aria-label={ariaLabel}
+      />
+      <button type="submit" disabled={disabled || !value.trim()} aria-label={sendLabel} title={sendLabel}>
+        <ArrowUp size={20} strokeWidth={2.25} />
+      </button>
+    </form>
   )
 }
 
