@@ -209,13 +209,20 @@ screens had hand-rolled the same textarea, so both had the same faults.
   touch gets return-is-a-newline with the arrow button as the only way to send.
   The field also declares `enterKeyHint`, so iOS draws the right return key, and
   Enter mid-IME-composition is left to the IME.
-- **It felt too small for real text.** The font can't shrink — anything under
-  16px makes iOS zoom the page on focus — so the room came from everywhere else:
-  padding trimmed to `11px 15px`, the cap raised 140px → 176px (about seven
-  lines before it scrolls), the pill radius dropped to 20px (a pill only looks
-  right one line tall), and the `ASK` / `SEND` label replaced by a round arrow,
-  which handed ~90px of phone width back to the draft. The Coach placeholder was
-  also too long to fit on one line, which made an empty field look overflowed.
+- **It felt too small for real text.** Room came from four places: the font
+  dropped 16px → 15px, padding trimmed to `11px 15px`, the cap raised 140px →
+  176px (about eight lines before it scrolls), the pill radius dropped to 20px
+  (a pill only looks right one line tall), and the `ASK` / `SEND` label was
+  replaced by a round arrow, which handed ~90px of phone width back to the
+  draft. The Coach placeholder was also too long to fit on one line, which made
+  an empty field look overflowed. A ~240-character paragraph now sits in the
+  composer whole, where it used to be a scrolling five-line slot.
+
+  The font size is the one deliberate exception to the type floor: 16px is the
+  threshold below which **iOS Safari zooms the page when the field takes focus**.
+  Seeing the whole draft is worth more than avoiding that zoom, and the installed
+  app (Capacitor / standalone PWA) doesn't zoom at all. If browser-tab focus
+  zoom ever becomes the bigger annoyance, this is the line to put back.
 - **The waiting animation read as "still loading", not "reply coming".** It was
   the same shimmer bar the app uses for skeletons. It's now three pulsing dots
   in a coach bubble (`TypingDots`) — the one waiting signal everyone already

@@ -1900,10 +1900,11 @@ textarea.input {
   color: var(--text);
   font-family: var(--font-sans);
   line-height: 1.4;
-  /* 16px, and it has to stay 16px: anything smaller makes iOS zoom the page on
-     focus, which is a worse trade than a slightly large glyph. Density comes
-     from the padding and the line cap above instead. */
-  font-size: var(--fs-base);
+  /* 15px — deliberately below the 16px floor that stops iOS Safari zooming the
+     page on focus. A draft you can see all of is worth more here than avoiding
+     that zoom, and the installed app (Capacitor / standalone PWA) doesn't do it
+     at all. Nothing else on the app's type scale goes below this. */
+  font-size: var(--fs-sm);
 }
 .coach-input textarea:focus {
   outline: none;
