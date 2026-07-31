@@ -11,7 +11,7 @@ import {
   type SessionDiff, type ExerciseChange, type ApplyTiming,
 } from '../../engine'
 import type { ProgramEditTurn } from '../../engine/agentClient'
-import { Button, Markdown, SectionHeader, Skeleton, Chip } from '../../components/ui'
+import { Button, Disclosure, Markdown, SectionHeader, Skeleton, Chip } from '../../components/ui'
 
 /**
  * CHANGE THE PROGRAM — the steering wheel.
@@ -237,7 +237,7 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
       <div className="page page--split">
         {/* ---- The week, marked up live. Left column on desktop; a header that
              expands on a phone, so the conversation owns the screen. ---- */}
-        <div className="page__main coach-read-pane">
+        <div className={`page__main coach-read-pane${boardOpen ? ' is-open' : ''}`}>
           <button
             type="button"
             className="coach-read-toggle"
@@ -350,62 +350,53 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
             )}
           </div>
 
-          {/* Staged changes — the gate. Everything above is memory until this. */}
+          {/* Staged changes — the gate. Everything above is memory until this.
+              ONE LINE, and no scroll of its own. This used to be a card capped
+              at 46vh with its own overflow, listing every staged label and every
+              warning; stacked against the board's 45vh inside a fixed-height
+              screen it claimed 91vh before the conversation got any, which is
+              how a phone ended up with content clipped at both ends and three
+              scrollers fighting. All of that detail now lives on the confirm
+              screen, which exists precisely to show it. This is a status bar and
+              a way through. */}
           {diff?.dirty && (
-            <div className="card fade-rise edit-apply" style={{ borderColor: 'var(--signal)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10, marginBottom: 8 }}>
-                <p className="text-xs text-signal" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', textTransform: 'uppercase' }}>
-                  {stagedLabels.length} staged change{stagedLabels.length === 1 ? '' : 's'}
-                </p>
-                <span className="num text-xs text-dim">
-                  ~{diff.minutesBefore} → {diff.minutesAfter} min/week
-                </span>
-              </div>
-
-              {diff.mainLiftsDropped.length > 0 && (
-                <p className="text-sm" style={{ color: 'var(--veto)', lineHeight: 1.45, marginBottom: 8, display: 'flex', gap: 8 }}>
-                  <AlertTriangle size={15} strokeWidth={1.75} style={{ flexShrink: 0, marginTop: 2 }} />
-                  <span>This drops {diff.mainLiftsDropped.join(', ')} from your week. Say "keep {diff.mainLiftsDropped[0]}" if that wasn't the idea.</span>
-                </p>
-              )}
-              {diff.longSessions.length > 0 && (
-                <p className="text-sm text-dim" style={{ lineHeight: 1.45, marginBottom: 8, display: 'flex', gap: 8 }}>
-                  <Clock size={15} strokeWidth={1.75} style={{ flexShrink: 0, marginTop: 2 }} />
-                  <span>
-                    {diff.longSessions.map((s) => `${s.name} ≈ ${s.minutes} min`).join(' · ')} — long, but it's your call.
-                  </span>
-                </p>
-              )}
-              {diff.sessionsPerWeekAfter !== diff.sessionsPerWeekBefore && (
-                <p className="text-sm text-dim" style={{ lineHeight: 1.45, marginBottom: 8 }}>
-                  Training days: <span className="num">{diff.sessionsPerWeekBefore}</span> →{' '}
-                  <span className="num text-signal">{diff.sessionsPerWeekAfter}</span> a week, so the week counts
-                  the new session instead of marking you short.
-                </p>
-              )}
-
-              <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
-                {stagedLabels.map((l, i) => (
-                  <li key={i} className="text-sm" style={{ lineHeight: 1.4, color: 'var(--text-dim)' }}>· {l}</li>
-                ))}
-              </ul>
-
-              <div style={{ display: 'flex', gap: 8 }}>
-                <Button onClick={() => setConfirming(true)} disabled={applying || pending} style={{ flex: 2 }}>
-                  Review &amp; apply
-                </Button>
-                <Button variant="ghost" onClick={undoLast} disabled={applying || pending} style={{ flex: 1 }}>
-                  <Undo2 size={15} strokeWidth={1.75} style={{ marginRight: 6 }} />Undo
-                </Button>
-              </div>
+            <div className="staged fade-rise">
               <button
                 type="button"
-                className="edit-discard"
-                onClick={discardAll}
+                className="staged__summary"
+                onClick={() => setConfirming(true)}
                 disabled={applying || pending}
               >
-                Discard all staged changes
+                {/* "5 changes" alongside the breakdown said the same thing
+                    twice and pushed the breakdown into an ellipsis. The
+                    breakdown is the more useful half — keep it whole. */}
+                <span className="staged__count">Staged</span>
+                <span className="staged__delta num">
+                  {diff.newSessions > 0 && <span style={{ color: 'var(--confirmed)' }}>{diff.newSessions} new </span>}
+                  {diff.added > 0 && <span style={{ color: 'var(--confirmed)' }}>+{diff.added} </span>}
+                  {diff.removed > 0 && <span style={{ color: 'var(--veto)' }}>−{diff.removed} </span>}
+                  {diff.changed > 0 && <span style={{ color: 'var(--computing)' }}>~{diff.changed}</span>}
+                </span>
+                {diff.mainLiftsDropped.length > 0 && (
+                  <AlertTriangle size={14} strokeWidth={2} style={{ color: 'var(--veto)', flexShrink: 0 }} />
+                )}
+                {diff.longSessions.length > 0 && diff.mainLiftsDropped.length === 0 && (
+                  <Clock size={14} strokeWidth={2} style={{ color: 'var(--text-dim)', flexShrink: 0 }} />
+                )}
               </button>
+              <button
+                type="button"
+                className="staged__undo"
+                onClick={undoLast}
+                disabled={applying || pending}
+                aria-label="Undo the last change"
+                title="Undo the last change"
+              >
+                <Undo2 size={16} strokeWidth={1.75} />
+              </button>
+              <Button onClick={() => setConfirming(true)} disabled={applying || pending}>
+                Review
+              </Button>
             </div>
           )}
 
@@ -441,6 +432,7 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
           applying={applying}
           onCancel={() => setConfirming(false)}
           onConfirm={(timing) => void apply(timing)}
+          onDiscard={() => { setConfirming(false); discardAll() }}
         />
       )}
     </div>
@@ -465,24 +457,33 @@ function formatDay(iso: string): string {
  * WHEN DOES THIS START — the question the editor used to answer for you.
  *
  * Applying wrote routine rows in place the instant you tapped it, with one
- * sentence of scope buried on the board behind the thread. On a Friday with four
- * sessions already logged that is the wrong default and the wrong altitude: the
- * athlete is mid-week, the change lands on a week they've nearly finished, and
- * nothing on screen says so.
+ * sentence of scope buried on the board behind the thread. On a Friday with
+ * eight sessions already logged that is the wrong default and the wrong
+ * altitude.
  *
- * So it gets the whole screen, and it leads with the week itself — seven days,
- * what's already done, and where the change actually lands under each option.
- * The diff is still here, below, because "what changes" and "when" are one
- * decision. Nothing has been written when this opens.
+ * The first build of this screen got the altitude right and the SHAPE wrong: two
+ * tall option cards, each carrying its own week visual and its own paragraph, so
+ * comparing them meant scrolling past one to reach the other and holding the
+ * first in your head. A binary choice should never cost a scroll.
+ *
+ * So the choice is a segmented control, and BOTH weeks are drawn once, below it.
+ * Toggling re-tints the same two strips instead of swapping in different content
+ * — nothing reflows, and the difference between the options is the only thing
+ * that moves on screen. That is the whole comparison, in place, at a glance.
+ *
+ * The diff sits behind a disclosure: by the time you are here you have already
+ * watched it build up in the thread, so it is a receipt to check, not the thing
+ * to read. Nothing has been written when this opens.
  */
 function ApplyConfirm({
-  state, diff, applying, onConfirm, onCancel,
+  state, diff, applying, onConfirm, onCancel, onDiscard,
 }: {
   state: ProgramEditState
   diff: DraftDiff
   applying: boolean
   onConfirm: (timing: ApplyTiming) => void
   onCancel: () => void
+  onDiscard: () => void
 }) {
   const logged = state.loggedThisWeek
   // A block already queued for the boundary takes deferral off the table: this
@@ -496,8 +497,7 @@ function ApplyConfirm({
     queued ? 'now' : logged.length > 0 ? 'next_week' : 'now',
   )
 
-  const today = new Date()
-  const todayIdx = mondayIndex(today)
+  const todayIdx = mondayIndex(new Date())
   const monday = nextMondayISO()
 
   // Which days already carry a logged session, and what was trained on them.
@@ -509,10 +509,6 @@ function ApplyConfirm({
     }
     return m
   }, [logged])
-
-  // The block ends before the deferral would land, so there is nothing to defer
-  // into — the phase boundary will design the next block regardless.
-  const blockEndsFirst = state.phase.weekEnd < monday
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !applying) onCancel() }
@@ -529,7 +525,10 @@ function ApplyConfirm({
     }
   }, [applying, onCancel])
 
+  const now = timing === 'now'
   const changedSessions = diff.sessions.filter((s) => s.isNew || s.added > 0 || s.removed > 0 || s.changed > 0)
+  const daysTrained = loggedByDay.size
+  const stagedCount = diff.added + diff.removed + diff.changed + diff.newSessions
 
   return (
     <div className="apply-confirm" role="dialog" aria-modal="true" aria-label="When should this change start">
@@ -541,144 +540,150 @@ function ApplyConfirm({
       </div>
 
       <div className="apply-confirm__body">
-        <h1 className="screen-title" style={{ marginBottom: 6 }}>When should this start?</h1>
-        <p className="text-sm text-dim" style={{ lineHeight: 1.55, marginBottom: 22 }}>
+        <h1 className="apply-confirm__title">When should this start?</h1>
+        <p className="apply-confirm__lede">
           {logged.length > 0 ? (
             <>
               You've logged <span className="num text-signal">{logged.length}</span>{' '}
-              session{logged.length === 1 ? '' : 's'} this week. Starting now changes the week you're
-              already most of the way through.
+              session{logged.length === 1 ? '' : 's'} over{' '}
+              <span className="num">{daysTrained}</span> day{daysTrained === 1 ? '' : 's'} this week.
             </>
           ) : (
             <>Nothing logged this week yet, so either option leaves your history untouched.</>
           )}
         </p>
 
-        <TimingOption
-          selected={timing === 'now'}
-          onSelect={() => setTiming('now')}
-          title="Start now"
-          meta="Live on Train immediately"
-          disabled={applying}
-        >
-          <WeekStrip
-            todayIdx={todayIdx}
-            loggedByDay={loggedByDay}
-            changeFromIdx={todayIdx}
-            label="This week"
-          />
-          <p className="apply-note">
-            {logged.length > 0 ? (
+        {/* The choice. Two taps wide, always both visible — no scrolling to
+            compare, which is the whole reason this replaced stacked cards. */}
+        <div className="seg" role="radiogroup" aria-label="When the change starts">
+          <button
+            type="button"
+            role="radio"
+            aria-checked={now}
+            className={`seg__opt${now ? ' is-on' : ''}`}
+            onClick={() => setTiming('now')}
+            disabled={applying}
+          >
+            <span className="seg__label">Start now</span>
+            <span className="seg__meta">live immediately</span>
+          </button>
+          <button
+            type="button"
+            role="radio"
+            aria-checked={!now}
+            className={`seg__opt${!now ? ' is-on' : ''}${queued ? ' is-off' : ''}`}
+            onClick={() => { if (!queued) setTiming('next_week') }}
+            disabled={applying || !!queued}
+          >
+            <span className="seg__label">Start Monday</span>
+            <span className="seg__meta">{queued ? 'unavailable' : formatDay(monday)}</span>
+          </button>
+        </div>
+
+        {/* Both weeks, drawn once. Only the tint moves when you toggle, so the
+            difference between the two answers is the only change on screen. */}
+        <ApplyWeek
+          label="This week"
+          todayIdx={todayIdx}
+          loggedByDay={loggedByDay}
+          coveredFrom={now ? todayIdx : null}
+        />
+        <ApplyWeek
+          label="Next week onward"
+          todayIdx={null}
+          loggedByDay={EMPTY_DAYS}
+          coveredFrom={0}
+        />
+
+        <p className="apply-note">
+          {queued ? (
+            <>
+              Your {queued.name} block is already scheduled for {formatDay(queued.weekStart)}, so there's
+              nothing to defer into. Applying now changes this week; either way your asks are saved and
+              carry into that block.
+            </>
+          ) : now ? (
+            logged.length > 0 ? (
               <>
-                Your <span className="num">{logged.length}</span> logged session
-                {logged.length === 1 ? '' : 's'} keep their own record — what you did is stored with
-                the session, not read back off the program. The new week applies from your next one.
+                The <span className="num">{logged.length}</span> session
+                {logged.length === 1 ? '' : 's'} you've already logged keep their own record — what you
+                did is stored with the session, not read back off the program.
               </>
             ) : (
               <>The reshaped week applies from your next session.</>
-            )}
-          </p>
-        </TimingOption>
+            )
+          ) : (
+            <>This week is left exactly as it is. The reshaped week goes live on its own — nothing to come back and do.</>
+          )}
+        </p>
 
-        <TimingOption
-          selected={timing === 'next_week'}
-          onSelect={() => { if (!queued) setTiming('next_week') }}
-          title={`Start Monday · ${formatDay(monday)}`}
-          meta={queued ? 'Unavailable — a block is already queued' : 'This week finishes as planned'}
-          disabled={applying || !!queued}
-          unavailable={!!queued}
-        >
-          {queued && (
-            <p className="apply-note" style={{ color: 'var(--pending)' }}>
-              Your {queued.name} block is already scheduled to start {formatDay(queued.weekStart)}, so
-              there's nothing to defer into — a second queued block would stall the arc. Apply now to
-              change this week, or wait for that block to begin and reshape it then. Either way your
-              asks are saved as standing preferences and carry into it.
-            </p>
-          )}
-          {!queued && (
-            <>
-              <WeekStrip
-                todayIdx={todayIdx}
-                loggedByDay={loggedByDay}
-                changeFromIdx={null}
-                label="This week"
-              />
-              <WeekStrip
-                todayIdx={null}
-                loggedByDay={new Map()}
-                changeFromIdx={0}
-                label="Next week"
-              />
-            </>
-          )}
-          {!queued && (
-            <p className="apply-note">
-              This week is left exactly as it is. Your reshaped week is queued as a new block and goes
-              live on its own — you don't have to come back and do anything.
-            </p>
-          )}
-          {blockEndsFirst && (
-            <p className="apply-note" style={{ color: 'var(--pending)' }}>
-              Heads up: your {state.phaseName} block already ends {formatDay(state.phase.weekEnd)}, so
-              a new block would normally be designed at that boundary anyway. Scheduling this still
-              works — your asks are also saved as standing preferences either way.
-            </p>
-          )}
-        </TimingOption>
-
-        {/* What changes — the same marked-up diff from the board, so the two
-            halves of the decision sit on one screen instead of two. */}
-        <div style={{ marginTop: 26 }}>
-          <SectionHeader>What changes</SectionHeader>
-          <div className="apply-summary">
-            {diff.newSessions > 0 && <Chip tone="done">{diff.newSessions} new session{diff.newSessions === 1 ? '' : 's'}</Chip>}
-            {diff.added > 0 && <Chip tone="done">+{diff.added} added</Chip>}
-            {diff.removed > 0 && <Chip tone="pending">−{diff.removed} dropped</Chip>}
-            {diff.changed > 0 && <Chip tone="todo">~{diff.changed} retuned</Chip>}
-            <span className="num text-xs text-dim" style={{ alignSelf: 'center' }}>
+        {/* A receipt, not a reading task: this diff has been building in the
+            thread the whole conversation. Folded by default, one tap to audit. */}
+        <div style={{ marginTop: 22 }}>
+          <Disclosure
+            label="What changes"
+            meta={
+              <span className="num text-xs text-dim">
+                {[
+                  diff.newSessions > 0 ? `${diff.newSessions} new` : null,
+                  diff.added > 0 ? `+${diff.added}` : null,
+                  diff.removed > 0 ? `−${diff.removed}` : null,
+                  diff.changed > 0 ? `~${diff.changed}` : null,
+                ].filter(Boolean).join(' · ')}
+              </span>
+            }
+          >
+            <p className="num text-xs text-dim" style={{ marginBottom: 12 }}>
               ~{diff.minutesBefore} → {diff.minutesAfter} min/week
-            </span>
-          </div>
-
-          {diff.mainLiftsDropped.length > 0 && (
-            <p className="text-sm" style={{ color: 'var(--veto)', lineHeight: 1.45, margin: '12px 0', display: 'flex', gap: 8 }}>
-              <AlertTriangle size={15} strokeWidth={1.75} style={{ flexShrink: 0, marginTop: 2 }} />
-              <span>This drops {diff.mainLiftsDropped.join(', ')} from your week.</span>
             </p>
-          )}
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12 }}>
-            {changedSessions.map((s, i) => (
-              <div className="card" key={`${s.name}-${i}`} style={{ borderColor: 'var(--signal)' }}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
-                  <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{s.name}</h3>
-                  <span className="num text-xs" style={{ whiteSpace: 'nowrap', color: 'var(--text-dim)' }}>
-                    {s.isNew ? <span style={{ color: 'var(--confirmed)' }}>NEW</span> : (
-                      <>
-                        {s.added > 0 && <span style={{ color: 'var(--confirmed)' }}>+{s.added} </span>}
-                        {s.removed > 0 && <span style={{ color: 'var(--veto)' }}>−{s.removed} </span>}
-                        {s.changed > 0 && <span style={{ color: 'var(--computing)' }}>~{s.changed}</span>}
-                      </>
-                    )}
-                  </span>
+            {diff.mainLiftsDropped.length > 0 && (
+              <p className="text-sm" style={{ color: 'var(--veto)', lineHeight: 1.45, marginBottom: 12, display: 'flex', gap: 8 }}>
+                <AlertTriangle size={15} strokeWidth={1.75} style={{ flexShrink: 0, marginTop: 2 }} />
+                <span>This drops {diff.mainLiftsDropped.join(', ')} from your week.</span>
+              </p>
+            )}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+              {changedSessions.map((s, i) => (
+                <div key={`${s.name}-${i}`}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
+                    <h3 style={{ fontSize: 'var(--fs-sm)', fontWeight: 700 }}>{s.name}</h3>
+                    <span className="num text-xs" style={{ whiteSpace: 'nowrap', color: 'var(--text-dim)' }}>
+                      {s.isNew ? <span style={{ color: 'var(--confirmed)' }}>NEW</span> : (
+                        <>
+                          {s.added > 0 && <span style={{ color: 'var(--confirmed)' }}>+{s.added} </span>}
+                          {s.removed > 0 && <span style={{ color: 'var(--veto)' }}>−{s.removed} </span>}
+                          {s.changed > 0 && <span style={{ color: 'var(--computing)' }}>~{s.changed}</span>}
+                        </>
+                      )}
+                    </span>
+                  </div>
+                  <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
+                    {s.changes.filter((c) => c.kind !== 'kept').map((c, k) => (
+                      <ChangeRow key={`${c.kind}-${c.name}-${k}`} change={c} />
+                    ))}
+                  </ul>
                 </div>
-                <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
-                  {s.changes.filter((c) => c.kind !== 'kept').map((c, k) => (
-                    <ChangeRow key={`${c.kind}-${c.name}-${k}`} change={c} />
-                  ))}
-                </ul>
-              </div>
-            ))}
-          </div>
+              ))}
+            </div>
+          </Disclosure>
         </div>
+
+        {/* Destructive and rare — reachable where you're already reviewing, and
+            nowhere near the button you tap every time. */}
+        <button
+          type="button"
+          className="edit-discard"
+          style={{ marginTop: 20 }}
+          onClick={onDiscard}
+          disabled={applying}
+        >
+          Discard all {stagedCount} change{stagedCount === 1 ? '' : 's'}
+        </button>
       </div>
 
       <div className="apply-confirm__actions">
         <Button onClick={() => onConfirm(timing)} disabled={applying} full>
-          {applying
-            ? 'Saving…'
-            : timing === 'now' ? 'Apply now' : `Schedule for ${formatDay(monday)}`}
+          {applying ? 'Saving…' : now ? 'Apply now' : `Schedule for ${formatDay(monday)}`}
         </Button>
         <button type="button" className="edit-discard" onClick={onCancel} disabled={applying}>
           Keep editing
@@ -688,102 +693,66 @@ function ApplyConfirm({
   )
 }
 
-/** One of the two answers, as a big tap target that shows its own consequence. */
-function TimingOption({
-  selected, onSelect, title, meta, disabled, unavailable, children,
-}: {
-  selected: boolean
-  onSelect: () => void
-  title: string
-  meta: string
-  disabled?: boolean
-  /** Ruled out by the program's state, not merely not-chosen. */
-  unavailable?: boolean
-  children: React.ReactNode
-}) {
-  return (
-    <div className={[
-      'timing-option',
-      selected ? 'is-selected' : '',
-      unavailable ? 'is-unavailable' : '',
-    ].filter(Boolean).join(' ')}>
-      <button
-        type="button"
-        className="timing-option__head"
-        onClick={onSelect}
-        disabled={disabled}
-        aria-pressed={selected}
-      >
-        <span className={`timing-option__radio${selected ? ' is-on' : ''}`} aria-hidden>
-          {selected && <Check size={13} strokeWidth={3} />}
-        </span>
-        <span style={{ minWidth: 0 }}>
-          <span className="timing-option__title">{title}</span>
-          <span className="timing-option__meta">{meta}</span>
-        </span>
-      </button>
-      <div className="timing-option__body">{children}</div>
-    </div>
-  )
-}
+// Stable identity so the second strip doesn't get a fresh Map every render.
+const EMPTY_DAYS: Map<number, string[]> = new Map()
 
 /**
- * Seven days, and where the change lands. This is the visual that replaces the
- * sentence "edits the repeating week for the rest of your block": a logged day
- * reads as done, and the band under the days the change covers shows the actual
- * blast radius rather than describing it.
+ * One week, seven days.
+ *
+ * Deliberately NOT the app's existing `.week-strip` — that class is the Today
+ * pager (a horizontal scroller), and reusing the name here is what turned this
+ * into a flex row with the label, the days and the caption fighting for one
+ * line. Its own namespace, and no shared rules.
+ *
+ * A tinted cell means "the reshaped week covers this day". That tint IS the
+ * answer to "what does starting now actually change", which is why there is no
+ * separate progress bar underneath any more — one signal, not two saying the
+ * same thing slightly differently.
  */
-function WeekStrip({
-  todayIdx, loggedByDay, changeFromIdx, label,
+function ApplyWeek({
+  label, todayIdx, loggedByDay, coveredFrom,
 }: {
+  label: string
   todayIdx: number | null
   loggedByDay: Map<number, string[]>
-  /** First day the change applies to, or null when this week is untouched. */
-  changeFromIdx: number | null
-  label: string
+  /** First day the reshaped week covers, or null when this week is untouched. */
+  coveredFrom: number | null
 }) {
   return (
-    <div className="week-strip">
-      <p className="week-strip__label">{label}</p>
-      <div className="week-strip__days">
+    <div className="applyweek">
+      <div className="applyweek__head">
+        <span className="applyweek__label">{label}</span>
+        <span className="applyweek__caption">
+          {coveredFrom == null
+            ? 'unchanged'
+            : coveredFrom === 0
+              ? 'new program'
+              : `new from ${DAY_KEYS[coveredFrom]}`}
+        </span>
+      </div>
+      <div className="applyweek__days">
         {DAY_KEYS.map((d, i) => {
           const done = loggedByDay.has(i)
-          const covered = changeFromIdx != null && i >= changeFromIdx
+          const covered = coveredFrom != null && i >= coveredFrom
           return (
             <div
               key={d}
               className={[
-                'week-strip__day',
+                'applyweek__day',
                 done ? 'is-done' : '',
                 covered ? 'is-covered' : '',
                 todayIdx === i ? 'is-today' : '',
               ].filter(Boolean).join(' ')}
               title={done ? loggedByDay.get(i)!.join(', ') : undefined}
             >
-              <span className="week-strip__dow">{d[0]}</span>
-              <span className="week-strip__mark">
-                {done ? <Check size={12} strokeWidth={3} /> : <span className="week-strip__dot" />}
-              </span>
+              <span className="applyweek__dow">{d[0]}</span>
+              {done
+                ? <Check className="applyweek__tick" size={13} strokeWidth={3} />
+                : <span className="applyweek__dot" />}
             </div>
           )
         })}
       </div>
-      <div className={`week-strip__band${changeFromIdx != null ? ' is-on' : ''}`}>
-        <span
-          className="week-strip__band-fill"
-          style={{
-            left: `${((changeFromIdx ?? 0) / 7) * 100}%`,
-            width: `${(((7 - (changeFromIdx ?? 0))) / 7) * 100}%`,
-          }}
-        />
-      </div>
-      <p className="week-strip__caption">
-        {changeFromIdx == null
-          ? 'unchanged'
-          : changeFromIdx === 0
-            ? 'the new week, all of it'
-            : `the new week, from ${DAY_KEYS[changeFromIdx]}`}
-      </p>
     </div>
   )
 }

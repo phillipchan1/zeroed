@@ -1946,13 +1946,48 @@ textarea.input {
 @media (max-width: 999px) {
   /* The read collapses; the conversation takes the viewport. */
   .coach-read { display: none; }
+
+  /* Opened, the board takes the WHOLE screen instead of squeezing into 45vh
+     above the thread. Inline it was a second scroll container stacked on the
+     thread's — two clipped panes, neither showing its top or bottom, inside a
+     screen already locked to the viewport height. A phone can show one thing
+     properly or three things badly; the board is worth reading, so it gets the
+     screen and hands it straight back. Desktop keeps the side-by-side split,
+     where there is room for both. */
   .coach-read.is-open {
     display: block;
-    max-height: 45vh;
+    position: fixed;
+    inset: 0;
+    z-index: 150;
+    background: var(--ground);
     overflow-y: auto;
-    margin-bottom: 12px;
-    padding-bottom: 4px;
+    -webkit-overflow-scrolling: touch;
+    margin-bottom: 0;
+    padding: calc(env(safe-area-inset-top, 0px) + 60px) var(--sp-4)
+             calc(env(safe-area-inset-bottom, 0px) + var(--sp-8));
+    animation: sheet-fade var(--dur-enter) var(--ease-out);
   }
+
+  /* The toggle rides up with it and becomes the way out — the control that
+     opened the board is the one that closes it, in the same place. */
+  .coach-read-pane.is-open .coach-read-toggle {
+    position: fixed;
+    top: env(safe-area-inset-top, 0px);
+    left: 0;
+    right: 0;
+    z-index: 151;
+    height: 60px;
+    align-items: center;
+    margin: 0;
+    padding: 0 var(--sp-4);
+    background: var(--ground);
+    border-bottom: 1px solid var(--line);
+  }
+  /* One line in a 60px bar: the eyebrow is scene-setting for a screen you're
+     already looking at, and the title carries the meaning on its own. */
+  .coach-read-pane.is-open .coach-read-toggle .eyebrow { display: none; }
+  .coach-read-pane.is-open .coach-read-toggle .screen-title { font-size: var(--fs-xl); }
+  .coach-read-pane.is-open .coach-read-toggle__hint { color: var(--signal); }
 
   /* The screen fills the gap between the status bar and the fixed nav, and
      manages its own internal scroll instead of scrolling the whole page. */
@@ -2579,14 +2614,69 @@ textarea.input {
 }
 
 /* The staging gate — everything above it is memory until this is tapped. */
-.edit-apply {
+/* Staged changes, docked above the composer. Fixed height, ONE line, no scroll
+   of its own — it replaced a card capped at 46vh with its own overflow, which on
+   a phone stacked against the board's 45vh and left the conversation squeezed
+   between two half-visible panes. Everything it used to list is on the confirm
+   screen now; this says how much is waiting and gets you there. */
+.staged {
   flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
   margin-top: 12px;
+  padding: var(--sp-2);
+  background: var(--surface);
+  border: 1px solid var(--signal);
+  border-radius: var(--radius-card);
 }
-@media (max-width: 999px) {
-  /* Never let a long list of staged changes push the composer off screen. */
-  .edit-apply { max-height: 46vh; overflow-y: auto; }
+
+.staged__summary {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  padding: var(--sp-2);
+  background: none;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
 }
+.staged__count {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--signal);
+  white-space: nowrap;
+}
+.staged__delta {
+  flex: 1;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.staged__undo {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: var(--tap);
+  height: var(--tap);
+  background: none;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.staged__undo:disabled { opacity: 0.4; cursor: default; }
+.staged__undo:active:not(:disabled) { background: var(--line); }
 
 .edit-discard {
   width: 100%;
@@ -2606,14 +2696,15 @@ textarea.input {
 .edit-discard:disabled { opacity: 0.5; cursor: default; }
 
 /* --- Apply confirm — "when does this start?" -------------------------------
-   Full screen, not a sheet. The 88%-capped sheet is right for detail you glance
-   at; this is a decision with a consequence the athlete has to SEE (which of
-   this week's logged sessions a change lands on), and it deserves the whole
-   viewport with its own scroll and a CTA pinned to the bottom. */
+   Full screen, above the nav. The 88%-capped sheet is right for detail you
+   glance at; this is a decision with a consequence the athlete has to SEE, and
+   it needs the whole viewport, its own scroll, and a CTA that isn't sharing the
+   bottom of the screen with the tab bar. z-index sits above .nav (100) — at 60
+   the actions rendered UNDERNEATH it. */
 .apply-confirm {
   position: fixed;
   inset: 0;
-  z-index: 60;
+  z-index: 200;
   background: var(--ground);
   display: flex;
   flex-direction: column;
@@ -2631,171 +2722,152 @@ textarea.input {
 
 .apply-confirm__body {
   flex: 1;
+  min-height: 0;
   overflow-y: auto;
   -webkit-overflow-scrolling: touch;
-  padding: var(--sp-6) var(--sp-4) var(--sp-8);
+  padding: var(--sp-5) var(--sp-4) var(--sp-8);
+}
+
+.apply-confirm__title {
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  line-height: 1.15;
+  letter-spacing: -0.02em;
+}
+.apply-confirm__lede {
+  margin-top: var(--sp-2);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+  color: var(--text-dim);
 }
 
 .apply-confirm__actions {
   flex-shrink: 0;
-  padding: var(--sp-4) var(--sp-4) calc(env(safe-area-inset-bottom, 0px) + var(--sp-4));
+  padding: var(--sp-4) var(--sp-4) calc(env(safe-area-inset-bottom, 0px) + var(--sp-3));
   border-top: 1px solid var(--line);
   background: var(--ground);
 }
 
 @media (min-width: 720px) {
   .apply-confirm__body,
-  .apply-confirm__actions { width: min(640px, 100%); margin-inline: auto; }
+  .apply-confirm__actions { width: min(620px, 100%); margin-inline: auto; }
 }
 
-/* One of the two answers. Unselected stays legible rather than greyed out —
-   both options are real choices, and dimming one pre-answers the question. */
-.timing-option {
+/* The choice. A segmented control rather than two stacked cards: the options are
+   mutually exclusive and one line of text each, so showing them side by side
+   costs nothing and removes the scroll it used to take to compare them. */
+.seg {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  margin-top: var(--sp-5);
+  padding: 4px;
+  background: var(--surface);
   border: 1px solid var(--line);
-  border-radius: var(--radius-card);
-  margin-bottom: var(--sp-3);
-  overflow: hidden;
-  transition: border-color var(--dur-fast) var(--ease-out);
+  border-radius: var(--radius-btn);
 }
-.timing-option.is-selected { border-color: var(--signal); }
-
-.timing-option__head {
+.seg__opt {
   display: flex;
-  align-items: center;
-  gap: var(--sp-3);
-  width: 100%;
-  min-height: var(--tap);
-  padding: var(--sp-4);
-  background: none;
-  border: none;
-  color: inherit;
-  text-align: left;
-  cursor: pointer;
-}
-/* Dim only the option that is genuinely unavailable. A merely-unselected option
-   stays at full strength — greying it out would pre-answer the question. */
-.timing-option__head:disabled { cursor: default; }
-.timing-option.is-unavailable { opacity: 0.6; }
-.timing-option.is-unavailable .timing-option__radio { border-style: dashed; }
-
-.timing-option__radio {
-  display: flex;
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  width: 22px;
-  height: 22px;
-  flex-shrink: 0;
-  border: 1.5px solid var(--line);
-  border-radius: var(--radius-pill);
-  color: var(--ground);
-  transition: background var(--dur-fast), border-color var(--dur-fast);
-}
-.timing-option__radio.is-on { background: var(--signal); border-color: var(--signal); }
-
-.timing-option__title {
-  display: block;
-  font-size: var(--fs-base);
-  font-weight: 700;
-}
-.timing-option__meta {
-  display: block;
-  margin-top: 2px;
-  font-size: var(--fs-xs);
+  gap: 2px;
+  min-height: var(--tap);
+  padding: var(--sp-2) var(--sp-1);
+  background: transparent;
+  border: none;
+  border-radius: 7px;
   color: var(--text-dim);
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.seg__opt.is-on {
+  background: var(--signal);
+  color: var(--ground);
+}
+.seg__opt.is-off { opacity: 0.45; cursor: default; }
+.seg__opt:disabled { cursor: default; }
+.seg__label { font-size: var(--fs-sm); font-weight: 700; }
+.seg__meta {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.02em;
+  opacity: 0.8;
 }
 
-.timing-option__body {
-  padding: 0 var(--sp-4) var(--sp-4);
-}
-
+/* The consequence, in one sentence. It changes with the choice, so it sits
+   below both strips rather than inside either — one place to look. */
 .apply-note {
-  margin-top: var(--sp-3);
+  margin-top: var(--sp-5);
   font-size: var(--fs-sm);
   line-height: 1.5;
   color: var(--text-dim);
 }
 
-/* The week, as seven days. A logged day is a tick; the band underneath is the
-   change's actual reach — the part a sentence could never make obvious. */
-.week-strip { margin-top: var(--sp-3); }
-.week-strip__label {
+/* One week, seven days. Its OWN namespace: .week-strip is already the Today
+   pager (a horizontal flex scroller), and sharing the name is what collapsed the
+   label, the days and the caption onto one squeezed line. */
+.applyweek { margin-top: var(--sp-5); }
+
+.applyweek__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: var(--sp-3);
+  margin-bottom: var(--sp-2);
+}
+.applyweek__label,
+.applyweek__caption {
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   color: var(--text-dim);
-  margin-bottom: var(--sp-2);
 }
-.week-strip__days {
+.applyweek__caption { color: var(--text-dim); }
+
+.applyweek__days {
   display: grid;
   grid-template-columns: repeat(7, 1fr);
-  gap: 4px;
+  gap: 5px;
 }
-.week-strip__day {
+
+.applyweek__day {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 5px;
-  padding: var(--sp-2) 0;
+  justify-content: center;
+  gap: 6px;
+  aspect-ratio: 1 / 1.25;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 9px;
   background: var(--surface);
+  transition: background var(--dur-mid) var(--ease-out), border-color var(--dur-mid) var(--ease-out);
 }
-.week-strip__day.is-covered { border-color: var(--signal); background: var(--signal-dim); }
-.week-strip__day.is-today   { box-shadow: inset 0 0 0 1px var(--text-dim); }
-.week-strip__day.is-done    { color: var(--confirmed); }
+/* The tint IS the answer to "what does this change" — the only signal, so it
+   has to be unmistakable against an untouched day. */
+.applyweek__day.is-covered {
+  border-color: var(--signal);
+  background: var(--signal-dim);
+}
+.applyweek__day.is-today { box-shadow: inset 0 0 0 1.5px var(--text-dim); }
 
-.week-strip__dow {
+.applyweek__dow {
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
+  line-height: 1;
   color: var(--text-dim);
 }
-.week-strip__mark {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 14px;
-}
-.week-strip__dot {
+.applyweek__day.is-covered .applyweek__dow { color: var(--signal); }
+
+.applyweek__tick { color: var(--confirmed); }
+.applyweek__dot {
   width: 5px;
   height: 5px;
   border-radius: var(--radius-pill);
   background: var(--line);
 }
-
-.week-strip__band {
-  position: relative;
-  height: 3px;
-  margin-top: 6px;
-  border-radius: var(--radius-pill);
-  background: var(--line);
-  overflow: hidden;
-}
-.week-strip__band-fill {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  background: var(--signal);
-  border-radius: var(--radius-pill);
-  opacity: 0;
-  transition: opacity var(--dur-mid) var(--ease-out);
-}
-.week-strip__band.is-on .week-strip__band-fill { opacity: 1; }
-
-.week-strip__caption {
-  margin-top: 5px;
-  font-family: var(--font-mono);
-  font-size: var(--fs-micro);
-  letter-spacing: 0.04em;
-  color: var(--text-dim);
-}
-
-.apply-summary {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--sp-2);
-  margin-top: var(--sp-3);
-}
+.applyweek__day.is-covered .applyweek__dot { background: var(--signal); opacity: 0.5; }
 
 /* An inline text link inside a sentence (not a button that looks like a link). */
 .link-inline {
