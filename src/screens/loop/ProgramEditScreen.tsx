@@ -1,14 +1,14 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { AlertTriangle, Clock, Undo2 } from 'lucide-react'
+import { AlertTriangle, Check, Clock, Undo2, X } from 'lucide-react'
 import { useCachedLoader } from '../../lib/cache'
 import { invalidateLoopViews } from '../../lib/loopCache'
 import { getWeightUnit } from '../../lib/units'
 import {
   gatherProgramEditState, runProgramEditChat, applyEditsToDraft, diffDraft,
-  estimateSessionMinutes, applyProgramDraft,
+  estimateSessionMinutes, applyProgramDraft, nextMondayISO,
   type ProgramDraft, type ProgramEditState, type DraftDiff,
-  type SessionDiff, type ExerciseChange,
+  type SessionDiff, type ExerciseChange, type ApplyTiming,
 } from '../../engine'
 import type { ProgramEditTurn } from '../../engine/agentClient'
 import { Button, Markdown, SectionHeader, Skeleton, Chip } from '../../components/ui'
@@ -89,6 +89,9 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
   const [draftText, setDraft] = useState('')
   const [pending, setPending] = useState(false)
   const [applying, setApplying] = useState(false)
+  // Apply no longer writes. It opens the confirm screen, which is where the
+  // question that actually matters gets asked: does this start now, or Monday?
+  const [confirming, setConfirming] = useState(false)
   const [followups, setFollowups] = useState<string[] | null>(null)
   const [boardOpen, setBoardOpen] = useState(() =>
     typeof window !== 'undefined' && window.innerWidth >= 1000)
@@ -194,20 +197,24 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
     }])
   }
 
-  async function apply() {
+  async function apply(timing: ApplyTiming) {
     if (!state || !working || !diff?.dirty || applying) return
     setApplying(true)
-    const res = await applyProgramDraft(athleteId, state, working, stagedNotes, stagedRequests)
+    const res = await applyProgramDraft(athleteId, state, working, stagedNotes, stagedRequests, timing)
     if (res.ok) {
       setStages([])
+      setConfirming(false)
       setTurns((prev) => [...prev.map((t) => ({ ...t, fresh: false })), {
         role: 'coach',
-        content: `**Applied.** Your ${state.phaseName} week is updated — it's live on Train now, and it stays this way for the rest of the block.`,
+        content: res.scheduled
+          ? `**Scheduled.** This week stays exactly as it is — everything you've already logged is untouched. Your reshaped ${state.phaseName} week goes live Monday.`
+          : `**Applied.** Your ${state.phaseName} week is updated — it's live on Train now, and it stays this way for the rest of the block.`,
         fresh: true,
       }])
       invalidateLoopViews()
       refetch()
     } else {
+      setConfirming(false)
       setTurns((prev) => [...prev.map((t) => ({ ...t, fresh: false })), {
         role: 'coach',
         content: `Couldn't save all of that: ${res.errors.join('; ') || 'the write failed'}. Nothing else changed — try Apply again.`,
@@ -384,8 +391,8 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
               </ul>
 
               <div style={{ display: 'flex', gap: 8 }}>
-                <Button onClick={() => void apply()} disabled={applying || pending} style={{ flex: 2 }}>
-                  {applying ? 'Saving…' : 'Apply to my program'}
+                <Button onClick={() => setConfirming(true)} disabled={applying || pending} style={{ flex: 2 }}>
+                  Review &amp; apply
                 </Button>
                 <Button variant="ghost" onClick={undoLast} disabled={applying || pending} style={{ flex: 1 }}>
                   <Undo2 size={15} strokeWidth={1.75} style={{ marginRight: 6 }} />Undo
@@ -426,6 +433,330 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
           </p>
         </div>
       </div>
+
+      {confirming && state && working && diff?.dirty && (
+        <ApplyConfirm
+          state={state}
+          diff={diff}
+          applying={applying}
+          onCancel={() => setConfirming(false)}
+          onConfirm={(timing) => void apply(timing)}
+        />
+      )}
+    </div>
+  )
+}
+
+// ---- The confirm screen ----------------------------------------------------
+
+const DAY_KEYS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+
+/** Mon=0 … Sun=6, the order the strip is drawn in. */
+function mondayIndex(d: Date): number {
+  return (d.getDay() + 6) % 7
+}
+
+function formatDay(iso: string): string {
+  const d = new Date(`${iso}T12:00:00`)
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+}
+
+/**
+ * WHEN DOES THIS START — the question the editor used to answer for you.
+ *
+ * Applying wrote routine rows in place the instant you tapped it, with one
+ * sentence of scope buried on the board behind the thread. On a Friday with four
+ * sessions already logged that is the wrong default and the wrong altitude: the
+ * athlete is mid-week, the change lands on a week they've nearly finished, and
+ * nothing on screen says so.
+ *
+ * So it gets the whole screen, and it leads with the week itself — seven days,
+ * what's already done, and where the change actually lands under each option.
+ * The diff is still here, below, because "what changes" and "when" are one
+ * decision. Nothing has been written when this opens.
+ */
+function ApplyConfirm({
+  state, diff, applying, onConfirm, onCancel,
+}: {
+  state: ProgramEditState
+  diff: DraftDiff
+  applying: boolean
+  onConfirm: (timing: ApplyTiming) => void
+  onCancel: () => void
+}) {
+  const logged = state.loggedThisWeek
+  // Default to the safe answer. Mid-week with work already logged, "now" changes
+  // a week the athlete has largely spent — so the burden of the extra tap goes on
+  // the disruptive option, not the careful one.
+  const [timing, setTiming] = useState<ApplyTiming>(logged.length > 0 ? 'next_week' : 'now')
+
+  const today = new Date()
+  const todayIdx = mondayIndex(today)
+  const monday = nextMondayISO()
+
+  // Which days already carry a logged session, and what was trained on them.
+  const loggedByDay = useMemo(() => {
+    const m = new Map<number, string[]>()
+    for (const s of logged) {
+      const i = mondayIndex(new Date(s.performedAt))
+      m.set(i, [...(m.get(i) ?? []), s.sessionName])
+    }
+    return m
+  }, [logged])
+
+  // The block ends before the deferral would land, so there is nothing to defer
+  // into — the phase boundary will design the next block regardless.
+  const blockEndsFirst = state.phase.weekEnd < monday
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape' && !applying) onCancel() }
+    document.addEventListener('keydown', onKey)
+    const root = document.getElementById('root')
+    const prevBody = document.body.style.overflow
+    const prevRoot = root?.style.overflow ?? ''
+    document.body.style.overflow = 'hidden'
+    if (root) root.style.overflow = 'hidden'
+    return () => {
+      document.removeEventListener('keydown', onKey)
+      document.body.style.overflow = prevBody
+      if (root) root.style.overflow = prevRoot
+    }
+  }, [applying, onCancel])
+
+  const changedSessions = diff.sessions.filter((s) => s.isNew || s.added > 0 || s.removed > 0 || s.changed > 0)
+
+  return (
+    <div className="apply-confirm" role="dialog" aria-modal="true" aria-label="When should this change start">
+      <div className="apply-confirm__bar">
+        <button type="button" className="sheet-close" onClick={onCancel} disabled={applying} aria-label="Back to editing">
+          <X size={20} strokeWidth={2} />
+        </button>
+        <span className="eyebrow">Nothing saved yet</span>
+      </div>
+
+      <div className="apply-confirm__body">
+        <h1 className="screen-title" style={{ marginBottom: 6 }}>When should this start?</h1>
+        <p className="text-sm text-dim" style={{ lineHeight: 1.55, marginBottom: 22 }}>
+          {logged.length > 0 ? (
+            <>
+              You've logged <span className="num text-signal">{logged.length}</span>{' '}
+              session{logged.length === 1 ? '' : 's'} this week. Starting now changes the week you're
+              already most of the way through.
+            </>
+          ) : (
+            <>Nothing logged this week yet, so either option leaves your history untouched.</>
+          )}
+        </p>
+
+        <TimingOption
+          selected={timing === 'now'}
+          onSelect={() => setTiming('now')}
+          title="Start now"
+          meta="Live on Train immediately"
+          disabled={applying}
+        >
+          <WeekStrip
+            todayIdx={todayIdx}
+            loggedByDay={loggedByDay}
+            changeFromIdx={todayIdx}
+            label="This week"
+          />
+          <p className="apply-note">
+            {logged.length > 0 ? (
+              <>
+                Your <span className="num">{logged.length}</span> logged session
+                {logged.length === 1 ? '' : 's'} keep their own record — what you did is stored with
+                the session, not read back off the program. The new week applies from your next one.
+              </>
+            ) : (
+              <>The reshaped week applies from your next session.</>
+            )}
+          </p>
+        </TimingOption>
+
+        <TimingOption
+          selected={timing === 'next_week'}
+          onSelect={() => setTiming('next_week')}
+          title={`Start Monday · ${formatDay(monday)}`}
+          meta="This week finishes as planned"
+          disabled={applying}
+        >
+          <WeekStrip
+            todayIdx={todayIdx}
+            loggedByDay={loggedByDay}
+            changeFromIdx={null}
+            label="This week"
+          />
+          <WeekStrip
+            todayIdx={null}
+            loggedByDay={new Map()}
+            changeFromIdx={0}
+            label="Next week"
+          />
+          <p className="apply-note">
+            This week is left exactly as it is. Your reshaped week is queued as a new block and goes
+            live on its own — you don't have to come back and do anything.
+          </p>
+          {blockEndsFirst && (
+            <p className="apply-note" style={{ color: 'var(--pending)' }}>
+              Heads up: your {state.phaseName} block already ends {formatDay(state.phase.weekEnd)}, so
+              a new block would normally be designed at that boundary anyway. Scheduling this still
+              works — your asks are also saved as standing preferences either way.
+            </p>
+          )}
+        </TimingOption>
+
+        {/* What changes — the same marked-up diff from the board, so the two
+            halves of the decision sit on one screen instead of two. */}
+        <div style={{ marginTop: 26 }}>
+          <SectionHeader>What changes</SectionHeader>
+          <div className="apply-summary">
+            {diff.newSessions > 0 && <Chip tone="done">{diff.newSessions} new session{diff.newSessions === 1 ? '' : 's'}</Chip>}
+            {diff.added > 0 && <Chip tone="done">+{diff.added} added</Chip>}
+            {diff.removed > 0 && <Chip tone="pending">−{diff.removed} dropped</Chip>}
+            {diff.changed > 0 && <Chip tone="todo">~{diff.changed} retuned</Chip>}
+            <span className="num text-xs text-dim" style={{ alignSelf: 'center' }}>
+              ~{diff.minutesBefore} → {diff.minutesAfter} min/week
+            </span>
+          </div>
+
+          {diff.mainLiftsDropped.length > 0 && (
+            <p className="text-sm" style={{ color: 'var(--veto)', lineHeight: 1.45, margin: '12px 0', display: 'flex', gap: 8 }}>
+              <AlertTriangle size={15} strokeWidth={1.75} style={{ flexShrink: 0, marginTop: 2 }} />
+              <span>This drops {diff.mainLiftsDropped.join(', ')} from your week.</span>
+            </p>
+          )}
+
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 12 }}>
+            {changedSessions.map((s, i) => (
+              <div className="card" key={`${s.name}-${i}`} style={{ borderColor: 'var(--signal)' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 10 }}>
+                  <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{s.name}</h3>
+                  <span className="num text-xs" style={{ whiteSpace: 'nowrap', color: 'var(--text-dim)' }}>
+                    {s.isNew ? <span style={{ color: 'var(--confirmed)' }}>NEW</span> : (
+                      <>
+                        {s.added > 0 && <span style={{ color: 'var(--confirmed)' }}>+{s.added} </span>}
+                        {s.removed > 0 && <span style={{ color: 'var(--veto)' }}>−{s.removed} </span>}
+                        {s.changed > 0 && <span style={{ color: 'var(--computing)' }}>~{s.changed}</span>}
+                      </>
+                    )}
+                  </span>
+                </div>
+                <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }}>
+                  {s.changes.filter((c) => c.kind !== 'kept').map((c, k) => (
+                    <ChangeRow key={`${c.kind}-${c.name}-${k}`} change={c} />
+                  ))}
+                </ul>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      <div className="apply-confirm__actions">
+        <Button onClick={() => onConfirm(timing)} disabled={applying} full>
+          {applying
+            ? 'Saving…'
+            : timing === 'now' ? 'Apply now' : `Schedule for ${formatDay(monday)}`}
+        </Button>
+        <button type="button" className="edit-discard" onClick={onCancel} disabled={applying}>
+          Keep editing
+        </button>
+      </div>
+    </div>
+  )
+}
+
+/** One of the two answers, as a big tap target that shows its own consequence. */
+function TimingOption({
+  selected, onSelect, title, meta, disabled, children,
+}: {
+  selected: boolean
+  onSelect: () => void
+  title: string
+  meta: string
+  disabled?: boolean
+  children: React.ReactNode
+}) {
+  return (
+    <div className={`timing-option${selected ? ' is-selected' : ''}`}>
+      <button
+        type="button"
+        className="timing-option__head"
+        onClick={onSelect}
+        disabled={disabled}
+        aria-pressed={selected}
+      >
+        <span className={`timing-option__radio${selected ? ' is-on' : ''}`} aria-hidden>
+          {selected && <Check size={13} strokeWidth={3} />}
+        </span>
+        <span style={{ minWidth: 0 }}>
+          <span className="timing-option__title">{title}</span>
+          <span className="timing-option__meta">{meta}</span>
+        </span>
+      </button>
+      <div className="timing-option__body">{children}</div>
+    </div>
+  )
+}
+
+/**
+ * Seven days, and where the change lands. This is the visual that replaces the
+ * sentence "edits the repeating week for the rest of your block": a logged day
+ * reads as done, and the band under the days the change covers shows the actual
+ * blast radius rather than describing it.
+ */
+function WeekStrip({
+  todayIdx, loggedByDay, changeFromIdx, label,
+}: {
+  todayIdx: number | null
+  loggedByDay: Map<number, string[]>
+  /** First day the change applies to, or null when this week is untouched. */
+  changeFromIdx: number | null
+  label: string
+}) {
+  return (
+    <div className="week-strip">
+      <p className="week-strip__label">{label}</p>
+      <div className="week-strip__days">
+        {DAY_KEYS.map((d, i) => {
+          const done = loggedByDay.has(i)
+          const covered = changeFromIdx != null && i >= changeFromIdx
+          return (
+            <div
+              key={d}
+              className={[
+                'week-strip__day',
+                done ? 'is-done' : '',
+                covered ? 'is-covered' : '',
+                todayIdx === i ? 'is-today' : '',
+              ].filter(Boolean).join(' ')}
+              title={done ? loggedByDay.get(i)!.join(', ') : undefined}
+            >
+              <span className="week-strip__dow">{d[0]}</span>
+              <span className="week-strip__mark">
+                {done ? <Check size={12} strokeWidth={3} /> : <span className="week-strip__dot" />}
+              </span>
+            </div>
+          )
+        })}
+      </div>
+      <div className={`week-strip__band${changeFromIdx != null ? ' is-on' : ''}`}>
+        <span
+          className="week-strip__band-fill"
+          style={{
+            left: `${((changeFromIdx ?? 0) / 7) * 100}%`,
+            width: `${(((7 - (changeFromIdx ?? 0))) / 7) * 100}%`,
+          }}
+        />
+      </div>
+      <p className="week-strip__caption">
+        {changeFromIdx == null
+          ? 'unchanged'
+          : changeFromIdx === 0
+            ? 'the new week, all of it'
+            : `the new week, from ${DAY_KEYS[changeFromIdx]}`}
+      </p>
     </div>
   )
 }

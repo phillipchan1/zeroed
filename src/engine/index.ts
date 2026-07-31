@@ -44,6 +44,10 @@ import {
   OBSTACLE_CATEGORY_HINTS, buildReadSkeleton, READ_FLOORS,
   type ReadAxis, type ArenaType,
 } from './demandTables'
+// Logged sets are index-keyed against the session's exercise list as it was AT
+// LOG TIME. Every read of actual_weights goes through here so an edit to the
+// live routine can never reattribute work the athlete already did.
+import { readLoggedExercises, type LoggedWorkoutLike } from './loggedSets'
 
 // The week-diff primitives live in weekDiff.ts so the phase designer and the
 // conversational program editor describe a change in exactly the same terms.
@@ -56,6 +60,10 @@ export {
 // multi-turn edits to the live week. Re-exported so screens keep importing the
 // engine and never the agent client.
 export * from './programEdit'
+
+// The append-only record of every reprogramming event: the athlete's journey on
+// one side, and the memory phase design reads back on the other.
+export * from './programHistory'
 
 // ---- Types -----------------------------------------------------------------
 
@@ -649,13 +657,11 @@ function formatSet(s: SetLog): string | null {
 
 // Turn a workout's per-exercise SetLog map into compact lines the coach can read
 // and quote — one line per exercise, only sets that carry data.
-function formatWorkoutSets(map: Record<string, SetLog[]> | null): string[] {
-  if (!map) return []
+function formatWorkoutSets(w: LoggedWorkoutLike): string[] {
   const lines: string[] = []
-  for (const [exercise, sets] of Object.entries(map)) {
-    if (!Array.isArray(sets)) continue
+  for (const { name, sets } of readLoggedExercises(w)) {
     const cells = sets.map(formatSet).filter((c): c is string => c != null)
-    if (cells.length) lines.push(`${exercise}: ${cells.join(', ')}`)
+    if (cells.length) lines.push(`${name}: ${cells.join(', ')}`)
   }
   return lines
 }
@@ -729,20 +735,22 @@ export async function gatherCoachContext(athleteId: string): Promise<CoachContex
 
   // What the athlete has actually logged recently — the week's real activity,
   // down to the set ("Bench Press: 225×5 @7, 245×3 @8"). Per-set grain lives in
-  // workout.actual_weights (Record<exerciseName, SetLog[]>).
+  // workout.actual_weights, keyed by index into the session's exercise list, so
+  // the snapshot has to come along or the coach reads back movement names that
+  // drifted when the program was edited.
   let recent_workouts: CoachContext['recent_workouts'] = []
   const { data: workouts } = await supabase
     .from('workout')
-    .select('performed_at, rpe, actual_weights, routine!inner(name, program!inner(athlete_id))')
+    .select('performed_at, rpe, actual_weights, exercises_snapshot, routine!inner(name, exercises, program!inner(athlete_id))')
     .eq('routine.program.athlete_id', athleteId)
     .order('performed_at', { ascending: false })
     .limit(5)
   if (Array.isArray(workouts)) {
-    recent_workouts = workouts.map((w) => ({
+    recent_workouts = (workouts as unknown as LoggedWorkoutLike[]).map((w) => ({
       session: (w as { routine?: { name?: string } }).routine?.name ?? 'Session',
-      performed_at: (w as { performed_at: string }).performed_at,
-      rpe: (w as { rpe: number | null }).rpe ?? null,
-      sets: formatWorkoutSets((w as { actual_weights: Record<string, SetLog[]> | null }).actual_weights),
+      performed_at: (w as unknown as { performed_at: string }).performed_at,
+      rpe: (w as unknown as { rpe: number | null }).rpe ?? null,
+      sets: formatWorkoutSets(w),
     }))
   }
 
@@ -2736,19 +2744,16 @@ async function insertPhaseAndRoutines(
 async function gatherExerciseBases(programId: string): Promise<Map<string, SetLog>> {
   const { data: ws } = await supabase
     .from('workout')
-    .select('performed_at, actual_weights, routine!inner(exercises, program_id)')
+    .select('performed_at, actual_weights, exercises_snapshot, routine!inner(exercises, program_id)')
     .eq('routine.program_id', programId)
     .order('performed_at', { ascending: false })
     .limit(60)
-  type Row = { actual_weights: Record<string, SetLog[]> | null; routine: { exercises: ExerciseTemplate[] } }
   const out = new Map<string, SetLog>()
-  for (const w of (ws ?? []) as unknown as Row[]) {
-    const exs = w.routine?.exercises ?? []
-    for (const [idx, sets] of Object.entries(w.actual_weights ?? {})) {
-      const ex = exs[Number(idx)]
-      if (!ex || out.has(ex.name)) continue   // newest wins (rows are desc)
+  for (const w of (ws ?? []) as unknown as LoggedWorkoutLike[]) {
+    for (const { name, sets } of readLoggedExercises(w)) {
+      if (out.has(name)) continue   // newest wins (rows are desc)
       const top = topWorkingSet(sets)
-      if (top) out.set(ex.name, top)
+      if (top) out.set(name, top)
     }
   }
   return out
@@ -2760,24 +2765,21 @@ async function gatherExerciseBases(programId: string): Promise<Map<string, SetLo
 async function gatherRecentLifts(programId: string, unit: string): Promise<Array<{ name: string; top_set: string; rpe: number | null }>> {
   const { data: ws } = await supabase
     .from('workout')
-    .select('rpe, performed_at, actual_weights, routine!inner(exercises, program_id)')
+    .select('rpe, performed_at, actual_weights, exercises_snapshot, routine!inner(exercises, program_id)')
     .eq('routine.program_id', programId)
     .order('performed_at', { ascending: false })
     .limit(40)
-  type Row = { rpe: number | null; actual_weights: Record<string, SetLog[]> | null; routine: { exercises: ExerciseTemplate[] } }
   const seen = new Map<string, { top_set: string; rpe: number | null }>()
-  for (const w of (ws ?? []) as unknown as Row[]) {
-    const exs = w.routine?.exercises ?? []
-    for (const [idx, sets] of Object.entries(w.actual_weights ?? {})) {
-      const ex = exs[Number(idx)]
-      if (!ex || seen.has(ex.name)) continue   // newest wins
+  for (const w of (ws ?? []) as unknown as Array<LoggedWorkoutLike & { rpe: number | null }>) {
+    for (const { name, sets } of readLoggedExercises(w)) {
+      if (seen.has(name)) continue   // newest wins
       const top = topWorkingSet(sets)
       if (!top) continue
       const detail = top.weight != null ? `${top.weight}${unit}×${top.reps ?? '?'}`
         : top.duration != null ? `${top.duration}s`
         : top.distance != null ? `${top.distance}`
         : `${top.reps ?? '?'} reps`
-      seen.set(ex.name, { top_set: detail, rpe: top.rpe ?? w.rpe })
+      seen.set(name, { top_set: detail, rpe: top.rpe ?? w.rpe })
     }
   }
   return [...seen.entries()].map(([name, v]) => ({ name, top_set: v.top_set, rpe: v.rpe })).slice(0, 20)
@@ -2918,9 +2920,21 @@ async function activateDueScheduledPhase(athleteId: string): Promise<boolean> {
   await supabase.from('athlete_profile')
     .update({ current_phase: dueName, last_updated: new Date().toISOString() })
     .eq('athlete_id', athleteId)
+
+  // Two things queue a block: a mid-week retest re-scoping the training, and the
+  // athlete deferring their own edit to the boundary. Greeting a change someone
+  // made by hand as though the system re-scoped them is a small lie that makes
+  // the app feel like it isn't listening, so name the one that actually happened.
+  const { data: steer } = await supabase
+    .from('program_revision').select('requests')
+    .eq('program_id', prog.id).eq('trigger', 'editor').eq('effective_on', today)
+    .order('created_at', { ascending: false }).limit(1).maybeSingle()
+  const asked = ((steer as { requests: string[] | null } | null)?.requests ?? [])[0]
   await insertCoachMessage(athleteId, {
     kind: 'phase_change',
-    body: `New block is live — your re-scoped ${dueName} phase starts this week.`,
+    body: steer
+      ? `The changes you made are live — your ${dueName} week starts today${asked ? `, with what you asked for: "${asked}"` : ''}.`
+      : `New block is live — your re-scoped ${dueName} phase starts this week.`,
     ref_id: dueId,
   })
   return true
@@ -3279,6 +3293,13 @@ export interface PendingSession {
   // null means "now" on insert / leave unchanged on edit.
   performedAt: string | null
   queuedAt: string
+  /**
+   * The routine's exercises AS THEY WERE when this session was logged, captured
+   * client-side and carried through the outbox. actualWeights is index-keyed
+   * against it, so without this a program edit made while the session sits
+   * offline would silently relabel it on commit.
+   */
+  exercisesSnapshot: ExerciseTemplate[] | null
 }
 
 export interface CommitResult {
@@ -3310,6 +3331,10 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
       rpe:            p.rpe,
       duration_mins:  p.durationMins,
     }
+    // Re-stamp the snapshot on an edit: the athlete re-entered these numbers
+    // against the prescription they were just shown, which is what the indices
+    // now mean. Absent (an older queued entry), leave the stored one alone.
+    if (p.exercisesSnapshot?.length) patch.exercises_snapshot = p.exercisesSnapshot
     if (p.performedAt) patch.performed_at = p.performedAt
     const { data: updated, error: updErr } = await supabase
       .from('workout').update(patch).eq('id', p.editWorkoutId).select().single()
@@ -3325,6 +3350,10 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
       rpe:            p.rpe,
       duration_mins:  p.durationMins,
     }
+    // Freeze what these set indices mean. Without it the log is only readable
+    // through the routine's CURRENT shape, and the next program edit rewrites
+    // the athlete's history as a side effect.
+    if (p.exercisesSnapshot?.length) insert.exercises_snapshot = p.exercisesSnapshot
     if (p.performedAt) insert.performed_at = p.performedAt
     const { data: workout, error } = await supabase
       .from('workout').insert(insert).select().single()
@@ -3538,7 +3567,7 @@ export async function gatherWeeklyRecap(athleteId: string, reviewId?: string): P
   const [{ data: ws }, { data: ins }, { data: ath }] = await Promise.all([
     supabase
       .from('workout')
-      .select('id, performed_at, rpe, actual_weights, routine!inner(name, exercises, program_id)')
+      .select('id, performed_at, rpe, actual_weights, exercises_snapshot, routine!inner(name, exercises, program_id)')
       .eq('routine.program_id', prog.id)
       .gte('performed_at', mondayStart.toISOString())
       .lte('performed_at', sunday.toISOString())
@@ -3552,19 +3581,15 @@ export async function gatherWeeklyRecap(athleteId: string, reviewId?: string): P
   ])
   const planned = ((ath as { sessions_per_week: number | null } | null)?.sessions_per_week) ?? 3
 
-  const sessions: RecapSession[] = ((ws ?? []) as unknown as Array<{
+  const sessions: RecapSession[] = ((ws ?? []) as unknown as Array<LoggedWorkoutLike & {
     id: string; performed_at: string; rpe: number | null
-    actual_weights: Record<string, SetLog[]> | null
     routine: { name: string; exercises: ExerciseTemplate[] }
   }>).map((w) => {
-    const aw = w.actual_weights ?? {}
-    const setsDone = Object.values(aw).flat().filter(isSetDone).length
-    const exs = (w.routine.exercises ?? []) as ExerciseTemplate[]
+    const setsDone = Object.values(w.actual_weights ?? {}).flat().filter(isSetDone).length
     const highlights: RecapSessionHighlight[] = []
-    for (const [idx, sets] of Object.entries(aw)) {
+    for (const { name, sets } of readLoggedExercises(w)) {
       const top = topWorkingSet(sets)
-      const ex = exs[Number(idx)]
-      if (top && ex) highlights.push({ name: ex.name, set: top })
+      if (top) highlights.push({ name, set: top })
       if (highlights.length >= 3) break
     }
     return {
@@ -3630,12 +3655,11 @@ export interface TrainingLog {
   weeks: LogWeek[]    // newest week first
 }
 
-function topHighlights(aw: Record<string, SetLog[]> | null, exercises: ExerciseTemplate[]): RecapSessionHighlight[] {
+function topHighlights(w: LoggedWorkoutLike): RecapSessionHighlight[] {
   const out: RecapSessionHighlight[] = []
-  for (const [idx, sets] of Object.entries(aw ?? {})) {
+  for (const { name, sets } of readLoggedExercises(w)) {
     const top = topWorkingSet(sets)
-    const ex = exercises[Number(idx)]
-    if (top && ex) out.push({ name: ex.name, set: top })
+    if (top) out.push({ name, set: top })
     if (out.length >= 3) break
   }
   return out
@@ -3653,6 +3677,13 @@ export interface SessionActuals {
   durationMins: number | null
   rpe: number | null
   setLogs: Record<number, SetLog[]>
+  /**
+   * The prescription this session was logged against. setLogs is indexed into
+   * THIS, not the routine's live list — "what you logged" has to show the
+   * movements you actually did, even if the program has been reshaped since.
+   * Null for sessions logged before snapshots shipped; render the routine then.
+   */
+  exercisesSnapshot: ExerciseTemplate[] | null
 }
 
 /** Count the sets in an actuals grid that carry real signal. */
@@ -3671,6 +3702,7 @@ export function actualsFromPending(p: PendingSession | null): SessionActuals | n
     durationMins: p.durationMins,
     rpe: p.rpe,
     setLogs,
+    exercisesSnapshot: p.exercisesSnapshot ?? null,
   }
 }
 
@@ -3678,13 +3710,14 @@ export function actualsFromPending(p: PendingSession | null): SessionActuals | n
 export async function gatherSessionActuals(workoutId: string): Promise<SessionActuals | null> {
   const { data } = await supabase
     .from('workout')
-    .select('id, performed_at, duration_mins, rpe, actual_weights')
+    .select('id, performed_at, duration_mins, rpe, actual_weights, exercises_snapshot')
     .eq('id', workoutId)
     .maybeSingle()
   if (!data) return null
   const w = data as {
     id: string; performed_at: string; duration_mins: number | null
     rpe: number | null; actual_weights: Record<string, SetLog[]> | null
+    exercises_snapshot: ExerciseTemplate[] | null
   }
   const setLogs: Record<number, SetLog[]> = {}
   Object.entries(w.actual_weights ?? {}).forEach(([k, v]) => { setLogs[Number(k)] = v })
@@ -3694,6 +3727,9 @@ export async function gatherSessionActuals(workoutId: string): Promise<SessionAc
     durationMins: w.duration_mins,
     rpe: w.rpe,
     setLogs,
+    exercisesSnapshot: Array.isArray(w.exercises_snapshot) && w.exercises_snapshot.length
+      ? w.exercises_snapshot
+      : null,
   }
 }
 
@@ -3713,14 +3749,13 @@ export async function gatherTrainingLog(
 
   const { data: ws } = await supabase
     .from('workout')
-    .select('id, routine_id, performed_at, rpe, actual_weights, routine!inner(name, exercises, program_id)')
+    .select('id, routine_id, performed_at, rpe, actual_weights, exercises_snapshot, routine!inner(name, exercises, program_id)')
     .eq('routine.program_id', prog.id)
     .order('performed_at', { ascending: false })
     .limit(limit)
 
-  type Row = {
+  type Row = LoggedWorkoutLike & {
     id: string; routine_id: string; performed_at: string; rpe: number | null
-    actual_weights: Record<string, SetLog[]> | null
     routine: { name: string; exercises: ExerciseTemplate[] }
   }
   const committed: LogSession[] = ((ws ?? []) as unknown as Row[]).map((w) => ({
@@ -3732,7 +3767,7 @@ export async function gatherTrainingLog(
     setsDone: Object.values(w.actual_weights ?? {}).flat().filter(isSetDone).length,
     rpe: w.rpe,
     pending: false,
-    highlights: topHighlights(w.actual_weights, w.routine?.exercises ?? []),
+    highlights: topHighlights(w),
   }))
 
   // Fold in finished-but-uncommitted sessions. Resolve their routine names in one
@@ -3762,7 +3797,13 @@ export async function gatherTrainingLog(
         setsDone: p.setsDone,
         rpe: p.rpe,
         pending: true,
-        highlights: topHighlights(p.actualWeights, r?.exercises ?? []),
+        // A queued session carries the prescription it was logged against, so a
+        // program edit while it sits in the outbox can't relabel it either.
+        highlights: topHighlights({
+          actual_weights: p.actualWeights,
+          exercises_snapshot: p.exercisesSnapshot ?? null,
+          routine: { exercises: r?.exercises ?? [] },
+        }),
       }
     })
   }
@@ -3819,20 +3860,15 @@ export async function gatherExerciseHistory(athleteId: string, exerciseName: str
 
   const { data: ws } = await supabase
     .from('workout')
-    .select('performed_at, rpe, actual_weights, routine!inner(exercises, program_id)')
+    .select('performed_at, rpe, actual_weights, exercises_snapshot, routine!inner(exercises, program_id)')
     .eq('routine.program_id', prog.id)
     .order('performed_at', { ascending: true })
 
-  type Row = {
-    performed_at: string; rpe: number | null
-    actual_weights: Record<string, SetLog[]> | null
-    routine: { exercises: ExerciseTemplate[] }
-  }
+  type Row = LoggedWorkoutLike & { performed_at: string; rpe: number | null }
   const points: ExercisePoint[] = []
   for (const w of (ws ?? []) as unknown as Row[]) {
-    const exs = w.routine?.exercises ?? []
-    for (const [idx, sets] of Object.entries(w.actual_weights ?? {})) {
-      if (exs[Number(idx)]?.name !== exerciseName) continue
+    for (const { name, sets } of readLoggedExercises(w)) {
+      if (name !== exerciseName) continue
       const top = topWorkingSet(sets)
       if (!top) continue
       const e1rm = top.weight != null && top.reps != null ? epley1rm(top.weight, top.reps) : null
@@ -4039,10 +4075,20 @@ export async function gatherWeekPager(athleteId: string, unit: string): Promise<
     const baseByRoutine = new Map<string, (number | null)[]>()
     for (const r of routines) {
       const { data: lastW } = await supabase
-        .from('workout').select('actual_weights').eq('routine_id', r.id).order('performed_at', { ascending: false }).limit(1).maybeSingle()
-      const aw = (lastW?.actual_weights as Record<string, SetLog[]> | null) ?? null
-      baseByRoutine.set(r.id, r.exercises.map((ex, i) =>
-        topWorkingSet(aw?.[String(i)] ?? undefined)?.weight ?? byName.get(ex.name)?.weight ?? null,
+        .from('workout').select('actual_weights, exercises_snapshot')
+        .eq('routine_id', r.id).order('performed_at', { ascending: false }).limit(1).maybeSingle()
+      // Resolve that session's sets BY MOVEMENT, not by position: the routine may
+      // have been edited since it was logged, and lining slot 3 up with slot 3
+      // would seed a lift's projection off a different exercise's weight.
+      const lastByName = new Map(
+        readLoggedExercises({
+          actual_weights: (lastW?.actual_weights as Record<string, SetLog[]> | null) ?? null,
+          exercises_snapshot: (lastW?.exercises_snapshot as ExerciseTemplate[] | null) ?? null,
+          routine: { exercises: r.exercises },
+        }).map(({ name, sets }) => [name, sets]),
+      )
+      baseByRoutine.set(r.id, r.exercises.map((ex) =>
+        topWorkingSet(lastByName.get(ex.name))?.weight ?? byName.get(ex.name)?.weight ?? null,
       ))
     }
 

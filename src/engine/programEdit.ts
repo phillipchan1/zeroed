@@ -26,8 +26,10 @@ import {
   callProgramEdit,
   type ProgramEditContext, type ProgramEditTurn, type EditWeekSession, type ProgramEdit,
 } from './agentClient'
+import { readLoggedExercises, type LoggedWorkoutLike } from './loggedSets'
+import { recordProgramRevision } from './programHistory'
 import type {
-  ExerciseTemplate, PhaseRow, RoutineRow, SetLog,
+  ExerciseTemplate, PhaseName, PhaseRow, RoutineRow, SetLog,
 } from '../types/database'
 
 // The deterministic half (draft shape, edit application, diff, estimates) lives
@@ -43,6 +45,46 @@ export interface ProgramEditState {
   weeksRemaining: number | null
   context: ProgramEditContext
   base: ProgramDraft
+  /** The live block's own dates and rules — needed to split it at a week boundary. */
+  phase: {
+    name: PhaseName
+    weekStart: string
+    weekEnd: string
+    nonNegotiables: string[]
+    advancementCriteria: string[]
+  }
+  /**
+   * Sessions already logged in the current week, newest first. The whole point
+   * of the timing choice: applying now rewrites the prescription these were
+   * performed against, and an athlete four sessions into a Friday deserves to
+   * see which ones before deciding.
+   */
+  loggedThisWeek: Array<{ routineId: string; sessionName: string; performedAt: string }>
+}
+
+/** When a confirmed change takes effect. */
+export type ApplyTiming = 'now' | 'next_week'
+
+/** Monday of the week containing `d`, local time. */
+export function startOfWeekMonday(d: Date): Date {
+  const r = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  r.setDate(r.getDate() - ((r.getDay() + 6) % 7))
+  return r
+}
+
+export function isoDate(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
+export function addDaysISO(dateStr: string, days: number): string {
+  const d = new Date(`${dateStr}T12:00:00`)
+  d.setDate(d.getDate() + days)
+  return isoDate(d)
+}
+
+/** The Monday a deferred change would land on. */
+export function nextMondayISO(from: Date = new Date()): string {
+  return addDaysISO(isoDate(startOfWeekMonday(from)), 7)
 }
 
 // ---- reading the live program ----------------------------------------------
@@ -117,38 +159,32 @@ export async function gatherProgramEditState(athleteId: string, unit: string): P
   // few sessions, so the coach edits against numbers instead of guesses.
   const { data: workoutRows } = await supabase
     .from('workout')
-    .select('rpe, performed_at, duration_mins, actual_weights, routine!inner(name, exercises, program_id)')
+    .select('rpe, performed_at, duration_mins, actual_weights, exercises_snapshot, routine!inner(name, exercises, program_id)')
     .eq('routine.program_id', prog.id)
     .order('performed_at', { ascending: false })
     .limit(30)
-  type WRow = {
+  type WRow = LoggedWorkoutLike & {
     rpe: number | null; performed_at: string; duration_mins: number | null
-    actual_weights: Record<string, SetLog[]> | null
     routine: { name: string; exercises: ExerciseTemplate[] }
   }
   const rows = (workoutRows ?? []) as unknown as WRow[]
 
   const liftSeen = new Map<string, { top_set: string; rpe: number | null }>()
   for (const w of rows) {
-    const exs = w.routine?.exercises ?? []
-    for (const [idx, sets] of Object.entries(w.actual_weights ?? {})) {
-      const ex = exs[Number(idx)]
-      if (!ex || liftSeen.has(ex.name)) continue
+    for (const { name, sets } of readLoggedExercises(w)) {
+      if (liftSeen.has(name)) continue
       const top = topWorkingSet(sets)
       const cell = top ? formatSetCell(top, unit) : null
       if (!cell) continue
-      liftSeen.set(ex.name, { top_set: cell, rpe: top?.rpe ?? w.rpe })
+      liftSeen.set(name, { top_set: cell, rpe: top?.rpe ?? w.rpe })
     }
   }
 
   const recent_sessions = rows.slice(0, 5).map((w) => {
-    const exs = w.routine?.exercises ?? []
     const lines: string[] = []
-    for (const [idx, sets] of Object.entries(w.actual_weights ?? {})) {
-      const ex = exs[Number(idx)]
-      if (!ex || !Array.isArray(sets)) continue
+    for (const { name, sets } of readLoggedExercises(w)) {
       const cells = sets.map((s) => formatSetCell(s, unit)).filter((c): c is string => c != null)
-      if (cells.length) lines.push(`${ex.name}: ${cells.join(', ')}`)
+      if (cells.length) lines.push(`${name}: ${cells.join(', ')}`)
     }
     return {
       session: w.routine?.name ?? 'Session',
@@ -180,6 +216,23 @@ export async function gatherProgramEditState(athleteId: string, unit: string): P
     recent_sessions,
   }
 
+  // What's already been trained this week. An edit applied now rewrites the
+  // prescription behind these sessions; deferring to Monday leaves them alone.
+  const weekMonday = startOfWeekMonday(new Date())
+  const { data: weekRows } = await supabase
+    .from('workout')
+    .select('performed_at, routine_id, routine!inner(name, program_id)')
+    .eq('routine.program_id', prog.id)
+    .gte('performed_at', weekMonday.toISOString())
+    .order('performed_at', { ascending: false })
+  const loggedThisWeek = ((weekRows ?? []) as unknown as Array<{
+    performed_at: string; routine_id: string; routine: { name: string }
+  }>).map((w) => ({
+    routineId: w.routine_id,
+    sessionName: w.routine?.name ?? 'Session',
+    performedAt: w.performed_at,
+  }))
+
   return {
     programId: prog.id,
     phaseId: phase.id,
@@ -190,6 +243,14 @@ export async function gatherProgramEditState(athleteId: string, unit: string): P
       sessions,
       sessionsPerWeek: clampInt(athlete?.sessions_per_week, 1, MAX_SESSIONS, Math.max(1, sessions.length)),
     },
+    phase: {
+      name: phase.name,
+      weekStart: phase.week_start,
+      weekEnd: phase.week_end,
+      nonNegotiables: Array.isArray(phase.non_negotiables) ? (phase.non_negotiables as string[]) : [],
+      advancementCriteria: Array.isArray(phase.advancement_criteria) ? (phase.advancement_criteria as string[]) : [],
+    },
+    loggedThisWeek,
   }
 }
 
@@ -271,6 +332,10 @@ export interface ApplyDraftResult {
   ok: boolean
   written: number
   errors: string[]
+  /** The day the change takes effect — today, or the Monday it was deferred to. */
+  effectiveOn: string
+  /** True when the change was queued as a new block rather than applied in place. */
+  scheduled: boolean
 }
 
 /**
@@ -289,13 +354,85 @@ export async function applyProgramDraft(
   notes: string[] = [],
   /** What the athlete asked for, in their own words — kept as a standing steer. */
   requests: string[] = [],
+  /** Now, or at the coming week boundary. Defaults to the old behaviour. */
+  timing: ApplyTiming = 'now',
 ): Promise<ApplyDraftResult> {
   const errors: string[] = []
   let written = 0
+  const diff = diffDraft(state.base, draft)
 
-  // Only the sessions that actually moved are written. An untouched session has
-  // no business being re-saved: the write would be a no-op at best, and at worst
-  // it would stamp a stale draft over something changed elsewhere since.
+  // The record comes first, and it records the week BEFORE either path runs —
+  // an immediate apply overwrites the routine rows it snapshots, so a snapshot
+  // taken afterwards would capture the change rather than what preceded it.
+  const effectiveOn = timing === 'next_week' ? nextMondayISO() : isoDate(new Date())
+  await recordProgramRevision({
+    programId: state.programId,
+    phaseId: state.phaseId,
+    trigger: 'editor',
+    effectiveOn,
+    requests,
+    before: state.base.sessions,
+    diff,
+  })
+
+  if (timing === 'next_week') {
+    written = await scheduleDraftForNextWeek(state, draft, errors, effectiveOn)
+  } else {
+    written = await writeDraftInPlace(state, draft, errors)
+  }
+
+  const athletePatch: Record<string, unknown> = {}
+  if (draft.sessionsPerWeek !== state.base.sessionsPerWeek) {
+    athletePatch.sessions_per_week = draft.sessionsPerWeek
+  }
+  // Steering has to outlive the block it was done in. Without this, the next
+  // phase is designed from scratch at the boundary and quietly drops everything
+  // the athlete asked for — the app fighting them all over again a month later.
+  const preferences = mergePreferences(state.context.standing_preferences, requests)
+  if (preferences && preferences !== state.context.standing_preferences) {
+    athletePatch.training_preferences = preferences
+  }
+  if (Object.keys(athletePatch).length) {
+    const { error } = await supabase.from('athlete').update(athletePatch).eq('id', athleteId)
+    if (error) errors.push(`profile: ${error.message}`)
+  }
+
+  // The change belongs in the coach log too — this is the same event class as a
+  // phase change, and the athlete should find it there later.
+  const parts = [
+    diff.added > 0 ? `${diff.added} added` : null,
+    diff.removed > 0 ? `${diff.removed} dropped` : null,
+    diff.changed > 0 ? `${diff.changed} retuned` : null,
+    diff.newSessions > 0 ? `${diff.newSessions} new session${diff.newSessions === 1 ? '' : 's'}` : null,
+  ].filter(Boolean)
+  await supabase.from('coach_message').insert({
+    athlete_id: athleteId,
+    role: 'coach',
+    kind: 'phase_change',
+    body: [
+      timing === 'next_week'
+        ? `Your reshaped ${state.phaseName} block is queued for Monday — ${parts.join(' · ') || 'no net change'}. This week stays as it is.`
+        : `You reshaped your ${state.phaseName} block — ${parts.join(' · ') || 'no net change'}.`,
+      ...notes,
+    ].join(' '),
+    ref_id: state.phaseId,
+  })
+
+  return { ok: errors.length === 0, written, errors, effectiveOn, scheduled: timing === 'next_week' }
+}
+
+/**
+ * Apply now: update the live routine rows in place, so the change is on Train
+ * the moment the athlete closes the screen.
+ *
+ * Only sessions that actually moved are written. An untouched session has no
+ * business being re-saved: the write would be a no-op at best, and at worst it
+ * would stamp a stale draft over something changed elsewhere since.
+ */
+async function writeDraftInPlace(
+  state: ProgramEditState, draft: ProgramDraft, errors: string[],
+): Promise<number> {
+  let written = 0
   const baseById = new Map(state.base.sessions.filter((s) => s.routineId).map((s) => [s.routineId as string, s]))
 
   for (const s of draft.sessions) {
@@ -328,42 +465,75 @@ export async function applyProgramDraft(
       else written++
     }
   }
+  return written
+}
 
-  const athletePatch: Record<string, unknown> = {}
-  if (draft.sessionsPerWeek !== state.base.sessionsPerWeek) {
-    athletePatch.sessions_per_week = draft.sessionsPerWeek
-  }
-  // Steering has to outlive the block it was done in. Without this, the next
-  // phase is designed from scratch at the boundary and quietly drops everything
-  // the athlete asked for — the app fighting them all over again a month later.
-  const preferences = mergePreferences(state.context.standing_preferences, requests)
-  if (preferences && preferences !== state.context.standing_preferences) {
-    athletePatch.training_preferences = preferences
-  }
-  if (Object.keys(athletePatch).length) {
-    const { error } = await supabase.from('athlete').update(athletePatch).eq('id', athleteId)
-    if (error) errors.push(`profile: ${error.message}`)
+/**
+ * Apply Monday: leave this week completely alone and queue the reshaped week as
+ * a new block starting at the boundary.
+ *
+ * This is the same manoeuvre a mid-week retest already performs — end the live
+ * block this Sunday, insert the new one as `pending`, and let
+ * activateDueScheduledPhase promote it once its week_start lands. Crucially the
+ * new block gets FRESH routine rows: the sessions the athlete already trained
+ * this week keep pointing at the untouched originals, so nothing they logged is
+ * rewritten and the old prescription survives as history rather than being
+ * overwritten by the new one.
+ */
+async function scheduleDraftForNextWeek(
+  state: ProgramEditState, draft: ProgramDraft, errors: string[], startsOn: string,
+): Promise<number> {
+  // Run the block through to the end of this week, then hand over. If the block
+  // was already due to end sooner, the handover date wins — a phase must never
+  // end before the one replacing it begins.
+  const thisSunday = addDaysISO(startsOn, -1)
+  const { error: truncErr } = await supabase
+    .from('phase').update({ week_end: thisSunday }).eq('id', state.phaseId)
+  if (truncErr) {
+    errors.push(`couldn't close out the current block: ${truncErr.message}`)
+    return 0
   }
 
-  // The change belongs in the coach log too — this is the same event class as a
-  // phase change, and the athlete should find it there later.
-  const diff = diffDraft(state.base, draft)
-  const parts = [
-    diff.added > 0 ? `${diff.added} added` : null,
-    diff.removed > 0 ? `${diff.removed} dropped` : null,
-    diff.changed > 0 ? `${diff.changed} retuned` : null,
-    diff.newSessions > 0 ? `${diff.newSessions} new session${diff.newSessions === 1 ? '' : 's'}` : null,
-  ].filter(Boolean)
-  await supabase.from('coach_message').insert({
-    athlete_id: athleteId,
-    role: 'coach',
-    kind: 'phase_change',
-    body: [
-      `You reshaped your ${state.phaseName} block — ${parts.join(' · ') || 'no net change'}.`,
-      ...notes,
-    ].join(' '),
-    ref_id: state.phaseId,
-  })
+  // The new block continues the same phase of the arc — same name, same rules,
+  // same advancement criteria. Only the week changed. Its end date keeps whatever
+  // runway the original had, and never less than a full week.
+  const weekEnd = state.phase.weekEnd > startsOn ? state.phase.weekEnd : addDaysISO(startsOn, 27)
+  const { data: newPhase, error: phaseErr } = await supabase
+    .from('phase')
+    .insert({
+      program_id: state.programId,
+      name: state.phase.name,
+      week_start: startsOn,
+      week_end: weekEnd,
+      non_negotiables: state.phase.nonNegotiables,
+      advancement_criteria: state.phase.advancementCriteria,
+      status: 'pending',
+    })
+    .select('id').single()
+  if (phaseErr || !newPhase) {
+    // Put the block's original end date back rather than leaving it truncated
+    // with nothing queued to follow it — that would strand the athlete without
+    // a live phase come Monday.
+    await supabase.from('phase').update({ week_end: state.phase.weekEnd }).eq('id', state.phaseId)
+    errors.push(`couldn't schedule the new block: ${phaseErr?.message ?? 'insert failed'}`)
+    return 0
+  }
+  const newPhaseId = (newPhase as { id: string }).id
 
-  return { ok: errors.length === 0, written, errors }
+  const { error: routineErr } = await supabase.from('routine').insert(
+    draft.sessions.map((s) => ({
+      program_id: state.programId,
+      phase_id: newPhaseId,
+      name: s.name,
+      session_type: s.sessionType,
+      exercises: s.exercises,
+      intent: s.intent,
+      intended_dow: s.intendedDow,
+    })),
+  )
+  if (routineErr) {
+    errors.push(`couldn't write the scheduled week: ${routineErr.message}`)
+    return 0
+  }
+  return draft.sessions.length
 }

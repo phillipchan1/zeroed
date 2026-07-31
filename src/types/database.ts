@@ -146,6 +146,59 @@ export interface WorkoutRow {
   actual_reps: Record<string, number[]> | null
   rpe: number | null
   duration_mins: number | null
+  /**
+   * The routine's exercises AS THEY WERE when this session was logged.
+   * `actual_weights` is index-keyed against THIS array — not the routine's live
+   * one, which the program editor rewrites in place. Null only for sessions
+   * logged before the snapshot shipped; `resolveLoggedExercises` falls back to
+   * the routine for those.
+   */
+  exercises_snapshot: ExerciseTemplate[] | null
+}
+
+/** How a reprogramming event came about. */
+export type RevisionTrigger = 'editor' | 'phase_boundary' | 'retest' | 'deload'
+
+/** One session's shape inside a revision snapshot — a frozen DraftSession. */
+export interface RevisionSession {
+  name: string
+  intent: string
+  session_type: string
+  intended_dow: number | null
+  exercises: ExerciseTemplate[]
+}
+
+/**
+ * An append-only record of one reprogramming event (table program_revision).
+ * Never updated, never deleted: it is both the athlete's journey and the memory
+ * that reprogramming reads back so each block knows what came before it.
+ */
+export interface ProgramRevisionRow {
+  id: string
+  program_id: string
+  phase_id: string | null
+  created_at: string
+  trigger: RevisionTrigger
+  /** When the change takes effect — today for an immediate apply, next Monday for a deferred one. */
+  effective_on: string
+  /** The athlete's own words, newest first. */
+  requests: string[]
+  /** The full week before the change — the restore point. */
+  snapshot: RevisionSession[]
+  /** What moved, precomputed so a timeline renders without replaying snapshots. */
+  diff: RevisionDiff
+  summary: string | null
+}
+
+export interface RevisionDiff {
+  added: number
+  removed: number
+  changed: number
+  new_sessions: number
+  sessions: Array<{
+    name: string
+    changes: Array<{ kind: string; name: string; before?: string; after?: string }>
+  }>
 }
 
 // An in-progress session, autosaved as it's logged (table workout_draft). Staged
