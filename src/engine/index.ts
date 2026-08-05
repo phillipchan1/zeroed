@@ -805,8 +805,9 @@ export async function runCoachChat(
   context: CoachContext,
   history: CoachChatTurn[],
   question: string,
+  opts?: { midWorkout?: boolean },
 ): Promise<CoachReply> {
-  const res = await callCoachChat({ context, history, question })
+  const res = await callCoachChat({ context, history, question, mid_workout: opts?.midWorkout })
   if (res.ok) {
     return {
       source: 'agent',
