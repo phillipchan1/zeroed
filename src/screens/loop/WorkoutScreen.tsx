@@ -1,26 +1,28 @@
 import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { ChevronLeft, Check, Plus, Info, X } from 'lucide-react'
+import { ChevronLeft, Check, Plus, Info, X, MessageCircle } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import {
   restoreDraft, loadDraftLocal, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
 } from '../../lib/workoutDraft'
-import { loadCache, saveCache } from '../../lib/cache'
+import { loadCache, saveCache, useCachedLoader } from '../../lib/cache'
 import { workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
 import { invalidateLoopViews, cacheKeys } from '../../lib/loopCache'
 import {
   enqueueSession, commitPending, parsePendingRef, pendingSessionById, committedWorkoutIdFor,
 } from '../../lib/workoutOutbox'
 import {
-  gatherSessionPrescription, actualsFromPending,
+  gatherSessionPrescription, actualsFromPending, coachStarterPrompts, runCoachChat,
   type SessionPrescription, type SessionActuals,
   type PendingSession, type PendingDebrief, type DebriefExerciseInput,
 } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
 import { getWeightUnit, getDistanceUnit } from '../../lib/units'
+import { fetchCoachView } from './CoachScreen'
+import type { CoachChatTurn } from '../../engine/agentClient'
 import {
-  Button, Spinner, Sheet, Chip,
+  Button, Spinner, Sheet, Chip, Markdown, ChatComposer, TypingDots,
 } from '../../components/ui'
 import type {
   RoutineRow, ExerciseTemplate, SetLog, InsightRow, TrackingType,
@@ -542,6 +544,117 @@ function ExerciseSheet({ name, note, cue, insight, reading, onClose }: ExerciseS
   )
 }
 
+// ---- Mid-workout coach chat (what/how/why, no program edits) ---------------
+// A quick-question surface the athlete can open without leaving the session —
+// today the only way to reach Coach mid-workout was to fully navigate off this
+// screen. Deliberately dumber than CoachScreen: it shares the same read-only
+// question/answer plumbing (gatherCoachContext, runCoachChat) but has NO
+// "Proposed changes / Apply" affordance at all, so a program edit is simply
+// not reachable from here — that still lives only in Coach (post-session) or
+// the program editor. `mid_workout: true` also tells the model itself to keep
+// `actions` empty and answers to a sentence or two (see schemas.ts).
+
+interface WorkoutCoachTurn {
+  role: 'athlete' | 'coach'
+  content: string
+  fresh?: boolean
+}
+
+function WorkoutCoachSheet({ athleteId, onClose }: { athleteId: string; onClose: () => void }) {
+  // Same cache key as CoachScreen — if the athlete has opened Coach recently
+  // this paints instantly from the held view instead of a fresh round-trip.
+  const { data: view } = useCachedLoader(`coach:${athleteId}`, () => fetchCoachView(athleteId))
+  const context = view?.context ?? null
+
+  const [turns, setTurns] = useState<WorkoutCoachTurn[]>([])
+  const [suggestionsOverride, setSuggestionsOverride] = useState<string[] | null>(null)
+  const suggestions = suggestionsOverride ?? (context ? coachStarterPrompts(context) : [])
+  const [pending, setPending] = useState(false)
+  const [draft, setDraft] = useState('')
+  const threadEndRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    threadEndRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }, [turns.length, pending])
+
+  async function send(question: string) {
+    const q = question.trim()
+    if (!q || pending || !context) return
+    setDraft('')
+    setSuggestionsOverride([])
+    const history: CoachChatTurn[] = turns.map((t) => ({ role: t.role, content: t.content }))
+    setTurns((prev) => [...prev.map((t) => ({ ...t, fresh: false })), { role: 'athlete', content: q }])
+    setPending(true)
+    // midWorkout: true — the reply is strictly Q&A; any `actions` the model
+    // returns are discarded unread, there's nothing here that could apply them.
+    const res = await runCoachChat(context, history, q, { midWorkout: true })
+    setTurns((prev) => [...prev, { role: 'coach', content: res.reply, fresh: true }])
+    setSuggestionsOverride(res.followups.length ? res.followups : [])
+    setPending(false)
+  }
+
+  return (
+    <Sheet
+      title="Coach"
+      subtitle="Quick questions — the clock keeps running"
+      onClose={onClose}
+      actions={
+        <ChatComposer
+          value={draft}
+          onChange={setDraft}
+          onSend={() => void send(draft)}
+          placeholder={context ? 'What, how, or why…' : 'Loading your read…'}
+          disabled={!context || pending}
+          ariaLabel="Ask the coach"
+          sendLabel="Ask"
+        />
+      }
+    >
+      <div className="coach-chat">
+        {context && turns.length === 0 && (
+          <div className="coach-msg coach-msg--coach fade-rise">
+            <Markdown className="coach-msg__body" text="What's up? Ask about this lift, this session, or the read behind it." />
+          </div>
+        )}
+
+        {turns.map((t, i) =>
+          t.role === 'athlete' ? (
+            <div key={i} className="coach-msg coach-msg--athlete fade-rise">
+              <p className="coach-msg__body">{t.content}</p>
+            </div>
+          ) : (
+            <div key={i} className={`coach-msg coach-msg--coach fade-rise${t.fresh ? ' coach-msg--fresh' : ''}`}>
+              <Markdown className="coach-msg__body" text={t.content} />
+            </div>
+          ),
+        )}
+
+        {pending && (
+          <div className="coach-msg coach-msg--coach">
+            <TypingDots />
+          </div>
+        )}
+
+        <div ref={threadEndRef} />
+
+        {!pending && suggestions.length > 0 && (
+          <div className="coach-suggestions">
+            {suggestions.map((s, i) => (
+              <button key={i} className="coach-suggestion" onClick={() => void send(s)}>
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
+      <p className="text-xs text-dim" style={{ marginTop: 12, lineHeight: 1.5 }}>
+        Answers only, no changes here — program adjustments happen in Coach after you finish.
+      </p>
+    </Sheet>
+  )
+}
+
 // ---- Session debrief sheet (the prose the agent mines) ---------------------
 
 interface DebriefSheetProps {
@@ -788,6 +901,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // seeded draft still drops straight into training.
   const [briefOpen, setBriefOpen] = useState(false)
   const [hasStarted, setHasStarted] = useState<boolean>(() => !!seedDraft || !!seedActuals)
+
+  // Mid-workout coach chat — quick what/how/why questions without leaving the
+  // session. No program-edit path exists from here (see WorkoutCoachSheet).
+  const [coachOpen, setCoachOpen] = useState(false)
 
   // Per-exercise felt signal (exIdx → feedback).
   const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>(
@@ -1489,6 +1606,16 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           >
             <Info size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Why
           </button>
+          {athleteId && (
+            <button
+              type="button"
+              className="howto-tag"
+              onClick={() => setCoachOpen(true)}
+              aria-label="Ask the coach"
+            >
+              <MessageCircle size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Coach
+            </button>
+          )}
         </div>
         {/* Progress — the session's completion, drawn. */}
         <div className="meter" style={{ height: 3, borderRadius: 0 }}>
@@ -1750,6 +1877,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           reading={openExercise.reading}
           onClose={() => setOpenExercise(null)}
         />
+      )}
+
+      {/* Mid-workout coach chat — quick questions, no program edits */}
+      {coachOpen && athleteId && (
+        <WorkoutCoachSheet athleteId={athleteId} onClose={() => setCoachOpen(false)} />
       )}
     </div>
   )

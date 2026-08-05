@@ -470,6 +470,9 @@ export function callCoachChat(payload: {
   context: CoachContext
   history: CoachChatTurn[]
   question: string
+  // True when asked from inside an active workout — the model is told to stay
+  // strictly read-only (see schemas.ts) since that surface has no Apply control.
+  mid_workout?: boolean
 }): Promise<AgentResult<CoachChatResult>> {
   return invokeAgent<CoachChatResult>('coach_chat', payload)
 }
