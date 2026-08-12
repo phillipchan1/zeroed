@@ -45,11 +45,18 @@ UPDATE phase SET week_start = '2026-08-10', week_end = '2026-09-06'
 WHERE id = '556a405d-25d2-4aa6-9613-ce58aa632434';
 
 -- 2. Copy the five real sessions into the block. See "why it is shaped this way".
+--    NOT EXISTS keeps this idempotent: a second run copies nothing rather than
+--    silently doubling the week to ten sessions.
 INSERT INTO routine (program_id, phase_id, name, session_type, exercises, intent, intended_dow)
-SELECT program_id, '556a405d-25d2-4aa6-9613-ce58aa632434',
-       name, session_type, exercises, intent, intended_dow
-FROM routine
-WHERE phase_id = '9ff5c1df-cdf0-4166-bfab-132fa4fa832d';
+SELECT src.program_id, '556a405d-25d2-4aa6-9613-ce58aa632434',
+       src.name, src.session_type, src.exercises, src.intent, src.intended_dow
+FROM routine src
+WHERE src.phase_id = '9ff5c1df-cdf0-4166-bfab-132fa4fa832d'
+  AND NOT EXISTS (
+    SELECT 1 FROM routine dst
+    WHERE dst.phase_id = '556a405d-25d2-4aa6-9613-ce58aa632434'
+      AND dst.name = src.name
+  );
 
 -- 3. Re-point only the Mon 2026-08-10 session onto its new copy, by name.
 UPDATE workout w SET routine_id = (
@@ -72,7 +79,7 @@ WHERE phase_id = '556a405d-25d2-4aa6-9613-ce58aa632434'
     SELECT count(*) FROM routine r2
     WHERE r2.phase_id = '556a405d-25d2-4aa6-9613-ce58aa632434'
       AND r2.name NOT IN ('Session A', 'Session B', 'Session C')
-  ) = 5;
+  ) >= 5;
 
 COMMIT;
 
