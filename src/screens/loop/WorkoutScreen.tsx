@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { ChevronLeft, Check, Plus, Info, X, MessageCircle } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Check, Plus, Info, X, MessageCircle, Target } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import {
   restoreDraft, loadDraftLocal, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
@@ -13,7 +13,7 @@ import {
 } from '../../lib/workoutOutbox'
 import {
   gatherSessionPrescription, actualsFromPending, coachStarterPrompts, runCoachChat,
-  type SessionPrescription, type SessionActuals,
+  type SessionPrescription, type SessionActuals, type ClearanceView,
   type PendingSession, type PendingDebrief, type DebriefExerciseInput,
 } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
@@ -457,6 +457,62 @@ function SessionBrief({
           <p key={i} className="text-base" style={{ lineHeight: 1.55 }}>{l}</p>
         ))}
       </div>
+    </Sheet>
+  )
+}
+
+// ---- Clearance sheet (what would actually lift the cap) --------------------
+// The limiter's exit condition, stated plainly enough to train at. This is the
+// difference between "load stays capped until the pattern clears" — which tells
+// the athlete nothing they can act on — and a target with a price on it.
+
+function ClearanceSheet({ clearance, onClose }: { clearance: ClearanceView; onClose: () => void }) {
+  const { lift, requirement, sessionsPassed, sessionsNeeded, minRpe, exerciseIndex } = clearance
+  return (
+    <Sheet title="What clears this" onClose={onClose}>
+      <p className="text-base" style={{ lineHeight: 1.55, marginBottom: 20 }}>{requirement}</p>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <p className="section-header" style={{ marginBottom: 10 }}>Progress</p>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+          {Array.from({ length: sessionsNeeded }, (_, i) => (
+            <span
+              key={i}
+              style={{
+                flex: 1, height: 4, borderRadius: 2,
+                background: i < sessionsPassed ? 'var(--signal)' : 'var(--line)',
+              }}
+            />
+          ))}
+        </div>
+        <p className="num text-sm" style={{ color: 'var(--text-dim)' }}>
+          {sessionsPassed} of {sessionsNeeded} sessions banked
+        </p>
+      </div>
+
+      <div style={{ marginBottom: 16 }}>
+        <p className="section-header" style={{ marginBottom: 10 }}>How it counts</p>
+        <ul style={{ margin: 0, padding: 0, listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 10 }}>
+          <li className="text-base" style={{ lineHeight: 1.55 }}>
+            Log your top sets on <strong>{lift}</strong> at <strong>RPE {minRpe} or above</strong>. Sets below that
+            don't count toward clearing — the test is whether the pattern holds under real load.
+          </li>
+          <li className="text-base" style={{ lineHeight: 1.55 }}>
+            Flag <strong>Tweak</strong> or <strong>Pain</strong> on {lift} and the limiter is confirmed instead:
+            the cap stays and the test starts over. That's the answer working, not you failing it.
+          </li>
+          {exerciseIndex < 0 && (
+            <li className="text-base" style={{ lineHeight: 1.55, color: 'var(--text-dim)' }}>
+              {lift} isn't in today's session — this progresses on the day you train it.
+            </li>
+          )}
+        </ul>
+      </div>
+
+      <p className="text-sm" style={{ color: 'var(--text-dim)', lineHeight: 1.55 }}>
+        Ready before the test says so? Use <strong>Push it</strong> on a capped lift. A pushed set that lands
+        pain-free counts as evidence against the limiter, same as a test set.
+      </p>
     </Sheet>
   )
 }
@@ -938,6 +994,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // Per-exercise prescription — last week's top set + the week's directive (§4.4).
   const [prescription, setPrescription] = useState<SessionPrescription | null>(() => seedBoot?.prescription ?? null)
 
+  // The clearance-test sheet — what would actually lift the cap.
+  const [showClearance, setShowClearance] = useState(false)
+
   // Last session's results per exercise index, for the desktop Previous column.
   const [prevByExercise, setPrevByExercise] = useState<Record<number, SetLog[]>>(() => seedBoot?.prevByExercise ?? {})
   // Which exercise is in focus — drives the "why" panel in the desktop rail.
@@ -1306,6 +1365,17 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     setFeedback((prev) => ({ ...prev, [exIdx]: { name, felt: prev[exIdx]?.felt ?? null, note } }))
   }
 
+  // A push rides in `feedback` rather than its own state so it survives a
+  // resumed session: the draft already persists feedback, and a decision to test
+  // the cap made an hour ago still holds when the athlete comes back to finish.
+  function togglePush(exIdx: number, name: string) {
+    startedLoggingRef.current = true
+    setFeedback((prev) => {
+      const cur = prev[exIdx]
+      return { ...prev, [exIdx]: { name, felt: cur?.felt ?? null, note: cur?.note ?? '', pushed: !cur?.pushed } }
+    })
+  }
+
   const allSetsFlat = Object.values(setLogs).flat()
   const hasAnyLog = allSetsFlat.some(isLogged)
 
@@ -1389,6 +1459,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         note: fb?.note ?? '',
         prescribed: `${ex.sets}×${ex.reps}${ex.load ? ` ${ex.load}` : ''}`,
         performed: performedSummary(t, setLogs[i] ?? [], unit, distanceUnit),
+        pushed: fb?.pushed === true,
       }
     })
     return {
@@ -1630,7 +1701,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       <div className="workout-panes">
        <div className="workout-list">
         <div className="workout-col">
-        {/* Intelligence Rule in effect — stated out loud (the felt difference) */}
+        {/* Intelligence Rule in effect — stated out loud (the felt difference),
+            with the way OUT of it directly underneath. A cap the athlete can't
+            see an exit from reads as the app being timid; naming the exit turns
+            it into something to train at. */}
         {prescription?.rule && (
           <div
             className="card"
@@ -1640,6 +1714,24 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
               {prescription.rule.name}
             </p>
             <p className="text-base" style={{ lineHeight: 1.5 }}>{prescription.rule.reasoning}</p>
+            {prescription.clearance && (
+              <button
+                type="button"
+                onClick={() => setShowClearance(true)}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8, width: '100%',
+                  marginTop: 14, padding: '10px 0 0', background: 'none',
+                  borderTop: '1px solid var(--line)', borderLeft: 0, borderRight: 0, borderBottom: 0,
+                  color: 'var(--text)', textAlign: 'left', cursor: 'pointer',
+                }}
+              >
+                <Target size={14} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--signal)' }} />
+                <span className="text-sm" style={{ flex: 1 }}>
+                  What clears it — {prescription.clearance.sessionsPassed}/{prescription.clearance.sessionsNeeded} sessions banked
+                </span>
+                <ChevronRight size={14} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--text-dim)' }} />
+              </button>
+            )}
           </div>
         )}
 
@@ -1655,6 +1747,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           const coachNote = getCoachingNote(ex.name)
           const hasDetails =
             !!coachNote || !!ex.cue || !!(ex.insight_id && insightMap[ex.insight_id]) || !!ex.reading
+          const isPushed = feedback[exIdx]?.pushed === true
 
           return (
             <div key={exIdx} style={{ paddingTop: 26, paddingBottom: 16, borderBottom: '1px solid var(--line)' }}>
@@ -1687,9 +1780,29 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
                     {ex.reading && <Chip tone="info">Reading</Chip>}
                     {prescription?.hints[exIdx] && (
-                      <Chip tone={prescription.held[exIdx] ? 'pending' : 'doing'}>
-                        {prescription.hints[exIdx]}
-                      </Chip>
+                      isPushed
+                        ? <Chip tone="doing">
+                            {prescription.pushTargets?.[exIdx] != null
+                              ? `Pushing — go for ${prescription.pushTargets[exIdx]}${unit}`
+                              : 'Pushing — cap off, your call'}
+                          </Chip>
+                        : <Chip tone={prescription.held[exIdx] ? 'pending' : 'doing'}>
+                            {prescription.hints[exIdx]}
+                          </Chip>
+                    )}
+                    {/* Push is offered only where a cap is actually suppressing
+                        the load. Everywhere else the athlete can simply log a
+                        heavier set — there is nothing to override. */}
+                    {prescription?.held[exIdx] && (
+                      <button
+                        type="button"
+                        className="howto-tag"
+                        onClick={() => togglePush(exIdx, ex.name)}
+                        aria-pressed={isPushed}
+                        style={isPushed ? { borderColor: 'var(--signal)', color: 'var(--signal)' } : undefined}
+                      >
+                        {isPushed ? 'Pushing' : 'Push it'}
+                      </button>
                     )}
                   </div>
                 )}
@@ -1876,6 +1989,14 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           insight={openExercise.insight}
           reading={openExercise.reading}
           onClose={() => setOpenExercise(null)}
+        />
+      )}
+
+      {/* The exit condition on the limiter, in full */}
+      {showClearance && prescription?.clearance && (
+        <ClearanceSheet
+          clearance={prescription.clearance}
+          onClose={() => setShowClearance(false)}
         />
       )}
 

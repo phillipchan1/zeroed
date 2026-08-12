@@ -37,13 +37,26 @@ import {
   type ProgramDesignResult, type PhaseDesignResult, type InsightCategory,
   type CoachContext, type CoachChatTurn, type CoachAction,
 } from './agentClient'
-import { FELT_CHIPS, type FeltLabel } from '../types/database'
+import { FELT_CHIPS, isClearanceTest, type FeltLabel, type ClearanceTest } from '../types/database'
 import { getWeightUnit } from '../lib/units'
 import { validateProvisionalProgram } from './safety'
 import {
   OBSTACLE_CATEGORY_HINTS, buildReadSkeleton, READ_FLOORS,
   type ReadAxis, type ArenaType,
 } from './demandTables'
+// The deterministic prescription rules live in their own pure module so they can
+// be exercised without a database — see prescription.check.ts.
+import {
+  SEVERITY_STRONG, SEVERITY_PAIN,
+  rpeContract, PHASE_RPE, tallyWeek, decidePrescription,
+  roundLoad, recommendedLoad, autoregulateDelta, maxUpFor,
+  P1_RESOLVE_THRESHOLD, P1_DISCONFIRM_STEP, advanceStatus,
+  addressesLimiter, capIsActive, isLiftHeld,
+  CLEARANCE_TOP_SETS, CLEARANCE_SESSIONS,
+  clearanceTestOf, pickClearanceLift, describeClearanceTest, newClearanceTest, judgeClearanceSession,
+  type WeeklyTally, type WeekWorkout, type WeekObservation, type LiftAttempt,
+} from './prescription'
+
 // Logged sets are index-keyed against the session's exercise list as it was AT
 // LOG TIME. Every read of actual_weights goes through here so an edit to the
 // live routine can never reattribute work the athlete already did.
@@ -383,8 +396,9 @@ export async function runSessionReviewAgent(
       existingInsightId: target.id,
       updatedConfidence,
       updatedEvidence,
-      // status only advances on rising confidence; disconfirming never advances.
-      updatedStatus: delta > 0 ? advanceStatus(target.status, updatedConfidence) : null,
+      // Status tracks confidence in BOTH directions — rising evidence promotes,
+      // and confidence falling to the resolve threshold retires the read.
+      updatedStatus: advanceStatus(target.status, updatedConfidence),
       newInsight: null,
     }
   }
@@ -428,6 +442,7 @@ export interface DebriefExerciseInput {
   note: string
   prescribed: string
   performed: string
+  pushed?: boolean   // athlete deliberately went over the cap on this lift
 }
 
 export interface DebriefInput {
@@ -515,7 +530,9 @@ function disposeClassifications(
       const delta = boundedConfidenceDelta(c.direction, c.magnitude)
       const updatedConfidence = clampConfidence(w.confidence + delta)
       const updatedEvidence = [...w.evidence, evidenceEntry]
-      const updatedStatus = delta > 0 ? advanceStatus(w.status, updatedConfidence) : null
+      // Both directions — see advanceStatus. A session's worth of disconfirming
+      // evidence must be able to finish a limiter off, not just erode it.
+      const updatedStatus = advanceStatus(w.status, updatedConfidence)
       // Compound the working copy so the next classification on this insight
       // reads the already-moved confidence/status.
       w.confidence = updatedConfidence
@@ -978,119 +995,13 @@ function topWorkingSet(sets: SetLog[] | undefined): SetLog | null {
   return logged.length ? logged[logged.length - 1] : null
 }
 
-interface WeekWorkout {
-  performed_at: string
-  rpe: number | null
-  actual_weights: Record<string, SetLog[]> | null
-}
-interface WeekObservation {
-  severity: number
-  signal: string
-  logged_at: string
-}
-
-interface WeeklyTally {
-  planned: number
-  done: number
-  adherence: number
-  avgRPE: number | null
-  painCount: number
-  positiveCount: number
-  flagged_categories: string[]
-}
-
-const POSITIVE_SIGNAL = /\b(easy|solid|strong|pr)\b/i
-
-function tallyWeek(planned: number, workouts: WeekWorkout[], observations: WeekObservation[]): WeeklyTally {
-  const done = workouts.length
-  const adherence = planned > 0 ? done / planned : 0
-
-  const rpes: number[] = []
-  for (const w of workouts) {
-    const sets = w.actual_weights ? Object.values(w.actual_weights).flat() : []
-    const setRpes = sets.map((s) => s.rpe).filter((r): r is number => r != null)
-    if (setRpes.length) rpes.push(...setRpes)
-    else if (w.rpe != null) rpes.push(w.rpe) // fall back to the session-level RPE
-  }
-  const avgRPE = rpes.length ? Math.round((rpes.reduce((a, b) => a + b, 0) / rpes.length) * 10) / 10 : null
-
-  const painObs = observations.filter((o) => o.severity >= 3)
-  const positiveCount = observations.filter((o) => POSITIVE_SIGNAL.test(o.signal)).length
-  const flagged_categories = [
-    ...new Set(painObs.map((o) => o.signal.split('—')[0].trim()).filter(Boolean)),
-  ].slice(0, 5)
-
-  return { planned, done, adherence, avgRPE, painCount: painObs.length, positiveCount, flagged_categories }
-}
-
-// The §4.3 decision tree — the only place a directive is chosen.
-//
-// Two athlete-state overrides sit in front of the tree:
-//  • injury  — explicit "I'm hurt / taking time off". The engine never infers
-//    this; only the athlete declares it. Forces a RECOVERY back-off.
-//  • emptyMissed — a completed week with NO logged work. A no-penalty reset so a
-//    skipped week never reads as a failure or silently vanishes.
-function decidePrescription(
-  t: WeeklyTally,
-  opts: { injury?: boolean; emptyMissed?: boolean } = {},
-): WeeklyPrescription {
-  if (opts.injury) {
-    return {
-      directive: 'RECOVERY',
-      load_delta_pct: -20,
-      rpe_target: 5,
-      rationale:
-        'You flagged an injury / time off — next week backs load off 20% and caps effort at RPE 5. Recovery is the training right now; we ramp back when the joint is calm.',
-    }
-  }
-  if (opts.emptyMissed || t.done === 0) {
-    return {
-      directive: 'HOLD (missed)',
-      load_delta_pct: 0,
-      rpe_target: 7,
-      rationale: 'No sessions logged this week — holding load, no penalty. Pick it back up when you can; the week resets clean.',
-    }
-  }
-  if (t.painCount >= 2 || (t.avgRPE != null && t.avgRPE >= 8.5)) {
-    return {
-      directive: 'DELOAD',
-      load_delta_pct: -10,
-      rpe_target: 6,
-      rationale: t.painCount >= 2
-        ? `${t.painCount} pain flags this week — backing load off 10% to let the pattern settle.`
-        : `Average RPE ${t.avgRPE} is into the red — backing off 10% to recover.`,
-    }
-  }
-  if (t.adherence >= 0.8 && t.avgRPE != null && t.avgRPE <= 6.5 && t.painCount === 0) {
-    return {
-      directive: 'PROGRESS',
-      load_delta_pct: 5,
-      rpe_target: 7,
-      rationale: `Adherence ${Math.round(t.adherence * 100)}% and RPE ${t.avgRPE} with no pain — adding 5%.`,
-    }
-  }
-  if (t.adherence < 0.5) {
-    return {
-      directive: 'HOLD (missed)',
-      load_delta_pct: 0,
-      rpe_target: 7,
-      rationale: `Only ${t.done}/${t.planned} sessions logged — holding load and resetting the week.`,
-    }
-  }
-  return {
-    directive: 'HOLD',
-    load_delta_pct: 0,
-    rpe_target: 7,
-    rationale: 'Holding load — not enough signal to push or back off yet.',
-  }
-}
-
 // Deterministic fallback note — always available, used offline and whenever the
 // weekly_debrief model call fails. The warm model message wraps the SAME tally
 // and directive; this is the floor, never wrong.
 function weeklyCoachNotes(weekEnding: string, t: WeeklyTally, p: WeeklyPrescription): string {
   const rpeStr = t.avgRPE != null ? `avg RPE ${t.avgRPE}` : 'RPE not logged'
-  const tally = `Week to ${weekEnding}: ${t.done}/${t.planned} sessions · ${rpeStr} · ${t.painCount} pain flag${t.painCount === 1 ? '' : 's'} · ${t.positiveCount} strong set${t.positiveCount === 1 ? '' : 's'}.`
+  const hardStr = t.hardCount ? ` · ${t.hardCount} hard set${t.hardCount === 1 ? '' : 's'}` : ''
+  const tally = `Week to ${weekEnding}: ${t.done}/${t.planned} sessions · ${rpeStr} · ${t.painCount} pain flag${t.painCount === 1 ? '' : 's'}${hardStr} · ${t.positiveCount} strong set${t.positiveCount === 1 ? '' : 's'}.`
   return `${tally} ${p.rationale}`
 }
 
@@ -1146,11 +1057,11 @@ async function persistWeeklyReview(
   planned: number,
   workouts: WeekWorkout[],
   observations: WeekObservation[],
-  ctx: { name: string | null; target: string | null; injury?: boolean },
+  ctx: { name: string | null; target: string | null; injury?: boolean; phaseName?: string | null },
 ): Promise<string | null> {
   const tally = tallyWeek(planned, workouts, observations)
   const injury = ctx.injury === true
-  const prescription = decidePrescription(tally, { injury })
+  const prescription = decidePrescription(tally, { injury, phaseName: ctx.phaseName })
   const adjustments: WeeklyReviewAdjustments = {
     avgRPE: tally.avgRPE,
     adherence: Math.round(tally.adherence * 100) / 100,
@@ -1177,12 +1088,24 @@ async function persistWeeklyReview(
 }
 
 // The athlete's name + what they're chasing — passed to the coach-message model
-// so the weekly note is specific, not generic. Falls back gracefully when unset.
-async function fetchReviewContext(athleteId: string): Promise<{ name: string | null; target: string | null }> {
-  const { data: ath } = await supabase
-    .from('athlete').select('name, goals, obstacle').eq('id', athleteId).maybeSingle()
+// so the weekly note is specific, not generic. Also carries the ACTIVE PHASE
+// NAME, because the directive tree cannot judge "was this week too hard?"
+// without knowing how hard the block was supposed to be. Falls back gracefully
+// when unset (rpeContract() then uses the legacy 6.5/8.5 thresholds).
+async function fetchReviewContext(
+  athleteId: string,
+  programId: string,
+): Promise<{ name: string | null; target: string | null; phaseName: string | null }> {
+  const [{ data: ath }, { data: phaseRow }] = await Promise.all([
+    supabase.from('athlete').select('name, goals, obstacle').eq('id', athleteId).maybeSingle(),
+    supabase.from('phase').select('name').eq('program_id', programId).eq('status', 'active').maybeSingle(),
+  ])
   const a = ath as { name: string | null; goals: string | null; obstacle: string | null } | null
-  return { name: a?.name ?? null, target: (a?.goals || a?.obstacle) ?? null }
+  return {
+    name: a?.name ?? null,
+    target: (a?.goals || a?.obstacle) ?? null,
+    phaseName: (phaseRow as { name: string } | null)?.name ?? null,
+  }
 }
 
 // At most this many completed weeks are back-filled in a single rollover run, so
@@ -1203,7 +1126,7 @@ export async function runWeeklyReviewAgent(athleteId: string, programId: string)
     supabase.from('weekly_review').select('week_ending').eq('program_id', programId),
     supabase.from('workout').select('performed_at, rpe, actual_weights, routine!inner(program_id)').eq('routine.program_id', programId),
     supabase.from('session_observation').select('severity, signal, logged_at, workout!inner(routine!inner(program_id))').eq('workout.routine.program_id', programId),
-    fetchReviewContext(athleteId),
+    fetchReviewContext(athleteId, programId),
   ])
 
   const planned = (ath?.sessions_per_week as number | null) ?? 3
@@ -1290,7 +1213,7 @@ export async function closeOutCurrentWeek(
     supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle(),
     supabase.from('workout').select('performed_at, rpe, actual_weights, routine!inner(program_id)').eq('routine.program_id', programId).gte('performed_at', thisMonday.toISOString()),
     supabase.from('session_observation').select('severity, signal, logged_at, workout!inner(routine!inner(program_id))').eq('workout.routine.program_id', programId).gte('logged_at', thisMonday.toISOString()),
-    fetchReviewContext(athleteId),
+    fetchReviewContext(athleteId, programId),
   ])
   const planned = (ath?.sessions_per_week as number | null) ?? 3
   const workouts = (workoutRows ?? []) as unknown as WeekWorkout[]
@@ -1337,7 +1260,9 @@ export async function checkPhaseAdvancement(athleteId: string, phaseId: string):
   const done = (phaseWorkouts ?? []).length
   if (planned > 0 && done / planned < 0.7) return false
 
-  // 3. Safety — no severity-≥3 observation in the last 3 logged sessions.
+  // 3. Safety — no PAIN observation in the last 3 logged sessions. Pain only:
+  // a "Hard" chip is the block working, not a reason to stall the athlete at a
+  // phase boundary they have otherwise earned.
   const lastThree = (phaseWorkouts ?? []).slice(0, 3) as Array<{ performed_at: string }>
   if (lastThree.length) {
     const since = lastThree[lastThree.length - 1].performed_at
@@ -1346,7 +1271,7 @@ export async function checkPhaseAdvancement(athleteId: string, phaseId: string):
       .select('severity, workout!inner(routine!inner(phase_id))')
       .eq('workout.routine.phase_id', phaseId)
       .gte('logged_at', since)
-    if ((recentObs ?? []).some((o) => (o as { severity: number }).severity >= 3)) return false
+    if ((recentObs ?? []).some((o) => (o as { severity: number }).severity >= SEVERITY_PAIN)) return false
   }
 
   return true
@@ -1549,11 +1474,38 @@ interface PhaseScheme {
   loadFloor: 'keep' | 'moderate'   // 'moderate' bumps non-bodyweight loads up
 }
 
+// NOTE: rpeLabel is prose for the athlete; PHASE_RPE (above) is the same
+// contract as numbers for the engine. They describe ONE intent — if you change
+// a band here, change it there. Keeping them apart is what let the app ask for
+// RPE 7–8 while quietly scoring anything above 6.5 as a failure.
 const PHASE_SCHEMES: Record<PhaseName, PhaseScheme> = {
   Stability: { sets: 3, reps: '8-12', rpeLabel: 'RPE 5–6 · control the pattern', intentVerb: 'Pattern quality', loadFloor: 'keep' },
   Strength:  { sets: 4, reps: '4-6',  rpeLabel: 'RPE 7–8 · moderate–heavy',       intentVerb: 'Build strength', loadFloor: 'moderate' },
   Power:     { sets: 4, reps: '2-3',  rpeLabel: 'RPE 7 · move it fast',           intentVerb: 'Express power',  loadFloor: 'moderate' },
   Sport:     { sets: 3, reps: '3-5',  rpeLabel: 'RPE 6–8 · sport-specific',       intentVerb: 'Integrate for sport', loadFloor: 'keep' },
+}
+
+// Keep holds/carries/mobility on their native prescription; only re-rep true
+// counted-rep lifts. Detects seconds, metres, breaths, and "each direction".
+function isCountedReps(reps: string): boolean {
+  return /^\d/.test(reps) && !/s\b|sec|m\b|min|breath|direction|hold/i.test(reps)
+}
+
+function applyScheme(ex: ExerciseTemplate, scheme: PhaseScheme, phaseName: PhaseName): ExerciseTemplate {
+  const next: ExerciseTemplate = { ...ex }
+  if (isCountedReps(ex.reps)) {
+    next.sets = scheme.sets
+    next.reps = /each side/i.test(ex.reps) ? `${scheme.reps} each side` : scheme.reps
+    // Carry the block's RPE target onto the lift itself. Without this the
+    // per-lift autoregulator falls back to the week-wide number and every block
+    // silently autoregulates toward the same effort, whatever it claims to be.
+    // Holds/carries/mobility are left alone — RPE means nothing on a plank.
+    if (ex.target_rpe == null) next.target_rpe = PHASE_RPE[phaseName].target
+  }
+  if (scheme.loadFloor === 'moderate' && ex.load && ex.load !== 'bodyweight' && ex.load === 'light') {
+    next.load = 'moderate'
+  }
+  return next
 }
 
 // One jump/throw added to each Power session — the velocity intent the table
@@ -1563,24 +1515,6 @@ const POWER_EXPRESSIONS: ExerciseTemplate[] = [
   { name: 'Med Ball Slam', sets: 4, reps: '3', load: 'moderate', cue: 'Full overhead — drive through the floor' },
   { name: 'Broad Jump', sets: 4, reps: '3', load: 'bodyweight', cue: 'Stick the landing — quality over distance' },
 ]
-
-// Keep holds/carries/mobility on their native prescription; only re-rep true
-// counted-rep lifts. Detects seconds, metres, breaths, and "each direction".
-function isCountedReps(reps: string): boolean {
-  return /^\d/.test(reps) && !/s\b|sec|m\b|min|breath|direction|hold/i.test(reps)
-}
-
-function applyScheme(ex: ExerciseTemplate, scheme: PhaseScheme): ExerciseTemplate {
-  const next: ExerciseTemplate = { ...ex }
-  if (isCountedReps(ex.reps)) {
-    next.sets = scheme.sets
-    next.reps = /each side/i.test(ex.reps) ? `${scheme.reps} each side` : scheme.reps
-  }
-  if (scheme.loadFloor === 'moderate' && ex.load && ex.load !== 'bodyweight' && ex.load === 'light') {
-    next.load = 'moderate'
-  }
-  return next
-}
 
 const NON_NEGOTIABLES_BY_CATEGORY: Record<string, string[]> = {
   'Lower Chain': [
@@ -1629,19 +1563,23 @@ export function generatePhase(
 
   // ──────────────────────────────────────────────────────────────────────────
   // PROGRAM-DESIGN SEAM (TODO Prompt 3: ProgramDesignAgent)
-  // Every exercise is attributed to the P1 insight; the real agent will map
-  // individual exercises to P2/P3 insights. Stamping happens only here.
+  // Exercises are attributed to the P1 insight ONLY where they actually train
+  // that chain. This stamp is not decoration: it is what the load cap and the
+  // "why is this lift here" sheet both read. Stamping the whole session meant a
+  // shoulder read capped the athlete's squat and told them the squat was there
+  // to fix their shoulder — both wrong, from one lazy attribution.
   // ──────────────────────────────────────────────────────────────────────────
-  const stamp = (exs: ExerciseTemplate[]): ExerciseTemplate[] => {
-    const scored = exs.map((ex) => applyScheme(ex, scheme))
-    return p1InsightId ? scored.map((ex) => ({ ...ex, insight_id: p1InsightId })) : scored
+  const stampOne = (ex: ExerciseTemplate): ExerciseTemplate => {
+    const scored = applyScheme(ex, scheme, phaseName)
+    return p1InsightId && addressesLimiter(scored.name, p1Category) === true
+      ? { ...scored, insight_id: p1InsightId }
+      : scored
   }
 
   const sessionExercises = (i: number): ExerciseTemplate[] => {
-    const base = stamp(routineExercises[i])
+    const base = routineExercises[i].map(stampOne)
     if (phaseName === 'Power') {
-      const expr = { ...POWER_EXPRESSIONS[i % POWER_EXPRESSIONS.length] }
-      if (p1InsightId) expr.insight_id = p1InsightId
+      const expr = stampOne({ ...POWER_EXPRESSIONS[i % POWER_EXPRESSIONS.length] })
       return [expr, ...base]   // express power fresh, before fatigue
     }
     return base
@@ -2001,34 +1939,6 @@ export interface ObservationAction {
   updatedStatus: InsightStatus | null  // null = leave status unchanged
   // create
   newInsight: InsightInsert | null
-}
-
-// ────────────────────────────────────────────────────────────────────────────
-// Status-advancement thresholds (DETERMINISTIC PLACEHOLDERS)
-// TODO Prompt 3: SessionReviewAgent replaces these with model-driven judgement.
-// Confidence thresholds at which an insight advances one tier:
-//   Hypothesis → Likely   at ≥ 0.50
-//   Likely     → Confirmed at ≥ 0.80
-//   Resolved / Disproved stay MANUAL (never auto-advanced here).
-// ────────────────────────────────────────────────────────────────────────────
-const STATUS_THRESHOLDS = {
-  likely: 0.50,
-  confirmed: 0.80,
-} as const
-
-/**
- * Given a current status and a (possibly nudged) confidence, returns the new
- * status if a threshold was crossed, otherwise null. Only advances forward
- * through hypothesis → likely → confirmed. Resolved/disproved are terminal here.
- */
-function advanceStatus(
-  current: InsightStatus,
-  confidence: number,
-): InsightStatus | null {
-  if (current === 'hypothesis' && confidence >= STATUS_THRESHOLDS.confirmed) return 'confirmed'
-  if (current === 'hypothesis' && confidence >= STATUS_THRESHOLDS.likely)    return 'likely'
-  if (current === 'likely'     && confidence >= STATUS_THRESHOLDS.confirmed) return 'confirmed'
-  return null
 }
 
 /**
@@ -2407,44 +2317,26 @@ export interface SessionPrescription {
   // of "moderate". Null when the lift has no weighted history to recommend from.
   // Absent on cached copies written before this field existed — read with `?.`.
   targets: Record<number, number | null>
+  // What a HELD lift would have been prescribed with no limiter in the way — the
+  // number "Push it" aims at. Null on lifts that aren't held (their target is
+  // already the honest one). Absent on caches written before this field existed.
+  pushTargets?: Record<number, number | null>
   rule: IntelligenceRule | null   // standing rule in effect this session, or null
+  // The open exit condition on the limiter — what would actually clear the cap,
+  // and how far along it is. Null when no cap is in effect. Absent on cached
+  // copies written before this field existed — read with `?.`.
+  clearance?: ClearanceView | null
 }
 
-// Round a computed load to the nearest 5 units — a real, rackable number.
-function roundLoad(w: number): number {
-  return Math.max(0, Math.round(w / 5) * 5)
-}
-
-// The concrete recommended working load for a lift: its last top weight with the
-// autoregulated delta applied, rounded rackable (delta 0 = repeat the load as
-// lifted). Null when the lift has no weighted history to recommend from.
-function recommendedLoad(top: SetLog | null, delta: number): number | null {
-  if (top?.weight == null) return null
-  return delta === 0 ? top.weight : roundLoad(top.weight * (1 + delta / 100))
-}
-
-// Per-exercise RPE autoregulation. The weekly review sets a TARGET RPE; this
-// turns how far THIS lift's last top set landed from that target into a per-lift
-// load nudge — ~3% per RPE point (≈ one RIR ≈ ~3% of load near the top end),
-// clamped. This is what makes "logged RPE 4 on an RPE-8 lift" recommend a heavier
-// weight for THAT lift specifically, while a lift that hit RPE 9 backs off — even
-// in the same week. Falls back to the program-wide weekly delta when this lift
-// has no logged RPE. A DELOAD week is a hard recovery directive and is never
-// overridden upward. maxUp caps progression by phase (Stability banks load).
-function autoregulateDelta(
-  lastRpe: number | null | undefined,
-  rpeTarget: number | null,
-  weeklyDelta: number,
-  directive: WeeklyDirective | null,
-  maxUp: number,
-): number {
-  if (directive === 'DELOAD') return weeklyDelta
-  if (lastRpe != null) {
-    const target = rpeTarget ?? 7
-    const adj = Math.round((target - lastRpe) * 3)
-    return Math.max(-10, Math.min(maxUp, adj))
-  }
-  return Math.max(-10, Math.min(maxUp, weeklyDelta))
+/** The clearance test, flattened for display. */
+export interface ClearanceView {
+  lift: string
+  requirement: string       // "2 top sets at RPE 8+ on Bench Press, pain-free, across 2 sessions."
+  sessionsPassed: number
+  sessionsNeeded: number
+  minRpe: number
+  /** Index into this routine's exercises, or -1 when the lift isn't in it today. */
+  exerciseIndex: number
 }
 
 function buildHint(top: SetLog | null, unit: string, directive: WeeklyDirective | null, delta: number, rpe: number | null, target: number | null): string {
@@ -2493,7 +2385,7 @@ export async function gatherSessionPrescription(
       .from('phase').select('name').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
     phaseName = (phaseRow as { name: string } | null)?.name ?? null
   }
-  const maxUp = phaseName === 'Stability' ? 5 : 15
+  const maxUp = maxUpFor(phaseName)
 
   let directive: WeeklyDirective | null = null
   let loadDeltaPct = 0
@@ -2513,12 +2405,18 @@ export async function gatherSessionPrescription(
   }
 
   // The P1 weak link — top-priority active insight. Drives the load-cap rule.
+  //
+  // The cap is gated on CONFIDENCE, not merely on the row still existing. It used
+  // to fire for any insight that wasn't explicitly resolved, which meant a read
+  // the system had already argued itself out of — 12% confident, still technically
+  // "a hypothesis" — capped load exactly as hard as one it was sure about. A
+  // belief that weak has no business holding a barbell down.
   const { data: insightRows } = await supabase
     .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
   const p1 = ((insightRows ?? []) as InsightRow[])
     .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
-  const p1Unresolved = !!p1
-  const rule: IntelligenceRule | null = p1Unresolved
+  const capActive = capIsActive(p1)
+  const rule: IntelligenceRule | null = capActive
     ? {
         name: 'Never load over instability',
         reasoning:
@@ -2538,11 +2436,33 @@ export async function gatherSessionPrescription(
   const hints: Record<number, string> = {}
   const held: Record<number, boolean> = {}
   const targets: Record<number, number | null> = {}
+  const pushTargets: Record<number, number | null> = {}
+  // The block's own RPE target is the floor for per-lift autoregulation. Without
+  // it a Strength lift with no stamped target autoregulates against the weekly
+  // number (7) and gets marked down for the RPE 8 the block asked for.
+  const phaseTarget = rpeContract(phaseName).target
+
   exercises.forEach((ex, i) => {
     const top = (lastWeights ? topWorkingSet(lastWeights[String(i)]) : null) ?? byName.get(ex.name) ?? null
-    // Held when the rule is in effect AND this lift addresses the P1 insight.
-    const isHeld = p1Unresolved && !!ex.insight_id && ex.insight_id === p1!.id
+    // Per-LIFT autoregulation against THIS exercise's own target RPE (falling
+    // back to the block's target, then the week's): each lift's last RPE vs its
+    // own target sets its load step — capped by phase — instead of one
+    // program-wide delta.
+    const exTarget = ex.target_rpe ?? phaseTarget ?? rpeTarget
+    const exDelta = autoregulateDelta(top?.rpe, exTarget, loadDeltaPct, directive, maxUp)
+    const uncapped = recommendedLoad(top, exDelta)
+
+    // Held when the cap is live AND this lift genuinely trains the limiter's
+    // chain. `addressesLimiter` returning null means the library has no opinion
+    // about the movement, in which case we trust the stamp the program already
+    // carries rather than inventing an answer in either direction.
+    const isHeld = isLiftHeld(ex, p1, capActive)
     held[i] = isHeld
+    // What the lift would have been asked to do with no limiter in the way. This
+    // is what "Push it" aims at — an override with a real number beats one that
+    // just shrugs and leaves the athlete to guess.
+    pushTargets[i] = isHeld ? uncapped : null
+
     if (isHeld && directive === 'PROGRESS') {
       // Suppress the +5%: state the hold and why, grounded in the last load.
       // The recommendation under a held cap is the last load itself.
@@ -2551,17 +2471,37 @@ export async function gatherSessionPrescription(
         ? `Hold ${top.weight}${unit} — cap stays until ${p1!.category} clears`
         : `Hold steady — ${p1!.category} not cleared yet`
     } else {
-      // Per-LIFT autoregulation against THIS exercise's own target RPE (falling
-      // back to the week's target): each lift's last RPE vs its own target sets
-      // its load step — capped by phase — instead of one program-wide delta.
-      const exTarget = ex.target_rpe ?? rpeTarget
-      const exDelta = autoregulateDelta(top?.rpe, exTarget, loadDeltaPct, directive, maxUp)
-      targets[i] = recommendedLoad(top, exDelta)
+      targets[i] = uncapped
       hints[i] = buildHint(top, unit, directive, exDelta, exTarget, targets[i])
     }
   })
 
-  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, rule }
+  // The way out of the cap. Shown whenever a cap is live, even on a day the
+  // tested lift isn't programmed — knowing the exit condition is the point, and
+  // a wall you can't see the door in is the thing we're fixing.
+  let clearance: ClearanceView | null = null
+  if (capActive && p1) {
+    const open = clearanceTestOf(p1)
+    const lift = open?.lift ?? pickClearanceLift(exercises, p1.category, (n) => byName.has(n))
+    if (lift) {
+      const test = open ?? {
+        kind: 'clearance_test' as const,
+        lift,
+        criterion: { top_sets: CLEARANCE_TOP_SETS, min_rpe: phaseTarget, sessions: CLEARANCE_SESSIONS, pain_free: true as const },
+        opened_at: '', sessions_passed: 0, status: 'open' as const,
+      }
+      clearance = {
+        lift,
+        requirement: describeClearanceTest(test),
+        sessionsPassed: test.sessions_passed,
+        sessionsNeeded: test.criterion.sessions,
+        minRpe: test.criterion.min_rpe,
+        exerciseIndex: exercises.findIndex((ex) => ex.name === lift),
+      }
+    }
+  }
+
+  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, pushTargets, rule, clearance }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2575,9 +2515,6 @@ export async function gatherSessionPrescription(
 // move is disposed deterministically here so it holds even with no LLM key;
 // the agent path (runSessionDebriefAgent) layers nuance on top when available.
 // ════════════════════════════════════════════════════════════════════════════
-
-const P1_RESOLVE_THRESHOLD = 0.30   // limiter confidence at/below this → resolved
-const P1_DISCONFIRM_STEP = 0.15     // bounded step per strong, pain-free session
 
 export interface SessionAdaptation {
   note: string
@@ -2621,13 +2558,20 @@ export async function recordSessionAdaptation(athleteId: string, workoutId: stri
     .gte('created_at', workout.performed_at).limit(1)
   if (existing && existing.length) return null
 
-  // Defer if another path (the LLM debrief) already moved P1 from this session —
-  // its evidence entries carry workout_id. Prevents a double move per session.
-  if (Array.isArray(p1.evidence) && p1.evidence.some((e) => (e as { workout_id?: string } | null)?.workout_id === workoutId)) {
-    return null
-  }
+  // Defer only if the LLM debrief already moved P1 DOWNWARD from this session —
+  // that's the same move we're about to make, and doing it twice would double-count
+  // one session's evidence. A confirming or neutral debrief entry is not a reason
+  // to skip: the old check deferred on ANY entry carrying this workout_id, which
+  // meant that whenever the debrief mentioned the limiter at all, the one path
+  // that can actually retire a limiter quietly stood down. Between that and
+  // advanceStatus refusing to move backwards, nothing could clear a read at all.
+  const debriefAlreadyLowered = Array.isArray(p1.evidence) && p1.evidence.some((e) => {
+    const entry = e as { workout_id?: string; direction?: string } | null
+    return entry?.workout_id === workoutId && entry?.direction === 'disconfirming'
+  })
+  if (debriefAlreadyLowered) return null
 
-  // This session's felt signal on the P1-linked work (severity: ≤1 strong, ≥4 pain).
+  // This session's felt signal on the P1-linked work.
   const { data: obs } = await supabase
     .from('session_observation').select('signal, severity, category').eq('workout_id', workoutId)
   const felt = ((obs ?? []) as Array<{ signal: string; severity: number; category: string }>)
@@ -2638,8 +2582,8 @@ export async function recordSessionAdaptation(athleteId: string, workoutId: stri
   for (const o of felt) {
     const name = o.signal.split('—')[0].trim()
     if (!p1Names.has(name)) continue
-    if (o.severity >= 4) pain++
-    else if (o.severity <= 1) { strong++; if (!exemplar) exemplar = name }
+    if (o.severity >= SEVERITY_PAIN) pain++
+    else if (o.severity <= SEVERITY_STRONG) { strong++; if (!exemplar) exemplar = name }
   }
 
   // The rule: strong, pain-free P1 work disconfirms the limiter. Anything else
@@ -2677,6 +2621,151 @@ export async function recordSessionAdaptation(athleteId: string, workoutId: stri
 
   await insertCoachMessage(athleteId, { kind: 'note', body: note, ref_id: p1.id })
   return { note, insightId: p1.id, category: p1.category, resolved, previousConfidence, newConfidence }
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// THE CLEARANCE TEST — the door in the wall.
+//
+// "Load stays capped until the pattern clears" is only fair if the athlete can
+// find out what clearing it takes. This states the exit condition as a concrete,
+// dated, falsifiable claim on ONE named lift, tracks it session by session, and
+// either retires the limiter or reconfirms it out loud.
+//
+// Doctrine: code owns the criteria and the arithmetic. The agent is not asked
+// what would clear a limiter; it is at most asked to phrase the answer.
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface ClearanceOutcome {
+  test: ClearanceTest
+  note: string
+  /** This session counted toward clearing. */
+  passed: boolean
+  /** The limiter is now resolved and the cap is off. */
+  cleared: boolean
+  /** Pain on the tested lift — the limiter was argued FOR, not against. */
+  reconfirmed: boolean
+}
+
+/**
+ * Read a logged session against the athlete's open clearance test — opening one
+ * first if the limiter has none. Returns the outcome when the session was
+ * relevant to the test, else null. Idempotent per workout (the test's own log is
+ * the guard). Called from commitSession alongside recordSessionAdaptation.
+ */
+export async function evaluateClearanceTest(athleteId: string, workoutId: string): Promise<ClearanceOutcome | null> {
+  const { data: workout } = await supabase
+    .from('workout').select('routine_id, actual_weights').eq('id', workoutId).maybeSingle()
+  if (!workout) return null
+
+  const { data: routine } = await supabase
+    .from('routine').select('exercises, phase_id').eq('id', workout.routine_id).maybeSingle()
+  const exercises = (routine?.exercises as ExerciseTemplate[] | null) ?? []
+  if (!exercises.length) return null
+
+  const { data: insightRows } = await supabase
+    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
+  const p1 = ((insightRows ?? []) as InsightRow[])
+    .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
+  // A limiter the system has already talked itself out of doesn't need a test —
+  // the cap is already off (see gatherSessionPrescription).
+  if (!p1 || p1.confidence < P1_RESOLVE_THRESHOLD) return null
+
+  // The block's RPE target defines "a real top set" for this test.
+  let phaseName: string | null = null
+  if (routine?.phase_id) {
+    const { data: ph } = await supabase.from('phase').select('name').eq('id', routine.phase_id).maybeSingle()
+    phaseName = (ph as { name: string } | null)?.name ?? null
+  }
+  const minRpe = rpeContract(phaseName).target
+
+  const evidence = Array.isArray(p1.evidence) ? [...p1.evidence] : []
+  let test = clearanceTestOf(p1)
+  let testIdx = test ? evidence.findIndex((e) => isClearanceTest(e) && e.status === 'open') : -1
+
+  if (!test) {
+    const lift = pickClearanceLift(exercises, p1.category, () => true)
+    if (!lift) return null
+    test = newClearanceTest(lift, minRpe, new Date().toISOString())
+    evidence.push(test)
+    testIdx = evidence.length - 1
+  }
+
+  // Already counted this session? The test's own log is the idempotency guard,
+  // so a replayed outbox commit can't double-credit a session.
+  if ((test.log ?? []).some((l) => l.workout_id === workoutId)) return null
+
+  const { data: obs } = await supabase
+    .from('session_observation').select('signal, severity, category').eq('workout_id', workoutId)
+  const observations = ((obs ?? []) as Array<{ signal: string; severity: number; category: string }>)
+  const nameOf = (signal: string) => signal.split('—')[0].trim()
+
+  // Which lift carried the proof this session. The named test lift is the
+  // default, but a lift the athlete deliberately PUSHED counts too, as long as
+  // it trains the limiter's chain: an athlete who says "I'm ready, let me test
+  // it" and is then proved right has produced exactly the evidence the test was
+  // asking for, and refusing to count it would make the override theatre.
+  const pushedOnChain = observations
+    .filter((o) => o.category === 'Probe')
+    .map((o) => nameOf(o.signal))
+    .filter((n) => addressesLimiter(n, p1.category) === true)
+
+  const candidates = [test.lift, ...pushedOnChain.filter((n) => n !== test!.lift)]
+  const attempts: LiftAttempt[] = candidates
+    .map((name) => {
+      const idx = exercises.findIndex((ex) => ex.name === name)
+      if (idx < 0) return null
+      const sets = ((workout.actual_weights as Record<string, SetLog[]> | null) ?? {})[String(idx)] ?? []
+      return {
+        name,
+        qualifying: sets.filter((s) => s.done && s.rpe != null && s.rpe >= test!.criterion.min_rpe).length,
+        pain: observations.some((o) => o.category === 'Felt' && o.severity >= SEVERITY_PAIN && nameOf(o.signal) === name),
+      }
+    })
+    .filter((c): c is LiftAttempt => c !== null)
+
+  const { relevant, passed, painOnLift, provedOn, qualifying } = judgeClearanceSession(test, attempts)
+  if (!relevant) return null   // the session simply didn't test anything
+
+  const now = new Date().toISOString()
+
+  const updated: ClearanceTest = {
+    ...test,
+    sessions_passed: passed ? test.sessions_passed + 1 : 0,
+    log: [...(test.log ?? []), { workout_id: workoutId, passed, at: now }],
+    status: painOnLift ? 'reconfirmed' : test.sessions_passed + 1 >= test.criterion.sessions ? 'passed' : 'open',
+  }
+  evidence[testIdx] = updated
+
+  const cleared = updated.status === 'passed'
+  const previousConfidence = p1.confidence
+  const newConfidence = clampConfidence(
+    painOnLift ? previousConfidence + P1_DISCONFIRM_STEP : previousConfidence - P1_DISCONFIRM_STEP,
+  )
+
+  // A reconfirmed test re-opens as a fresh one, so the athlete always has a
+  // stated way out rather than a limiter that just got harder for no visible
+  // reason. Appended BEFORE the payload is built — the closed record stays in
+  // place at its own index and the new test sits after it.
+  if (painOnLift) evidence.push(newClearanceTest(updated.lift, minRpe, now))
+
+  const update: Record<string, unknown> = { confidence: newConfidence, evidence }
+  if (cleared) {
+    update.status = 'resolved'
+    update.resolved_at = now
+  }
+
+  await supabase.from('insight').update(update).eq('id', p1.id)
+
+  // Name the lift that actually carried the session — which may be one the
+  // athlete pushed rather than the one the test nominated.
+  const note = painOnLift
+    ? `${provedOn} flagged pain at test weight — that's the ${p1.category} limiter answering, so it stands (${Math.round(previousConfidence * 100)}%→${Math.round(newConfidence * 100)}%). The cap stays and the test resets. This is the system working, not you failing it.`
+    : cleared
+      ? `Clearance test passed. ${updated.criterion.sessions} sessions of ${updated.criterion.top_sets}+ top sets at RPE ${updated.criterion.min_rpe}+ on ${provedOn}, no pain — ${p1.category} is resolved and the load cap is off.`
+      : `${provedOn} banked session ${updated.sessions_passed} of ${updated.criterion.sessions} toward clearing ${p1.category}. ${qualifying} qualifying set${qualifying === 1 ? '' : 's'} at RPE ${updated.criterion.min_rpe}+, pain-free. One more like that and the cap comes off.`
+
+  await insertCoachMessage(athleteId, { kind: 'note', body: note, ref_id: p1.id })
+  return { test: updated, note, passed, cleared, reconfirmed: painOnLift }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2809,7 +2898,10 @@ function disposePhaseDesign(
         load: ex.load,
         cue: ex.cue ? String(ex.cue) : undefined,
       }
-      if (p1InsightId) t.insight_id = p1InsightId
+      // The block's RPE target, and the limiter attribution — but only on the
+      // lifts that actually train that chain. See generatePhase's stamp note.
+      if (isCountedReps(t.reps)) t.target_rpe = PHASE_RPE[phaseName].target
+      if (p1InsightId && addressesLimiter(t.name, category) === true) t.insight_id = p1InsightId
       return t
     }).filter((ex) => ex.name),
     intent: s.intent ? String(s.intent) : '',
@@ -3418,12 +3510,27 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
   const obsRows: SessionObservationInsert[] = []
   for (const ex of exercises) {
     const note = ex.note?.trim()
-    if (!ex.felt && !note) continue
+    // A push is worth recording even with no chip and no note: the athlete
+    // declaring "I'm testing this cap" is itself the signal.
+    if (!ex.felt && !note && !ex.pushed) continue
     const sev = ex.felt ? FELT_CHIPS.find((c) => c.label === ex.felt)?.severity ?? 2 : 2
     const signal = ex.felt
       ? `${ex.name} — ${ex.felt}${note ? ` — ${note}` : ''}`
-      : `${ex.name} — ${note}`
-    obsRows.push({ workout_id: workoutId, category: 'Felt', signal, severity: sev })
+      : note
+        ? `${ex.name} — ${note}`
+        : `${ex.name} — pushed past the cap`
+    if (ex.felt || note) obsRows.push({ workout_id: workoutId, category: 'Felt', signal, severity: sev })
+    // The push itself, as its own row. Category is free text on this table, so
+    // this needs no migration; keeping it separate from 'Felt' means the weekly
+    // tally and the pain counters are untouched by it.
+    if (ex.pushed) {
+      obsRows.push({
+        workout_id: workoutId,
+        category: 'Probe',
+        signal: `${ex.name} — pushed past the cap deliberately${ex.felt ? `, felt ${ex.felt}` : ''}`,
+        severity: sev,
+      })
+    }
   }
   if (reflection) obsRows.push({ workout_id: workoutId, category: 'Reflection', signal: reflection, severity: 1 })
   if (readingAnswer && reading) {
@@ -3447,7 +3554,13 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
         confidence: action.updatedConfidence,
         evidence:   action.updatedEvidence,
       }
-      if (action.updatedStatus) updatePayload.status = action.updatedStatus
+      if (action.updatedStatus) {
+        updatePayload.status = action.updatedStatus
+        // A read that just retired needs its resolved_at, same as one retired by
+        // the session-adaptation path — otherwise "when did this clear?" has no
+        // answer and the history reads as if it were never a limiter at all.
+        if (action.updatedStatus === 'resolved') updatePayload.resolved_at = new Date().toISOString()
+      }
       await supabase.from('insight').update(updatePayload).eq('id', action.existingInsightId)
 
       const prior = ((existingInsights as InsightRow[]) ?? []).find((i) => i.id === action.existingInsightId)
@@ -3478,11 +3591,26 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
   // 7. The living loop: read this session as evidence on the P1 weak link.
   //    Best-effort — a committed session must never hang on this. Skipped on an
   //    edit so a correction doesn't append a duplicate adaptation note.
+  //
+  //    The clearance test runs FIRST and, when it has something to say, it speaks
+  //    instead of the generic adaptation note: both read the same session against
+  //    the same limiter, and the athlete should hear the specific answer ("one
+  //    more session like that and the cap comes off") rather than two overlapping
+  //    ones. The test is also the only one of the two that can be argued FOR the
+  //    limiter, which is what makes it a test rather than a countdown.
   if (!p.editWorkoutId) {
+    let clearanceSpoke = false
     try {
-      await recordSessionAdaptation(p.athleteId, workoutId)
+      clearanceSpoke = (await evaluateClearanceTest(p.athleteId, workoutId)) !== null
     } catch (e) {
-      console.error('[loop] session adaptation failed', e)
+      console.error('[loop] clearance test failed', e)
+    }
+    if (!clearanceSpoke) {
+      try {
+        await recordSessionAdaptation(p.athleteId, workoutId)
+      } catch (e) {
+        console.error('[loop] session adaptation failed', e)
+      }
     }
   }
 

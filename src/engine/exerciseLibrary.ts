@@ -176,6 +176,40 @@ export function findLibraryExercise(name: string): LibraryExercise | null {
   return LOOKUP.get(normalizeName(name)) ?? null
 }
 
+// Keyword fallback for a movement the library hasn't curated yet. Deliberately
+// narrow — it only claims a category when the name says so plainly, and returns
+// null otherwise so the caller can decide what "unknown" is worth.
+//
+// ORDER MATTERS, and Upper Chain goes LAST because its keywords are the greediest
+// ("press", "row", "lat"). Posterior before Lower so "single-leg RDL" reads as
+// posterior; Lower before Upper so "overhead squat" reads as a squat; Conditioning
+// before Upper so "row erg" isn't mistaken for a barbell row.
+const CATEGORY_KEYWORDS: Array<[RegExp, LibraryCategory]> = [
+  [/\b(deadlift|rdl|hinge|hip thrust|glute|hamstring|leg curl|good ?morning|kettlebell swing|kb swing|back extension|hyperextension|nordic|pull ?through)\b/, 'Posterior Chain'],
+  [/\b(squat|lunge|step ?up|leg press|leg extension|calf|quad|tke)\b/, 'Lower Chain'],
+  [/\b(plank|dead ?bug|bird ?dog|hollow|pallof|anti ?rotation|carry|crunch|sit ?up|ab wheel|core|oblique|side bend)\b/, 'Core'],
+  [/\b(run|sprint|bike|erg|sled|prowler|jump rope|skipping|conditioning|intervals?|shuttle)\b/, 'Conditioning'],
+  [/\b(bench|press|push ?up|dip|fly|flye|overhead|ohp|lateral raise|shoulder|scap|rotator|cuff|row|pull ?up|chin ?up|pulldown|lat|bicep|hammer curl|preacher|tricep|face pull|shrug)\b/, 'Upper Chain'],
+]
+
+/**
+ * Which chain a movement belongs to. Library hit wins; then a narrow keyword
+ * read; then null for "genuinely don't know".
+ *
+ * This exists so a limiter can be scoped to the work it actually concerns. The
+ * load cap used to apply to every exercise in a phase, which meant a shoulder
+ * read held back an athlete's squat — the cap was right, its blast radius was
+ * not. Callers should treat null as "no opinion" and fall back to whatever the
+ * program already recorded, rather than guessing in either direction.
+ */
+export function resolveCategory(name: string): LibraryCategory | null {
+  const hit = LOOKUP.get(normalizeName(name))
+  if (hit) return hit.category
+  const n = normalizeName(name)
+  for (const [re, category] of CATEGORY_KEYWORDS) if (re.test(n)) return category
+  return null
+}
+
 // ---- heuristic fallback for unknown exercises ------------------------------
 // Conservative: reps-unit signals first (most reliable), then name keywords,
 // then load. Defaults to weight_reps. The library covers the tricky cases so

@@ -357,6 +357,43 @@ export interface ExerciseFeedback {
   name: string             // exercise name, so the agent can attribute it
   felt: FeltLabel | null
   note: string             // optional free text ("weaker on left side")
+  // The athlete deliberately went above the recommendation on this lift. Not the
+  // same as simply logging a heavier set: it is a stated intention to test the
+  // cap, which is what makes the result EVIDENCE rather than noise. A pushed set
+  // that lands pain-free argues against the limiter; one that hurts argues for it.
+  pushed?: boolean
+}
+
+// ---- The clearance test (how a limiter is allowed to end) ------------------
+// A limiter used to be a wall with no door: load stayed capped "until the pattern
+// clears", and nothing in the system could ever decide it had. This makes the
+// exit condition explicit, dated, and falsifiable — the athlete can read exactly
+// what would clear it and go and do that.
+//
+// Stored inside insight.evidence (JSONB, already a list of typed entries), so no
+// migration. Code owns every number here; the agent may only draft prose.
+
+export interface ClearanceCriterion {
+  top_sets: number        // qualifying top sets required per session
+  min_rpe: number         // ...at or above this effort
+  sessions: number        // ...across this many separate sessions
+  pain_free: true         // always — a painful rep never counts toward clearing
+}
+
+export interface ClearanceTest {
+  kind: 'clearance_test'
+  lift: string            // the exercise that has to carry the proof
+  criterion: ClearanceCriterion
+  opened_at: string
+  sessions_passed: number
+  status: 'open' | 'passed' | 'reconfirmed'
+  // Each qualifying session, newest last — so progress survives a reload and the
+  // athlete can see which sessions actually counted.
+  log?: Array<{ workout_id: string; passed: boolean; at: string }>
+}
+
+export function isClearanceTest(e: unknown): e is ClearanceTest {
+  return !!e && typeof e === 'object' && (e as { kind?: string }).kind === 'clearance_test'
 }
 
 // Pre-session readiness — JuggernautAI's gate. 1–5 quick taps, all optional.

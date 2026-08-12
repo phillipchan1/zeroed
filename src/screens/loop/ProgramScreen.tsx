@@ -7,12 +7,13 @@ import {
   gatherProgramMap, gatherTrainingLog,
   type NextWeekProjection, type MapPhase,
 } from '../../engine'
+import { capIsActive, clearanceTestOf, describeClearanceTest } from '../../engine/prescription'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { getWeightUnit } from '../../lib/units'
 import {
   PageHeader, SectionHeader, Skeleton, Disclosure, Chip, Row, Button,
 } from '../../components/ui'
-import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, PhaseName, WeeklyDirective } from '../../types/database'
+import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, InsightRow, PhaseName, WeeklyDirective } from '../../types/database'
 
 // Directive → chip tone, matching the recap banner so "the call" reads the same
 // everywhere it appears.
@@ -49,17 +50,33 @@ interface ProgramView {
   phase: PhaseRow | null
   routines: RoutineRow[]
   profile: AthleteProfileRow | null
+  // The open exit condition on the limiter, if one is capping load. The gate
+  // block is where the athlete comes to ask "what am I waiting on" — the load
+  // cap belongs in that answer, not only inside a workout.
+  clearance: { requirement: string; sessionsPassed: number; sessionsNeeded: number } | null
 }
 
 export async function fetchProgramView(athleteId: string): Promise<ProgramView> {
-  const [programRes, profileRes] = await Promise.all([
+  const [programRes, profileRes, insightRes] = await Promise.all([
     supabase.from('program').select('*').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle(),
     supabase.from('athlete_profile').select('*').eq('athlete_id', athleteId).maybeSingle(),
+    supabase.from('insight').select('*').eq('athlete_id', athleteId).order('priority'),
   ])
   if (programRes.error) throw programRes.error
   if (profileRes.error) throw profileRes.error
   const program = programRes.data as ProgramRow | null
   const profile = profileRes.data as AthleteProfileRow | null
+
+  const p1 = ((insightRes.data ?? []) as InsightRow[])
+    .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
+  const openTest = capIsActive(p1) ? clearanceTestOf(p1) : null
+  const clearance = openTest
+    ? {
+        requirement: describeClearanceTest(openTest),
+        sessionsPassed: openTest.sessions_passed,
+        sessionsNeeded: openTest.criterion.sessions,
+      }
+    : null
 
   let phase: PhaseRow | null = null
   let routines: RoutineRow[] = []
@@ -78,7 +95,7 @@ export async function fetchProgramView(athleteId: string): Promise<ProgramView> 
     }
     routines = (routineRes.data ?? []) as RoutineRow[]
   }
-  return { program, phase, routines, profile }
+  return { program, phase, routines, profile, clearance }
 }
 
 export function ProgramScreen({ athleteId }: { athleteId: string }) {
@@ -124,6 +141,7 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
 
   const nonNegotiables = (phase?.non_negotiables as string[] | null) ?? []
   const advancement    = (phase?.advancement_criteria as string[] | null) ?? []
+  const clearance      = data?.clearance ?? null
 
   return (
     <div className="screen with-nav">
@@ -237,10 +255,10 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
               </div>
             </Disclosure>
 
-            {advancement.length > 0 && (
+            {(advancement.length > 0 || clearance) && (
               <Disclosure
                 label={nextPhase ? `What graduates you to ${nextPhase}` : 'What graduates you'}
-                meta={<span className="num">{advancement.length}</span>}
+                meta={<span className="num">{advancement.length + (clearance ? 1 : 0)}</span>}
               >
                 <ul style={{ listStyle: 'none', display: 'flex', flexDirection: 'column', gap: 14 }}>
                   {advancement.map((c, i) => (
@@ -252,6 +270,25 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
                       <span className="text-base" style={{ lineHeight: 1.5 }}>{c}</span>
                     </li>
                   ))}
+                  {/* The load cap's own exit condition. It belongs here because
+                      it is the gate the athlete feels every session, and it is
+                      the only one with a number they can move this week. */}
+                  {clearance && (
+                    <li style={{ display: 'flex', gap: 12, alignItems: 'flex-start' }}>
+                      <span
+                        title="Clearance test"
+                        style={{ marginTop: 7, flexShrink: 0, width: 9, height: 9, borderRadius: '50%', border: '1.5px solid var(--signal)' }}
+                      />
+                      <span style={{ flex: 1 }}>
+                        <span className="text-base" style={{ lineHeight: 1.5, display: 'block' }}>
+                          Lifts the load cap: {clearance.requirement}
+                        </span>
+                        <span className="num text-sm text-dim" style={{ display: 'block', marginTop: 4 }}>
+                          {clearance.sessionsPassed}/{clearance.sessionsNeeded} banked
+                        </span>
+                      </span>
+                    </li>
+                  )}
                 </ul>
               </Disclosure>
             )}
