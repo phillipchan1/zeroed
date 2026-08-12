@@ -2789,11 +2789,13 @@ async function gatherRecentLifts(programId: string, unit: string): Promise<Array
 
 // Dispose the agent's design onto the canonical GeneratedProgram shape with
 // deterministic guardrails (clamp sets, cap sessions/exercises, stamp the P1
-// insight, keep canonical advancement criteria). Falls back to the template if
-// the design is empty.
+// insight, keep canonical advancement criteria). Returns null when the design
+// carries no usable session — the caller decides what a floor is worth, because
+// substituting the template is safe for a brand-new athlete and destructive for
+// one mid-block.
 function disposePhaseDesign(
   d: PhaseDesignResult, phaseName: PhaseName, category: string, startDateStr: string, p1InsightId: string | null,
-): GeneratedProgram {
+): GeneratedProgram | null {
   const canonical = generatePhase(phaseName, category, startDateStr, { p1InsightId })
   // Caps match the program editor's (7 sessions, 12 exercises, 10 sets), not the
   // old conservative ones: an athlete who has built a six-day week with a jump
@@ -2815,7 +2817,7 @@ function disposePhaseDesign(
     intent: s.intent ? String(s.intent) : '',
   })).filter((r) => r.exercises.length)
 
-  if (!routines.length) return canonical
+  if (!routines.length) return null
   return {
     goal: (d.goal ?? '').trim() || canonical.goal,
     retest_date: canonical.retest_date,
@@ -2830,12 +2832,36 @@ function disposePhaseDesign(
   }
 }
 
+/**
+ * A designed phase, and whether it is the athlete's or the template's.
+ *
+ * `fellBack` is the whole point. The deterministic template is a safe floor for
+ * an athlete who has no training behind them — it is NOT a safe replacement for
+ * a block someone is already mid-way through, because it knows nothing about
+ * their lifts, their loads, or the steer they set in the program editor. A
+ * caller that swaps blocks has to be able to tell the two apart, so it can
+ * decline to install a floor over real training. `reason` carries the agent's
+ * own failure string through for the coach message and the developer log.
+ */
+interface DesignedPhase {
+  plan: GeneratedProgram
+  fellBack: boolean
+  reason: string | null
+}
+
 // Design a phase via the agent (screened athlete), falling back to the
 // deterministic template on ANY failure — the app always produces a safe phase.
+// Callers MUST check `fellBack` before overwriting an existing block; see the
+// DesignedPhase doc.
 async function designPhasePlan(
   athleteId: string, programId: string, phaseName: PhaseName, startDateStr: string,
   category: string, p1InsightId: string | null, unit: string, emphasis?: string,
-): Promise<GeneratedProgram> {
+): Promise<DesignedPhase> {
+  const template = (reason: string): DesignedPhase => ({
+    plan: generatePhase(phaseName, category, startDateStr, { p1InsightId }),
+    fellBack: true,
+    reason,
+  })
   try {
     const [{ data: ath }, { data: insightRows }] = await Promise.all([
       supabase.from('athlete').select('goals, obstacle, training_age, sessions_per_week, training_preferences').eq('id', athleteId).maybeSingle(),
@@ -2868,11 +2894,38 @@ async function designPhasePlan(
       ...(trimmedEmphasis ? { emphasis: trimmedEmphasis } : {}),
       ...(history ? { history } : {}),
     })
-    if (!res.ok) return generatePhase(phaseName, category, startDateStr, { p1InsightId })
-    return disposePhaseDesign(res.data, phaseName, category, startDateStr, p1InsightId)
-  } catch {
-    return generatePhase(phaseName, category, startDateStr, { p1InsightId })
+    if (!res.ok) return template(res.reason ? `${res.error}: ${res.reason}` : res.error)
+    // A call that succeeds can still carry no usable session (zero sessions, or
+    // every exercise name blank), so "the agent answered" is not the same as
+    // "we got a real block".
+    const plan = disposePhaseDesign(res.data, phaseName, category, startDateStr, p1InsightId)
+    if (!plan) return template('design_empty')
+    return { plan, fellBack: false, reason: null }
+  } catch (e) {
+    return template(`threw: ${String(e)}`)
   }
+}
+
+/**
+ * Leave a trace when the designer fell back and a block swap was declined.
+ *
+ * Deliberately NOT a program_revision row: that table is the athlete's journey,
+ * it is append-only history of reprogramming that actually happened, and
+ * gatherProgramHistory feeds it back to the designer as "changes the athlete
+ * already made, with what they asked for". A failure to reprogram is neither of
+ * those things, and filing it there would both misread on the timeline and
+ * mislead the next design. The athlete-facing record is the coach_message the
+ * caller writes; this is the developer-facing half, carrying the agent's own
+ * reason string — which the client otherwise discards into the fallback, and
+ * which is exactly what was missing when this bug was diagnosed.
+ */
+async function recordPhaseDesignFallback(
+  programId: string, phaseId: string | null, nextName: PhaseName, reason: string | null,
+): Promise<void> {
+  console.error(
+    '[loop] phase design fell back to the template — block swap declined',
+    { programId, phaseId, nextName, reason },
+  )
 }
 
 /**
@@ -2995,9 +3048,9 @@ export async function runPhaseAdvancement(athleteId: string): Promise<boolean> {
   }
 
   const nextName = PHASE_SEQUENCE[PHASE_SEQUENCE.indexOf(phase.name) + 1] ?? null
-  await supabase.from('phase').update({ status: 'completed' }).eq('id', phase.id)
 
   if (!nextName) {
+    await supabase.from('phase').update({ status: 'completed' }).eq('id', phase.id)
     await insertCoachMessage(athleteId, {
       kind: 'phase_change',
       body: `You've cleared the full arc — Sport phase complete. A retest will re-scope what's next.`,
@@ -3006,40 +3059,73 @@ export async function runPhaseAdvancement(athleteId: string): Promise<boolean> {
     return true
   }
 
-  const today = isoDate(new Date())
-  const plan = await designPhasePlan(athleteId, prog.id, nextName, today, category, p1?.id ?? null, getWeightUnit())
+  // Blocks are Monday-anchored everywhere else in the loop, so anchor here too.
+  // Stamping `today` started a block mid-week, which split the athlete's week
+  // across two phases and hid the sessions they had already logged. Worse, the
+  // mid-week week_end that follows from it makes the NEXT advancement fire
+  // mid-week too, so one such start keeps re-infecting every block after it.
+  //
+  // And preserve an in-progress week exactly the way the retest re-scope does
+  // (see rescopeAfterRetest): if anything is already logged this week, the new
+  // block is QUEUED for next Monday and the current one runs out the week.
+  // Advancement fires on the first app open past week_end, which for a Sunday
+  // end is usually Monday — but for someone who opens the app on Wednesday it
+  // is Wednesday, and their half-finished week must not be swapped out from
+  // under them.
+  const weekMonday = startOfWeekMonday(new Date())
+  const { count: loggedThisWeek } = await supabase
+    .from('workout').select('id, routine!inner(program_id)', { count: 'exact', head: true })
+    .eq('routine.program_id', prog.id)
+    .gte('performed_at', weekMonday.toISOString())
+  const defer = (loggedThisWeek ?? 0) > 0
+  const startsOn = defer ? addDays(isoDate(weekMonday), 7) : isoDate(weekMonday)
 
-  // Prefer ACTIVATING an existing pending phase of the next stage (one the program
-  // was seeded or planned with) over inserting a fresh one — otherwise advancement
-  // leaves an orphaned duplicate phase. Only generate from scratch when no pending
-  // phase of that stage exists. Its dates/criteria are reset to start now.
-  const { data: pendingNext } = await supabase
-    .from('phase').select('id')
-    .eq('program_id', prog.id).eq('name', nextName).eq('status', 'pending')
-    .order('week_start').limit(1).maybeSingle()
+  // Design BEFORE retiring the current block. The template is a safe floor for
+  // an athlete with nothing behind them, but installing it over a block someone
+  // is training is destructive: it knows none of their lifts, none of their
+  // loads, and none of the steer they set in the program editor. So when the
+  // designer falls back, HOLD — the block they have beats a block we couldn't
+  // build. (2026-08-11: this ran the other way round and replaced a real
+  // 5-session week with a 3-session "Session A/B/C" template.)
+  const designed = await designPhasePlan(athleteId, prog.id, nextName, startsOn, category, p1?.id ?? null, getWeightUnit())
 
-  let newPhaseId: string | null
-  if (pendingNext) {
-    newPhaseId = (pendingNext as { id: string }).id
-    await supabase.from('phase').update({
-      status: 'active',
-      week_start: plan.phase.week_start,
-      week_end: plan.phase.week_end,
-      non_negotiables: plan.phase.non_negotiables,
-      advancement_criteria: plan.phase.advancement_criteria,
-    }).eq('id', newPhaseId)
-    // Populate sessions from the blueprint only if the phase has none yet.
-    const { count } = await supabase
-      .from('routine').select('id', { count: 'exact', head: true }).eq('phase_id', newPhaseId)
-    if (!count) {
-      await supabase.from('routine').insert(plan.routines.map((r) => ({
-        program_id: prog.id, phase_id: newPhaseId, name: r.name,
-        session_type: r.session_type, exercises: r.exercises, intent: r.intent,
-      })))
-    }
-  } else {
-    newPhaseId = await insertPhaseAndRoutines(prog.id, plan)
+  if (designed.fellBack) {
+    const heldUntil = weekEndingISO(startOfWeekMonday(new Date(`${addDays(isoDate(weekMonday), 7)}T12:00:00`)))
+    await supabase.from('phase').update({ week_end: heldUntil }).eq('id', phase.id)
+    await insertCoachMessage(athleteId, {
+      kind: 'phase_change',
+      body: `You've earned the step up to ${nextName}, but I couldn't build the new block just now — so I'm holding ${phase.name} rather than dropping you onto a generic week. Your sessions are unchanged. I'll try again on the next open.`,
+      ref_id: phase.id,
+    })
+    await recordPhaseDesignFallback(prog.id, phase.id, nextName, designed.reason)
+    return false
   }
+
+  const plan = designed.plan
+
+  // Only one pending phase can exist at a time and we returned early above if
+  // one did, so a fresh insert is always right here — no pending block of the
+  // next stage can be sitting there waiting to be adopted.
+  if (defer) {
+    // Current block runs out the week; the new one activates at the boundary via
+    // activateDueScheduledPhase. Nothing logged this week gets orphaned, and
+    // current_phase stays put until the swap actually happens.
+    await supabase.from('phase')
+      .update({ week_end: weekEndingISO(weekMonday) })
+      .eq('id', phase.id)
+    const queuedId = await insertPhaseAndRoutines(prog.id, plan, 'pending')
+    await insertCoachMessage(athleteId, {
+      kind: 'phase_change',
+      body: `You've cleared ${phase.name} — your ${nextName} block is built and starts Monday. This week stays as it is.`,
+      ref_id: queuedId ?? phase.id,
+    })
+    return true
+  }
+
+  await supabase.from('phase')
+    .update({ status: 'completed', week_end: addDays(startsOn, -1) })
+    .eq('id', phase.id)
+  const newPhaseId = await insertPhaseAndRoutines(prog.id, plan, 'active')
 
   await supabase.from('athlete_profile')
     .update({ current_phase: nextName, last_updated: new Date().toISOString() })
@@ -3097,7 +3183,9 @@ export interface RetestSummary {
 // pending phase starting next Monday and the current phase runs out the week
 // (activateDueScheduledPhase promotes it at the boundary). A clean week has
 // nothing to preserve, so the new block takes over immediately as before.
-async function rescopeAfterRetest(athleteId: string): Promise<{ deferred: boolean; startsOn: string }> {
+async function rescopeAfterRetest(
+  athleteId: string,
+): Promise<{ deferred: boolean; startsOn: string; held?: boolean }> {
   const today = isoDate(new Date())
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
@@ -3130,7 +3218,23 @@ async function rescopeAfterRetest(athleteId: string): Promise<{ deferred: boolea
   const deferred = (loggedThisWeek ?? 0) > 0
   const startsOn = deferred ? addDays(isoDate(weekMonday), 7) : today
 
-  const plan = await designPhasePlan(athleteId, prog.id, nextName, startsOn, category, p1?.id ?? null, getWeightUnit())
+  const designed = await designPhasePlan(athleteId, prog.id, nextName, startsOn, category, p1?.id ?? null, getWeightUnit())
+
+  // Same rule as the phase boundary: never retire a real block for a template
+  // one. The retest itself still stands — the caller has already written the new
+  // diagnostic and moved the insights — this only declines to swap the training.
+  // The retest date is pushed a week rather than the usual 28 days so the
+  // re-scope is retried soon instead of waiting out a full cycle.
+  if (designed.fellBack) {
+    await recordPhaseDesignFallback(prog.id, (phaseRow as PhaseRow | null)?.id ?? null, nextName, designed.reason)
+    const retryOn = addDays(today, 7)
+    await supabase.from('program').update({ retest_date: retryOn }).eq('id', prog.id)
+    await supabase.from('athlete_profile')
+      .update({ retest_date: retryOn, last_updated: new Date().toISOString() })
+      .eq('athlete_id', athleteId)
+    return { deferred: false, startsOn: today, held: true }
+  }
+  const plan = designed.plan
 
   if (deferred) {
     // Keep the current phase active through the end of this week; queue the new

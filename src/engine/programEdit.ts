@@ -27,6 +27,9 @@ import {
   type ProgramEditContext, type ProgramEditTurn, type EditWeekSession, type ProgramEdit,
 } from './agentClient'
 import { readLoggedExercises, type LoggedWorkoutLike } from './loggedSets'
+import {
+  startOfWeekMonday, isoDate, addDaysISO, nextMondayISO, sundayOnOrAfterISO,
+} from './weekDates'
 import { recordProgramRevision, gatherProgramHistory } from './programHistory'
 import type {
   ExerciseTemplate, PhaseName, PhaseRow, RoutineRow, SetLog,
@@ -74,27 +77,10 @@ export interface ProgramEditState {
 /** When a confirmed change takes effect. */
 export type ApplyTiming = 'now' | 'next_week'
 
-/** Monday of the week containing `d`, local time. */
-export function startOfWeekMonday(d: Date): Date {
-  const r = new Date(d.getFullYear(), d.getMonth(), d.getDate())
-  r.setDate(r.getDate() - ((r.getDay() + 6) % 7))
-  return r
-}
-
-export function isoDate(d: Date): string {
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
-}
-
-export function addDaysISO(dateStr: string, days: number): string {
-  const d = new Date(`${dateStr}T12:00:00`)
-  d.setDate(d.getDate() + days)
-  return isoDate(d)
-}
-
-/** The Monday a deferred change would land on. */
-export function nextMondayISO(from: Date = new Date()): string {
-  return addDaysISO(isoDate(startOfWeekMonday(from)), 7)
-}
+// The week-date primitives live in weekDates.ts (pure, so they can be checked
+// without a database). Re-exported here so existing importers of this module
+// keep working.
+export { startOfWeekMonday, isoDate, addDaysISO, nextMondayISO, sundayOnOrAfterISO }
 
 // ---- reading the live program ----------------------------------------------
 
@@ -546,7 +532,9 @@ async function scheduleDraftForNextWeek(
   // The new block continues the same phase of the arc — same name, same rules,
   // same advancement criteria. Only the week changed. Its end date keeps whatever
   // runway the original had, and never less than a full week.
-  const weekEnd = state.phase.weekEnd > startsOn ? state.phase.weekEnd : addDaysISO(startsOn, 27)
+  const weekEnd = sundayOnOrAfterISO(
+    state.phase.weekEnd > startsOn ? state.phase.weekEnd : addDaysISO(startsOn, 27),
+  )
   const { data: newPhase, error: phaseErr } = await supabase
     .from('phase')
     .insert({

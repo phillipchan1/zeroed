@@ -117,16 +117,22 @@ export async function fetchSnapshot(userId: string): Promise<AppStateSnapshot> {
 
       if (routineRows && routineRows.length > 0) {
         routines = [...(routineRows as unknown as RoutineRow[])].sort((a, b) => a.name.localeCompare(b.name))
-        // This week's workouts for these routines (Mon–Sun), for scheduling.
+        // This week's workouts (Mon–Sun), for scheduling. Scoped to the PROGRAM
+        // and the date window, not to the current phase's routine ids — the way
+        // gatherWeeklyRecap already counts a week. A phase boundary mints fresh
+        // routine rows, so filtering by the active phase's routines made every
+        // session logged earlier in the same week vanish from the week the
+        // moment the block swapped, and the athlete's finished work read as
+        // never done.
         const monday = new Date()
         monday.setHours(0, 0, 0, 0)
         monday.setDate(monday.getDate() - ((monday.getDay() + 6) % 7))
         const { data: weekRows } = await supabase
           .from('workout')
-          .select('routine_id, performed_at')
-          .in('routine_id', routines.map((r) => r.id))
+          .select('routine_id, performed_at, routine!inner(program_id)')
+          .eq('routine.program_id', prog.id)
           .gte('performed_at', monday.toISOString())
-        weekWorkouts = (weekRows ?? []) as Array<{ routine_id: string; performed_at: string }>
+        weekWorkouts = (weekRows ?? []) as unknown as Array<{ routine_id: string; performed_at: string }>
       }
     }
   }
