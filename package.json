@@ -10,7 +10,10 @@
     "type-check": "tsc --noEmit",
     "deploy:db": "supabase db push",
     "deploy:agent": "supabase functions deploy agent",
-    "deploy:backend": "supabase db push && supabase functions deploy agent"
+    "deploy:backend": "supabase db push && supabase functions deploy agent",
+    "mcp": "npm --prefix mcp start",
+    "mcp:install": "npm --prefix mcp install",
+    "mcp:check": "npm --prefix mcp run check"
   },
   "dependencies": {
     "@capacitor/core": "^6.2.0",

@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "zeroed": {
+      "command": "npx",
+      "args": [
+        "tsx",
+        "/ABSOLUTE/PATH/TO/zeroed/mcp/src/index.ts"
+      ],
+      "cwd": "/ABSOLUTE/PATH/TO/zeroed/mcp",
+      "env": {
+        "ZEROED_SUPABASE_URL": "https://your-project-id.supabase.co",
+        "ZEROED_SUPABASE_ANON_KEY": "your-anon-key",
+        "ZEROED_EMAIL": "you@example.com",
+        "ZEROED_PASSWORD": "your-app-password",
+        "ZEROED_WEIGHT_UNIT": "lb"
+      }
+    }
+  }
+}

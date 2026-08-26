@@ -7,6 +7,8 @@ dist/
 # Environment secrets — never commit
 .env.local
 .env.*.local
+.env
+mcp/.env
 supabase/functions/.env       # Edge Function secrets for local `functions serve`
 supabase/.temp/
 

@@ -1,5 +1,24 @@
 # Zeroed
 
+## Claude MCP (chat against your log)
+
+Zeroed ships a local MCP server so Claude Desktop, Claude Code, or Cursor can
+read your workout history and apply the same surgical program edits as the
+in-app editor.
+
+```bash
+npm run mcp:install    # once
+cp mcp/.env.example mcp/.env
+```
+
+Put your Supabase URL plus either athlete login (`ZEROED_EMAIL` / `ZEROED_PASSWORD`
++ anon key) or a service-role key + `ZEROED_ATHLETE_EMAIL` in `mcp/.env`. Then
+point Claude at `mcp/src/index.ts` — copy `mcp/claude_desktop_config.example.json`
+or `mcp/cursor-mcp.example.json` and replace the placeholder path.
+
+`npm run mcp:check` exercises the editor and formatters without a database.
+Full setup: `mcp/README.md`.
+
 ## Setup
 
 ### 1. Install dependencies
