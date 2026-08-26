@@ -152,6 +152,16 @@ ok(Boolean(apply?.inputSchema), 'apply tool advertises a schema')
 const { prompts } = await client.listPrompts()
 ok(prompts.some((p) => p.name === 'coach'), 'protocol lists the coach prompt')
 
+// Confirm is checked before any database connection, so a refused write
+// never needs credentials and never talks to Supabase.
+const applyRefused = await client.callTool({
+  name: 'apply_program_edits',
+  arguments: { confirm: false, edits: [{ type: 'add_note', note: 'keep jumps' }] },
+})
+const applyRefusedText = JSON.stringify(applyRefused)
+ok(applyRefusedText.includes('confirm=true'), 'apply without confirm is refused')
+ok(!applyRefusedText.includes('ZEROED_SUPABASE_URL'), 'refusal must not require credentials')
+
 // Without credentials the tool must fail clearly — never hang or throw out of band.
 const call = await client.callTool({ name: 'get_training_brief', arguments: {} })
 const callText = JSON.stringify(call)

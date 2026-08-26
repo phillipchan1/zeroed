@@ -274,6 +274,9 @@ export function createZeroedServer(): McpServer {
       request: z.string().optional().describe('The athlete\'s own words — stored as a standing preference so the next block does not drop it.'),
     },
     async ({ edits, confirm, timing, request }) => safe(async () => {
+      if (!confirm) {
+        return 'Refused: apply_program_edits requires confirm=true. Call preview_program_edits first, then apply with confirm=true.'
+      }
       const store = await connectStore()
       return applyEdits(store, edits as EditInput[], {
         confirm,
