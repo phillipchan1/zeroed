@@ -1,8 +1,13 @@
 # Zeroed MCP
 
-A local [Model Context Protocol](https://modelcontextprotocol.io) server so Claude (Desktop, Claude Code, or Cursor) can read your live Zeroed log and — after a preview — apply the same surgical program edits the in-app editor uses.
+Claude can talk to your live Zeroed log two ways:
 
-The model proposes. The existing engine (`src/engine/programDraft.ts`) disposes: clamps, diffs, and writes. Claude never dumps a whole new week.
+| Path | Where it works | Transport |
+| --- | --- | --- |
+| **Remote** (recommended for phone / web) | Claude web, Claude iOS/Android, Claude Desktop custom connector | Public HTTPS → Supabase Edge |
+| **Local** | Claude Desktop (Local dev), Cursor, Claude Code on this machine | stdio process |
+
+Same tools either way. The model proposes. The existing engine (`src/engine/programDraft.ts`) disposes: clamps, diffs, and writes. Claude never dumps a whole new week.
 
 ## What Claude can do
 
@@ -23,7 +28,38 @@ Program writes follow the app:
 - New sessions are inserted. Sessions are never deleted (drop work by removing exercises).
 - `timing=next_week` leaves this week alone and queues Monday — refused if a block is already pending.
 
-## Setup
+---
+
+## Remote (Claude web / mobile)
+
+Edge function: `supabase/functions/mcp`. Auth is an opaque `mcp_token` bearer minted in the app — **not** a Supabase JWT.
+
+### Wire it once
+
+1. Open Zeroed → **You** (Profile) → **Claude connector** → Create a named token.
+2. **Copy URL + token** (shown once).
+3. In Claude: **Customize → Connectors → Add custom connector**.
+4. Name it `Zeroed`, paste the URL (it already includes `apikey=`).
+5. Auth: `Authorization: Bearer <token>`. **Skip any OAuth / login card.**
+6. Enable the connector in a chat and ask: *What's on my training week?*
+
+URL shape:
+
+```
+https://<project>.supabase.co/functions/v1/mcp?apikey=<anon_key>
+```
+
+Deploy / redeploy the function:
+
+```bash
+npx supabase functions deploy mcp --no-verify-jwt --project-ref pzxkcngdmkjjwbimncdx
+```
+
+Revoke a leaked token from the same Profile screen.
+
+---
+
+## Local (this machine)
 
 ```bash
 cd mcp
@@ -64,7 +100,7 @@ The server itself stays quiet until a client connects over stdin:
 npm --prefix mcp start
 ```
 
-## Claude Desktop
+### Claude Desktop (Local dev)
 
 Open `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows) and add the `zeroed` block from `claude_desktop_config.example.json`. Use **absolute** paths.
 
@@ -72,7 +108,7 @@ Open `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) o
 2. Ask: *What's on my training week, and how has my squat moved?*
 3. To change the program: *Add box jumps after the squat on Lower A — preview first.* Then confirm before anything is written.
 
-## Cursor / Claude Code
+### Cursor / Claude Code
 
 Copy `cursor-mcp.example.json` into `~/.cursor/mcp.json` (Cursor) or `.mcp.json` at the repo root (Claude Code). Same absolute-path rule. Reload MCP servers after editing.
 
@@ -80,4 +116,5 @@ Copy `cursor-mcp.example.json` into `~/.cursor/mcp.json` (Cursor) or `.mcp.json`
 
 - `apply_program_edits` without `confirm=true` is a no-op.
 - Preview and apply re-read the live week, so a stale preview cannot silently overwrite a later in-app edit with the old snapshot.
-- Service-role writes are still scoped to the resolved athlete id. Prefer athlete login.
+- Remote tokens are hashed at rest; revoke anytime from Profile.
+- Local service-role writes are still scoped to the resolved athlete id. Prefer athlete login for local, and Profile tokens for remote.

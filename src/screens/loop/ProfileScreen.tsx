@@ -1,13 +1,42 @@
-import { useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Target, CalendarDays, Scale, Activity, LogOut } from 'lucide-react'
-import { supabase } from '../../lib/supabaseClient'
+import { Target, CalendarDays, Scale, Activity, LogOut, Link2 } from 'lucide-react'
+import { supabase, supabaseAnonKey, supabaseUrl } from '../../lib/supabaseClient'
 import { useCachedLoader, mutateCache } from '../../lib/cache'
 import { cacheKeys } from '../../lib/loopCache'
 import { getWeightUnit, setWeightUnit, type WeightUnit } from '../../lib/units'
 import {
   PageHeader, SectionHeader, Skeleton, Button, Input, Row, Sheet,
 } from '../../components/ui'
+
+interface McpTokenRow {
+  id: string
+  name: string
+  last_four: string
+  created_at: string
+  last_used_at: string | null
+  revoked_at: string | null
+}
+
+function mintToken(): string {
+  const bytes = new Uint8Array(32)
+  crypto.getRandomValues(bytes)
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '')
+}
+
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('')
+}
+
+function mcpEndpoint(): string {
+  const url = new URL(`${supabaseUrl.replace(/\/$/, '')}/functions/v1/mcp`)
+  url.searchParams.set('apikey', supabaseAnonKey)
+  return url.toString()
+}
 
 interface ProfileScreenProps {
   athleteId: string
@@ -63,6 +92,90 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   const [draft, setDraft] = useState('')
   const [saving, setSaving] = useState(false)
   const [signingOut, setSigningOut] = useState(false)
+
+  const [mcpTokens, setMcpTokens] = useState<McpTokenRow[]>([])
+  const [mcpLabel, setMcpLabel] = useState('')
+  const [mcpBusy, setMcpBusy] = useState(false)
+  const [mcpError, setMcpError] = useState<string | null>(null)
+  const [freshToken, setFreshToken] = useState<{ name: string; token: string } | null>(null)
+  const [copied, setCopied] = useState(false)
+
+  const reloadMcpTokens = useCallback(async () => {
+    const { data, error } = await supabase
+      .from('mcp_token')
+      .select('id, name, last_four, created_at, last_used_at, revoked_at')
+      .eq('athlete_id', athleteId)
+      .order('created_at', { ascending: false })
+    if (error) {
+      setMcpError(error.message)
+      return
+    }
+    setMcpTokens((data ?? []) as McpTokenRow[])
+    setMcpError(null)
+  }, [athleteId])
+
+  useEffect(() => {
+    void reloadMcpTokens()
+  }, [reloadMcpTokens])
+
+  async function createMcpToken() {
+    const label = mcpLabel.trim() || 'Claude'
+    if (mcpBusy) return
+    setMcpBusy(true)
+    setMcpError(null)
+    try {
+      const token = mintToken()
+      const { error } = await supabase.from('mcp_token').insert({
+        athlete_id: athleteId,
+        name: label,
+        token_hash: await sha256Hex(token),
+        last_four: token.slice(-4),
+      })
+      if (error) throw error
+      setFreshToken({ name: label, token })
+      setMcpLabel('')
+      await reloadMcpTokens()
+    } catch (e) {
+      setMcpError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setMcpBusy(false)
+    }
+  }
+
+  async function revokeMcpToken(id: string) {
+    if (mcpBusy) return
+    setMcpBusy(true)
+    try {
+      const { error } = await supabase
+        .from('mcp_token')
+        .update({ revoked_at: new Date().toISOString() })
+        .eq('id', id)
+      if (error) throw error
+      await reloadMcpTokens()
+    } catch (e) {
+      setMcpError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setMcpBusy(false)
+    }
+  }
+
+  async function copyFresh() {
+    if (!freshToken) return
+    const blob = [
+      `URL: ${mcpEndpoint()}`,
+      `Authorization: Bearer ${freshToken.token}`,
+      '',
+      'Claude → Customize → Connectors → Add custom connector.',
+      'Paste the URL. Skip any OAuth / login card — use the Bearer header above.',
+    ].join('\n')
+    try {
+      await navigator.clipboard.writeText(blob)
+      setCopied(true)
+      window.setTimeout(() => setCopied(false), 2000)
+    } catch {
+      setMcpError('Could not copy — select the text and copy it by hand')
+    }
+  }
 
   async function handleSignOut() {
     if (signingOut) return
@@ -188,12 +301,84 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
           </div>
         </div>
 
+        <div className="section">
+          <SectionHeader>Claude connector</SectionHeader>
+          <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)', lineHeight: 1.45 }}>
+            A remote MCP key so Claude on the web or phone can read your log and
+            preview program edits. Use as a <em>custom connector</em> (not Local
+            dev). Skip any OAuth login card — Bearer only.
+          </p>
+          <div style={{ marginTop: 12, display: 'flex', gap: 8 }}>
+            <Input
+              type="text"
+              placeholder="e.g. Claude iPhone"
+              value={mcpLabel}
+              onChange={(e) => setMcpLabel(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <Button variant="outline" onClick={() => void createMcpToken()} disabled={mcpBusy}>
+              Create
+            </Button>
+          </div>
+          {mcpError && (
+            <p style={{ marginTop: 8, color: 'var(--danger, #c44)', fontSize: 'var(--fs-sm)' }}>{mcpError}</p>
+          )}
+          <div style={{ marginTop: 8 }}>
+            {mcpTokens.filter((t) => !t.revoked_at).map((t) => (
+              <Row
+                key={t.id}
+                leading={<Link2 size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+                title={t.name}
+                sub={`…${t.last_four}${t.last_used_at ? ` · used ${new Date(t.last_used_at).toLocaleDateString()}` : ' · unused'}`}
+                value="Revoke"
+                onClick={() => void revokeMcpToken(t.id)}
+              />
+            ))}
+            {!mcpTokens.some((t) => !t.revoked_at) && (
+              <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)' }}>No active tokens yet.</p>
+            )}
+          </div>
+        </div>
+
         <Button variant="ghost" full onClick={handleSignOut} disabled={signingOut}>
           <LogOut size={18} strokeWidth={1.75} style={{ marginRight: 8 }} />
           {signingOut ? 'Signing out…' : 'Sign out'}
         </Button>
        </div>
       </div>
+
+      {freshToken && (
+        <Sheet
+          title="Copy once — then it's gone"
+          onClose={() => setFreshToken(null)}
+          actions={
+            <Button variant="primary" full onClick={() => void copyFresh()}>
+              {copied ? 'Copied' : 'Copy URL + token'}
+            </Button>
+          }
+        >
+          <p className="text-dim" style={{ fontSize: 'var(--fs-sm)', lineHeight: 1.45, marginBottom: 12 }}>
+            Token for <strong style={{ color: 'var(--text)' }}>{freshToken.name}</strong>. We only
+            store a hash — you will not see this again.
+          </p>
+          <pre
+            style={{
+              whiteSpace: 'pre-wrap',
+              wordBreak: 'break-all',
+              fontFamily: 'var(--font-mono)',
+              fontSize: 'var(--fs-sm)',
+              padding: 12,
+              borderRadius: 12,
+              border: '1px solid var(--line)',
+              background: 'var(--surface, transparent)',
+              color: 'var(--text)',
+              margin: 0,
+            }}
+          >
+            {`URL:\n${mcpEndpoint()}\n\nAuthorization:\nBearer ${freshToken.token}`}
+          </pre>
+        </Sheet>
+      )}
 
       {editing && (
         <Sheet

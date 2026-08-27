@@ -1,0 +1,8 @@
+# Zeroed local Supabase config — only the knobs the edge functions need.
+
+[functions.agent]
+verify_jwt = true
+
+[functions.mcp]
+# Bearer is an opaque mcp_token, not a Supabase JWT — gateway must pass it through.
+verify_jwt = false

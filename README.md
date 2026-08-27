@@ -2,9 +2,10 @@
 
 ## Claude MCP (chat against your log)
 
-Zeroed ships a local MCP server so Claude Desktop, Claude Code, or Cursor can
-read your workout history and apply the same surgical program edits as the
-in-app editor.
+**Remote (web / phone):** Profile → **Claude connector** → Create token → paste as a
+Claude **custom connector** (Bearer auth, skip OAuth). Details: `mcp/README.md`.
+
+**Local (this machine):** Claude Desktop Local-dev / Cursor / Claude Code:
 
 ```bash
 npm run mcp:install    # once
