@@ -43,7 +43,7 @@ import {
   estimate1RM, estimateIsReliable, displayPRs, foldBest, NO_BEST,
   type LiftBest, type PrKind,
 } from './prs'
-import { isSetLogged, tallySession, sumVolume, type VolumeTally } from './volume'
+import { isSetLogged, tallySession, sumVolume, NO_VOLUME, type VolumeTally } from './volume'
 import { validateProvisionalProgram } from './safety'
 import {
   OBSTACLE_CATEGORY_HINTS, buildReadSkeleton, READ_FLOORS,
@@ -3766,8 +3766,13 @@ export interface RecapSession {
   performedAt: string
   setsDone: number
   rpe: number | null
-  /** Load moved this session (Σ weight × reps), in STORAGE units. */
-  volume: VolumeTally
+  /**
+   * Load moved this session (Σ weight × reps), in STORAGE units. OPTIONAL
+   * because a device holds cached views written by earlier builds: a required
+   * field here is a white screen on the first launch after an update, for
+   * exactly the athletes with the most history. Read with `?.`.
+   */
+  volume?: VolumeTally
   highlights: RecapSessionHighlight[]   // top set of the first few exercises
 }
 export interface RecapMovement {
@@ -3784,8 +3789,8 @@ export interface WeeklyRecap {
   weekEnd: string     // ISO date (Sunday) — review.week_ending
   planned: number     // sessions/week target, for the done/planned stat
   totalSets: number
-  /** The week's load moved — the number that actually tracks the training. */
-  totalVolume: VolumeTally
+  /** The week's load moved. Absent on caches written before this field existed. */
+  totalVolume?: VolumeTally
   sessions: RecapSession[]
   movements: RecapMovement[]
 }
@@ -3871,7 +3876,7 @@ export async function gatherWeeklyRecap(athleteId: string, reviewId?: string): P
     .sort((a, b) => Number(!!b.prevStatus) - Number(!!a.prevStatus) || b.confidence - a.confidence)
 
   const totalSets = sessions.reduce((a, s) => a + s.setsDone, 0)
-  const totalVolume = sumVolume(sessions.map((s) => s.volume))
+  const totalVolume = sumVolume(sessions.map((s) => s.volume ?? NO_VOLUME))
 
   return {
     review: reviewRow,
@@ -3900,8 +3905,8 @@ export interface LogSession {
   performedAt: string
   setsDone: number
   rpe: number | null
-  /** Load moved this session, in STORAGE units. */
-  volume: VolumeTally
+  /** Load moved this session, in STORAGE units. Absent on older caches. */
+  volume?: VolumeTally
   pending: boolean                     // finished offline, not yet synced
   highlights: RecapSessionHighlight[]  // top set of the first few exercises
 }
@@ -3909,7 +3914,8 @@ export interface LogWeek {
   weekStart: string   // ISO Monday
   weekEnding: string  // ISO Sunday
   totalSets: number
-  totalVolume: VolumeTally
+  /** Absent on caches written before this field existed. */
+  totalVolume?: VolumeTally
   sessions: LogSession[]  // newest first within the week
 }
 export interface TrainingLog {
@@ -4094,7 +4100,7 @@ export async function gatherTrainingLog(
     }
     wk.sessions.push(s)
     wk.totalSets += s.setsDone
-    wk.totalVolume = sumVolume([wk.totalVolume, s.volume])
+    wk.totalVolume = sumVolume([wk.totalVolume ?? NO_VOLUME, s.volume ?? NO_VOLUME])
   }
 
   return { weeks: [...weeks.values()].sort((a, b) => b.weekEnding.localeCompare(a.weekEnding)) }
@@ -4108,18 +4114,18 @@ export interface ExercisePoint {
   topReps: number | null
   e1rm: number | null        // display unit; Epley, exact at one rep
   rpe: number | null
-  /** Which records this session broke, if any — the markers on the trend. */
-  prs: PrKind[]
+  /** Which records this session broke, if any. Absent on older caches. */
+  prs?: PrKind[]
   /** False above ~12 reps, where an e1RM stops being a strength number. */
-  e1rmReliable: boolean
+  e1rmReliable?: boolean
 }
 export interface ExerciseHistory {
   name: string
   points: ExercisePoint[]   // oldest → newest
   bestWeight: number | null // display unit
   bestE1rm: number | null   // display unit
-  /** How many sessions on this lift set a record. */
-  prCount: number
+  /** How many sessions on this lift set a record. Absent on older caches. */
+  prCount?: number
 }
 
 /**
@@ -4176,7 +4182,7 @@ export async function gatherExerciseHistory(
     points,
     bestWeight: running.weight != null ? u.show(running.weight) : null,
     bestE1rm: running.e1rm != null ? u.show(running.e1rm) : null,
-    prCount: points.filter((p) => p.prs.length > 0).length,
+    prCount: points.filter((p) => (p.prs?.length ?? 0) > 0).length,
   }
 }
 

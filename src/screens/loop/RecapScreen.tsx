@@ -40,7 +40,7 @@ function SessionRow({ s }: { s: RecapSession }) {
         <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{s.routineName}</h3>
         <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
           {shortDay(s.performedAt)} · {s.setsDone} sets
-          {s.volume.load > 0 ? ` · ${u.volume(s.volume.load)}${u.unit}` : ''}
+          {s.volume?.load ? ` · ${u.volume(s.volume.load)}${u.unit}` : ''}
           {s.rpe != null ? ` · RPE ${s.rpe}` : ''}
         </span>
       </div>
@@ -141,7 +141,7 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
               <Stat value={recap.totalSets} label="Sets" />
               {/* Load moved. Sets alone cannot tell the week that added a set
                   while halving the bar from the week that got stronger. */}
-              {recap.totalVolume.load > 0 && (
+              {!!recap.totalVolume?.load && (
                 <Stat value={`${u.volume(recap.totalVolume.load)}${u.unit}`} label="Volume" />
               )}
               <Stat value={adj?.avgRPE ?? '—'} label="Avg RPE" />

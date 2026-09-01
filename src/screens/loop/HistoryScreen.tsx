@@ -56,7 +56,7 @@ function LogSessionCard({
           : <Chip tone="done">{s.setsDone} sets</Chip>}
         {/* Load moved, not just how many times you stopped. A session of 3x5 at
             315 and one of 3x12 at 95 both read as "3 sets" without it. */}
-        {s.volume.load > 0 && <Chip tone="todo">{u.volume(s.volume.load)}{u.unit}</Chip>}
+        {!!s.volume?.load && <Chip tone="todo">{u.volume(s.volume.load)}{u.unit}</Chip>}
         {/* Phase is constant across a block, so it was repeating on every row
             for no information. It stays in the week header's context. */}
         {!s.pending && s.rpe != null && <Chip tone="todo">RPE {s.rpe}</Chip>}
@@ -125,7 +125,7 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
                 {hist.bestWeight != null && <Stat value={`${hist.bestWeight}${u.unit}`} label="Top set" />}
                 {hist.bestE1rm != null && <Stat value={`${hist.bestE1rm}${u.unit}`} label="Est. 1RM" tone="var(--signal)" />}
                 <Stat value={hist.points.length} label="Sessions" />
-                {hist.prCount > 0 && <Stat value={hist.prCount} label={hist.prCount === 1 ? 'PR' : 'PRs'} tone="var(--signal)" />}
+                {!!hist.prCount && <Stat value={hist.prCount} label={hist.prCount === 1 ? 'PR' : 'PRs'} tone="var(--signal)" />}
               </StatGrid>
             </div>
           )}
@@ -155,7 +155,7 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
                   {/* Which sessions actually beat something, marked on the day
                       they did it — a best-ever number at the top of a sheet
                       never said WHICH session earned it. */}
-                  {p.prs.length > 0 && (
+                  {!!p.prs?.length && (
                     <span
                       className="text-micro"
                       style={{ color: 'var(--signal)', fontWeight: 700, letterSpacing: '0.08em' }}
@@ -229,7 +229,7 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
                 <SectionHeader>{fmtRange(wk.weekStart, wk.weekEnding)}</SectionHeader>
                 <span className="num text-xs text-dim">
                   {wk.sessions.length} session{wk.sessions.length === 1 ? '' : 's'} · {wk.totalSets} sets
-                  {wk.totalVolume.load > 0 && ` · ${u.volume(wk.totalVolume.load)}${u.unit}`}
+                  {!!wk.totalVolume?.load && ` · ${u.volume(wk.totalVolume.load)}${u.unit}`}
                 </span>
               </div>
               {wk.sessions.map((s) => (

@@ -753,6 +753,9 @@ function WorkoutCoachSheet({ athleteId, onClose }: { athleteId: string; onClose:
 interface DebriefSheetProps {
   reading: { name: string; question: string } | null
   saving: boolean
+  /** What the session actually came to — sets, load moved, time. */
+  tally: { sets: number; load: number; minutes: number }
+  u: UnitContext
   // What was written the first time round, when this is an edit of a session
   // that hasn't synced — editing shouldn't ask for the story again.
   initial: { reflection: string; readingAnswer: string } | null
@@ -760,7 +763,7 @@ interface DebriefSheetProps {
   onSkip: () => void
 }
 
-function DebriefSheet({ reading, saving, initial, onSave, onSkip }: DebriefSheetProps) {
+function DebriefSheet({ reading, saving, tally, u, initial, onSave, onSkip }: DebriefSheetProps) {
   const [reflection, setReflection] = useState(initial?.reflection ?? '')
   const [readingAnswer, setReadingAnswer] = useState(initial?.readingAnswer ?? '')
   return (
@@ -788,6 +791,15 @@ function DebriefSheet({ reading, saving, initial, onSave, onSkip }: DebriefSheet
         </>
       }
     >
+      {/* What the session came to. Sets alone can't tell a session of triples at
+          315 from one of twelves at 95, and this is the moment the athlete is
+          looking back at it. */}
+      <p className="num text-xs text-dim" style={{ marginBottom: 18 }}>
+        {tally.sets} set{tally.sets === 1 ? '' : 's'}
+        {tally.load > 0 ? ` · ${u.volume(tally.load)}${u.unit} moved` : ''}
+        {tally.minutes > 0 ? ` · ${tally.minutes} min` : ''}
+      </p>
+
       {reading && (
         <div style={{ marginBottom: 18 }}>
           <p className="text-sm" style={{ color: 'var(--computing)', marginBottom: 8, lineHeight: 1.45 }}>
@@ -1705,9 +1717,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   const setsTotal = allSetsFlat.length
   const setsDone  = allSetsFlat.filter(isLogged).length
-  // Load moved so far — the number that actually tracks the session, next to the
-  // one that only counts how many times you stopped.
-  const liveVolume = tallySession(setLogs)
+  // Load moved. NOT in the sticky header: that strip was deliberately cut back
+  // to a title, one metadata line and a progress bar, and a fourth field wraps
+  // it onto two lines and re-creates the telemetry crush that pass removed. It
+  // belongs at the moment the session is being looked back on — the debrief.
+  const sessionVolume = tallySession(setLogs)
   const rpeLive   = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
   const avgRpeLive = rpeLive.length ? Math.round(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length) : null
 
@@ -1748,7 +1762,6 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
             </p>
             <p className="num text-xs text-dim" style={{ marginTop: 2 }}>
               {formatElapsed(elapsed)} · {setsDone}/{setsTotal} sets
-              {liveVolume.load > 0 ? ` · ${u.volume(liveVolume.load)}${u.unit}` : ''}
               {avgRpeLive !== null ? ` · RPE ${avgRpeLive}` : ''}
             </p>
           </div>
@@ -2069,6 +2082,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         <DebriefSheet
           reading={readingEx ? { name: readingEx.name, question: readingEx.reading_why ?? 'How did the read item feel?' } : null}
           saving={savingDebrief}
+          tally={{
+            sets: sessionVolume.loggedSets,
+            load: sessionVolume.load,
+            minutes: Math.ceil(finalElapsedRef.current / 60),
+          }}
+          u={u}
           initial={priorDebrief ? { reflection: priorDebrief.reflection, readingAnswer: priorDebrief.readingAnswer } : null}
           onSave={handleDebrief}
           onSkip={handleDebriefSkip}
