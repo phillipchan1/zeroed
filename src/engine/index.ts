@@ -35,7 +35,7 @@ import {
   callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callPhaseDesign, callInfoGain, callTarget,
   callCoachChat, callWeeklyDebrief,
   type ProgramDesignResult, type PhaseDesignResult, type InsightCategory,
-  type CoachContext, type CoachChatTurn, type CoachAction,
+  type CoachContext, type CoachChatTurn, type CoachAction, type RetestFindings,
 } from './agentClient'
 import { FELT_CHIPS, isClearanceTest, type FeltLabel, type ClearanceTest } from '../types/database'
 import { unitContext, type UnitContext } from '../lib/units'
@@ -44,9 +44,10 @@ import {
   type LiftBest, type PrKind,
 } from './prs'
 import {
-  buildBaseline, namedLifts, strengthDeltas,
+  buildBaseline, namedLifts, strengthDeltas, strengthStalls,
   type BaselineLift, type StrengthDelta,
 } from './strengthBaseline'
+import { readBalance, type BalanceRead } from './balance'
 import { isSetLogged, tallySession, sumVolume, NO_VOLUME, type VolumeTally } from './volume'
 import { validateProvisionalProgram } from './safety'
 import {
@@ -2331,6 +2332,12 @@ export interface SessionPrescription {
   // already the honest one). Absent on caches written before this field existed.
   pushTargets?: Record<number, number | null>
   rule: IntelligenceRule | null   // standing rule in effect this session, or null
+  /**
+   * The active block, so the session can prescribe REST the way it prescribes
+   * load — a Strength main lift needs three minutes, a band pull-apart does not.
+   * Absent on cached copies written before this field existed — read with `?.`.
+   */
+  phaseName?: string | null
   // The open exit condition on the limiter — what would actually clear the cap,
   // and how far along it is. Null when no cap is in effect. Absent on cached
   // copies written before this field existed — read with `?.`.
@@ -2510,7 +2517,7 @@ export async function gatherSessionPrescription(
     }
   }
 
-  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, pushTargets, rule, clearance }
+  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, pushTargets, rule, clearance, phaseName }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2971,9 +2978,12 @@ async function designPhasePlan(
     // The newest top set per lift, AND the arc behind it. Without the arc the
     // designer cannot tell progress from a plateau, and every block is built for
     // an athlete who just arrived.
-    const [recent_lifts, history] = await Promise.all([
+    const [recent_lifts, history, retest] = await Promise.all([
       gatherRecentLifts(programId, u),
       gatherProgramHistory(athleteId, programId, u).catch(() => null),
+      // What the retest that triggered this block found. Best-effort: a design
+      // that can't read it is the design we always shipped.
+      gatherRetestFindings(athleteId).catch(() => null),
     ])
     const insights = ((insightRows ?? []) as Array<{ priority: string; category: string; claim: string; confidence: number; status: string }>)
       .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
@@ -2994,6 +3004,7 @@ async function designPhasePlan(
       recent_lifts,
       ...(trimmedEmphasis ? { emphasis: trimmedEmphasis } : {}),
       ...(history ? { history } : {}),
+      ...(retest ? { retest } : {}),
     })
     if (!res.ok) return template(res.reason ? `${res.error}: ${res.reason}` : res.error)
     // A call that succeeds can still carry no usable session (zero sessions, or
@@ -4226,6 +4237,149 @@ export async function gatherExerciseBests(programId: string): Promise<Record<str
     }
   }
   return out
+}
+
+/**
+ * The athlete's strength balance — which chain is behind, read off their own log.
+ *
+ * Built on the same baseline the retest reads, so the two can never disagree
+ * about what the athlete lifts.
+ */
+export async function gatherBalance(athleteId: string): Promise<BalanceRead> {
+  const lifts = await gatherStrengthBaseline(athleteId)
+  return readBalance(
+    lifts
+      .filter((l) => l.e1rm != null && l.e1rm > 0)
+      .map((l) => ({ slot: l.slot, lift: l.name, e1rm: l.e1rm! })),
+  )
+}
+
+// ---- Block volume (the chart on Program) -----------------------------------
+
+export interface BlockVolumeWeek {
+  weekStart: string      // ISO Monday
+  weekEnding: string     // ISO Sunday
+  load: number           // Σ weight × reps, STORAGE units
+  sessions: number
+  directive: WeeklyDirective | null   // the call that produced the NEXT week
+  isCurrent: boolean
+}
+export interface BlockVolume {
+  phaseName: string | null
+  weeks: BlockVolumeWeek[]   // oldest → newest
+  best: number               // the tallest bar, so the chart can scale
+}
+
+/**
+ * Load moved per week across the current block, with the directive that was
+ * standing over each week.
+ *
+ * This is the app explaining itself: the volume line and the PROGRESS / HOLD /
+ * DELOAD calls are the same story told twice, and until the volume existed there
+ * was no way to see whether the calls were working. Weeks with no logged work
+ * are kept as zero rather than skipped — a gap in a block is information, and
+ * dropping it would draw a continuous climb over a fortnight off.
+ */
+export async function gatherBlockVolume(athleteId: string): Promise<BlockVolume | null> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return null
+
+  const [{ data: phaseRow }, { data: reviewRows }, log] = await Promise.all([
+    supabase.from('phase').select('name, week_start, week_end')
+      .eq('program_id', prog.id).eq('status', 'active').maybeSingle(),
+    supabase.from('weekly_review').select('week_ending, next_week_prescription')
+      .eq('program_id', prog.id).order('week_ending', { ascending: true }),
+    gatherTrainingLog(athleteId, [], 200),
+  ])
+  const phase = phaseRow as { name: string; week_start: string; week_end: string } | null
+  if (!phase) return null
+
+  const directiveByWeek = new Map<string, WeeklyDirective>()
+  for (const r of (reviewRows ?? []) as Array<{ week_ending: string; next_week_prescription: WeeklyPrescription | null }>) {
+    if (r.next_week_prescription?.directive) directiveByWeek.set(r.week_ending, r.next_week_prescription.directive)
+  }
+  const loggedByWeek = new Map(log.weeks.map((w) => [w.weekEnding, w]))
+
+  // Walk the block's Mondays rather than the weeks that happen to have logs, so
+  // a skipped week draws as a zero instead of vanishing from the axis.
+  const thisMonday = startOfWeekMonday(new Date())
+  const weeks: BlockVolumeWeek[] = []
+  let cursor = startOfWeekMonday(new Date(`${phase.week_start}T12:00:00`))
+  const end = new Date(`${phase.week_end}T23:59:59`)
+  for (let guard = 0; guard < 26 && cursor <= end; guard++) {
+    const weekEnding = weekEndingISO(cursor)
+    const wk = loggedByWeek.get(weekEnding)
+    weeks.push({
+      weekStart: isoDate(cursor),
+      weekEnding,
+      load: wk?.totalVolume?.load ?? 0,
+      sessions: wk?.sessions.length ?? 0,
+      directive: directiveByWeek.get(weekEnding) ?? null,
+      isCurrent: isoDate(cursor) === isoDate(thisMonday),
+    })
+    // Never past today: a block runs four weeks and three of them may not have
+    // happened yet. An empty bar for a week in the future is a lie about a week
+    // that hasn't been trained.
+    if (cursor >= thisMonday) break
+    const next = new Date(cursor)
+    next.setDate(next.getDate() + 7)
+    cursor = next
+  }
+
+  return {
+    phaseName: phase.name,
+    weeks,
+    best: weeks.reduce((m, w) => Math.max(m, w.load), 0),
+  }
+}
+
+/**
+ * What the most recent retest found, for the block it is about to design.
+ *
+ * A re-scope is triggered BY a retest and knew nothing about it: the designer
+ * saw the athlete's logged lifts, which it always sees, but not that a movement
+ * pattern had just cleared or that a lift measured 28 days apart came back flat.
+ * Those two are the findings most likely to change what the next block should
+ * be, and they were being computed and thrown away.
+ *
+ * Null when there is nothing to say — a single diagnostic, or no active program.
+ */
+export async function gatherRetestFindings(athleteId: string): Promise<RetestFindings | null> {
+  const { data: diagRows } = await supabase
+    .from('diagnostic').select('version, raw_results')
+    .eq('athlete_id', athleteId)
+    .order('version', { ascending: false })
+    .limit(2)
+  const diags = (diagRows ?? []) as Array<{ version: number; raw_results: DiagnosticResults | null }>
+  if (diags.length < 2) return null
+  const [current, prior] = diags
+  if (!current.raw_results) return null
+
+  const movement_gains: string[] = []
+  const baseMove = prior.raw_results?.movement ?? {}
+  for (const p of MOVEMENT_PATTERNS) {
+    const from = baseMove[p.key]
+    const to = current.raw_results.movement?.[p.key]
+    if (from != null && to != null && to > from) movement_gains.push(`${p.label} ${from}→${to}`)
+  }
+
+  // Weak links this retest retired. resolved_at is stamped by runRetest, so the
+  // window is "since the previous diagnostic" — near enough, and it never
+  // reports a read that cleared for some other reason months ago.
+  const { data: resolvedRows } = await supabase
+    .from('insight').select('category, claim, resolved_at')
+    .eq('athlete_id', athleteId).eq('status', 'resolved')
+    .order('resolved_at', { ascending: false }).limit(5)
+  const cleared = ((resolvedRows ?? []) as Array<{ category: string; claim: string }>)
+    .map((i) => i.category)
+
+  const stronger = strengthDeltas(prior.raw_results?.strength, current.raw_results.strength)
+    .map((d) => `${d.name} ${d.from}→${d.to} (+${d.pct}%)`)
+  const stalled = strengthStalls(prior.raw_results?.strength, current.raw_results.strength)
+
+  if (!movement_gains.length && !cleared.length && !stronger.length && !stalled.length) return null
+  return { version: current.version, movement_gains, cleared, stronger, stalled }
 }
 
 /**

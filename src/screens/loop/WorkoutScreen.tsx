@@ -20,6 +20,8 @@ import {
 import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
 import { isSetLogged, tallySession } from '../../engine/volume'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
+import { restSecondsFor, adjustRest, formatRest } from '../../engine/restTimer'
+import { fireRestAlert } from '../../lib/restAlert'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { fetchCoachView } from './CoachScreen'
@@ -42,7 +44,6 @@ function leadingInt(s: string | undefined): number | null {
   return m ? parseInt(m[0], 10) : null
 }
 
-const REST_SECONDS = 90
 const RPE_SCALE = [6, 7, 8, 9, 10]
 
 // Column layout per tracking type, as a CSS class so the grid template can be
@@ -1025,8 +1026,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // reading "In progress" on the Train tab for days.
   const [confirmDiscard, setConfirmDiscard] = useState(false)
 
-  // Rest timer (epoch ms when rest ends, or null).
+  // Rest timer. `restEndsAt` is the deadline; `restTotal` is what was prescribed
+  // for the lift that started it, so ±30s has something to move and the ring
+  // knows how far through it is.
   const [restEndsAt, setRestEndsAt] = useState<number | null>(null)
+  const [restTotal, setRestTotal] = useState(0)
   const [, setNowTick] = useState(0)
 
   // insight_id → insight, for the per-exercise "why" surface
@@ -1104,12 +1108,19 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routineId])
 
-  // Rest-timer ticker — only runs while a rest is active.
+  // Rest-timer ticker — only runs while a rest is active. The alert fires on the
+  // transition to zero and nowhere else: this effect re-runs whenever restEndsAt
+  // changes (every ±30s tap), so firing anywhere but the clear would beep at the
+  // athlete for adjusting their own rest.
   useEffect(() => {
     if (restEndsAt == null) return
     const id = setInterval(() => {
       setNowTick((t) => t + 1)
-      if (Date.now() >= restEndsAt) setRestEndsAt(null)
+      if (Date.now() >= restEndsAt) {
+        setRestEndsAt(null)
+        // The whole point of a rest timer is knowing without looking.
+        fireRestAlert()
+      }
     }, 250)
     return () => clearInterval(id)
   }, [restEndsAt])
@@ -1940,7 +1951,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                     carry={carry}
                     prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], u)}
                     onChange={(updated) => handleSetChange(exIdx, setIdx, updated)}
-                    onComplete={() => setRestEndsAt(Date.now() + REST_SECONDS * 1000)}
+                    onComplete={() => {
+                      const secs = restSecondsFor(ex, prescription?.phaseName, trackingType)
+                      setRestTotal(secs)
+                      setRestEndsAt(Date.now() + secs * 1000)
+                    }}
                     onActivate={() => setActiveExIdx(exIdx)}
                   />
                 )
@@ -1975,7 +1990,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
            <p className="rail__head">Rest</p>
            {restEndsAt != null && restLeft > 0 ? (
              <>
-               <p className="num rail__timer">{formatElapsed(restLeft)}</p>
+               <p className="num rail__timer">{formatRest(restLeft)}</p>
                <button
                  type="button"
                  className="btn btn--ghost"
@@ -1987,7 +2002,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
              </>
            ) : (
              <p className="text-xs text-dim" style={{ lineHeight: 1.5 }}>
-               Idle. Completing a set starts the {REST_SECONDS}s clock.
+               Idle. Completing a set starts a clock sized to the lift.
              </p>
            )}
          </div>
@@ -2013,13 +2028,53 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
        </aside>
       </div>
 
-      {/* Rest timer pill (mobile; desktop surfaces it in the rail instead) */}
+      {/* Rest timer pill (mobile; desktop surfaces it in the rail instead).
+          Three controls, not one: the clock the app prescribed, and the two taps
+          that say it was wrong. The coach isn't in the gym, and the set that just
+          happened is better evidence than any table. */}
       {restEndsAt != null && restLeft > 0 && (
-        <button type="button" className="rest-pill" onClick={() => setRestEndsAt(null)}>
-          <span className="rest-pill__label">REST</span>
-          <span className="num rest-pill__time">{formatElapsed(restLeft)}</span>
-          <X size={13} strokeWidth={2} />
-        </button>
+        <div className="rest-pill" role="timer" aria-label={`Rest, ${restLeft} seconds left`}>
+          <button
+            type="button"
+            className="rest-pill__step"
+            aria-label="30 seconds less rest"
+            onClick={() => {
+              const next = adjustRest(restLeft, -1)
+              setRestTotal(next)
+              setRestEndsAt(Date.now() + next * 1000)
+            }}
+          >
+            −30
+          </button>
+          <span className="num rest-pill__time">{formatRest(restLeft)}</span>
+          <button
+            type="button"
+            className="rest-pill__step"
+            aria-label="30 seconds more rest"
+            onClick={() => {
+              const next = adjustRest(restLeft, 1)
+              setRestTotal(next)
+              setRestEndsAt(Date.now() + next * 1000)
+            }}
+          >
+            +30
+          </button>
+          <button
+            type="button"
+            className="rest-pill__skip"
+            aria-label="Skip rest"
+            onClick={() => setRestEndsAt(null)}
+          >
+            <X size={14} strokeWidth={2.5} />
+          </button>
+          {/* How far through, drawn along the bottom edge — readable at a glance
+              from across a rack without parsing digits. */}
+          <span
+            className="rest-pill__bar"
+            style={{ width: restTotal > 0 ? `${Math.max(0, Math.min(100, (1 - restLeft / restTotal) * 100))}%` : '0%' }}
+            aria-hidden="true"
+          />
+        </div>
       )}
 
       {/* Bottom complete bar */}

@@ -2,17 +2,9 @@ import { useNavigate, useParams } from 'react-router-dom'
 import { useCachedLoader } from '../../lib/cache'
 import { gatherWeeklyRecap, type RecapSession } from '../../engine'
 import { unitContext, type UnitContext } from '../../lib/units'
+import { toneFor } from '../../lib/directive'
 import { Button, SectionHeader, Skeleton, PageHeader, Stat, StatGrid } from '../../components/ui'
-import type { SetLog, WeeklyDirective, WeeklyPrescription, WeeklyReviewAdjustments } from '../../types/database'
-
-// Directive → colour + plain-language gist for the recap banner.
-const DIRECTIVE_TONE: Record<WeeklyDirective, { color: string; gist: string }> = {
-  PROGRESS:        { color: 'var(--confirmed)', gist: 'Earned more load' },
-  HOLD:            { color: 'var(--text-dim)',  gist: 'Holding the line' },
-  'HOLD (missed)': { color: 'var(--pending)',   gist: 'Resetting the week' },
-  DELOAD:          { color: 'var(--pending)',   gist: 'Backing off to recover' },
-  RECOVERY:        { color: 'var(--pending)',   gist: 'Healing — recovery is the work' },
-}
+import type { SetLog, WeeklyPrescription, WeeklyReviewAdjustments } from '../../types/database'
 
 function fmtRange(startISO: string, endISO: string): string {
   const s = new Date(`${startISO}T12:00:00`)
@@ -38,7 +30,9 @@ function SessionRow({ s }: { s: RecapSession }) {
     <div className="card" style={{ marginBottom: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
         <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{s.routineName}</h3>
-        <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
+        {/* No nowrap: at large text sizes this three-part line ran off the
+            right edge. It is allowed to take two lines. */}
+        <span className="num text-xs text-dim" style={{ textAlign: 'right' }}>
           {shortDay(s.performedAt)} · {s.setsDone} sets
           {s.volume?.load ? ` · ${u.volume(s.volume.load)}${u.unit}` : ''}
           {s.rpe != null ? ` · RPE ${s.rpe}` : ''}
@@ -99,7 +93,7 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
   const adj = (recap.review.adjustments ?? null) as WeeklyReviewAdjustments | null
   const presc = (recap.review.next_week_prescription ?? null) as WeeklyPrescription | null
   const directive = presc?.directive ?? 'HOLD'
-  const tone = DIRECTIVE_TONE[directive] ?? DIRECTIVE_TONE.HOLD
+  const tone = toneFor(directive)
   const adherencePct = adj ? Math.round(adj.adherence * 100) : null
   const delta = presc?.load_delta_pct ?? 0
 

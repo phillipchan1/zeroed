@@ -1,11 +1,15 @@
 import { useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useCachedLoader } from '../../lib/cache'
-import { gatherTrainingLog, gatherExerciseHistory, type LogSession, type ExerciseHistory } from '../../engine'
+import {
+  gatherTrainingLog, gatherExerciseHistory, gatherBalance,
+  type LogSession, type ExerciseHistory,
+} from '../../engine'
+import { describeGap, labelForSlot, type BalanceRead } from '../../engine/balance'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { prLabel } from '../../engine/prs'
-import { SectionHeader, Skeleton, PageHeader, Sheet, Chip, Stat, StatGrid } from '../../components/ui'
+import { SectionHeader, Skeleton, PageHeader, Sheet, Chip, Stat, StatGrid, Meter } from '../../components/ui'
 import type { SetLog } from '../../types/database'
 
 function fmtRange(startISO: string, endISO: string): string {
@@ -182,6 +186,67 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
 }
 
 /**
+ * THE BALANCE — which chain is actually behind.
+ *
+ * Not a population percentile. Zeroed's thesis is that something specific about
+ * YOU is the limiter, and "you are a 62nd-percentile squatter" names a peer
+ * group rather than a limiter. This scores the athlete against the well-known
+ * ratios BETWEEN their own lifts, which hold across bodyweights and sexes — so
+ * it needs no new field and makes no claim it can't support.
+ */
+function BalanceCard({ balance, u }: { balance: BalanceRead; u: UnitContext }) {
+  if (balance.chains.length === 0) {
+    return (
+      <div className="card" style={{ marginBottom: 28 }}>
+        <SectionHeader>Balance</SectionHeader>
+        <p className="text-sm text-dim" style={{ marginTop: 10, lineHeight: 1.55 }}>{balance.reason}</p>
+      </div>
+    )
+  }
+  return (
+    <div className="card fade-rise" style={{ marginBottom: 28 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+        <SectionHeader>Balance</SectionHeader>
+        <span className="num text-xs text-dim">vs your own lifts</span>
+      </div>
+
+      <p className="text-base" style={{ marginTop: 12, marginBottom: 18, lineHeight: 1.5 }}>
+        {balance.weakest
+          ? <>Your <strong>{labelForSlot(balance.weakest.slot).toLowerCase()}</strong> is {describeGap(balance.weakest)}.</>
+          : balance.reason}
+      </p>
+
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+        {balance.chains.map((c) => (
+          <div key={c.slot}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12, marginBottom: 6 }}>
+              <span className="text-sm" style={{ fontWeight: 600 }}>{labelForSlot(c.slot)}</span>
+              <span className="num text-xs text-dim">
+                {u.fmt(c.e1rm)}{u.unit}
+                <span style={{ opacity: 0.6 }}> / {u.fmt(c.expected)}{u.unit}</span>
+              </span>
+            </div>
+            {/* Capped at parity, so the bar reads "how close to in-proportion",
+                not "who is biggest" — the point is the shortfall, not the size. */}
+            <Meter
+              value={Math.min(1, c.ratio)}
+              tone={c.state === 'lagging' ? 'var(--pending)' : 'var(--confirmed)'}
+              label={`${labelForSlot(c.slot)}, ${describeGap(c)}`}
+            />
+            <p className="text-xs text-dim" style={{ marginTop: 5 }}>{c.lift} · {describeGap(c)}</p>
+          </div>
+        ))}
+      </div>
+
+      <p className="text-xs text-dim" style={{ marginTop: 16, lineHeight: 1.5 }}>
+        Estimated maxes against the usual ratios between these lifts. A heuristic,
+        not a verdict — leverages and sport demands move it.
+      </p>
+    </div>
+  )
+}
+
+/**
  * HISTORY — everything you've trained, newest first, grouped by week. The
  * backward half of the program timeline: tap a session to review/edit it, or tap
  * any lift to see its progression. Reads fold in the outbox so a session finished
@@ -196,6 +261,7 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
     `history:${athleteId}`,
     () => gatherTrainingLog(athleteId, pendingSessionsRaw()),
   )
+  const { data: balance } = useCachedLoader(`balance:${athleteId}`, () => gatherBalance(athleteId))
   const weeks = data?.weeks ?? []
 
   return (
@@ -207,6 +273,8 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
           subtitle="Tap a session to review it, or a lift to see its progression."
           onBack={() => navigate('/app/today')}
         />
+
+        {balance && <BalanceCard balance={balance} u={u} />}
 
         {loading && weeks.length === 0 ? (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>

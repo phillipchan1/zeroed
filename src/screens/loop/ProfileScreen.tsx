@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Target, CalendarDays, Scale, Activity, LogOut, Link2 } from 'lucide-react'
+import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell } from 'lucide-react'
 import { supabase, supabaseAnonKey, supabaseUrl } from '../../lib/supabaseClient'
 import { useCachedLoader, mutateCache } from '../../lib/cache'
 import { cacheKeys } from '../../lib/loopCache'
 import { getWeightUnit, setWeightUnit, type WeightUnit } from '../../lib/units'
+import { restAlertEnabled, setRestAlertEnabled } from '../../lib/restAlert'
 import {
   PageHeader, SectionHeader, Skeleton, Button, Input, Row, Sheet,
 } from '../../components/ui'
@@ -87,6 +88,9 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     () => fetchProfileMeta(athleteId),
   )
   const [unit, setUnit] = useState<WeightUnit>(() => getWeightUnit())
+  // A beep at the end of rest is the default — a silent timer is a stopwatch,
+  // and the point is knowing without looking. Off is a deliberate choice.
+  const [restAlert, setRestAlert] = useState(() => restAlertEnabled())
 
   const [editing, setEditing] = useState<EditField | null>(null)
   const [draft, setDraft] = useState('')
@@ -288,6 +292,14 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
               title="Weight units"
               value={unit}
               onClick={() => openEdit('units')}
+            />
+            <Row
+              leading={<Bell size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+              title="Rest timer sound"
+              sub="A beep and a buzz when the rest is up"
+              value={restAlert ? 'On' : 'Off'}
+              onClick={() => { const next = !restAlert; setRestAlert(next); setRestAlertEnabled(next) }}
+              chevron={false}
             />
           </div>
         </div>

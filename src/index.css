@@ -31,19 +31,31 @@
   --font-mono: 'JetBrains Mono', monospace;
   --font-sans: 'Inter', sans-serif;
 
-  /* Mobile-first type scale. Nothing below --fs-micro (12px) is allowed to
-     carry meaning; body copy is 16px. The old scale bottomed out at 9.5–11px,
-     which is unreadable at arm's length in a gym. Every size here is a token so
-     a screen can never quietly re-introduce 10px text. */
-  --fs-micro: 12px;   /* mono labels, tags, badges — the smallest legal size */
-  --fs-xs:    13px;   /* secondary metadata */
-  --fs-sm:    15px;   /* supporting copy */
-  --fs-base:  16px;   /* body — the default */
-  --fs-lg:    18px;
-  --fs-xl:    22px;   /* card / section titles */
-  --fs-2xl:   28px;   /* screen titles */
-  --fs-3xl:   36px;   /* hero numbers */
-  --fs-4xl:   46px;
+  /* Mobile-first type scale. Nothing below --fs-micro is allowed to carry
+     meaning; body copy is 16px at default. The old scale bottomed out at
+     9.5–11px, which is unreadable at arm's length in a gym. Every size is a
+     token so a screen can never quietly re-introduce 10px text.
+
+     In REM, not px. Fixed pixels ignore the OS and browser font-size setting
+     outright — an athlete who has turned text up because they cannot read small
+     type got exactly nothing from this app, which is a strange thing for a
+     scale that exists to be readable. 1rem is the browser's own base (16px
+     unless the reader has said otherwise), so the default rendering is
+     byte-identical to the px scale it replaces and only a reader who asked for
+     bigger text sees a change.
+
+     Reflow is the failure mode of rem, so it is checked rather than hoped for:
+     scripts/check-layout.mjs asserts nothing overflows, clips, or shrinks below
+     the tap floor at 320/390/430px × 100/125/150% text. */
+  --fs-micro: 0.75rem;    /* 12px — mono labels, tags, badges; the smallest legal size */
+  --fs-xs:    0.8125rem;  /* 13px — secondary metadata */
+  --fs-sm:    0.9375rem;  /* 15px — supporting copy */
+  --fs-base:  1rem;       /* 16px — body, the default */
+  --fs-lg:    1.125rem;   /* 18px */
+  --fs-xl:    1.375rem;   /* 22px — card / section titles */
+  --fs-2xl:   1.75rem;    /* 28px — screen titles */
+  --fs-3xl:   2.25rem;    /* 36px — hero numbers */
+  --fs-4xl:   2.875rem;   /* 46px */
 
   /* Spacing (4px base unit) */
   --sp-1:  4px;
@@ -317,8 +329,11 @@ body {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  height: var(--tap);
-  padding: 0 var(--sp-5);
+  /* min-height, not height: at 150% text a fixed box clips its own label.
+     The tap floor is a MINIMUM, and a button that grows with its text is the
+     correct behaviour, not a regression. */
+  min-height: var(--tap);
+  padding: 8px var(--sp-5);
   border-radius: var(--radius-btn);
   font-family: var(--font-sans);
   font-size: var(--fs-base);
@@ -1495,7 +1510,10 @@ textarea.input {
    Neutral register (dim, not the computing-cyan reading instrument) so it reads
    as "reference, tap if you want it" rather than a live signal. */
 .howto-tag {
-  height: 32px;
+  /* 40px, not 32. These are Why / Coach / Details / Push it — tapped mid-set,
+     one-handed, with a bar in your hands, and 32px was the only target in the
+     app under the miss-tap floor at every width and every font scale. */
+  min-height: 40px;
   padding: 0 12px;
   border-radius: 999px;
   background: transparent;
@@ -1674,13 +1692,72 @@ textarea.input {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   animation: fadeRise var(--dur-mid) var(--ease-out);
 }
+.rest-pill {
+  /* The bar below is positioned against this, and the pill's own radius has to
+     clip it or it draws square corners over a rounded edge. */
+  overflow: hidden;
+  padding: 0 6px 0 6px;
+  gap: 2px;
+}
 .rest-pill__label {
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
   letter-spacing: 0.12em;
   color: var(--computing);
 }
-.rest-pill__time { font-size: var(--fs-lg); font-weight: 600; }
+.rest-pill__time {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  min-width: 62px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;   /* the pill must not resize every second */
+}
+
+/* ±30s. Full-height hit areas rather than small round buttons: this is tapped
+   mid-set, one-handed, without looking. */
+.rest-pill__step {
+  height: 46px;
+  min-width: 52px;
+  padding: 0 6px;
+  background: none;
+  border: 0;
+  border-radius: 999px;
+  color: var(--computing);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+.rest-pill__step:active { background: rgba(90, 143, 184, 0.16); }
+
+.rest-pill__skip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 46px;
+  min-width: 42px;
+  background: none;
+  border: 0;
+  border-radius: 999px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.rest-pill__skip:active { background: rgba(255, 255, 255, 0.06); }
+
+/* Elapsed, drawn along the bottom edge — readable from across a rack without
+   parsing digits. */
+.rest-pill__bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--computing);
+  transition: width 250ms linear;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rest-pill__bar { transition: none; }
+}
 
 /* --- Workout desktop layout ---------------------------------------------- */
 /* Mobile: a single scrolling column, exactly as before. Desktop: the column
@@ -2269,6 +2346,10 @@ textarea.input {
   flex-direction: column;
   align-items: center;
   justify-content: center;
+  /* The ring is a fixed-size graphic, so its centred label cannot push it wider.
+     line-height 1 keeps the text box equal to the glyphs, which is what stops it
+     clipping against the ring at large font sizes. */
+  line-height: 1;
   font-family: var(--font-mono);
   font-variant-numeric: tabular-nums;
   line-height: 1;
@@ -2279,15 +2360,18 @@ textarea.input {
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  height: 28px;
-  padding: 0 12px;
+  min-height: 28px;
+  padding: 4px 12px;
   border-radius: 999px;
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  white-space: nowrap;
+  /* A long chip ("225 lbs · +5 from last week") ran off the right edge at large
+     text sizes. Wrapping is better than a chip nobody can finish reading. */
+  white-space: normal;
+  max-width: 100%;
 }
 .chip--todo    { background: rgba(154,154,154,0.10); color: var(--text-dim); }
 .chip--doing   { background: var(--signal-dim);      color: var(--signal); }
@@ -2954,3 +3038,73 @@ textarea.input {
   cursor: pointer;
 }
 .workout-discard:hover { color: var(--veto); }
+
+/* --- Block volume chart (Program) ----------------------------------------
+   One series, so no legend — the heading names it. Bars carry magnitude in a
+   single hue; the weekly directive is a RESERVED status colour that always
+   ships with its own two letters underneath, so colour never carries it alone. */
+.vol-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.vol-col {
+  flex: 1 1 0;
+  min-width: 34px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+/* The plot area. A fixed track means every bar shares one baseline and one
+   ceiling — bars that each scale to themselves compare nothing. */
+.vol-col__track {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 100%;
+  height: 96px;
+  background: var(--ground);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.vol-col__bar {
+  width: 100%;
+  background: var(--computing);
+  border-radius: 4px 4px 0 0;   /* rounded data-end, square on the baseline */
+  opacity: 0.5;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.vol-col--on .vol-col__bar { opacity: 1; }
+/* A week with no training. Drawn, not omitted — an empty track and a missing
+   bar look identical, and "I trained nothing" is not "there is no data". */
+.vol-col__bar--zero {
+  height: 4px;
+  background: var(--veto);
+  opacity: 0.55;
+  border-radius: 0;
+}
+
+.vol-col__tick {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-mute, var(--text-dim));
+}
+.vol-col--on .vol-col__tick { color: var(--text); }
+.vol-col__tick--now { color: var(--signal); font-weight: 700; }
+
+.vol-col__dir { display: flex; align-items: center; gap: 4px; min-height: 14px; }
+.vol-col__dot { width: 6px; height: 6px; border-radius: 999px; }
+.vol-col__dir-text {
+  font-family: var(--font-mono);
+  font-size: 10px;           /* a two-letter axis mark, not body copy */
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}

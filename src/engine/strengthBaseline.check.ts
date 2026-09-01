@@ -16,7 +16,7 @@
 //   · a delta inside the estimate's own error bar is not called progress
 
 import {
-  slotOf, buildBaseline, toStrengthMap, namedLifts, strengthDeltas, gainPct,
+  slotOf, buildBaseline, toStrengthMap, namedLifts, strengthDeltas, strengthStalls, gainPct,
   SLOT_KEY, MEANINGFUL_GAIN_PCT,
 } from './strengthBaseline.ts'
 import type { LiftBest } from './prs.ts'
@@ -146,6 +146,21 @@ ok(strengthDeltas({ 'Bench Press': 258 }, { 'Bench Press': 263 }).length === 0,
 same(strengthDeltas(prior, prior), [], 'no change, nothing to say')
 same(strengthDeltas(undefined, now), [], 'no prior diagnostic, no delta')
 same(strengthDeltas({ 'Back Squat': 400 }, { 'Back Squat': 350 }), [], 'a regression is not reported as a gain')
+
+// ---- 5. stalls: the half nobody reports -------------------------------------
+// A lift measured twice that didn't move is an instruction to change something.
+
+same(strengthStalls(prior, now), ['Bench Press'],
+  'a lift measured twice that did not move is a stall')
+same(strengthStalls(prior, { 'Back Squat': 368, 'Bench Press': 290 }), [],
+  'two real gains, no stalls')
+same(strengthStalls({ 'Back Squat': 400 }, { 'Back Squat': 350 }), ['Back Squat'],
+  'a regression counts as a stall — same instruction, and more likely estimate noise than a real loss')
+same(strengthStalls(prior, { 'Overhead Press': 150 }), [],
+  'a lift with no prior measurement cannot have stalled')
+same(strengthStalls(undefined, now), [], 'no prior diagnostic, no stalls')
+ok(!strengthStalls(prior, now).includes('squat_1rm_est'),
+  'the canonical slot keys are not reported as lifts')
 
 // A retest against a legacy row (canonical keys only) still says something.
 const legacy = strengthDeltas({ squat_1rm_est: 300 }, { 'Back Squat': 368, squat_1rm_est: 368 })

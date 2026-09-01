@@ -482,11 +482,57 @@ properly. The "left deliberately" set is unchanged.
 
 ---
 
+## Second follow-up — the rest of the queue
+
+Everything left on the list, built. Notes where the build differed from the plan.
+
+| Item | Outcome |
+|---|---|
+| Retest delta → phase design | Built. The gap was narrower and worse than the audit said — see below. |
+| Rest timer | Built: prescribed per lift and block, ±30s, beeps and buzzes, off in one tap. |
+| Block volume chart | Built on Program. |
+| Per-chain strength score | Built — but measuring something different. See below. |
+| Layout checks + rem type scale | Built. The checks found five real reflow bugs. |
+
+**The retest→design gap was not what I wrote.** The audit said the designer
+couldn't see lift trajectories; it already could (`history.trajectories`). The
+real gap: a re-scope is designed *by* a retest and knew nothing about it — not
+that a pattern had cleared, not that a lift measured 28 days apart came back
+flat. And `strengthDeltas` only ever returned gains, so a stalled lift appeared
+nowhere at all and the block after a retest was built as though every lift were
+progressing. Stalls are reported now, and the prompt says to change the variable
+rather than run the same block again. **Needs `npm run deploy:agent`** — it
+degrades safely without one.
+
+**The strength score measures balance, not percentile.** A population percentile
+needs bodyweight and sex and answers a question this app isn't asking: "you are a
+62nd-percentile squatter" names a peer group, not a limiter. It scores the
+athlete against the established ratios between their own lifts instead — those
+hold across bodyweights and sexes, so it needs no new field and claims nothing it
+can't support. A percentile is still available later if you want it; it needs two
+fields and that's a product call.
+
+**Screenshot baselines were the wrong tool.** A pixel baseline made on one
+machine fails on another for font-rendering reasons unrelated to the change, so
+it cries wolf until someone deletes it. `scripts/check-layout.mjs` asserts
+geometry instead — no overflow, no clipping, no sub-floor tap target, at
+320/390/430px × 100/125/150% text. That is machine-independent and describes what
+would actually be wrong. It found five bugs the px scale had been hiding by
+ignoring the font setting outright.
+
+Still open, and deliberately: exercise media (content, not code), duplicate
+exercise names in one routine (needs a stable per-exercise id and a migration),
+the four dead screens, Watch/HealthKit (needs the native shell), and a population
+strength percentile (needs bodyweight + sex).
+
+---
+
 ## Appendix — running the checks
 
 ```bash
 npm run type-check    # tsc --noEmit
-npm run check         # all eight *.check.ts files (531 assertions)
+npm run check         # all ten *.check.ts files (601 assertions)
+npm run check:layout  # geometry at 3 widths x 3 font scales (needs playwright)
 npm run build         # production build
 
 # visual, ad hoc (playwright is deliberately not a project dependency)

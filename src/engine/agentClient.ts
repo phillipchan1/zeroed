@@ -384,6 +384,7 @@ export function callPhaseDesign(payload: {
   recent_lifts: Array<{ name: string; top_set: string; rpe: number | null }>
   emphasis?: string   // optional athlete steer, e.g. "more explosive jumping + eccentric protective work"
   history?: TrainingHistory   // what came before this block — see the type
+  retest?: RetestFindings     // what the retest that triggered this block found
 }): Promise<AgentResult<PhaseDesignResult>> {
   return invokeAgent<PhaseDesignResult>('phase_design', payload)
 }
@@ -416,6 +417,27 @@ export interface TrainingHistory {
   settled: string[]
   /** Reprogramming events already made, newest first, with the athlete's asks. */
   revisions: string[]
+}
+
+/**
+ * What the retest that triggered this block actually FOUND.
+ *
+ * A re-scope is designed by the retest and, until now, knew nothing about it.
+ * The designer saw the athlete's logged lifts (which it always sees) but not
+ * that a movement pattern had just cleared, or that a lift measured 28 days
+ * apart had come back flat. Those are the two findings most likely to change
+ * what the next block should be, and they were being computed and discarded.
+ */
+export interface RetestFindings {
+  version: number
+  /** Movement patterns that improved: "Deep Squat 1→2". */
+  movement_gains: string[]
+  /** Weak links the retest retired outright. */
+  cleared: string[]
+  /** Lifts that gained since the last retest: "Back Squat 350→368 (+5%)". */
+  stronger: string[]
+  /** Lifts measured twice that did NOT move. The instruction to change a variable. */
+  stalled: string[]
 }
 
 /** Information-gain selection — post-auth. → the next pattern to screen. */
