@@ -3013,3 +3013,73 @@ textarea.input {
   cursor: pointer;
 }
 .workout-discard:hover { color: var(--veto); }
+
+/* --- Block volume chart (Program) ----------------------------------------
+   One series, so no legend — the heading names it. Bars carry magnitude in a
+   single hue; the weekly directive is a RESERVED status colour that always
+   ships with its own two letters underneath, so colour never carries it alone. */
+.vol-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: 6px;
+  margin-top: 4px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+.vol-col {
+  flex: 1 1 0;
+  min-width: 34px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+/* The plot area. A fixed track means every bar shares one baseline and one
+   ceiling — bars that each scale to themselves compare nothing. */
+.vol-col__track {
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  width: 100%;
+  height: 96px;
+  background: var(--ground);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.vol-col__bar {
+  width: 100%;
+  background: var(--computing);
+  border-radius: 4px 4px 0 0;   /* rounded data-end, square on the baseline */
+  opacity: 0.5;
+  transition: opacity var(--dur-fast) var(--ease-out);
+}
+.vol-col--on .vol-col__bar { opacity: 1; }
+/* A week with no training. Drawn, not omitted — an empty track and a missing
+   bar look identical, and "I trained nothing" is not "there is no data". */
+.vol-col__bar--zero {
+  height: 4px;
+  background: var(--veto);
+  opacity: 0.55;
+  border-radius: 0;
+}
+
+.vol-col__tick {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-mute, var(--text-dim));
+}
+.vol-col--on .vol-col__tick { color: var(--text); }
+.vol-col__tick--now { color: var(--signal); font-weight: 700; }
+
+.vol-col__dir { display: flex; align-items: center; gap: 4px; min-height: 14px; }
+.vol-col__dot { width: 6px; height: 6px; border-radius: 999px; }
+.vol-col__dir-text {
+  font-family: var(--font-mono);
+  font-size: 10px;           /* a two-letter axis mark, not body copy */
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}

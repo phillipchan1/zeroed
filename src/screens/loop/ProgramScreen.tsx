@@ -1,15 +1,17 @@
-import { Fragment } from 'react'
+import { Fragment, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { History, Lock, Sparkles } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
 import {
   gatherProgramMap, gatherTrainingLog,
-  type NextWeekProjection, type MapPhase,
+  gatherBlockVolume,
+  type NextWeekProjection, type MapPhase, type BlockVolume, type BlockVolumeWeek,
 } from '../../engine'
 import { capIsActive, clearanceTestOf, describeClearanceTest } from '../../engine/prescription'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { unitContext } from '../../lib/units'
+import { toneFor } from '../../lib/directive'
 import {
   PageHeader, SectionHeader, Skeleton, Disclosure, Chip, Row, Button,
 } from '../../components/ui'
@@ -98,6 +100,95 @@ export async function fetchProgramView(athleteId: string): Promise<ProgramView> 
   return { program, phase, routines, profile, clearance }
 }
 
+/**
+ * LOAD MOVED, WEEK BY WEEK — the app explaining itself.
+ *
+ * The volume line and the PROGRESS / HOLD / DELOAD calls are the same story told
+ * twice, and until volume existed there was no way to see whether the calls were
+ * working. One series (load), so no legend: the heading names it. The directive
+ * is a separate, RESERVED status colour and never carries meaning on its own —
+ * every dot ships with its word underneath.
+ */
+function BlockVolumeChart({ data, u }: { data: BlockVolume; u: ReturnType<typeof unitContext> }) {
+  // Tap a bar to read it. On a phone this beats a hover tooltip: the finger is
+  // over the thing it is asking about, so the answer goes above the chart.
+  const [selected, setSelected] = useState<number | null>(null)
+  const weeks = data.weeks
+  if (weeks.length === 0 || data.best <= 0) return null
+
+  const shown = selected != null ? weeks[selected] : weeks[weeks.length - 1]
+  const label = (w: BlockVolumeWeek) =>
+    new Date(`${w.weekStart}T12:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+
+  return (
+    <div className="card fade-rise" style={{ marginBottom: 28 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+        <SectionHeader>Load moved</SectionHeader>
+        <span className="num text-xs text-dim">{data.phaseName} block</span>
+      </div>
+
+      {/* The readout. Selective direct labelling — one number, for the week in
+          question, rather than a figure over every bar. */}
+      <div style={{ marginTop: 12, marginBottom: 16 }}>
+        <p style={{ fontSize: 'var(--fs-2xl)', fontWeight: 700, letterSpacing: '-0.02em', fontFamily: 'var(--font-mono)' }}>
+          {u.volume(shown.load)}<span className="text-base text-dim" style={{ marginLeft: 4 }}>{u.unit}</span>
+        </p>
+        <p className="text-xs text-dim" style={{ marginTop: 4 }}>
+          week of {label(shown)} · {shown.sessions} session{shown.sessions === 1 ? '' : 's'}
+          {shown.directive ? ` · ${toneFor(shown.directive).gist.toLowerCase()}` : ''}
+        </p>
+      </div>
+
+      <div
+        className="vol-chart"
+        role="img"
+        aria-label={`Load moved per week this block: ${weeks.map((w) => `week of ${label(w)}, ${u.volume(w.load)} ${u.unit}`).join('; ')}`}
+      >
+        {weeks.map((w, i) => {
+          const pct = data.best > 0 ? (w.load / data.best) * 100 : 0
+          const isSel = (selected ?? weeks.length - 1) === i
+          return (
+            <button
+              key={w.weekEnding}
+              type="button"
+              className={`vol-col${isSel ? ' vol-col--on' : ''}`}
+              onClick={() => setSelected(i)}
+              aria-label={`Week of ${label(w)}, ${u.volume(w.load)} ${u.unit}${w.directive ? `, ${w.directive}` : ''}`}
+              aria-pressed={isSel}
+            >
+              <span className="vol-col__track">
+                {/* A zero week draws as a visible floor rather than nothing, so a
+                    missed week reads as "trained nothing" and not "no data". At
+                    a 2px hairline it was indistinguishable from an empty track. */}
+                {w.load > 0
+                  ? <span className="vol-col__bar" style={{ height: `max(4px, ${pct}%)` }} />
+                  : <span className="vol-col__bar vol-col__bar--zero" />}
+              </span>
+              <span className={`vol-col__tick${w.isCurrent ? ' vol-col__tick--now' : ''}`}>
+                {new Date(`${w.weekStart}T12:00:00`).getDate()}
+              </span>
+              {/* Status: dot AND word. Colour never carries this alone. */}
+              {w.directive ? (
+                <span className="vol-col__dir">
+                  <span className="vol-col__dot" style={{ background: toneFor(w.directive).color }} />
+                  <span className="vol-col__dir-text">{toneFor(w.directive).short}</span>
+                </span>
+              ) : (
+                <span className="vol-col__dir" aria-hidden="true">&nbsp;</span>
+              )}
+            </button>
+          )
+        })}
+      </div>
+
+      <p className="text-xs text-dim" style={{ marginTop: 12, lineHeight: 1.5 }}>
+        Weight × reps, summed. Tap a week. The mark under each bar is the call the
+        coach made that week.
+      </p>
+    </div>
+  )
+}
+
 export function ProgramScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
   const { data, loading: coldLoading } = useCachedLoader(
@@ -111,6 +202,10 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
   const { data: log } = useCachedLoader(
     `history:${athleteId}`,
     () => gatherTrainingLog(athleteId, pendingSessionsRaw()),
+  )
+  const { data: blockVolume } = useCachedLoader(
+    `blockvol:${athleteId}`,
+    () => gatherBlockVolume(athleteId),
   )
 
   const nextWeek = map?.nextWeek ?? null
@@ -191,6 +286,8 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
                 <p className="text-sm text-dim" style={{ marginTop: 16, lineHeight: 1.55 }}>{program.goal}</p>
               )}
             </div>
+
+            {blockVolume && <BlockVolumeChart data={blockVolume} u={unitContext()} />}
 
             {/* The steering wheel. This used to be a textarea at the bottom of
                 the Sessions accordion — three taps deep, one shot, no way to

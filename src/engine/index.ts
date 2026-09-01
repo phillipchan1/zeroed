@@ -4238,6 +4238,86 @@ export async function gatherExerciseBests(programId: string): Promise<Record<str
   return out
 }
 
+// ---- Block volume (the chart on Program) -----------------------------------
+
+export interface BlockVolumeWeek {
+  weekStart: string      // ISO Monday
+  weekEnding: string     // ISO Sunday
+  load: number           // Σ weight × reps, STORAGE units
+  sessions: number
+  directive: WeeklyDirective | null   // the call that produced the NEXT week
+  isCurrent: boolean
+}
+export interface BlockVolume {
+  phaseName: string | null
+  weeks: BlockVolumeWeek[]   // oldest → newest
+  best: number               // the tallest bar, so the chart can scale
+}
+
+/**
+ * Load moved per week across the current block, with the directive that was
+ * standing over each week.
+ *
+ * This is the app explaining itself: the volume line and the PROGRESS / HOLD /
+ * DELOAD calls are the same story told twice, and until the volume existed there
+ * was no way to see whether the calls were working. Weeks with no logged work
+ * are kept as zero rather than skipped — a gap in a block is information, and
+ * dropping it would draw a continuous climb over a fortnight off.
+ */
+export async function gatherBlockVolume(athleteId: string): Promise<BlockVolume | null> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return null
+
+  const [{ data: phaseRow }, { data: reviewRows }, log] = await Promise.all([
+    supabase.from('phase').select('name, week_start, week_end')
+      .eq('program_id', prog.id).eq('status', 'active').maybeSingle(),
+    supabase.from('weekly_review').select('week_ending, next_week_prescription')
+      .eq('program_id', prog.id).order('week_ending', { ascending: true }),
+    gatherTrainingLog(athleteId, [], 200),
+  ])
+  const phase = phaseRow as { name: string; week_start: string; week_end: string } | null
+  if (!phase) return null
+
+  const directiveByWeek = new Map<string, WeeklyDirective>()
+  for (const r of (reviewRows ?? []) as Array<{ week_ending: string; next_week_prescription: WeeklyPrescription | null }>) {
+    if (r.next_week_prescription?.directive) directiveByWeek.set(r.week_ending, r.next_week_prescription.directive)
+  }
+  const loggedByWeek = new Map(log.weeks.map((w) => [w.weekEnding, w]))
+
+  // Walk the block's Mondays rather than the weeks that happen to have logs, so
+  // a skipped week draws as a zero instead of vanishing from the axis.
+  const thisMonday = startOfWeekMonday(new Date())
+  const weeks: BlockVolumeWeek[] = []
+  let cursor = startOfWeekMonday(new Date(`${phase.week_start}T12:00:00`))
+  const end = new Date(`${phase.week_end}T23:59:59`)
+  for (let guard = 0; guard < 26 && cursor <= end; guard++) {
+    const weekEnding = weekEndingISO(cursor)
+    const wk = loggedByWeek.get(weekEnding)
+    weeks.push({
+      weekStart: isoDate(cursor),
+      weekEnding,
+      load: wk?.totalVolume?.load ?? 0,
+      sessions: wk?.sessions.length ?? 0,
+      directive: directiveByWeek.get(weekEnding) ?? null,
+      isCurrent: isoDate(cursor) === isoDate(thisMonday),
+    })
+    // Never past today: a block runs four weeks and three of them may not have
+    // happened yet. An empty bar for a week in the future is a lie about a week
+    // that hasn't been trained.
+    if (cursor >= thisMonday) break
+    const next = new Date(cursor)
+    next.setDate(next.getDate() + 7)
+    cursor = next
+  }
+
+  return {
+    phaseName: phase.name,
+    weeks,
+    best: weeks.reduce((m, w) => Math.max(m, w.load), 0),
+  }
+}
+
 /**
  * What the most recent retest found, for the block it is about to design.
  *
