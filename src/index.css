@@ -1674,13 +1674,72 @@ textarea.input {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
   animation: fadeRise var(--dur-mid) var(--ease-out);
 }
+.rest-pill {
+  /* The bar below is positioned against this, and the pill's own radius has to
+     clip it or it draws square corners over a rounded edge. */
+  overflow: hidden;
+  padding: 0 6px 0 6px;
+  gap: 2px;
+}
 .rest-pill__label {
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
   letter-spacing: 0.12em;
   color: var(--computing);
 }
-.rest-pill__time { font-size: var(--fs-lg); font-weight: 600; }
+.rest-pill__time {
+  font-size: var(--fs-lg);
+  font-weight: 600;
+  min-width: 62px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;   /* the pill must not resize every second */
+}
+
+/* ±30s. Full-height hit areas rather than small round buttons: this is tapped
+   mid-set, one-handed, without looking. */
+.rest-pill__step {
+  height: 46px;
+  min-width: 52px;
+  padding: 0 6px;
+  background: none;
+  border: 0;
+  border-radius: 999px;
+  color: var(--computing);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+}
+.rest-pill__step:active { background: rgba(90, 143, 184, 0.16); }
+
+.rest-pill__skip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 46px;
+  min-width: 42px;
+  background: none;
+  border: 0;
+  border-radius: 999px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.rest-pill__skip:active { background: rgba(255, 255, 255, 0.06); }
+
+/* Elapsed, drawn along the bottom edge — readable from across a rack without
+   parsing digits. */
+.rest-pill__bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--computing);
+  transition: width 250ms linear;
+}
+@media (prefers-reduced-motion: reduce) {
+  .rest-pill__bar { transition: none; }
+}
 
 /* --- Workout desktop layout ---------------------------------------------- */
 /* Mobile: a single scrolling column, exactly as before. Desktop: the column

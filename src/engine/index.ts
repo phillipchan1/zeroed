@@ -2331,6 +2331,12 @@ export interface SessionPrescription {
   // already the honest one). Absent on caches written before this field existed.
   pushTargets?: Record<number, number | null>
   rule: IntelligenceRule | null   // standing rule in effect this session, or null
+  /**
+   * The active block, so the session can prescribe REST the way it prescribes
+   * load — a Strength main lift needs three minutes, a band pull-apart does not.
+   * Absent on cached copies written before this field existed — read with `?.`.
+   */
+  phaseName?: string | null
   // The open exit condition on the limiter — what would actually clear the cap,
   // and how far along it is. Null when no cap is in effect. Absent on cached
   // copies written before this field existed — read with `?.`.
@@ -2510,7 +2516,7 @@ export async function gatherSessionPrescription(
     }
   }
 
-  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, pushTargets, rule, clearance }
+  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, pushTargets, rule, clearance, phaseName }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
