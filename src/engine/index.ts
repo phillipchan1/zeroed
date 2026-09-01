@@ -47,6 +47,7 @@ import {
   buildBaseline, namedLifts, strengthDeltas, strengthStalls,
   type BaselineLift, type StrengthDelta,
 } from './strengthBaseline'
+import { readBalance, type BalanceRead } from './balance'
 import { isSetLogged, tallySession, sumVolume, NO_VOLUME, type VolumeTally } from './volume'
 import { validateProvisionalProgram } from './safety'
 import {
@@ -4236,6 +4237,21 @@ export async function gatherExerciseBests(programId: string): Promise<Record<str
     }
   }
   return out
+}
+
+/**
+ * The athlete's strength balance — which chain is behind, read off their own log.
+ *
+ * Built on the same baseline the retest reads, so the two can never disagree
+ * about what the athlete lifts.
+ */
+export async function gatherBalance(athleteId: string): Promise<BalanceRead> {
+  const lifts = await gatherStrengthBaseline(athleteId)
+  return readBalance(
+    lifts
+      .filter((l) => l.e1rm != null && l.e1rm > 0)
+      .map((l) => ({ slot: l.slot, lift: l.name, e1rm: l.e1rm! })),
+  )
 }
 
 // ---- Block volume (the chart on Program) -----------------------------------
