@@ -85,15 +85,18 @@ app** — see P0-1.
 
 - **Exercise library** — ~100 movements with tracking types; coaching notes
   (how-to, watch-for) for 50 of them. No media at all.
-- **Retest** — re-screens movement and strength, but the strength battery is a
-  fixed set of lifts, not the athlete's actual main lifts.
+- **Retest** — ~~the strength battery is a fixed set of lifts~~ → now read off
+  the athlete's own log (see *Follow-up pass*). Movement is still a self-scored
+  screen, which is the right shape but depends on honest self-assessment.
 - **Capacitor** — config committed, no iOS project generated.
 
 **Declared but not built:**
 
 - `Readiness { sleep, energy, soreness }` is a type, has CSS
   (`.readiness__*`), and is passed to the debrief agent as a hardcoded `null`.
-  Nothing collects it. This is the hook the whole HRV/sleep story would hang on.
+  Nothing collects it. **Decision taken (see *Follow-up pass*): the manual
+  pre-session gate is not being built.** The socket stays for a passive
+  HealthKit source, which is where the differentiator actually lives.
 - `InsightDraftRow`, `SessionObservationRow.category` typing, and several
   `OBSERVATION_CATEGORIES` entries are unused.
 
@@ -122,7 +125,7 @@ coach-roster tooling).
 | **Automatic PR detection** | **~~Missing~~ → Have** (this pass) | Hevy, Strong, TrainHeroic | **P0** |
 | **Volume tracked per session / week / block** | **~~Missing~~ → Have** (session + week; block deferred) | JEFIT, TrainHeroic | **P1** |
 | 1RM estimate / calculator | **Have** — Epley on the per-lift sheet (was wrong at 1 rep; fixed) | Hevy | — |
-| Program auto-scales to tested maxes | **Have** — every prescription is off the athlete's own logged top set, not a template % | TrainHeroic | — |
+| Program auto-scales to tested maxes | **Have** — every prescription is off the athlete's own logged top set, and the retest now re-tests off the log too | TrainHeroic | — |
 | **lb/kg** | **~~Broken~~ → Have** (this pass) | everyone | **P0** |
 | Body-measurement tracking | **Missing** | JEFIT | P3 — off-strategy. Zeroed reads *performance*, not composition |
 | Strength score / percentile vs population | **Missing** | Stronger app | P2 — genuinely interesting here: Zeroed already has a per-chain model, so "your posterior chain is a 4/10 and that's your limiter" would be the read made concrete |
@@ -130,7 +133,7 @@ coach-roster tooling).
 | Social feed | **Missing** | Hevy | Won't do |
 | Apple Watch / HealthKit | **Missing** | Strong | P2, blocked on a native shell |
 | Milestone gamification (cumulative lbs) | **Missing** | TrainHeroic | P3 — now cheap, since volume exists |
-| **Reads wearable recovery (HRV/sleep) to adjust training** | **Missing** — but the socket is cut | *nobody does this well* | **P1 — the differentiator** |
+| **Reads wearable recovery (HRV/sleep) to adjust training** | **Missing** — socket cut, manual gate declined | *nobody does this well* | **P2 — passive only, blocked on the native shell** |
 
 ### On the recovery gap
 
@@ -328,7 +331,7 @@ has:
 | `740e8d1` | New cached fields made optional (upgrade white-screen); live volume moved out of the sticky workout header |
 
 Verification: `npx tsc --noEmit` clean, `npm run build` clean, `npm run check`
-green across all seven check files (**487 assertions**, 139 of them new — the suite was 348), and the
+green across all seven check files (**487 assertions**, 139 of them new — the suite was 348; the follow-up pass below took it to 531), and the
 `scripts/preview-loop.mjs` harness driven manually to confirm — on a real render
 — that a set tying the record shows no badge while the set beating it does, that
 the live volume adds up (225×5 + 235×5 = 2,300 lb), and that a stored 225 lb
@@ -403,11 +406,87 @@ In priority order.
 
 ---
 
+## Follow-up pass — 1 Sep 2026, after review
+
+Two decisions came back from Phil, and one of them changed the shape of the work.
+
+### The readiness gate: not building it
+
+**Decision: no manual pre-session readiness questionnaire.** Phil's objection was
+that it's an inhibitor — friction before every session — and he's right, for a
+reason I under-weighted when I proposed it:
+
+**Zeroed already collects a better version of this signal.** Per-set RPE, the
+felt chips, and the per-lift autoregulator are *revealed* readiness, measured
+from what actually happened. A pre-session questionnaire is *predicted* readiness,
+and the first working set supersedes it. If you report four hours' sleep and then
+your top set flies up at RPE 6, the app should believe the bar, not the form.
+The autoregulation literature points the same way: in-session feedback (RPE/RIR,
+bar speed) is what has evidence behind it, while daily wellness questionnaires
+are a squad-monitoring tool whose compliance decays badly in unsupervised use —
+and which athletes learn to game in whichever direction gets them the session
+they wanted.
+
+So the honest answer to "does it actually drive results" is **no, not the manual
+version** — it mostly duplicates a signal Zeroed already has, later and worse,
+and charges friction before every session to do it.
+
+**What survives:** the differentiator was never "ask a question", it was "read
+recovery data". Passive HealthKit sleep and HRV cost zero taps, and the
+`Readiness` socket stays cut for exactly that. It moves to P2 behind the native
+shell rather than P1. Even then the claim should stay modest: HRV-guided training
+has reasonable evidence in endurance work and thin evidence in strength work, so
+it's a real differentiator and an honest *input*, not a promised results multiplier.
+
+### The retest: rebuilt, and the diagnosis got sharper
+
+Phil approved this one with a better reason than mine: the battery is *cumbersome
+and ambiguous*. Investigating that turned up a third fault I'd missed and which
+makes it worse than the audit above records:
+
+**The strength battery was almost entirely inert.** Of its five fields, exactly
+two were ever read — a squat:hinge ratio check that mints one insight. Push, pull
+and plank were collected at every retest and read by nothing, anywhere, ever. And
+no strength number was **ever compared across versions**: `runRetest` computed a
+delta for movement patterns only. The retest asked you for four numbers every 28
+days and could not tell you whether any of them had gone up.
+
+So the fix isn't "test your actual lifts" — it's **don't test anything**. Every
+top set you log is already a test, and `gatherExerciseBests` (built earlier in
+this pass for PR detection) already knows the best one. The step is now a
+confirmation: your real lifts, the e1RM your own log supports, the set that
+produced it, and the gain since the last retest. Lifts with no loaded history are
+dropped rather than offered as a blank field.
+
+Shipped in `664c368`, with 44 checks. Notable details:
+
+- The stored map is written under both the lift's real name and the canonical
+  slot key, so the existing ratio check and every row already in the database
+  keep working — they just get a logged number instead of a guess.
+- `runRetest` computes a strength delta against the **previous retest**, not the
+  first-ever baseline. Movement scores compare to baseline because 0–3 has a
+  fixed ceiling; a lift doesn't.
+- A gain inside the estimate's own error bar isn't called progress, and the step
+  and the summary share one predicate for it. They briefly didn't — caught on a
+  real render, where a bench that went 258 → 263 was announced as "+2% since last
+  retest" on the way in and dropped from what got stronger on the way out.
+- Onboarding is untouched. There's no log to read at the first-ever diagnostic,
+  so that path still asks.
+
+### Where the remaining list stands
+
+Phil approved the rest of the queue. Unchanged in priority except as noted:
+per-chain strength score (needs bodyweight, one field); block-level volume chart
+(data now exists); screenshot baselines then the rem type scale; the rest timer
+properly. The "left deliberately" set is unchanged.
+
+---
+
 ## Appendix — running the checks
 
 ```bash
 npm run type-check    # tsc --noEmit
-npm run check         # all seven *.check.ts files (487 assertions)
+npm run check         # all eight *.check.ts files (531 assertions)
 npm run build         # production build
 
 # visual, ad hoc (playwright is deliberately not a project dependency)
