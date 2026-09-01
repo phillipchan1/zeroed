@@ -1,23 +1,34 @@
 import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { supabase } from '../../lib/supabaseClient'
-import { runRetest, type RetestSummary } from '../../engine'
+import { runRetest, gatherStrengthBaseline, type RetestSummary } from '../../engine'
+import { unitContext } from '../../lib/units'
+import type { BaselineLift } from '../../engine/strengthBaseline'
 import { invalidateLoopViews } from '../../lib/loopCache'
 import { DiagnosticIntake } from '../funnel/DiagnosticIntake'
 import { Button, Spinner } from '../../components/ui'
 import type { DiagnosticResults } from '../../types/database'
 
 /**
- * RETEST (§6) — the program cadence. Re-runs the movement rescreen (+ key
- * strength lifts via the existing battery) without re-asking the static profile
- * fields, then hands the results to runRetest, which writes the v+1 diagnostic,
- * resolves cleared weak links, re-scopes the program, and logs the delta.
+ * RETEST (§6) — the program cadence. Re-runs the movement rescreen without
+ * re-asking the static profile fields, then hands the results to runRetest,
+ * which writes the v+1 diagnostic, resolves cleared weak links, re-scopes the
+ * program, and logs the delta.
+ *
+ * The strength half is no longer a battery to perform. The athlete's own log
+ * already holds a top set on every lift they train, so the step confirms what
+ * that log says rather than asking them to go and test four generic patterns.
  */
 export function RetestScreen({ athleteId, onDone }: { athleteId: string; onDone: () => void }) {
   const navigate = useNavigate()
   const [profile, setProfile] = useState<{ obstacle: string; sport: string; trainingAge: number; sessions: number } | null>(null)
   const [saving, setSaving] = useState(false)
   const [summary, setSummary] = useState<RetestSummary | null>(null)
+  // The athlete's lifts as their log has them. Best-effort and non-blocking: an
+  // empty baseline just means the strength step falls back to asking, which is
+  // the right answer for someone with nothing logged yet.
+  const [baseline, setBaseline] = useState<BaselineLift[]>([])
+  const u = unitContext()
 
   useEffect(() => {
     void (async () => {
@@ -33,6 +44,7 @@ export function RetestScreen({ athleteId, onDone }: { athleteId: string; onDone:
         sessions: (data?.sessions_per_week as number | null) ?? 3,
       })
     })()
+    void gatherStrengthBaseline(athleteId).then(setBaseline).catch(() => setBaseline([]))
   }, [athleteId])
 
   async function handleComplete(results: DiagnosticResults) {
@@ -74,7 +86,30 @@ export function RetestScreen({ athleteId, onDone }: { athleteId: string; onDone:
               ? `Cleared ${summary.resolvedCount} weak link${summary.resolvedCount === 1 ? '' : 's'}.`
               : 'Re-scoped.'}
           </h2>
-          <p className="text-base text-dim" style={{ marginBottom: summary.deferred ? 18 : 30 }}>{improvedStr}</p>
+          <p className="text-base text-dim" style={{ marginBottom: 18 }}>{improvedStr}</p>
+
+          {/* What got STRONGER. The retest collected strength numbers at every
+              version and never once compared them, so this is the first time it
+              can answer the question it exists to ask. */}
+          {summary.stronger.length > 0 && (
+            <div style={{ marginBottom: summary.deferred ? 18 : 30, display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {summary.stronger.map((s) => (
+                <div
+                  key={s.name}
+                  style={{
+                    display: 'flex', alignItems: 'baseline', justifyContent: 'space-between',
+                    gap: 12, padding: '10px 14px',
+                    background: 'var(--surface)', border: '1px solid var(--line)', borderRadius: 8,
+                  }}
+                >
+                  <span className="text-sm" style={{ fontWeight: 600 }}>{s.name}</span>
+                  <span className="num text-sm" style={{ color: 'var(--confirmed)' }}>
+                    {u.fmt(s.from)} → {u.fmt(s.to)}{u.unit} · +{s.pct}%
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
           {summary.deferred && (
             <p className="text-sm text-dim" style={{ marginBottom: 30 }}>
               Your new block starts Monday — this week's sessions stay as they are.
@@ -94,6 +129,7 @@ export function RetestScreen({ athleteId, onDone }: { athleteId: string; onDone:
       sport={profile.sport}
       trainingAge={profile.trainingAge}
       sessions={profile.sessions}
+      strengthBaseline={baseline}
       onComplete={handleComplete}
       onExit={() => navigate('/app/today')}
     />

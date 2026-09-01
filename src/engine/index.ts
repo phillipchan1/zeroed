@@ -43,6 +43,10 @@ import {
   estimate1RM, estimateIsReliable, displayPRs, foldBest, NO_BEST,
   type LiftBest, type PrKind,
 } from './prs'
+import {
+  buildBaseline, namedLifts, strengthDeltas,
+  type BaselineLift, type StrengthDelta,
+} from './strengthBaseline'
 import { isSetLogged, tallySession, sumVolume, NO_VOLUME, type VolumeTally } from './volume'
 import { validateProvisionalProgram } from './safety'
 import {
@@ -3263,6 +3267,12 @@ export interface RetestSummary {
   version: number
   resolvedCount: number
   improved: Array<{ pattern: string; from: number; to: number }>
+  /**
+   * Lifts that went up since the last retest. The retest's whole job is to say
+   * what changed, and until now it could only ever talk about movement scores —
+   * it collected strength numbers at every version and never once compared them.
+   */
+  stronger: StrengthDelta[]
   // The re-scoped block was queued for next Monday (the current week already had
   // logged sessions) rather than swapped in immediately. Lets the summary explain
   // why this week is unchanged.
@@ -3374,6 +3384,11 @@ export async function runRetest(athleteId: string, newResults: DiagnosticResults
 
   // Delta vs baseline (per movement pattern).
   const baseMove = baseline?.raw_results?.movement ?? {}
+  // Strength moves against the PREVIOUS retest, not the first-ever baseline:
+  // "since we last looked" is the question a retest answers. Movement scores
+  // compare to baseline because a 0-3 score has a fixed ceiling; a lift doesn't.
+  const prior = diags.length ? diags[diags.length - 1] : null
+  const stronger = strengthDeltas(prior?.raw_results?.strength, newResults.strength)
   const delta: Record<string, number> = {}
   const improved: Array<{ pattern: string; from: number; to: number }> = []
   for (const p of MOVEMENT_PATTERNS) {
@@ -3423,6 +3438,9 @@ export async function runRetest(athleteId: string, newResults: DiagnosticResults
   const deltaSummary = improved.length
     ? improved.map((i) => `${labelOfPattern(i.pattern)} ${i.from}→${i.to}`).join(', ')
     : 'no pattern gains yet'
+  const strengthSummary = stronger.length
+    ? ` ${stronger.map((s) => `${s.name} ${s.from}→${s.to} (+${s.pct}%)`).join(', ')}.`
+    : ''
   const clearedNote = resolvedCount > 0
     ? `Cleared ${resolvedCount} weak link${resolvedCount === 1 ? '' : 's'}.`
     : 'Holding the line.'
@@ -3431,11 +3449,11 @@ export async function runRetest(athleteId: string, newResults: DiagnosticResults
     : ' Block re-scoped.'
   await insertCoachMessage(athleteId, {
     kind: 'retest',
-    body: `Retest v${newVersion}: ${deltaSummary}. ${clearedNote}${scopeNote}`,
+    body: `Retest v${newVersion}: ${deltaSummary}.${strengthSummary} ${clearedNote}${scopeNote}`,
     ref_id: newDiagId,
   })
 
-  return { version: newVersion, resolvedCount, improved, deferred: rescope.deferred }
+  return { version: newVersion, resolvedCount, improved, stronger, deferred: rescope.deferred }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -4208,6 +4226,50 @@ export async function gatherExerciseBests(programId: string): Promise<Record<str
     }
   }
   return out
+}
+
+/**
+ * The athlete's strength baseline, READ OFF THEIR LOG rather than asked for.
+ *
+ * The retest's strength half used to be a fixed battery of four estimated 1RMs
+ * on four generic patterns — cumbersome (an estimated max on a lift you train
+ * for fives means going and testing something), ambiguous ("Press" is not a
+ * lift), and inert (only two of the five fields were ever read, and no strength
+ * number was ever compared across versions, so the retest could not tell you
+ * your squat had gone up).
+ *
+ * Every top set the athlete has logged is already a test. This returns the lifts
+ * they actually train, with the best estimate their own log supports, and what
+ * the last retest recorded for the same lift — so the step becomes "confirm or
+ * correct" instead of "go and do four more exercises".
+ *
+ * Empty when there's no loaded history to read (a brand-new athlete), which is
+ * the caller's signal to fall back to asking.
+ */
+export async function gatherStrengthBaseline(athleteId: string): Promise<BaselineLift[]> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return []
+
+  const [{ data: routineRows }, bests, { data: priorDiag }] = await Promise.all([
+    supabase.from('routine').select('exercises').eq('program_id', prog.id),
+    gatherExerciseBests(prog.id),
+    supabase
+      .from('diagnostic').select('raw_results')
+      .eq('athlete_id', athleteId).order('version', { ascending: false })
+      .limit(1).maybeSingle(),
+  ])
+
+  // Program order, so the lifts the block is actually built on come first.
+  const names: string[] = []
+  for (const r of (routineRows ?? []) as Array<{ exercises: ExerciseTemplate[] | null }>) {
+    for (const ex of r.exercises ?? []) names.push(ex.name)
+  }
+
+  const previous = namedLifts(
+    ((priorDiag as { raw_results: DiagnosticResults | null } | null)?.raw_results?.strength) ?? undefined,
+  )
+  return buildBaseline(names, bests, previous)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
