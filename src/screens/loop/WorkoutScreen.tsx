@@ -18,7 +18,7 @@ import {
 } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
-import { getWeightUnit, getDistanceUnit } from '../../lib/units'
+import { unitContext, type UnitContext } from '../../lib/units'
 import { fetchCoachView } from './CoachScreen'
 import type { CoachChatTurn } from '../../engine/agentClient'
 import {
@@ -52,18 +52,16 @@ function gridClass(t: TrackingType): string {
 }
 
 // Compact "what you hit last session" string for the desktop Previous column.
-function formatPrev(
-  t: TrackingType, prev: SetLog | undefined, unit: string, distanceUnit: string,
-): string | null {
+function formatPrev(t: TrackingType, prev: SetLog | undefined, u: UnitContext): string | null {
   if (!prev) return null
   if (t === 'time')     return prev.duration != null ? `${prev.duration}s` : null
-  if (t === 'distance') return prev.distance != null ? `${prev.distance}${distanceUnit}` : null
+  if (t === 'distance') return prev.distance != null ? `${prev.distance}${u.distance}` : null
   if (t === 'bodyweight_reps') {
     if (prev.reps == null) return null
-    return prev.weight ? `${prev.reps}+${prev.weight}` : `${prev.reps}`
+    return prev.weight ? `${prev.reps}+${u.fmt(prev.weight)}` : `${prev.reps}`
   }
   if (prev.weight == null && prev.reps == null) return null
-  return `${prev.weight != null ? `${prev.weight}${unit}` : 'BW'}×${prev.reps ?? '?'}`
+  return `${prev.weight != null ? `${u.fmt(prev.weight)}${u.unit}` : 'BW'}×${prev.reps ?? '?'}`
 }
 
 // Enter flies the cursor to the next numeric field, across rows and exercises —
@@ -80,8 +78,7 @@ function advanceField(el: EventTarget & HTMLInputElement) {
 
 interface SetHeaderProps {
   trackingType: TrackingType
-  unit: string
-  distanceUnit: string
+  u: UnitContext
   prescribedReps: string         // raw prescription, e.g. "8-10" or "30s"
   prescribedLoad: string | null  // raw load, e.g. "225 lbs" or "bodyweight"
 }
@@ -102,7 +99,7 @@ function headCell(label: string, target: string | null) {
 // A header that labels each input column and parks the prescribed target right
 // above the field you type into — so "what to hit" sits next to "what you did".
 function SetHeader({
-  trackingType, unit, distanceUnit, prescribedReps, prescribedLoad,
+  trackingType, u, prescribedReps, prescribedLoad,
 }: SetHeaderProps) {
   let cells: ReactNode
   if (trackingType === 'time') {
@@ -113,19 +110,19 @@ function SetHeader({
       </>
     )
   } else if (trackingType === 'distance') {
-    cells = headCell(distanceUnit, prescribedReps)
+    cells = headCell(u.distance, prescribedReps)
   } else if (trackingType === 'bodyweight_reps') {
     cells = (
       <>
         {headCell('Reps', prescribedReps)}
-        {headCell(`+${unit}`, prescribedLoad)}
+        {headCell(`+${u.unit}`, prescribedLoad)}
         {headCell('RPE', null)}
       </>
     )
   } else {
     cells = (
       <>
-        {headCell(unit, prescribedLoad)}
+        {headCell(u.unit, prescribedLoad)}
         {headCell('Reps', prescribedReps)}
         {headCell('RPE', null)}
       </>
@@ -150,8 +147,7 @@ interface SetRowProps {
   setNum: number
   log: SetLog
   trackingType: TrackingType
-  unit: string
-  distanceUnit: string
+  u: UnitContext
   prescribedReps: number | null
   prescribedDuration: number | null
   prescribedLoad: number | null   // parsed prescribed weight, e.g. "225 lbs" → 225
@@ -163,7 +159,7 @@ interface SetRowProps {
 }
 
 function SetRow({
-  setNum, log, trackingType, unit, distanceUnit,
+  setNum, log, trackingType, u,
   prescribedReps, prescribedDuration, prescribedLoad, carry,
   prevText, onChange, onComplete, onActivate,
 }: SetRowProps) {
@@ -212,7 +208,9 @@ function SetRow({
       if (value != null && next[field] == null) { next[field] = value; filled.push(field) }
     }
     if (trackingType === 'weight_reps') {
-      fill('weight', carry.weight ?? prescribedLoad)
+      // carry.weight is already stored-unit; prescribedLoad was parsed out of
+      // the prescription text the athlete READS, so it has to be converted in.
+      fill('weight', carry.weight ?? (prescribedLoad != null ? u.store(prescribedLoad) : null))
       fill('reps', carry.reps ?? prescribedReps)
       fill('rpe', carry.rpe)
     } else if (trackingType === 'bodyweight_reps') {
@@ -283,12 +281,20 @@ function SetRow({
     placeholder: string,
     onVal: (n: number | null) => void,
     mode: 'decimal' | 'numeric' = 'numeric',
+    // The placeholder alone ("lb", "reps") is the whole accessible name
+    // otherwise — no set number, no idea which of eighteen fields this is.
+    label?: string,
   ) => (
     <input
       className="set-row__input"
       type="number"
       inputMode={mode}
+      // A negative weight or rep count is never a real log, and nothing
+      // downstream clamped one: it went into the outbox, the volume total and
+      // the next session's recommendation exactly as typed.
+      min={0}
       placeholder={placeholder}
+      aria-label={label ?? placeholder}
       value={value ?? ''}
       onChange={(e) => onVal(num(e.target.value))}
       enterKeyHint="next"
@@ -297,6 +303,18 @@ function SetRow({
     />
   )
 
+  // The weight field is the ONE input that crosses units: the athlete types in
+  // their display unit, the log is kept in the storage unit. Everything else is
+  // unitless (reps, seconds) or already display-native.
+  const weightInput = (placeholder: string, label: string) =>
+    numInput(
+      log.weight != null ? u.show(log.weight) : null,
+      placeholder,
+      (n) => setField('weight', n == null ? null : u.store(n)),
+      'decimal',
+      label,
+    )
+
   // Per-type column contents. Set number + done button are constant; the grid
   // template itself is shared with the header via gridFor().
   let cells: ReactNode
@@ -304,17 +322,17 @@ function SetRow({
   if (trackingType === 'time') {
     cells = (
       <>
-        {numInput(log.duration, 'sec', (n) => setField('duration', n))}
+        {numInput(log.duration, 'sec', (n) => setField('duration', n), 'numeric', `Set ${setNum} seconds`)}
         {rpeCell}
       </>
     )
   } else if (trackingType === 'distance') {
-    cells = numInput(log.distance, distanceUnit, (n) => setField('distance', n), 'decimal')
+    cells = numInput(log.distance, u.distance, (n) => setField('distance', n), 'decimal', `Set ${setNum} distance in ${u.distance}`)
   } else if (trackingType === 'bodyweight_reps') {
     cells = (
       <>
-        {numInput(log.reps, 'reps', (n) => setField('reps', n))}
-        {numInput(log.weight, `+${unit}`, (n) => setField('weight', n), 'decimal')}
+        {numInput(log.reps, 'reps', (n) => setField('reps', n), 'numeric', `Set ${setNum} reps`)}
+        {weightInput(`+${u.unit}`, `Set ${setNum} added weight in ${u.unit}`)}
         {rpeCell}
       </>
     )
@@ -322,8 +340,8 @@ function SetRow({
     // weight_reps (default)
     cells = (
       <>
-        {numInput(log.weight, unit, (n) => setField('weight', n), 'decimal')}
-        {numInput(log.reps, 'reps', (n) => setField('reps', n))}
+        {weightInput(u.unit, `Set ${setNum} weight in ${u.unit}`)}
+        {numInput(log.reps, 'reps', (n) => setField('reps', n), 'numeric', `Set ${setNum} reps`)}
         {rpeCell}
       </>
     )
@@ -807,13 +825,13 @@ function isLogged(s: SetLog): boolean {
 }
 
 // Short "what they actually did" summary per exercise, for the debrief agent.
-function performedSummary(t: TrackingType, logs: SetLog[], unit: string, distanceUnit: string): string {
-  const done = logs.filter((l) => l.done || l.reps != null || l.duration != null || l.distance != null)
+function performedSummary(t: TrackingType, logs: SetLog[], u: UnitContext): string {
+  const done = logs.filter(isLogged)
   if (!done.length) return 'not logged'
   if (t === 'time') return done.map((l) => `${l.duration ?? '?'}s`).join(', ')
-  if (t === 'distance') return done.map((l) => `${l.distance ?? '?'}${distanceUnit}`).join(', ')
-  if (t === 'bodyweight_reps') return done.map((l) => `${l.reps ?? '?'}${l.weight ? `+${l.weight}${unit}` : ''}`).join(', ')
-  return done.map((l) => `${l.reps ?? '?'}×${l.weight != null ? `${l.weight}${unit}` : 'BW'}`).join(', ')
+  if (t === 'distance') return done.map((l) => `${l.distance ?? '?'}${u.distance}`).join(', ')
+  if (t === 'bodyweight_reps') return done.map((l) => `${l.reps ?? '?'}${l.weight ? `+${u.fmt(l.weight)}${u.unit}` : ''}`).join(', ')
+  return done.map((l) => `${l.reps ?? '?'}×${l.weight != null ? `${u.fmt(l.weight)}${u.unit}` : 'BW'}`).join(', ')
 }
 
 // ---- offline-first bootstrap -----------------------------------------------
@@ -882,8 +900,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const { pendingEditId, editWorkoutId } = modeRef.current
   const isEdit = !!editRef
 
-  const unit = getWeightUnit()
-  const distanceUnit = getDistanceUnit(unit)
+  const u = unitContext()
 
   // Offline-first seed: read the cached bootstrap and the (synchronous, local)
   // draft exactly once, so the very first paint already shows the session — no
@@ -1217,7 +1234,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     let nextPresc: SessionPrescription | null = seedRef.current!.boot?.prescription ?? null
     if (programData && routineId) {
       try {
-        nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, unit)
+        nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, u)
         setPrescription(nextPresc)
       } catch { /* non-fatal */ }
     }
@@ -1458,7 +1475,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         felt: fb?.felt ?? null,
         note: fb?.note ?? '',
         prescribed: `${ex.sets}×${ex.reps}${ex.load ? ` ${ex.load}` : ''}`,
-        performed: performedSummary(t, setLogs[i] ?? [], unit, distanceUnit),
+        performed: performedSummary(t, setLogs[i] ?? [], u),
         pushed: fb?.pushed === true,
       }
     })
@@ -1783,7 +1800,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                       isPushed
                         ? <Chip tone="doing">
                             {prescription.pushTargets?.[exIdx] != null
-                              ? `Pushing — go for ${prescription.pushTargets[exIdx]}${unit}`
+                              ? `Pushing — go for ${prescription.pushTargets[exIdx]}${u.unit}`
                               : 'Pushing — cap off, your call'}
                           </Chip>
                         : <Chip tone={prescription.held[exIdx] ? 'pending' : 'doing'}>
@@ -1810,8 +1827,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
               <SetHeader
                 trackingType={trackingType}
-                unit={unit}
-                distanceUnit={distanceUnit}
+                u={u}
                 prescribedReps={ex.reps}
                 prescribedLoad={ex.load ?? null}
               />
@@ -1836,13 +1852,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                     setNum={setIdx + 1}
                     log={log}
                     trackingType={trackingType}
-                    unit={unit}
-                    distanceUnit={distanceUnit}
+                    u={u}
                     prescribedReps={pReps}
                     prescribedDuration={pDur}
                     prescribedLoad={pLoad}
                     carry={carry}
-                    prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], unit, distanceUnit)}
+                    prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], u)}
                     onChange={(updated) => handleSetChange(exIdx, setIdx, updated)}
                     onComplete={() => setRestEndsAt(Date.now() + REST_SECONDS * 1000)}
                     onActivate={() => setActiveExIdx(exIdx)}

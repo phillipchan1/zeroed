@@ -18,6 +18,7 @@ import type {
   WeeklyDirective, WeeklyPrescription, ClearanceTest,
 } from '../types/database.ts'
 import { isClearanceTest } from '../types/database.ts'
+import { roundToIncrement, type UnitContext } from '../lib/units.ts'
 import { resolveCategory } from './exerciseLibrary.ts'
 import { MAIN_LIFT } from './weekDiff.ts'
 
@@ -202,19 +203,30 @@ export function decidePrescription(
 // PER-LIFT LOAD
 // ────────────────────────────────────────────────────────────────────────────
 
-/** Round a computed load to the nearest 5 units — a real, rackable number. */
-export function roundLoad(w: number): number {
-  return Math.max(0, Math.round(w / 5) * 5)
+/**
+ * Round a computed load to a real, rackable number IN THE ATHLETE'S OWN UNIT.
+ *
+ * This used to round to the nearest 5 in every unit, which is only right in
+ * pounds: 5 kg is a 11 lb jump, more than twice the smallest step a kg lifter
+ * can actually make. The increment now comes from the unit (see loadIncrement).
+ */
+export function roundLoad(w: number, u: UnitContext): number {
+  return roundToIncrement(w, u.unit)
 }
 
 /**
- * The concrete recommended working load for a lift: its last top weight with the
- * autoregulated delta applied, rounded rackable (delta 0 = repeat the load as
- * lifted). Null when the lift has no weighted history to recommend from.
+ * The concrete recommended working load for a lift — the number to put on the
+ * bar. Its last top weight (a STORED number) with the autoregulated delta
+ * applied, then converted into the athlete's display unit and rounded to that
+ * unit's plate increment. Null when the lift has no weighted history to
+ * recommend from.
+ *
+ * Delta 0 means "repeat what you lifted", so it converts the logged load
+ * verbatim rather than racking it — the athlete already made that weight.
  */
-export function recommendedLoad(top: SetLog | null, delta: number): number | null {
+export function recommendedLoad(top: SetLog | null, delta: number, u: UnitContext): number | null {
   if (top?.weight == null) return null
-  return delta === 0 ? top.weight : roundLoad(top.weight * (1 + delta / 100))
+  return delta === 0 ? u.show(top.weight) : u.prescribe(top.weight * (1 + delta / 100))
 }
 
 /**

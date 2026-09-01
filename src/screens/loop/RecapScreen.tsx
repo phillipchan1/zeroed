@@ -1,7 +1,7 @@
 import { useNavigate, useParams } from 'react-router-dom'
 import { useCachedLoader } from '../../lib/cache'
 import { gatherWeeklyRecap, type RecapSession } from '../../engine'
-import { getWeightUnit, getDistanceUnit } from '../../lib/units'
+import { unitContext, type UnitContext } from '../../lib/units'
 import { Button, SectionHeader, Skeleton, PageHeader, Stat, StatGrid } from '../../components/ui'
 import type { SetLog, WeeklyDirective, WeeklyPrescription, WeeklyReviewAdjustments } from '../../types/database'
 
@@ -25,16 +25,15 @@ function fmtRange(startISO: string, endISO: string): string {
 
 const shortDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short' })
 
-function fmtSet(s: SetLog, unit: string, distanceUnit: string): string {
-  if (s.weight != null) return `${s.weight}${unit}×${s.reps ?? '?'}`
+function fmtSet(s: SetLog, u: UnitContext): string {
+  if (s.weight != null) return `${u.fmt(s.weight)}${u.unit}×${s.reps ?? '?'}`
   if (s.duration != null) return `${s.duration}s`
-  if (s.distance != null) return `${s.distance}${distanceUnit}`
+  if (s.distance != null) return `${s.distance}${u.distance}`
   return `${s.reps ?? '?'} reps`
 }
 
 function SessionRow({ s }: { s: RecapSession }) {
-  const unit = getWeightUnit()
-  const distanceUnit = getDistanceUnit(unit)
+  const u = unitContext()
   return (
     <div className="card" style={{ marginBottom: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
@@ -45,7 +44,7 @@ function SessionRow({ s }: { s: RecapSession }) {
       </div>
       {s.highlights.length > 0 && (
         <p className="num text-xs text-dim" style={{ marginTop: 8, lineHeight: 1.5 }}>
-          {s.highlights.map((h) => `${h.name} ${fmtSet(h.set, unit, distanceUnit)}`).join('  ·  ')}
+          {s.highlights.map((h) => `${h.name} ${fmtSet(h.set, u)}`).join('  ·  ')}
         </p>
       )}
     </div>

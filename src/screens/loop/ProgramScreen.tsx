@@ -9,7 +9,7 @@ import {
 } from '../../engine'
 import { capIsActive, clearanceTestOf, describeClearanceTest } from '../../engine/prescription'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
-import { getWeightUnit } from '../../lib/units'
+import { unitContext } from '../../lib/units'
 import {
   PageHeader, SectionHeader, Skeleton, Disclosure, Chip, Row, Button,
 } from '../../components/ui'
@@ -106,7 +106,7 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
   )
   const { data: map } = useCachedLoader(
     `programmap:${athleteId}`,
-    () => gatherProgramMap(athleteId, getWeightUnit()),
+    () => gatherProgramMap(athleteId, unitContext()),
   )
   const { data: log } = useCachedLoader(
     `history:${athleteId}`,

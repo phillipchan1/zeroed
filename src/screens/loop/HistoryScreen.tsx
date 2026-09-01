@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { useCachedLoader } from '../../lib/cache'
 import { gatherTrainingLog, gatherExerciseHistory, type LogSession, type ExerciseHistory } from '../../engine'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
-import { getWeightUnit, getDistanceUnit } from '../../lib/units'
+import { unitContext, type UnitContext } from '../../lib/units'
 import { SectionHeader, Skeleton, PageHeader, Sheet, Chip, Stat, StatGrid } from '../../components/ui'
 import type { SetLog } from '../../types/database'
 
@@ -17,21 +17,20 @@ function fmtRange(startISO: string, endISO: string): string {
 }
 const dayAndDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
 
-function fmtSet(s: SetLog, unit: string, distanceUnit: string): string {
-  if (s.weight != null) return `${s.weight}${unit}×${s.reps ?? '?'}`
+function fmtSet(s: SetLog, u: UnitContext): string {
+  if (s.weight != null) return `${u.fmt(s.weight)}${u.unit}×${s.reps ?? '?'}`
   if (s.duration != null) return `${s.duration}s`
-  if (s.distance != null) return `${s.distance}${distanceUnit}`
+  if (s.distance != null) return `${s.distance}${u.distance}`
   return `${s.reps ?? '?'} reps`
 }
 
 // ---- One logged session in the week list ----------------------------------
 
 function LogSessionCard({
-  s, unit, distanceUnit, onOpen, onExercise,
+  s, u, onOpen, onExercise,
 }: {
   s: LogSession
-  unit: string
-  distanceUnit: string
+  u: UnitContext
   onOpen: () => void
   onExercise: (name: string) => void
 }) {
@@ -72,7 +71,7 @@ function LogSessionCard({
                 color: 'var(--text-dim)', fontSize: 'var(--fs-xs)',
               }}
             >
-              {h.name} {fmtSet(h.set, unit, distanceUnit)}
+              {h.name} {fmtSet(h.set, u)}
             </button>
           ))}
         </div>
@@ -103,8 +102,8 @@ function Sparkline({ values }: { values: number[] }) {
 }
 
 function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string; name: string; onClose: () => void }) {
-  const unit = getWeightUnit()
-  const { data, loading } = useCachedLoader(`exhist:${athleteId}:${name}`, () => gatherExerciseHistory(athleteId, name))
+  const u = unitContext()
+  const { data, loading } = useCachedLoader(`exhist:${athleteId}:${name}`, () => gatherExerciseHistory(athleteId, name, u))
   const hist = data as ExerciseHistory | null
   const series = (hist?.points ?? []).map((p) => p.e1rm ?? p.topWeight).filter((v): v is number => v != null)
 
@@ -119,8 +118,8 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
           {(hist.bestWeight != null || hist.bestE1rm != null) && (
             <div style={{ marginBottom: 20 }}>
               <StatGrid>
-                {hist.bestWeight != null && <Stat value={`${hist.bestWeight}${unit}`} label="Top set" />}
-                {hist.bestE1rm != null && <Stat value={`${hist.bestE1rm}${unit}`} label="Est. 1RM" tone="var(--signal)" />}
+                {hist.bestWeight != null && <Stat value={`${hist.bestWeight}${u.unit}`} label="Top set" />}
+                {hist.bestE1rm != null && <Stat value={`${hist.bestE1rm}${u.unit}`} label="Est. 1RM" tone="var(--signal)" />}
                 <Stat value={hist.points.length} label="Sessions" />
               </StatGrid>
             </div>
@@ -148,8 +147,8 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
               >
                 <span className="text-sm text-dim" style={{ fontFamily: 'var(--font-mono)' }}>{dayAndDate(p.performedAt)}</span>
                 <span className="num text-sm" style={{ textAlign: 'right' }}>
-                  {p.topWeight != null ? `${p.topWeight}${unit}×${p.topReps ?? '?'}` : `${p.topReps ?? '?'} reps`}
-                  {p.e1rm != null ? `  ·  ${p.e1rm}${unit} e1RM` : ''}
+                  {p.topWeight != null ? `${p.topWeight}${u.unit}×${p.topReps ?? '?'}` : `${p.topReps ?? '?'} reps`}
+                  {p.e1rm != null ? `  ·  ${p.e1rm}${u.unit} e1RM` : ''}
                   {p.rpe != null ? `  ·  RPE ${p.rpe}` : ''}
                 </span>
               </div>
@@ -169,8 +168,7 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
  */
 export function HistoryScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
-  const unit = getWeightUnit()
-  const distanceUnit = getDistanceUnit(unit)
+  const u = unitContext()
   const [exercise, setExercise] = useState<string | null>(null)
 
   const { data, loading } = useCachedLoader(
@@ -216,8 +214,7 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
                 <LogSessionCard
                   key={s.workoutId}
                   s={s}
-                  unit={unit}
-                  distanceUnit={distanceUnit}
+                  u={u}
                   onOpen={() => navigate(`/app/workout/${s.routineId}?w=${s.workoutId}`)}
                   onExercise={setExercise}
                 />

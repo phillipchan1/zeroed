@@ -5,7 +5,7 @@ import { useAppState } from './hooks/useAppState'
 import { useDisableShakeToUndo } from './hooks/useDisableShakeToUndo'
 import { useOutboxSync, pendingSessionsRaw } from './lib/workoutOutbox'
 import { cacheKeys, useWarmLoopCaches } from './lib/loopCache'
-import { getWeightUnit } from './lib/units'
+import { unitContext } from './lib/units'
 import { gatherProgramMap, gatherTrainingLog, gatherWeekPager } from './engine'
 import { Spinner } from './components/ui'
 import { Nav, Sidebar } from './components/layout/Nav'
@@ -72,10 +72,10 @@ function LoopLayout({
   // loads its own view; these are the ones that would otherwise cost a wait on
   // first tap. Ordered by how likely they are to be opened next.
   useWarmLoopCaches(athleteId, [
-    { key: cacheKeys.weekPager(athleteId),   load: () => gatherWeekPager(athleteId, getWeightUnit()) },
+    { key: cacheKeys.weekPager(athleteId),   load: () => gatherWeekPager(athleteId, unitContext()) },
     { key: cacheKeys.program(athleteId),     load: () => fetchProgramView(athleteId) },
     { key: cacheKeys.history(athleteId),     load: () => gatherTrainingLog(athleteId, pendingSessionsRaw()) },
-    { key: cacheKeys.programMap(athleteId),  load: () => gatherProgramMap(athleteId, getWeightUnit()) },
+    { key: cacheKeys.programMap(athleteId),  load: () => gatherProgramMap(athleteId, unitContext()) },
     { key: cacheKeys.profile(athleteId),     load: () => fetchProfileMeta(athleteId) },
     { key: cacheKeys.coach(athleteId),       load: () => fetchCoachView(athleteId) },
   ])

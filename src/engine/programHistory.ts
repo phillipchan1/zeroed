@@ -22,6 +22,7 @@
 // =============================================================================
 
 import { supabase } from '../lib/supabaseClient'
+import type { UnitContext } from '../lib/units'
 import { readLoggedExercises, type LoggedWorkoutLike } from './loggedSets'
 import type {
   ExerciseTemplate, PhaseRow, ProgramRevisionRow, RevisionDiff, RevisionSession,
@@ -252,8 +253,8 @@ const MAX_WEEKLY_NOTES = 6
 const MAX_SETTLED = 8
 const MAX_REVISIONS = 6
 
-function describeSet(s: SetLog, unit: string): string {
-  if (s.weight != null) return `${s.weight}${unit}×${s.reps ?? '?'}`
+function describeSet(s: SetLog, u: UnitContext): string {
+  if (s.weight != null) return `${u.fmt(s.weight)}${u.unit}×${s.reps ?? '?'}`
   if (s.duration != null) return `${s.duration}s`
   if (s.distance != null) return `${s.distance}`
   return `${s.reps ?? '?'} reps`
@@ -279,7 +280,7 @@ function shortDate(iso: string): string {
  * four scoped reads, all capped — this rides in an agent context window.
  */
 export async function gatherProgramHistory(
-  athleteId: string, programId: string, unit: string,
+  athleteId: string, programId: string, u: UnitContext,
 ): Promise<ProgramHistorySummary> {
   const [{ data: phaseRows }, { data: reviewRows }, { data: insightRows }, { data: revRows }, { data: ws }] =
     await Promise.all([
@@ -357,9 +358,9 @@ export async function gatherProgramHistory(
             : 'flat'
       return {
         name,
-        first: describeSet(a.first, unit),
-        best: describeSet(a.best, unit),
-        current: describeSet(a.last, unit),
+        first: describeSet(a.first, u),
+        best: describeSet(a.best, u),
+        current: describeSet(a.last, u),
         sessions: a.sessions,
         direction,
       }
@@ -374,13 +375,13 @@ export async function gatherProgramHistory(
  * is no active program, or when the read fails (this is context, never a gate).
  */
 export async function gatherProgramArc(
-  athleteId: string, unit: string,
+  athleteId: string, u: UnitContext,
 ): Promise<ProgramHistorySummary | null> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
   if (!prog?.id) return null
   try {
-    return await gatherProgramHistory(athleteId, (prog as { id: string }).id, unit)
+    return await gatherProgramHistory(athleteId, (prog as { id: string }).id, u)
   } catch {
     return null
   }

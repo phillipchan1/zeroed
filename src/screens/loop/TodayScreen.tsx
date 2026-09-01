@@ -8,7 +8,7 @@ import {
   type PagerWeekView, type WeekPagerData, type SessionActuals,
 } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
-import { getWeightUnit, getDistanceUnit } from '../../lib/units'
+import { unitContext, type UnitContext } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
 import { loadDraftRoutineIds, weekStart } from '../../lib/workoutDraft'
 import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
@@ -193,11 +193,11 @@ const STATE_CHIP: Record<SessionState['kind'], { tone: 'todo' | 'doing' | 'done'
 const isSetLogged = (s: SetLog) => s.done || s.reps != null || s.duration != null || s.distance != null
 
 // One performed set, in the shape its tracking type is read in.
-function fmtSet(t: TrackingType, s: SetLog, unit: string, distanceUnit: string): string {
+function fmtSet(t: TrackingType, s: SetLog, u: UnitContext): string {
   if (t === 'time')     return s.duration != null ? `${s.duration}s` : '—'
-  if (t === 'distance') return s.distance != null ? `${s.distance}${distanceUnit}` : '—'
-  if (t === 'bodyweight_reps') return `${s.reps ?? '?'}${s.weight ? `+${s.weight}${unit}` : ''}`
-  return `${s.weight != null ? `${s.weight}${unit}` : 'BW'}×${s.reps ?? '?'}`
+  if (t === 'distance') return s.distance != null ? `${s.distance}${u.distance}` : '—'
+  if (t === 'bodyweight_reps') return `${s.reps ?? '?'}${s.weight ? `+${u.fmt(s.weight)}${u.unit}` : ''}`
+  return `${s.weight != null ? `${u.fmt(s.weight)}${u.unit}` : 'BW'}×${s.reps ?? '?'}`
 }
 
 // What was prescribed, as one string: "3×8 · moderate".
@@ -216,12 +216,11 @@ const CMP_LABEL: React.CSSProperties = {
  * parted company — which sets went missing, which load was different.
  */
 function PerformedRow({
-  ex, logs, unit, distanceUnit,
+  ex, logs, u,
 }: {
   ex: ExerciseTemplate
   logs: SetLog[]
-  unit: string
-  distanceUnit: string
+  u: UnitContext
 }) {
   const t = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
   const done = logs.filter(isSetLogged)
@@ -244,7 +243,7 @@ function PerformedRow({
         <span style={CMP_LABEL}>Logged</span>
         <span className="num text-sm" style={{ color: done.length ? 'var(--text)' : 'var(--text-dim)' }}>
           {done.length
-            ? done.map((s) => fmtSet(t, s, unit, distanceUnit)).join(', ')
+            ? done.map((s) => fmtSet(t, s, u)).join(', ')
                 + (avgRpe != null ? ` · RPE ${avgRpe}` : '')
             : 'Not logged'}
         </span>
@@ -259,7 +258,7 @@ function PerformedRow({
  * here, one tap away, so the week list stays scannable.
  */
 function SessionSheet({
-  routine, state, targets, actuals, unit, distanceUnit, plannedDow, onPlanDay, onClose, onStart, onEdit, onLogAgain,
+  routine, state, targets, actuals, u, plannedDow, onPlanDay, onClose, onStart, onEdit, onLogAgain,
 }: {
   routine: RoutineRow
   state: SessionState
@@ -269,8 +268,7 @@ function SessionSheet({
   // The session as performed, once it's done. Null until it loads (or if the
   // log can't be reached) — the sheet falls back to the plan.
   actuals: SessionActuals | null
-  unit: string
-  distanceUnit: string
+  u: UnitContext
   plannedDow: number | null
   onPlanDay: (dow: number | null) => void
   onClose: () => void
@@ -332,8 +330,7 @@ function SessionSheet({
                 key={i}
                 ex={ex}
                 logs={actuals!.setLogs[i] ?? []}
-                unit={unit}
-                distanceUnit={distanceUnit}
+                u={u}
               />
             ))
           : exercises.map((ex, i) => {
@@ -352,7 +349,7 @@ function SessionSheet({
                 <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
                 <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
                   {ex.sets}×{ex.reps}
-                  {target != null ? ` · ${target}${unit}` : ex.load ? ` · ${ex.load}` : ''}
+                  {target != null ? ` · ${target}${u.unit}` : ex.load ? ` · ${ex.load}` : ''}
                 </span>
               </div>
             )
@@ -676,7 +673,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   )
   const { data: pager } = useCachedLoader(
     `weekpager:${athleteId}`,
-    () => gatherWeekPager(athleteId, getWeightUnit()),
+    () => gatherWeekPager(athleteId, unitContext()),
   )
 
   const p1            = view?.p1 ?? null
@@ -828,11 +825,11 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // paints instantly and offline; the fetch also refreshes the workout
   // bootstrap's copy, so the number the preview promises is the one the session
   // opens with.
-  const unit = getWeightUnit()
+  const u = unitContext()
   const { data: openRx } = useCachedLoader(
     openSession ? cacheKeys.sessionRx(openSession.id) : null,
     async () => {
-      const rx = await gatherSessionPrescription(athleteId, openSession!.id, openSession!.exercises, unit)
+      const rx = await gatherSessionPrescription(athleteId, openSession!.id, openSession!.exercises, u)
       mutateCache<WorkoutBootstrap>(workoutBootKey(openSession!.id), (b) => ({ ...b, prescription: rx }))
       return rx
     },
@@ -1082,8 +1079,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           state={statusFor(openSession.id)}
           targets={openTargets}
           actuals={openActuals}
-          unit={unit}
-          distanceUnit={getDistanceUnit(unit)}
+          u={u}
           plannedDow={plannedDowFor(openSession)}
           onPlanDay={(dow) => handlePlanDay(openSession.id, dow)}
           onClose={() => setOpenSessionId(null)}
