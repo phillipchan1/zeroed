@@ -35,7 +35,7 @@ import {
   callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callPhaseDesign, callInfoGain, callTarget,
   callCoachChat, callWeeklyDebrief,
   type ProgramDesignResult, type PhaseDesignResult, type InsightCategory,
-  type CoachContext, type CoachChatTurn, type CoachAction,
+  type CoachContext, type CoachChatTurn, type CoachAction, type RetestFindings,
 } from './agentClient'
 import { FELT_CHIPS, isClearanceTest, type FeltLabel, type ClearanceTest } from '../types/database'
 import { unitContext, type UnitContext } from '../lib/units'
@@ -44,7 +44,7 @@ import {
   type LiftBest, type PrKind,
 } from './prs'
 import {
-  buildBaseline, namedLifts, strengthDeltas,
+  buildBaseline, namedLifts, strengthDeltas, strengthStalls,
   type BaselineLift, type StrengthDelta,
 } from './strengthBaseline'
 import { isSetLogged, tallySession, sumVolume, NO_VOLUME, type VolumeTally } from './volume'
@@ -2971,9 +2971,12 @@ async function designPhasePlan(
     // The newest top set per lift, AND the arc behind it. Without the arc the
     // designer cannot tell progress from a plateau, and every block is built for
     // an athlete who just arrived.
-    const [recent_lifts, history] = await Promise.all([
+    const [recent_lifts, history, retest] = await Promise.all([
       gatherRecentLifts(programId, u),
       gatherProgramHistory(athleteId, programId, u).catch(() => null),
+      // What the retest that triggered this block found. Best-effort: a design
+      // that can't read it is the design we always shipped.
+      gatherRetestFindings(athleteId).catch(() => null),
     ])
     const insights = ((insightRows ?? []) as Array<{ priority: string; category: string; claim: string; confidence: number; status: string }>)
       .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
@@ -2994,6 +2997,7 @@ async function designPhasePlan(
       recent_lifts,
       ...(trimmedEmphasis ? { emphasis: trimmedEmphasis } : {}),
       ...(history ? { history } : {}),
+      ...(retest ? { retest } : {}),
     })
     if (!res.ok) return template(res.reason ? `${res.error}: ${res.reason}` : res.error)
     // A call that succeeds can still carry no usable session (zero sessions, or
@@ -4226,6 +4230,54 @@ export async function gatherExerciseBests(programId: string): Promise<Record<str
     }
   }
   return out
+}
+
+/**
+ * What the most recent retest found, for the block it is about to design.
+ *
+ * A re-scope is triggered BY a retest and knew nothing about it: the designer
+ * saw the athlete's logged lifts, which it always sees, but not that a movement
+ * pattern had just cleared or that a lift measured 28 days apart came back flat.
+ * Those two are the findings most likely to change what the next block should
+ * be, and they were being computed and thrown away.
+ *
+ * Null when there is nothing to say — a single diagnostic, or no active program.
+ */
+export async function gatherRetestFindings(athleteId: string): Promise<RetestFindings | null> {
+  const { data: diagRows } = await supabase
+    .from('diagnostic').select('version, raw_results')
+    .eq('athlete_id', athleteId)
+    .order('version', { ascending: false })
+    .limit(2)
+  const diags = (diagRows ?? []) as Array<{ version: number; raw_results: DiagnosticResults | null }>
+  if (diags.length < 2) return null
+  const [current, prior] = diags
+  if (!current.raw_results) return null
+
+  const movement_gains: string[] = []
+  const baseMove = prior.raw_results?.movement ?? {}
+  for (const p of MOVEMENT_PATTERNS) {
+    const from = baseMove[p.key]
+    const to = current.raw_results.movement?.[p.key]
+    if (from != null && to != null && to > from) movement_gains.push(`${p.label} ${from}→${to}`)
+  }
+
+  // Weak links this retest retired. resolved_at is stamped by runRetest, so the
+  // window is "since the previous diagnostic" — near enough, and it never
+  // reports a read that cleared for some other reason months ago.
+  const { data: resolvedRows } = await supabase
+    .from('insight').select('category, claim, resolved_at')
+    .eq('athlete_id', athleteId).eq('status', 'resolved')
+    .order('resolved_at', { ascending: false }).limit(5)
+  const cleared = ((resolvedRows ?? []) as Array<{ category: string; claim: string }>)
+    .map((i) => i.category)
+
+  const stronger = strengthDeltas(prior.raw_results?.strength, current.raw_results.strength)
+    .map((d) => `${d.name} ${d.from}→${d.to} (+${d.pct}%)`)
+  const stalled = strengthStalls(prior.raw_results?.strength, current.raw_results.strength)
+
+  if (!movement_gains.length && !cleared.length && !stronger.length && !stalled.length) return null
+  return { version: current.version, movement_gains, cleared, stronger, stalled }
 }
 
 /**

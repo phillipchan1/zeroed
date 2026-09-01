@@ -226,3 +226,32 @@ export function strengthDeltas(
 
   return out.sort((a, b) => b.pct - a.pct)
 }
+
+/**
+ * Lifts that were measured twice and did NOT move.
+ *
+ * The half nobody reports, and the half that should change a block. A lift that
+ * gained 5% keeps its progression; a lift tested 28 days apart that came back
+ * flat needs the variable changed — rep range, tempo, variation, frequency —
+ * rather than another block of the same. "No news" is news here, and until now
+ * it was thrown away: `strengthDeltas` returns gains, so a stalled lift simply
+ * did not appear anywhere.
+ *
+ * A REGRESSION counts as a stall. It is the same instruction to the designer
+ * (change something) and calling it out separately would invite a block built
+ * around a number that is more likely noise in an estimate than a real loss.
+ */
+export function strengthStalls(
+  prior: DiagnosticResults['strength'] | undefined,
+  current: DiagnosticResults['strength'] | undefined,
+): string[] {
+  if (!prior || !current) return []
+  const out: string[] = []
+  for (const name of Object.keys(namedLifts(current))) {
+    const from = prior[name]
+    const to = current[name]
+    if (from == null || to == null || from <= 0 || to <= 0) continue
+    if (gainPct(from, to) == null) out.push(name)
+  }
+  return out.sort()
+}

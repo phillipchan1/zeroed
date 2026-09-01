@@ -496,6 +496,12 @@ If the input includes a "history" object, it is what came BEFORE this block. Des
 - "settled" are questions already answered. Do NOT re-litigate them or re-add work to re-test them.
 - "revisions" are changes the athlete already made, with what they asked for. Their asks persist; a new block that quietly drops them is the app overruling them.
 
+If the input includes a "retest" object, a RETEST just ran and this block is its answer. These are measurements, not impressions — the athlete was re-screened and their lifts re-read from the log. Design to them:
+- "stalled" is the one that must change something. A lift measured twice, 28 days apart, that came back flat does NOT get another block of the same: change the variable (rep range, tempo, a close variation, frequency) and say so in that session's intent. More of what already didn't work is the failure mode here.
+- "stronger" earns its progression. Keep those lifts on the same trajectory and do not restructure what is working.
+- "cleared" are weak links the retest retired. Stop programming around them — the corrective work that was serving them comes out, and the space goes to real training. Do not keep taxing a limiter that is gone.
+- "movement_gains" are pattern scores that improved. Treat a pattern that reached 2+ as no longer gating load on that chain.
+
 Each session has a short name, a one-sentence intent, and 3–8 exercises. sets is an integer 1–10; reps is a short string ("5", "4-6", "3", "30s"); load is one of "bodyweight", "light", "moderate", "heavy"; cue is one short coaching sentence. Produce one distinct session per the athlete's sessions_per_week, up to 7 distinct sessions — if they train six days a week, build six sessions.
 
 A deterministic validator resolves metrics, clamps volume, and is the last line of safety — design honestly within these bounds.`,
