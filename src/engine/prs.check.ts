@@ -12,7 +12,7 @@
 //     and a bodyweight set contributes only what was hung off the belt
 
 import {
-  estimate1RM, estimateIsReliable, detectSetPRs, foldBest, bestOfSets, prLabel,
+  estimate1RM, estimateIsReliable, detectSetPRs, displayPRs, foldBest, bestOfSets, prLabel,
   NO_BEST, type LiftBest,
 } from './prs.ts'
 import { tallySets, tallySession, setLoad, isSetLogged, sumVolume, NO_VOLUME } from './volume.ts'
@@ -67,6 +67,10 @@ same(detectSetPRs(null, standing), [], 'no set, no PR')
 // The exact boundary — one unit over is a PR, dead level is not.
 same(detectSetPRs(set(226, 5), standing), ['weight', 'e1rm'], 'one pound over the best is a PR')
 eq(detectSetPRs(set(225, 5), standing).length, 0, 'dead level leaves the record standing')
+
+// A first-ever set is a baseline, not a record — nothing to beat.
+same(displayPRs(set(100, 5), NO_BEST), [], 'the first loaded set on a lift shows no badge')
+same(displayPRs(set(230, 5), standing), ['weight', 'e1rm'], 'a real record still shows')
 
 eq(prLabel(['weight', 'e1rm', 'reps']), 'Heaviest', 'heaviest-ever outranks the estimate')
 eq(prLabel(['e1rm', 'reps']), 'Best e1RM', 'the estimate outranks a rep record')

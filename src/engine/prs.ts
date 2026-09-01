@@ -105,6 +105,18 @@ export function detectSetPRs(set: SetLog | null | undefined, best: LiftBest): Pr
   return kinds
 }
 
+/**
+ * The PRs worth SHOWING. Same arithmetic, one extra rule: a first-ever loaded
+ * set on a lift sets a BASELINE, not a record — there was nothing to beat. A
+ * badge on every set of a first session is a badge that means nothing by the
+ * second one. `detectSetPRs` stays the honest primitive (it is what folds the
+ * running best forward); this is what a surface renders.
+ */
+export function displayPRs(set: SetLog | null | undefined, best: LiftBest): PrKind[] {
+  if (best.weight == null) return []
+  return detectSetPRs(set, best)
+}
+
 /** Fold one more set into a running best. Returns a new object; never mutates. */
 export function foldBest(best: LiftBest, set: SetLog | null | undefined): LiftBest {
   if (!set || set.weight == null || set.weight <= 0) return best

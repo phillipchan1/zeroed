@@ -17,7 +17,7 @@ import {
   type SessionPrescription, type SessionActuals, type ClearanceView,
   type PendingSession, type PendingDebrief, type DebriefExerciseInput,
 } from '../../engine'
-import { detectSetPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
+import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
 import { isSetLogged, tallySession } from '../../engine/volume'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
@@ -186,7 +186,14 @@ function SetRow({
   // exactly those, while anything the athlete typed by hand is left alone.
   const [autofilled, setAutofilled] = useState<MetricField[]>([])
 
-  const num = (v: string) => (v === '' ? null : Number(v))
+  // `min={0}` on a number input is validation, not a restriction — a typed "-5"
+  // still reaches onChange. Every metric here (weight, reps, seconds, distance)
+  // is non-negative by definition, so clamp at the source.
+  const num = (v: string) => {
+    if (v === '') return null
+    const n = Number(v)
+    return Number.isFinite(n) ? Math.max(0, n) : null
+  }
 
   // Any manual edit means the athlete owns that field now: drop it from the
   // autofill set so a later un-check won't wipe their number.
@@ -354,7 +361,7 @@ function SetRow({
 
   // The one moment the whole log exists for. Computed live off what's typed, so
   // it appears as the number goes in — not in a summary three taps later.
-  const pr = prLabel(detectSetPRs(log, best))
+  const pr = prLabel(displayPRs(log, best))
 
   return (
     <div className={`set-row ${gridClass(trackingType)}${log.done ? ' set-row--done' : ''}${pr ? ' set-row--pr' : ''}`}>

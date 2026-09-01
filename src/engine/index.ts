@@ -40,7 +40,7 @@ import {
 import { FELT_CHIPS, isClearanceTest, type FeltLabel, type ClearanceTest } from '../types/database'
 import { unitContext, type UnitContext } from '../lib/units'
 import {
-  estimate1RM, estimateIsReliable, detectSetPRs, foldBest, NO_BEST,
+  estimate1RM, estimateIsReliable, displayPRs, foldBest, NO_BEST,
   type LiftBest, type PrKind,
 } from './prs'
 import { isSetLogged, tallySession, sumVolume, type VolumeTally } from './volume'
@@ -4155,7 +4155,7 @@ export async function gatherExerciseHistory(
       if (name !== exerciseName) continue
       const top = topWorkingSet(sets)
       if (!top) continue
-      const prs = detectSetPRs(top, running)
+      const prs = displayPRs(top, running)
       running = foldBest(running, top)
       const e1rm = top.weight != null && top.reps != null ? estimate1RM(top.weight, top.reps) : null
       points.push({
