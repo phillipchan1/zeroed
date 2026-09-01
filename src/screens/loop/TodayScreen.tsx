@@ -8,6 +8,7 @@ import {
   type PagerWeekView, type WeekPagerData, type SessionActuals,
 } from '../../engine'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
+import { tallySession } from '../../engine/volume'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
 import { loadDraftRoutineIds, weekStart } from '../../lib/workoutDraft'
@@ -280,6 +281,7 @@ function SessionSheet({
   const chip = STATE_CHIP[state.kind]
   // A finished session is read for what happened, not what was asked for.
   const showPerformed = state.kind === 'done' && !!actuals
+  const performedVolume = tallySession(actuals?.setLogs)
   const loggedSets = actuals
     ? Object.values(actuals.setLogs).flat().filter(isSetLogged).length
     : 0
@@ -305,6 +307,8 @@ function SessionSheet({
           {showPerformed
             ? [
                 `${loggedSets} of ${plannedSets} sets`,
+                // What you moved, not only how many times you stopped.
+                performedVolume.load > 0 ? `${u.volume(performedVolume.load)}${u.unit}` : null,
                 actuals!.rpe != null ? `RPE ${actuals!.rpe}` : null,
                 actuals!.durationMins ? `${actuals!.durationMins} min` : null,
               ].filter(Boolean).join(' · ')
@@ -747,7 +751,22 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   }
 
   const confidencePct = p1 ? Math.round(p1.confidence * 100) : null
-  const doneCount = routines.filter((r) => statusFor(r.id).kind === 'done').length
+
+  // THE WEEK'S PLAN — one number, the same one the rest of the app uses.
+  //
+  // This screen used to measure the week against `routines.length` (how many
+  // sessions the block contains) while the scheduler, the weekly review and the
+  // adherence gate all measured it against `sessions_per_week` (how many the
+  // athlete said they train). Those are different numbers the moment a block
+  // carries three sessions and the athlete trains five: Train said "Week
+  // complete · 3 of 3" on the same day the recap said "Only 3/5 sessions logged
+  // — holding load". Both were reading their own definition correctly.
+  //
+  // Sessions done is counted the way computeWeekSchedule counts it — distinct
+  // calendar DAYS trained, so logging Session A twice in one week counts twice
+  // and twice in one day counts once.
+  const plannedThisWeek = Math.max(1, view?.sessionsPerWeek ?? (routines.length || 3))
+  const doneCount = new Set(weekWorkouts.map((w) => localIso(new Date(w.performedAt)))).size
   const lastDoneByRoutine = view?.lastDoneByRoutine ?? {}
 
   // Exactly one session gets the primary (yellow) Start: the scheduler's pick if
@@ -797,7 +816,6 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // the CTA so it reads "done" rather than inviting a second close.
   const currentWeekEnding = localIso(weekDays[6].date)
   const weekClosed = (latestReview?.weekEnding ?? null) === currentWeekEnding
-  const plannedThisWeek = routines.length || 3
 
   async function handleCloseWeek(injury: boolean) {
     if (closing) return
@@ -932,15 +950,15 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             {!loading && routines.length > 0 && (
               <div className="card fade-rise" style={{ marginBottom: 24 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
-                  <Ring value={doneCount / routines.length} size={72}>
+                  <Ring value={doneCount / plannedThisWeek} size={72}>
                     <span style={{ fontSize: 'var(--fs-xl)', fontWeight: 700 }}>{doneCount}</span>
-                    <span className="text-micro text-dim" style={{ marginTop: 2 }}>of {routines.length}</span>
+                    <span className="text-micro text-dim" style={{ marginTop: 2 }}>of {plannedThisWeek}</span>
                   </Ring>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <p className="text-lg" style={{ fontWeight: 700, lineHeight: 1.25 }}>
                       {doneCount === 0 ? 'Nothing logged yet'
-                        : doneCount >= routines.length ? 'Week complete'
-                        : `${routines.length - doneCount} to go`}
+                        : doneCount >= plannedThisWeek ? 'Week complete'
+                        : `${plannedThisWeek - doneCount} to go`}
                     </p>
                     <div className="week-strip" style={{ marginTop: 12, padding: 0, gap: 2 }}>
                       {weekDays.map((day, i) => (

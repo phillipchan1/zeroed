@@ -12,10 +12,13 @@ import {
   enqueueSession, commitPending, parsePendingRef, pendingSessionById, committedWorkoutIdFor,
 } from '../../lib/workoutOutbox'
 import {
-  gatherSessionPrescription, actualsFromPending, coachStarterPrompts, runCoachChat,
+  gatherSessionPrescription, gatherExerciseBests, actualsFromPending,
+  coachStarterPrompts, runCoachChat,
   type SessionPrescription, type SessionActuals, type ClearanceView,
   type PendingSession, type PendingDebrief, type DebriefExerciseInput,
 } from '../../engine'
+import { detectSetPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
+import { isSetLogged, tallySession } from '../../engine/volume'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
 import { unitContext, type UnitContext } from '../../lib/units'
@@ -148,6 +151,8 @@ interface SetRowProps {
   log: SetLog
   trackingType: TrackingType
   u: UnitContext
+  /** What this lift's best set ever was — what this row has to beat. */
+  best: LiftBest
   prescribedReps: number | null
   prescribedDuration: number | null
   prescribedLoad: number | null   // parsed prescribed weight, e.g. "225 lbs" → 225
@@ -159,7 +164,7 @@ interface SetRowProps {
 }
 
 function SetRow({
-  setNum, log, trackingType, u,
+  setNum, log, trackingType, u, best,
   prescribedReps, prescribedDuration, prescribedLoad, carry,
   prevText, onChange, onComplete, onActivate,
 }: SetRowProps) {
@@ -347,9 +352,16 @@ function SetRow({
     )
   }
 
+  // The one moment the whole log exists for. Computed live off what's typed, so
+  // it appears as the number goes in — not in a summary three taps later.
+  const pr = prLabel(detectSetPRs(log, best))
+
   return (
-    <div className={`set-row ${gridClass(trackingType)}${log.done ? ' set-row--done' : ''}`}>
-      <span className="set-row__num">{setNum}</span>
+    <div className={`set-row ${gridClass(trackingType)}${log.done ? ' set-row--done' : ''}${pr ? ' set-row--pr' : ''}`}>
+      <span className="set-row__num">
+        {setNum}
+        {pr && <span className="set-row__pr" title={`${pr} ever`} aria-label={`Personal record: ${pr} ever`}>PR</span>}
+      </span>
       <span className="set-row__prev num">{prevText ?? '·'}</span>
       {cells}
       {doneBtn}
@@ -819,10 +831,12 @@ function dateInputToISO(s: string): string {
 }
 
 // A set counts as "logged" once it carries any real signal — the trigger for
-// autosaving the draft (so we never persist an untouched, empty session).
-function isLogged(s: SetLog): boolean {
-  return s.done || s.reps != null || s.duration != null || s.distance != null
-}
+// autosaving the draft (so we never persist an untouched, empty session), and
+// the same definition every read-back uses. It lives in engine/volume.ts now:
+// this file used to count only TAPPED checkboxes when committing, so a session
+// typed straight into the grid was filed as "0 sets" while History, the recap
+// and the week ring all counted it correctly.
+const isLogged = isSetLogged
 
 // Short "what they actually did" summary per exercise, for the debrief agent.
 function performedSummary(t: TrackingType, logs: SetLog[], u: UnitContext): string {
@@ -1016,6 +1030,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   // Last session's results per exercise index, for the desktop Previous column.
   const [prevByExercise, setPrevByExercise] = useState<Record<number, SetLog[]>>(() => seedBoot?.prevByExercise ?? {})
+  // The standing record per exercise index — what a set has to beat to be a PR.
+  // Seeded from the cached bootstrap so the badge works offline and on frame one.
+  const [bestByExercise, setBestByExercise] = useState<Record<number, LiftBest>>(
+    () => seedBoot?.bestByExercise ?? {},
+  )
   // Which exercise is in focus — drives the "why" panel in the desktop rail.
   const [activeExIdx, setActiveExIdx] = useState(0)
 
@@ -1239,6 +1258,23 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       } catch { /* non-fatal */ }
     }
 
+    // Standing records for this session's lifts, so a PR can be recognised as it
+    // happens. Best-effort and behind everything else: a missing record only
+    // costs a badge, and an over-eager one (empty map → every loaded set reads
+    // as a first-ever PR) would be worse than none, so a failure keeps the seed.
+    let nextBests: Record<number, LiftBest> = seedRef.current!.boot?.bestByExercise ?? {}
+    if (r.program_id) {
+      try {
+        const byName = await gatherExerciseBests(r.program_id)
+        // A session being EDITED already contributed its own sets to these
+        // records, so comparing against them would say "no PR" on the very set
+        // that set the record. The badge is a live-logging signal; leave it off
+        // an edit rather than show it wrong.
+        nextBests = isEdit ? {} : Object.fromEntries(exs.map((ex, i) => [i, byName[ex.name] ?? NO_BEST]))
+        setBestByExercise(nextBests)
+      } catch { /* non-fatal — the badge just doesn't fire this open */ }
+    }
+
     // Re-cache the whole bootstrap so the next open is instant and offline-ready.
     saveCache<WorkoutBootstrap>(bootKey(routineId), {
       routine: r,
@@ -1248,6 +1284,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       prevByExercise: nextPrev,
       insightMap: nextInsightMap,
       prescription: nextPresc,
+      bestByExercise: nextBests,
     })
 
     if (!isEdit && programData && routineId && !startedLoggingRef.current) {
@@ -1444,7 +1481,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       actualReps,
       rpe: avgRpe,
       durationMins: Math.ceil(finalElapsedRef.current / 60),
-      setsDone: allSetsFlat.filter((s) => s.done).length,
+      setsDone: allSetsFlat.filter(isLogged).length,
       athleteName,
       // A queued first-ever session keeps its transition — editing it before it
       // syncs mustn't be what strands onboarding half-finished.
@@ -1641,7 +1678,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     : isFirstSession ? 'Start training →' : 'Start session →'
 
   const setsTotal = allSetsFlat.length
-  const setsDone  = allSetsFlat.filter((s) => s.done).length
+  const setsDone  = allSetsFlat.filter(isLogged).length
+  // Load moved so far — the number that actually tracks the session, next to the
+  // one that only counts how many times you stopped.
+  const liveVolume = tallySession(setLogs)
   const rpeLive   = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
   const avgRpeLive = rpeLive.length ? Math.round(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length) : null
 
@@ -1682,6 +1722,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
             </p>
             <p className="num text-xs text-dim" style={{ marginTop: 2 }}>
               {formatElapsed(elapsed)} · {setsDone}/{setsTotal} sets
+              {liveVolume.load > 0 ? ` · ${u.volume(liveVolume.load)}${u.unit}` : ''}
               {avgRpeLive !== null ? ` · RPE ${avgRpeLive}` : ''}
             </p>
           </div>
@@ -1853,6 +1894,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                     log={log}
                     trackingType={trackingType}
                     u={u}
+                    best={bestByExercise[exIdx] ?? NO_BEST}
                     prescribedReps={pReps}
                     prescribedDuration={pDur}
                     prescribedLoad={pLoad}

@@ -4,6 +4,7 @@ import { useCachedLoader } from '../../lib/cache'
 import { gatherTrainingLog, gatherExerciseHistory, type LogSession, type ExerciseHistory } from '../../engine'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
 import { unitContext, type UnitContext } from '../../lib/units'
+import { prLabel } from '../../engine/prs'
 import { SectionHeader, Skeleton, PageHeader, Sheet, Chip, Stat, StatGrid } from '../../components/ui'
 import type { SetLog } from '../../types/database'
 
@@ -53,6 +54,9 @@ function LogSessionCard({
         {s.pending
           ? <Chip tone="pending">Syncing</Chip>
           : <Chip tone="done">{s.setsDone} sets</Chip>}
+        {/* Load moved, not just how many times you stopped. A session of 3x5 at
+            315 and one of 3x12 at 95 both read as "3 sets" without it. */}
+        {s.volume.load > 0 && <Chip tone="todo">{u.volume(s.volume.load)}{u.unit}</Chip>}
         {/* Phase is constant across a block, so it was repeating on every row
             for no information. It stays in the week header's context. */}
         {!s.pending && s.rpe != null && <Chip tone="todo">RPE {s.rpe}</Chip>}
@@ -121,6 +125,7 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
                 {hist.bestWeight != null && <Stat value={`${hist.bestWeight}${u.unit}`} label="Top set" />}
                 {hist.bestE1rm != null && <Stat value={`${hist.bestE1rm}${u.unit}`} label="Est. 1RM" tone="var(--signal)" />}
                 <Stat value={hist.points.length} label="Sessions" />
+                {hist.prCount > 0 && <Stat value={hist.prCount} label={hist.prCount === 1 ? 'PR' : 'PRs'} tone="var(--signal)" />}
               </StatGrid>
             </div>
           )}
@@ -145,10 +150,26 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
                   gap: 12, padding: '12px 0', borderBottom: '1px solid var(--line)',
                 }}
               >
-                <span className="text-sm text-dim" style={{ fontFamily: 'var(--font-mono)' }}>{dayAndDate(p.performedAt)}</span>
+                <span className="text-sm text-dim" style={{ fontFamily: 'var(--font-mono)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {dayAndDate(p.performedAt)}
+                  {/* Which sessions actually beat something, marked on the day
+                      they did it — a best-ever number at the top of a sheet
+                      never said WHICH session earned it. */}
+                  {p.prs.length > 0 && (
+                    <span
+                      className="text-micro"
+                      style={{ color: 'var(--signal)', fontWeight: 700, letterSpacing: '0.08em' }}
+                      title={`${prLabel(p.prs)} at the time`}
+                    >
+                      PR
+                    </span>
+                  )}
+                </span>
                 <span className="num text-sm" style={{ textAlign: 'right' }}>
                   {p.topWeight != null ? `${p.topWeight}${u.unit}×${p.topReps ?? '?'}` : `${p.topReps ?? '?'} reps`}
-                  {p.e1rm != null ? `  ·  ${p.e1rm}${u.unit} e1RM` : ''}
+                  {/* Above ~12 reps an Epley estimate stops being a strength
+                      number, so it is not printed as one. */}
+                  {p.e1rm != null && p.e1rmReliable ? `  ·  ${p.e1rm}${u.unit} e1RM` : ''}
                   {p.rpe != null ? `  ·  RPE ${p.rpe}` : ''}
                 </span>
               </div>
@@ -208,6 +229,7 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
                 <SectionHeader>{fmtRange(wk.weekStart, wk.weekEnding)}</SectionHeader>
                 <span className="num text-xs text-dim">
                   {wk.sessions.length} session{wk.sessions.length === 1 ? '' : 's'} · {wk.totalSets} sets
+                  {wk.totalVolume.load > 0 && ` · ${u.volume(wk.totalVolume.load)}${u.unit}`}
                 </span>
               </div>
               {wk.sessions.map((s) => (

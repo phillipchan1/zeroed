@@ -18,6 +18,7 @@ import type {
   RoutineRow, SetLog, InsightRow, OnboardingStep,
 } from '../types/database'
 import type { SessionPrescription } from '../engine'
+import type { LiftBest } from '../engine/prs'
 
 export interface WorkoutBootstrap {
   routine: RoutineRow
@@ -27,6 +28,13 @@ export interface WorkoutBootstrap {
   prevByExercise: Record<number, SetLog[]>
   insightMap: Record<string, InsightRow>
   prescription: SessionPrescription | null
+  /**
+   * The standing record on each of this session's lifts, by exercise index —
+   * what a set logged right now has to beat. Cached with the rest so the PR
+   * badge fires offline, on the bar, at the moment it is earned. Absent on
+   * bootstraps written before this field existed — read with `?.`.
+   */
+  bestByExercise?: Record<number, LiftBest>
 }
 
 export const workoutBootKey = (routineId: string) => `workout:${routineId}`
@@ -52,5 +60,6 @@ export function seedWorkoutBootstrap(
     prevByExercise: {},
     insightMap: {},
     prescription: null,
+    bestByExercise: {},
   })
 }

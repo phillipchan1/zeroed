@@ -1204,6 +1204,21 @@ textarea.input {
   text-align: center;
 }
 
+/* A personal record, marked where the number is — the set row itself, as it's
+   typed. A badge under the set number rather than a toast: the athlete is
+   looking at this row, holding a bar, and a thing that appears and disappears
+   is a thing they miss. */
+.set-row--pr { background: rgba(232, 204, 10, 0.06); }
+.set-row__pr {
+  display: block;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  color: var(--signal);
+}
+
 .set-row__input {
   width: 100%;
   height: 52px;
