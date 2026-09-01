@@ -177,7 +177,7 @@ function MovementStep({
           "SCREENING 3/7 · WEAK LINKS 1 · STARTED 2m ago" — of which only the
           first number meant anything to the person filling the form. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 22 }}>
-        <Ring value={scoredCount / MOVEMENT_PATTERNS.length} size={56} stroke={5}>
+        <Ring value={scoredCount / MOVEMENT_PATTERNS.length} size={56} stroke={5} label={`${scoredCount} of ${MOVEMENT_PATTERNS.length} patterns scored`}>
           <span style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{scoredCount}</span>
           <span className="text-micro text-dim">of {MOVEMENT_PATTERNS.length}</span>
         </Ring>

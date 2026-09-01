@@ -1000,6 +1000,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       : (seedDraft?.feedback ?? {}) as Record<number, ExerciseFeedback>),
   )
 
+  // Two-tap discard. A session started by mistake had NO exit: clearDraft only
+  // ever ran on completion, Complete is disabled until something is logged, and
+  // a draft survives until the week rolls over — so one stray tap left a session
+  // reading "In progress" on the Train tab for days.
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+
   // Rest timer (epoch ms when rest ends, or null).
   const [restEndsAt, setRestEndsAt] = useState<number | null>(null)
   const [, setNowTick] = useState(0)
@@ -1446,6 +1452,19 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     completedRef.current = true   // stop draft autosave; the outbox owns it now
     setRestEndsAt(null)
     setShowDebrief(true)
+  }
+
+  // Throw the in-progress session away. Destructive and deliberately two-tap:
+  // the set logs live in the draft tiers and nowhere else, so this is the one
+  // place in the app that can lose work the athlete meant to keep. It never
+  // touches a COMMITTED session — an edit has a real row behind it, and "throw
+  // away my changes" there is just backing out without saving.
+  function discardSession() {
+    if (!athleteId || !routineId) return
+    completedRef.current = true          // stop the autosave racing the delete
+    if (timerRef.current) clearInterval(timerRef.current)
+    clearDraft(athleteId, routineId)
+    navigate('/app/today', { replace: true })
   }
 
   // Assemble the workout numbers + (optional) debrief into a replayable unit.
@@ -2014,6 +2033,18 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           <Button variant="primary" full onClick={handleCompleteWorkout} disabled={!hasAnyLog}>
             {isEdit ? 'Save changes →' : 'Complete workout →'}
           </Button>
+          {/* Only for a session that exists nowhere but this draft. An edit
+              already has a row; backing out of one changes nothing. */}
+          {!isEdit && hasAnyLog && (
+            <button
+              type="button"
+              className="workout-discard"
+              onClick={() => (confirmDiscard ? discardSession() : setConfirmDiscard(true))}
+              onBlur={() => setConfirmDiscard(false)}
+            >
+              {confirmDiscard ? 'Tap again to discard this session' : 'Discard session'}
+            </button>
+          )}
         </div>
       </div>
 

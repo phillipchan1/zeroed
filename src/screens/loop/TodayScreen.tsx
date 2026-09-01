@@ -553,7 +553,7 @@ function CloseWeekSheet({
       }
     >
       <div className="card" style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
-        <Ring value={planned ? doneCount / planned : 0} size={64}>
+        <Ring value={planned ? doneCount / planned : 0} size={64} label={`${doneCount} of ${planned} sessions logged`}>
           <span style={{ fontSize: 'var(--fs-lg)', fontWeight: 700 }}>{doneCount}</span>
           <span className="text-micro text-dim" style={{ marginTop: 1 }}>/{planned}</span>
         </Ring>
@@ -950,7 +950,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             {!loading && routines.length > 0 && (
               <div className="card fade-rise" style={{ marginBottom: 24 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
-                  <Ring value={doneCount / plannedThisWeek} size={72}>
+                  <Ring value={doneCount / plannedThisWeek} size={72} label={`${doneCount} of ${plannedThisWeek} sessions logged this week`}>
                     <span style={{ fontSize: 'var(--fs-xl)', fontWeight: 700 }}>{doneCount}</span>
                     <span className="text-micro text-dim" style={{ marginTop: 2 }}>of {plannedThisWeek}</span>
                   </Ring>
@@ -1054,7 +1054,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                   <span className="num text-sm text-signal">{confidencePct}% confident</span>
                 </div>
                 <p className="text-base prose-clamp" style={{ marginTop: 8, lineHeight: 1.45 }}>{p1.claim}</p>
-                <div style={{ marginTop: 12 }}><Meter value={p1.confidence} /></div>
+                <div style={{ marginTop: 12 }}><Meter value={p1.confidence} label="Confidence in this read" /></div>
               </button>
             )}
 
