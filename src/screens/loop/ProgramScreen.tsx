@@ -439,7 +439,10 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
 // ---- Phase arc — the journey, static. done=green, current=signal, pending=amber.
 function PhaseArc({ currentIdx }: { currentIdx: number }) {
   return (
-    <div style={{ display: 'flex', alignItems: 'center' }}>
+    // Four phase names on a 320px screen at 150% text do not fit, and the arc is
+    // a fixed-order instrument that must not reflow. So it scrolls in its own
+    // container rather than pushing the page sideways.
+    <div style={{ display: 'flex', alignItems: 'center', overflowX: 'auto', paddingBottom: 2 }}>
       {PHASES.map((p, i) => {
         const state = i < currentIdx ? 'done' : i === currentIdx ? 'current' : 'pending'
         const last = i === PHASES.length - 1

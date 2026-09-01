@@ -30,7 +30,9 @@ function SessionRow({ s }: { s: RecapSession }) {
     <div className="card" style={{ marginBottom: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
         <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{s.routineName}</h3>
-        <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
+        {/* No nowrap: at large text sizes this three-part line ran off the
+            right edge. It is allowed to take two lines. */}
+        <span className="num text-xs text-dim" style={{ textAlign: 'right' }}>
           {shortDay(s.performedAt)} · {s.setsDone} sets
           {s.volume?.load ? ` · ${u.volume(s.volume.load)}${u.unit}` : ''}
           {s.rpe != null ? ` · RPE ${s.rpe}` : ''}

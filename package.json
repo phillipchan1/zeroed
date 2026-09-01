@@ -14,7 +14,8 @@
     "mcp": "npm --prefix mcp start",
     "mcp:install": "npm --prefix mcp install",
     "mcp:check": "npm --prefix mcp run check",
-    "check": "for f in src/engine/*.check.ts src/lib/*.check.ts; do node --experimental-strip-types \"$f\" || exit 1; done"
+    "check": "for f in src/engine/*.check.ts src/lib/*.check.ts; do node --experimental-strip-types \"$f\" || exit 1; done",
+    "check:layout": "node scripts/check-layout.mjs"
   },
   "dependencies": {
     "@capacitor/core": "^6.2.0",
