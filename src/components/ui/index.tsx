@@ -307,10 +307,20 @@ export function StatGrid({ children }: { children: ReactNode }) {
 
 // ---- Meter — a proportion, drawn ---------------------------------------------
 
-export function Meter({ value, tone }: { value: number; tone?: string }) {
+export function Meter({ value, tone, label }: { value: number; tone?: string; label?: string }) {
   const pct = Math.max(0, Math.min(1, value)) * 100
+  // A bare div told a screen reader nothing at all — the confidence meter under
+  // "the read" was the whole point of that card and read as empty.
   return (
-    <div className="meter">
+    <div
+      className="meter"
+      role="progressbar"
+      aria-valuenow={Math.round(pct)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label={label}
+      aria-valuetext={`${Math.round(pct)}%`}
+    >
       <div className="meter__fill" style={{ width: `${pct}%`, background: tone }} />
     </div>
   )
@@ -323,15 +333,25 @@ interface RingProps {
   size?: number
   stroke?: number
   tone?: string
+  /** Accessible name — the centred label is decorative markup, not a name. */
+  label?: string
   children?: ReactNode   // centred label
 }
 
-export function Ring({ value, size = 72, stroke = 6, tone, children }: RingProps) {
+export function Ring({ value, size = 72, stroke = 6, tone, label, children }: RingProps) {
   const r = (size - stroke) / 2
   const circ = 2 * Math.PI * r
   const pct = Math.max(0, Math.min(1, value))
   return (
-    <div className="ring-wrap" style={{ width: size, height: size }}>
+    <div
+      className="ring-wrap"
+      style={{ width: size, height: size }}
+      role="progressbar"
+      aria-valuenow={Math.round(pct * 100)}
+      aria-valuemin={0}
+      aria-valuemax={100}
+      aria-label={label}
+    >
       <svg className="ring" width={size} height={size} aria-hidden>
         <circle className="ring__track" cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke} />
         <circle

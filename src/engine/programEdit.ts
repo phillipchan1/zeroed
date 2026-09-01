@@ -18,6 +18,7 @@
 // =============================================================================
 
 import { supabase } from '../lib/supabaseClient'
+import type { UnitContext } from '../lib/units'
 import {
   diffDraft, estimateDraft, mergePreferences, MAX_SESSIONS, clampInt,
   type ProgramDraft, type DraftSession,
@@ -92,8 +93,8 @@ function topWorkingSet(sets: SetLog[] | undefined): SetLog | null {
   return logged.length ? logged[logged.length - 1] : null
 }
 
-function formatSetCell(s: SetLog, unit: string): string | null {
-  if (s.weight != null) return `${s.weight}${unit}×${s.reps ?? '?'}${s.rpe != null ? ` @${s.rpe}` : ''}`
+function formatSetCell(s: SetLog, u: UnitContext): string | null {
+  if (s.weight != null) return `${u.fmt(s.weight)}${u.unit}×${s.reps ?? '?'}${s.rpe != null ? ` @${s.rpe}` : ''}`
   if (s.duration != null) return `${s.duration}s`
   if (s.distance != null) return `${s.distance}`
   if (s.reps != null) return `${s.reps} reps${s.rpe != null ? ` @${s.rpe}` : ''}`
@@ -112,7 +113,7 @@ function weeksBetween(fromISO: string | null, toISO: string | null): number | nu
  * is allowed to see. Returns null when there is no active program/phase — the
  * screen shows the "no program yet" state rather than inventing one.
  */
-export async function gatherProgramEditState(athleteId: string, unit: string): Promise<ProgramEditState | null> {
+export async function gatherProgramEditState(athleteId: string, u: UnitContext): Promise<ProgramEditState | null> {
   const [{ data: athlete }, { data: prog }] = await Promise.all([
     supabase.from('athlete').select('name, goals, obstacle, training_age, sessions_per_week, training_preferences').eq('id', athleteId).maybeSingle(),
     supabase.from('program').select('id, goal').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle(),
@@ -169,7 +170,7 @@ export async function gatherProgramEditState(athleteId: string, unit: string): P
     for (const { name, sets } of readLoggedExercises(w)) {
       if (liftSeen.has(name)) continue
       const top = topWorkingSet(sets)
-      const cell = top ? formatSetCell(top, unit) : null
+      const cell = top ? formatSetCell(top, u) : null
       if (!cell) continue
       liftSeen.set(name, { top_set: cell, rpe: top?.rpe ?? w.rpe })
     }
@@ -178,7 +179,7 @@ export async function gatherProgramEditState(athleteId: string, unit: string): P
   const recent_sessions = rows.slice(0, 5).map((w) => {
     const lines: string[] = []
     for (const { name, sets } of readLoggedExercises(w)) {
-      const cells = sets.map((s) => formatSetCell(s, unit)).filter((c): c is string => c != null)
+      const cells = sets.map((s) => formatSetCell(s, u)).filter((c): c is string => c != null)
       if (cells.length) lines.push(`${name}: ${cells.join(', ')}`)
     }
     return {
@@ -193,7 +194,7 @@ export async function gatherProgramEditState(athleteId: string, unit: string): P
   // The long arc, so the editor answers "am I actually getting stronger?" from
   // the record instead of from the last thirty sessions. Non-fatal: a failure
   // here costs the coach context, never the ability to edit.
-  const history = await gatherProgramHistory(athleteId, prog.id, unit).catch(() => null)
+  const history = await gatherProgramHistory(athleteId, prog.id, u).catch(() => null)
 
   const context: ProgramEditContext = {
     name: (athlete?.name as string | null) ?? null,

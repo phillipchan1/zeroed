@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { Calendar, Clock, TrendingDown, TrendingUp, Minus } from 'lucide-react'
 import { useCachedLoader } from '../../lib/cache'
-import { getWeightUnit } from '../../lib/units'
+import { unitContext } from '../../lib/units'
 import {
   gatherProgramJourney, gatherProgramArc,
   type JourneyEntry, type LiftTrajectory, type ProgramHistorySummary,
@@ -27,7 +27,7 @@ import { PageHeader, SectionHeader, Skeleton, Chip } from '../../components/ui'
  */
 export function ProgramJourneyScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
-  const unit = getWeightUnit()
+  const u = unitContext()
 
   // One loader, one cache key — the arc and the timeline are two views of the
   // same record and must never render from reads that disagree.
@@ -37,7 +37,7 @@ export function ProgramJourneyScreen({ athleteId }: { athleteId: string }) {
   }>(`journey:${athleteId}`, async () => {
     const [entries, history] = await Promise.all([
       gatherProgramJourney(athleteId),
-      gatherProgramArc(athleteId, unit),
+      gatherProgramArc(athleteId, u),
     ])
     return { entries, history }
   })

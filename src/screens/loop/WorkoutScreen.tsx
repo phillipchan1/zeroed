@@ -12,13 +12,16 @@ import {
   enqueueSession, commitPending, parsePendingRef, pendingSessionById, committedWorkoutIdFor,
 } from '../../lib/workoutOutbox'
 import {
-  gatherSessionPrescription, actualsFromPending, coachStarterPrompts, runCoachChat,
+  gatherSessionPrescription, gatherExerciseBests, actualsFromPending,
+  coachStarterPrompts, runCoachChat,
   type SessionPrescription, type SessionActuals, type ClearanceView,
   type PendingSession, type PendingDebrief, type DebriefExerciseInput,
 } from '../../engine'
+import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
+import { isSetLogged, tallySession } from '../../engine/volume'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
-import { getWeightUnit, getDistanceUnit } from '../../lib/units'
+import { unitContext, type UnitContext } from '../../lib/units'
 import { fetchCoachView } from './CoachScreen'
 import type { CoachChatTurn } from '../../engine/agentClient'
 import {
@@ -52,18 +55,16 @@ function gridClass(t: TrackingType): string {
 }
 
 // Compact "what you hit last session" string for the desktop Previous column.
-function formatPrev(
-  t: TrackingType, prev: SetLog | undefined, unit: string, distanceUnit: string,
-): string | null {
+function formatPrev(t: TrackingType, prev: SetLog | undefined, u: UnitContext): string | null {
   if (!prev) return null
   if (t === 'time')     return prev.duration != null ? `${prev.duration}s` : null
-  if (t === 'distance') return prev.distance != null ? `${prev.distance}${distanceUnit}` : null
+  if (t === 'distance') return prev.distance != null ? `${prev.distance}${u.distance}` : null
   if (t === 'bodyweight_reps') {
     if (prev.reps == null) return null
-    return prev.weight ? `${prev.reps}+${prev.weight}` : `${prev.reps}`
+    return prev.weight ? `${prev.reps}+${u.fmt(prev.weight)}` : `${prev.reps}`
   }
   if (prev.weight == null && prev.reps == null) return null
-  return `${prev.weight != null ? `${prev.weight}${unit}` : 'BW'}×${prev.reps ?? '?'}`
+  return `${prev.weight != null ? `${u.fmt(prev.weight)}${u.unit}` : 'BW'}×${prev.reps ?? '?'}`
 }
 
 // Enter flies the cursor to the next numeric field, across rows and exercises —
@@ -80,8 +81,7 @@ function advanceField(el: EventTarget & HTMLInputElement) {
 
 interface SetHeaderProps {
   trackingType: TrackingType
-  unit: string
-  distanceUnit: string
+  u: UnitContext
   prescribedReps: string         // raw prescription, e.g. "8-10" or "30s"
   prescribedLoad: string | null  // raw load, e.g. "225 lbs" or "bodyweight"
 }
@@ -102,7 +102,7 @@ function headCell(label: string, target: string | null) {
 // A header that labels each input column and parks the prescribed target right
 // above the field you type into — so "what to hit" sits next to "what you did".
 function SetHeader({
-  trackingType, unit, distanceUnit, prescribedReps, prescribedLoad,
+  trackingType, u, prescribedReps, prescribedLoad,
 }: SetHeaderProps) {
   let cells: ReactNode
   if (trackingType === 'time') {
@@ -113,19 +113,19 @@ function SetHeader({
       </>
     )
   } else if (trackingType === 'distance') {
-    cells = headCell(distanceUnit, prescribedReps)
+    cells = headCell(u.distance, prescribedReps)
   } else if (trackingType === 'bodyweight_reps') {
     cells = (
       <>
         {headCell('Reps', prescribedReps)}
-        {headCell(`+${unit}`, prescribedLoad)}
+        {headCell(`+${u.unit}`, prescribedLoad)}
         {headCell('RPE', null)}
       </>
     )
   } else {
     cells = (
       <>
-        {headCell(unit, prescribedLoad)}
+        {headCell(u.unit, prescribedLoad)}
         {headCell('Reps', prescribedReps)}
         {headCell('RPE', null)}
       </>
@@ -150,8 +150,9 @@ interface SetRowProps {
   setNum: number
   log: SetLog
   trackingType: TrackingType
-  unit: string
-  distanceUnit: string
+  u: UnitContext
+  /** What this lift's best set ever was — what this row has to beat. */
+  best: LiftBest
   prescribedReps: number | null
   prescribedDuration: number | null
   prescribedLoad: number | null   // parsed prescribed weight, e.g. "225 lbs" → 225
@@ -163,7 +164,7 @@ interface SetRowProps {
 }
 
 function SetRow({
-  setNum, log, trackingType, unit, distanceUnit,
+  setNum, log, trackingType, u, best,
   prescribedReps, prescribedDuration, prescribedLoad, carry,
   prevText, onChange, onComplete, onActivate,
 }: SetRowProps) {
@@ -185,7 +186,14 @@ function SetRow({
   // exactly those, while anything the athlete typed by hand is left alone.
   const [autofilled, setAutofilled] = useState<MetricField[]>([])
 
-  const num = (v: string) => (v === '' ? null : Number(v))
+  // `min={0}` on a number input is validation, not a restriction — a typed "-5"
+  // still reaches onChange. Every metric here (weight, reps, seconds, distance)
+  // is non-negative by definition, so clamp at the source.
+  const num = (v: string) => {
+    if (v === '') return null
+    const n = Number(v)
+    return Number.isFinite(n) ? Math.max(0, n) : null
+  }
 
   // Any manual edit means the athlete owns that field now: drop it from the
   // autofill set so a later un-check won't wipe their number.
@@ -212,7 +220,9 @@ function SetRow({
       if (value != null && next[field] == null) { next[field] = value; filled.push(field) }
     }
     if (trackingType === 'weight_reps') {
-      fill('weight', carry.weight ?? prescribedLoad)
+      // carry.weight is already stored-unit; prescribedLoad was parsed out of
+      // the prescription text the athlete READS, so it has to be converted in.
+      fill('weight', carry.weight ?? (prescribedLoad != null ? u.store(prescribedLoad) : null))
       fill('reps', carry.reps ?? prescribedReps)
       fill('rpe', carry.rpe)
     } else if (trackingType === 'bodyweight_reps') {
@@ -283,12 +293,20 @@ function SetRow({
     placeholder: string,
     onVal: (n: number | null) => void,
     mode: 'decimal' | 'numeric' = 'numeric',
+    // The placeholder alone ("lb", "reps") is the whole accessible name
+    // otherwise — no set number, no idea which of eighteen fields this is.
+    label?: string,
   ) => (
     <input
       className="set-row__input"
       type="number"
       inputMode={mode}
+      // A negative weight or rep count is never a real log, and nothing
+      // downstream clamped one: it went into the outbox, the volume total and
+      // the next session's recommendation exactly as typed.
+      min={0}
       placeholder={placeholder}
+      aria-label={label ?? placeholder}
       value={value ?? ''}
       onChange={(e) => onVal(num(e.target.value))}
       enterKeyHint="next"
@@ -297,6 +315,18 @@ function SetRow({
     />
   )
 
+  // The weight field is the ONE input that crosses units: the athlete types in
+  // their display unit, the log is kept in the storage unit. Everything else is
+  // unitless (reps, seconds) or already display-native.
+  const weightInput = (placeholder: string, label: string) =>
+    numInput(
+      log.weight != null ? u.show(log.weight) : null,
+      placeholder,
+      (n) => setField('weight', n == null ? null : u.store(n)),
+      'decimal',
+      label,
+    )
+
   // Per-type column contents. Set number + done button are constant; the grid
   // template itself is shared with the header via gridFor().
   let cells: ReactNode
@@ -304,17 +334,17 @@ function SetRow({
   if (trackingType === 'time') {
     cells = (
       <>
-        {numInput(log.duration, 'sec', (n) => setField('duration', n))}
+        {numInput(log.duration, 'sec', (n) => setField('duration', n), 'numeric', `Set ${setNum} seconds`)}
         {rpeCell}
       </>
     )
   } else if (trackingType === 'distance') {
-    cells = numInput(log.distance, distanceUnit, (n) => setField('distance', n), 'decimal')
+    cells = numInput(log.distance, u.distance, (n) => setField('distance', n), 'decimal', `Set ${setNum} distance in ${u.distance}`)
   } else if (trackingType === 'bodyweight_reps') {
     cells = (
       <>
-        {numInput(log.reps, 'reps', (n) => setField('reps', n))}
-        {numInput(log.weight, `+${unit}`, (n) => setField('weight', n), 'decimal')}
+        {numInput(log.reps, 'reps', (n) => setField('reps', n), 'numeric', `Set ${setNum} reps`)}
+        {weightInput(`+${u.unit}`, `Set ${setNum} added weight in ${u.unit}`)}
         {rpeCell}
       </>
     )
@@ -322,16 +352,23 @@ function SetRow({
     // weight_reps (default)
     cells = (
       <>
-        {numInput(log.weight, unit, (n) => setField('weight', n), 'decimal')}
-        {numInput(log.reps, 'reps', (n) => setField('reps', n))}
+        {weightInput(u.unit, `Set ${setNum} weight in ${u.unit}`)}
+        {numInput(log.reps, 'reps', (n) => setField('reps', n), 'numeric', `Set ${setNum} reps`)}
         {rpeCell}
       </>
     )
   }
 
+  // The one moment the whole log exists for. Computed live off what's typed, so
+  // it appears as the number goes in — not in a summary three taps later.
+  const pr = prLabel(displayPRs(log, best))
+
   return (
-    <div className={`set-row ${gridClass(trackingType)}${log.done ? ' set-row--done' : ''}`}>
-      <span className="set-row__num">{setNum}</span>
+    <div className={`set-row ${gridClass(trackingType)}${log.done ? ' set-row--done' : ''}${pr ? ' set-row--pr' : ''}`}>
+      <span className="set-row__num">
+        {setNum}
+        {pr && <span className="set-row__pr" title={`${pr} ever`} aria-label={`Personal record: ${pr} ever`}>PR</span>}
+      </span>
       <span className="set-row__prev num">{prevText ?? '·'}</span>
       {cells}
       {doneBtn}
@@ -716,6 +753,9 @@ function WorkoutCoachSheet({ athleteId, onClose }: { athleteId: string; onClose:
 interface DebriefSheetProps {
   reading: { name: string; question: string } | null
   saving: boolean
+  /** What the session actually came to — sets, load moved, time. */
+  tally: { sets: number; load: number; minutes: number }
+  u: UnitContext
   // What was written the first time round, when this is an edit of a session
   // that hasn't synced — editing shouldn't ask for the story again.
   initial: { reflection: string; readingAnswer: string } | null
@@ -723,7 +763,7 @@ interface DebriefSheetProps {
   onSkip: () => void
 }
 
-function DebriefSheet({ reading, saving, initial, onSave, onSkip }: DebriefSheetProps) {
+function DebriefSheet({ reading, saving, tally, u, initial, onSave, onSkip }: DebriefSheetProps) {
   const [reflection, setReflection] = useState(initial?.reflection ?? '')
   const [readingAnswer, setReadingAnswer] = useState(initial?.readingAnswer ?? '')
   return (
@@ -751,6 +791,15 @@ function DebriefSheet({ reading, saving, initial, onSave, onSkip }: DebriefSheet
         </>
       }
     >
+      {/* What the session came to. Sets alone can't tell a session of triples at
+          315 from one of twelves at 95, and this is the moment the athlete is
+          looking back at it. */}
+      <p className="num text-xs text-dim" style={{ marginBottom: 18 }}>
+        {tally.sets} set{tally.sets === 1 ? '' : 's'}
+        {tally.load > 0 ? ` · ${u.volume(tally.load)}${u.unit} moved` : ''}
+        {tally.minutes > 0 ? ` · ${tally.minutes} min` : ''}
+      </p>
+
       {reading && (
         <div style={{ marginBottom: 18 }}>
           <p className="text-sm" style={{ color: 'var(--computing)', marginBottom: 8, lineHeight: 1.45 }}>
@@ -801,19 +850,21 @@ function dateInputToISO(s: string): string {
 }
 
 // A set counts as "logged" once it carries any real signal — the trigger for
-// autosaving the draft (so we never persist an untouched, empty session).
-function isLogged(s: SetLog): boolean {
-  return s.done || s.reps != null || s.duration != null || s.distance != null
-}
+// autosaving the draft (so we never persist an untouched, empty session), and
+// the same definition every read-back uses. It lives in engine/volume.ts now:
+// this file used to count only TAPPED checkboxes when committing, so a session
+// typed straight into the grid was filed as "0 sets" while History, the recap
+// and the week ring all counted it correctly.
+const isLogged = isSetLogged
 
 // Short "what they actually did" summary per exercise, for the debrief agent.
-function performedSummary(t: TrackingType, logs: SetLog[], unit: string, distanceUnit: string): string {
-  const done = logs.filter((l) => l.done || l.reps != null || l.duration != null || l.distance != null)
+function performedSummary(t: TrackingType, logs: SetLog[], u: UnitContext): string {
+  const done = logs.filter(isLogged)
   if (!done.length) return 'not logged'
   if (t === 'time') return done.map((l) => `${l.duration ?? '?'}s`).join(', ')
-  if (t === 'distance') return done.map((l) => `${l.distance ?? '?'}${distanceUnit}`).join(', ')
-  if (t === 'bodyweight_reps') return done.map((l) => `${l.reps ?? '?'}${l.weight ? `+${l.weight}${unit}` : ''}`).join(', ')
-  return done.map((l) => `${l.reps ?? '?'}×${l.weight != null ? `${l.weight}${unit}` : 'BW'}`).join(', ')
+  if (t === 'distance') return done.map((l) => `${l.distance ?? '?'}${u.distance}`).join(', ')
+  if (t === 'bodyweight_reps') return done.map((l) => `${l.reps ?? '?'}${l.weight ? `+${u.fmt(l.weight)}${u.unit}` : ''}`).join(', ')
+  return done.map((l) => `${l.reps ?? '?'}×${l.weight != null ? `${u.fmt(l.weight)}${u.unit}` : 'BW'}`).join(', ')
 }
 
 // ---- offline-first bootstrap -----------------------------------------------
@@ -882,8 +933,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const { pendingEditId, editWorkoutId } = modeRef.current
   const isEdit = !!editRef
 
-  const unit = getWeightUnit()
-  const distanceUnit = getDistanceUnit(unit)
+  const u = unitContext()
 
   // Offline-first seed: read the cached bootstrap and the (synchronous, local)
   // draft exactly once, so the very first paint already shows the session — no
@@ -969,6 +1019,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       : (seedDraft?.feedback ?? {}) as Record<number, ExerciseFeedback>),
   )
 
+  // Two-tap discard. A session started by mistake had NO exit: clearDraft only
+  // ever ran on completion, Complete is disabled until something is logged, and
+  // a draft survives until the week rolls over — so one stray tap left a session
+  // reading "In progress" on the Train tab for days.
+  const [confirmDiscard, setConfirmDiscard] = useState(false)
+
   // Rest timer (epoch ms when rest ends, or null).
   const [restEndsAt, setRestEndsAt] = useState<number | null>(null)
   const [, setNowTick] = useState(0)
@@ -999,6 +1055,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   // Last session's results per exercise index, for the desktop Previous column.
   const [prevByExercise, setPrevByExercise] = useState<Record<number, SetLog[]>>(() => seedBoot?.prevByExercise ?? {})
+  // The standing record per exercise index — what a set has to beat to be a PR.
+  // Seeded from the cached bootstrap so the badge works offline and on frame one.
+  const [bestByExercise, setBestByExercise] = useState<Record<number, LiftBest>>(
+    () => seedBoot?.bestByExercise ?? {},
+  )
   // Which exercise is in focus — drives the "why" panel in the desktop rail.
   const [activeExIdx, setActiveExIdx] = useState(0)
 
@@ -1217,9 +1278,26 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     let nextPresc: SessionPrescription | null = seedRef.current!.boot?.prescription ?? null
     if (programData && routineId) {
       try {
-        nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, unit)
+        nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, u)
         setPrescription(nextPresc)
       } catch { /* non-fatal */ }
+    }
+
+    // Standing records for this session's lifts, so a PR can be recognised as it
+    // happens. Best-effort and behind everything else: a missing record only
+    // costs a badge, and an over-eager one (empty map → every loaded set reads
+    // as a first-ever PR) would be worse than none, so a failure keeps the seed.
+    let nextBests: Record<number, LiftBest> = seedRef.current!.boot?.bestByExercise ?? {}
+    if (r.program_id) {
+      try {
+        const byName = await gatherExerciseBests(r.program_id)
+        // A session being EDITED already contributed its own sets to these
+        // records, so comparing against them would say "no PR" on the very set
+        // that set the record. The badge is a live-logging signal; leave it off
+        // an edit rather than show it wrong.
+        nextBests = isEdit ? {} : Object.fromEntries(exs.map((ex, i) => [i, byName[ex.name] ?? NO_BEST]))
+        setBestByExercise(nextBests)
+      } catch { /* non-fatal — the badge just doesn't fire this open */ }
     }
 
     // Re-cache the whole bootstrap so the next open is instant and offline-ready.
@@ -1231,6 +1309,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       prevByExercise: nextPrev,
       insightMap: nextInsightMap,
       prescription: nextPresc,
+      bestByExercise: nextBests,
     })
 
     if (!isEdit && programData && routineId && !startedLoggingRef.current) {
@@ -1394,6 +1473,19 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     setShowDebrief(true)
   }
 
+  // Throw the in-progress session away. Destructive and deliberately two-tap:
+  // the set logs live in the draft tiers and nowhere else, so this is the one
+  // place in the app that can lose work the athlete meant to keep. It never
+  // touches a COMMITTED session — an edit has a real row behind it, and "throw
+  // away my changes" there is just backing out without saving.
+  function discardSession() {
+    if (!athleteId || !routineId) return
+    completedRef.current = true          // stop the autosave racing the delete
+    if (timerRef.current) clearInterval(timerRef.current)
+    clearDraft(athleteId, routineId)
+    navigate('/app/today', { replace: true })
+  }
+
   // Assemble the workout numbers + (optional) debrief into a replayable unit.
   function buildPending(debrief: PendingDebrief | null): PendingSession {
     const actualWeights: Record<string, SetLog[]> = {}
@@ -1427,7 +1519,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       actualReps,
       rpe: avgRpe,
       durationMins: Math.ceil(finalElapsedRef.current / 60),
-      setsDone: allSetsFlat.filter((s) => s.done).length,
+      setsDone: allSetsFlat.filter(isLogged).length,
       athleteName,
       // A queued first-ever session keeps its transition — editing it before it
       // syncs mustn't be what strands onboarding half-finished.
@@ -1458,7 +1550,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         felt: fb?.felt ?? null,
         note: fb?.note ?? '',
         prescribed: `${ex.sets}×${ex.reps}${ex.load ? ` ${ex.load}` : ''}`,
-        performed: performedSummary(t, setLogs[i] ?? [], unit, distanceUnit),
+        performed: performedSummary(t, setLogs[i] ?? [], u),
         pushed: fb?.pushed === true,
       }
     })
@@ -1624,7 +1716,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     : isFirstSession ? 'Start training →' : 'Start session →'
 
   const setsTotal = allSetsFlat.length
-  const setsDone  = allSetsFlat.filter((s) => s.done).length
+  const setsDone  = allSetsFlat.filter(isLogged).length
+  // Load moved. NOT in the sticky header: that strip was deliberately cut back
+  // to a title, one metadata line and a progress bar, and a fourth field wraps
+  // it onto two lines and re-creates the telemetry crush that pass removed. It
+  // belongs at the moment the session is being looked back on — the debrief.
+  const sessionVolume = tallySession(setLogs)
   const rpeLive   = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
   const avgRpeLive = rpeLive.length ? Math.round(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length) : null
 
@@ -1783,7 +1880,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                       isPushed
                         ? <Chip tone="doing">
                             {prescription.pushTargets?.[exIdx] != null
-                              ? `Pushing — go for ${prescription.pushTargets[exIdx]}${unit}`
+                              ? `Pushing — go for ${prescription.pushTargets[exIdx]}${u.unit}`
                               : 'Pushing — cap off, your call'}
                           </Chip>
                         : <Chip tone={prescription.held[exIdx] ? 'pending' : 'doing'}>
@@ -1810,8 +1907,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
               <SetHeader
                 trackingType={trackingType}
-                unit={unit}
-                distanceUnit={distanceUnit}
+                u={u}
                 prescribedReps={ex.reps}
                 prescribedLoad={ex.load ?? null}
               />
@@ -1836,13 +1932,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                     setNum={setIdx + 1}
                     log={log}
                     trackingType={trackingType}
-                    unit={unit}
-                    distanceUnit={distanceUnit}
+                    u={u}
+                    best={bestByExercise[exIdx] ?? NO_BEST}
                     prescribedReps={pReps}
                     prescribedDuration={pDur}
                     prescribedLoad={pLoad}
                     carry={carry}
-                    prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], unit, distanceUnit)}
+                    prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], u)}
                     onChange={(updated) => handleSetChange(exIdx, setIdx, updated)}
                     onComplete={() => setRestEndsAt(Date.now() + REST_SECONDS * 1000)}
                     onActivate={() => setActiveExIdx(exIdx)}
@@ -1957,6 +2053,18 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           <Button variant="primary" full onClick={handleCompleteWorkout} disabled={!hasAnyLog}>
             {isEdit ? 'Save changes →' : 'Complete workout →'}
           </Button>
+          {/* Only for a session that exists nowhere but this draft. An edit
+              already has a row; backing out of one changes nothing. */}
+          {!isEdit && hasAnyLog && (
+            <button
+              type="button"
+              className="workout-discard"
+              onClick={() => (confirmDiscard ? discardSession() : setConfirmDiscard(true))}
+              onBlur={() => setConfirmDiscard(false)}
+            >
+              {confirmDiscard ? 'Tap again to discard this session' : 'Discard session'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -1974,6 +2082,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         <DebriefSheet
           reading={readingEx ? { name: readingEx.name, question: readingEx.reading_why ?? 'How did the read item feel?' } : null}
           saving={savingDebrief}
+          tally={{
+            sets: sessionVolume.loggedSets,
+            load: sessionVolume.load,
+            minutes: Math.ceil(finalElapsedRef.current / 60),
+          }}
+          u={u}
           initial={priorDebrief ? { reflection: priorDebrief.reflection, readingAnswer: priorDebrief.readingAnswer } : null}
           onSave={handleDebrief}
           onSkip={handleDebriefSkip}

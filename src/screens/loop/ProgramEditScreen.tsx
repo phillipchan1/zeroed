@@ -3,7 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { AlertTriangle, Check, Clock, Undo2, X } from 'lucide-react'
 import { useCachedLoader } from '../../lib/cache'
 import { invalidateLoopViews } from '../../lib/loopCache'
-import { getWeightUnit } from '../../lib/units'
+import { unitContext } from '../../lib/units'
 import {
   gatherProgramEditState, runProgramEditChat, applyEditsToDraft, diffDraft,
   estimateSessionMinutes, applyProgramDraft, nextMondayISO,
@@ -83,7 +83,7 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
 
   const { data: state, loading, refetch } = useCachedLoader<ProgramEditState | null>(
     `programedit:${athleteId}`,
-    () => gatherProgramEditState(athleteId, getWeightUnit()),
+    () => gatherProgramEditState(athleteId, unitContext()),
   )
 
   const [stages, setStages]   = useState<Stage[]>([])

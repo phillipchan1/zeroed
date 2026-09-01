@@ -13,7 +13,8 @@
     "deploy:backend": "supabase db push && supabase functions deploy agent",
     "mcp": "npm --prefix mcp start",
     "mcp:install": "npm --prefix mcp install",
-    "mcp:check": "npm --prefix mcp run check"
+    "mcp:check": "npm --prefix mcp run check",
+    "check": "for f in src/engine/*.check.ts src/lib/*.check.ts; do node --experimental-strip-types \"$f\" || exit 1; done"
   },
   "dependencies": {
     "@capacitor/core": "^6.2.0",

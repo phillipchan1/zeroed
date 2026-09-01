@@ -3,7 +3,8 @@ import { useNavigate } from 'react-router-dom'
 import { useCachedLoader } from '../../lib/cache'
 import { gatherTrainingLog, gatherExerciseHistory, type LogSession, type ExerciseHistory } from '../../engine'
 import { pendingSessionsRaw } from '../../lib/workoutOutbox'
-import { getWeightUnit, getDistanceUnit } from '../../lib/units'
+import { unitContext, type UnitContext } from '../../lib/units'
+import { prLabel } from '../../engine/prs'
 import { SectionHeader, Skeleton, PageHeader, Sheet, Chip, Stat, StatGrid } from '../../components/ui'
 import type { SetLog } from '../../types/database'
 
@@ -17,21 +18,20 @@ function fmtRange(startISO: string, endISO: string): string {
 }
 const dayAndDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' })
 
-function fmtSet(s: SetLog, unit: string, distanceUnit: string): string {
-  if (s.weight != null) return `${s.weight}${unit}×${s.reps ?? '?'}`
+function fmtSet(s: SetLog, u: UnitContext): string {
+  if (s.weight != null) return `${u.fmt(s.weight)}${u.unit}×${s.reps ?? '?'}`
   if (s.duration != null) return `${s.duration}s`
-  if (s.distance != null) return `${s.distance}${distanceUnit}`
+  if (s.distance != null) return `${s.distance}${u.distance}`
   return `${s.reps ?? '?'} reps`
 }
 
 // ---- One logged session in the week list ----------------------------------
 
 function LogSessionCard({
-  s, unit, distanceUnit, onOpen, onExercise,
+  s, u, onOpen, onExercise,
 }: {
   s: LogSession
-  unit: string
-  distanceUnit: string
+  u: UnitContext
   onOpen: () => void
   onExercise: (name: string) => void
 }) {
@@ -54,6 +54,9 @@ function LogSessionCard({
         {s.pending
           ? <Chip tone="pending">Syncing</Chip>
           : <Chip tone="done">{s.setsDone} sets</Chip>}
+        {/* Load moved, not just how many times you stopped. A session of 3x5 at
+            315 and one of 3x12 at 95 both read as "3 sets" without it. */}
+        {!!s.volume?.load && <Chip tone="todo">{u.volume(s.volume.load)}{u.unit}</Chip>}
         {/* Phase is constant across a block, so it was repeating on every row
             for no information. It stays in the week header's context. */}
         {!s.pending && s.rpe != null && <Chip tone="todo">RPE {s.rpe}</Chip>}
@@ -72,7 +75,7 @@ function LogSessionCard({
                 color: 'var(--text-dim)', fontSize: 'var(--fs-xs)',
               }}
             >
-              {h.name} {fmtSet(h.set, unit, distanceUnit)}
+              {h.name} {fmtSet(h.set, u)}
             </button>
           ))}
         </div>
@@ -103,8 +106,8 @@ function Sparkline({ values }: { values: number[] }) {
 }
 
 function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string; name: string; onClose: () => void }) {
-  const unit = getWeightUnit()
-  const { data, loading } = useCachedLoader(`exhist:${athleteId}:${name}`, () => gatherExerciseHistory(athleteId, name))
+  const u = unitContext()
+  const { data, loading } = useCachedLoader(`exhist:${athleteId}:${name}`, () => gatherExerciseHistory(athleteId, name, u))
   const hist = data as ExerciseHistory | null
   const series = (hist?.points ?? []).map((p) => p.e1rm ?? p.topWeight).filter((v): v is number => v != null)
 
@@ -119,9 +122,10 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
           {(hist.bestWeight != null || hist.bestE1rm != null) && (
             <div style={{ marginBottom: 20 }}>
               <StatGrid>
-                {hist.bestWeight != null && <Stat value={`${hist.bestWeight}${unit}`} label="Top set" />}
-                {hist.bestE1rm != null && <Stat value={`${hist.bestE1rm}${unit}`} label="Est. 1RM" tone="var(--signal)" />}
+                {hist.bestWeight != null && <Stat value={`${hist.bestWeight}${u.unit}`} label="Top set" />}
+                {hist.bestE1rm != null && <Stat value={`${hist.bestE1rm}${u.unit}`} label="Est. 1RM" tone="var(--signal)" />}
                 <Stat value={hist.points.length} label="Sessions" />
+                {!!hist.prCount && <Stat value={hist.prCount} label={hist.prCount === 1 ? 'PR' : 'PRs'} tone="var(--signal)" />}
               </StatGrid>
             </div>
           )}
@@ -146,10 +150,26 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
                   gap: 12, padding: '12px 0', borderBottom: '1px solid var(--line)',
                 }}
               >
-                <span className="text-sm text-dim" style={{ fontFamily: 'var(--font-mono)' }}>{dayAndDate(p.performedAt)}</span>
+                <span className="text-sm text-dim" style={{ fontFamily: 'var(--font-mono)', display: 'flex', alignItems: 'center', gap: 8 }}>
+                  {dayAndDate(p.performedAt)}
+                  {/* Which sessions actually beat something, marked on the day
+                      they did it — a best-ever number at the top of a sheet
+                      never said WHICH session earned it. */}
+                  {!!p.prs?.length && (
+                    <span
+                      className="text-micro"
+                      style={{ color: 'var(--signal)', fontWeight: 700, letterSpacing: '0.08em' }}
+                      title={`${prLabel(p.prs)} at the time`}
+                    >
+                      PR
+                    </span>
+                  )}
+                </span>
                 <span className="num text-sm" style={{ textAlign: 'right' }}>
-                  {p.topWeight != null ? `${p.topWeight}${unit}×${p.topReps ?? '?'}` : `${p.topReps ?? '?'} reps`}
-                  {p.e1rm != null ? `  ·  ${p.e1rm}${unit} e1RM` : ''}
+                  {p.topWeight != null ? `${p.topWeight}${u.unit}×${p.topReps ?? '?'}` : `${p.topReps ?? '?'} reps`}
+                  {/* Above ~12 reps an Epley estimate stops being a strength
+                      number, so it is not printed as one. */}
+                  {p.e1rm != null && p.e1rmReliable ? `  ·  ${p.e1rm}${u.unit} e1RM` : ''}
                   {p.rpe != null ? `  ·  RPE ${p.rpe}` : ''}
                 </span>
               </div>
@@ -169,8 +189,7 @@ function ExerciseHistorySheet({ athleteId, name, onClose }: { athleteId: string;
  */
 export function HistoryScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
-  const unit = getWeightUnit()
-  const distanceUnit = getDistanceUnit(unit)
+  const u = unitContext()
   const [exercise, setExercise] = useState<string | null>(null)
 
   const { data, loading } = useCachedLoader(
@@ -210,14 +229,14 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
                 <SectionHeader>{fmtRange(wk.weekStart, wk.weekEnding)}</SectionHeader>
                 <span className="num text-xs text-dim">
                   {wk.sessions.length} session{wk.sessions.length === 1 ? '' : 's'} · {wk.totalSets} sets
+                  {!!wk.totalVolume?.load && ` · ${u.volume(wk.totalVolume.load)}${u.unit}`}
                 </span>
               </div>
               {wk.sessions.map((s) => (
                 <LogSessionCard
                   key={s.workoutId}
                   s={s}
-                  unit={unit}
-                  distanceUnit={distanceUnit}
+                  u={u}
                   onOpen={() => navigate(`/app/workout/${s.routineId}?w=${s.workoutId}`)}
                   onExercise={setExercise}
                 />

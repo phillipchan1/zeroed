@@ -1,6 +1,7 @@
 import { useState, useCallback, useMemo } from 'react'
 import { X, HelpCircle } from 'lucide-react'
-import { getWeightUnit } from '../../lib/units'
+import { unitContext, type UnitContext } from '../../lib/units'
+import { toStrengthMap, gainPct, type BaselineLift } from '../../engine/strengthBaseline'
 import {
   Logo, Button, Input, StepIndicator, ScorePicker,
   SectionHeader, InsightCard, Spinner, Ring, Chip, Sheet,
@@ -177,7 +178,7 @@ function MovementStep({
           "SCREENING 3/7 · WEAK LINKS 1 · STARTED 2m ago" — of which only the
           first number meant anything to the person filling the form. */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 14, marginBottom: 22 }}>
-        <Ring value={scoredCount / MOVEMENT_PATTERNS.length} size={56} stroke={5}>
+        <Ring value={scoredCount / MOVEMENT_PATTERNS.length} size={56} stroke={5} label={`${scoredCount} of ${MOVEMENT_PATTERNS.length} patterns scored`}>
           <span style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{scoredCount}</span>
           <span className="text-micro text-dim">of {MOVEMENT_PATTERNS.length}</span>
         </Ring>
@@ -307,6 +308,90 @@ function MovementStep({
   )
 }
 
+/**
+ * The strength step when the athlete HAS a log — i.e. every retest after the
+ * first. Nothing is asked and nothing is tested: each lift they actually train
+ * arrives with the best estimate their own top sets support, the set that
+ * produced it, and what the last retest recorded. They confirm, or they correct
+ * a number they know is stale.
+ */
+function StrengthFromLogStep({
+  lifts, overrides, onOverride, u, onNext, onBack,
+}: {
+  lifts: BaselineLift[]
+  overrides: Record<string, string>
+  onOverride: (name: string, val: string) => void
+  u: UnitContext
+  onNext: () => void
+  onBack: () => void
+}) {
+  return (
+    <div>
+      <h1 className="screen-title" style={{ fontSize: 'var(--fs-xl)' }}>Where your lifts are</h1>
+      <p className="text-sm text-dim" style={{ marginTop: 6, marginBottom: 24, lineHeight: 1.55 }}>
+        Read straight off your log — you already tested these. Change one only if
+        it&apos;s wrong.
+      </p>
+
+      <div style={{ display: 'flex', flexDirection: 'column' }}>
+        {lifts.map((lift) => {
+          const shown = u.show(lift.e1rm ?? 0)
+          // Same predicate the retest summary uses, so a lift can't be called
+          // "+2% since last retest" here and then be missing from what got
+          // stronger on the way out.
+          const gain = gainPct(lift.previous, lift.e1rm)
+          return (
+            <div
+              key={lift.name}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 14,
+                padding: '14px 0', borderBottom: '1px solid var(--line)',
+              }}
+            >
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <label htmlFor={`lift-${lift.name}`} className="text-base" style={{ fontWeight: 500 }}>
+                  {lift.name}
+                </label>
+                <p className="num text-xs text-dim" style={{ marginTop: 3 }}>
+                  {lift.topWeight != null
+                    ? `${u.fmt(lift.topWeight)}${u.unit}×${lift.topReps ?? '?'} best`
+                    : 'no loaded set yet'}
+                  {gain != null && (
+                    <span style={{ color: 'var(--confirmed)' }}> · +{gain}% since last retest</span>
+                  )}
+                </p>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+                <Input
+                  id={`lift-${lift.name}`}
+                  type="number"
+                  inputMode="decimal"
+                  min={0}
+                  aria-label={`${lift.name} estimated one-rep max in ${u.unit}`}
+                  value={overrides[lift.name] ?? String(shown)}
+                  onChange={(e) => onOverride(lift.name, e.target.value)}
+                  mono
+                  style={{ width: 96, textAlign: 'center' }}
+                />
+                <span className="text-xs text-dim" style={{ width: 26 }}>{u.unit}</span>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+
+      <p className="text-xs text-dim" style={{ marginTop: 16, lineHeight: 1.5 }}>
+        Estimated one-rep maxes, from your heaviest logged set on each lift.
+      </p>
+
+      <div style={{ marginTop: 32, display: 'flex', gap: 10 }}>
+        <Button variant="ghost" onClick={onBack} style={{ flex: 1 }}>← Back</Button>
+        <Button variant="primary" onClick={onNext} style={{ flex: 2 }}>Looks right →</Button>
+      </div>
+    </div>
+  )
+}
+
 function StrengthStep({
   data, onChange, onNext, onBack,
 }: {
@@ -318,7 +403,7 @@ function StrengthStep({
   // The unit the athlete actually trains in. These fields were hard-coded to kg
   // while the rest of the app defaults to lb, so a lifter typing "225" was
   // recorded as 225 kg.
-  const unit = getWeightUnit()
+  const unit = unitContext().unit
   const fields: Array<{ key: keyof StrengthData; label: string; suffix: string }> = [
     { key: 'squat_1rm_est', label: 'Back Squat', suffix: unit },
     { key: 'hinge_1rm_est', label: 'Deadlift / hinge', suffix: unit },
@@ -446,10 +531,24 @@ interface ScreeningProps {
   /** When set, renders a close affordance that bails out of the screen without
    *  submitting — so you can open it to look around and back out. */
   onExit?: () => void
+  /**
+   * The athlete's lifts as their LOG has them (a retest). When present the
+   * strength step confirms these instead of asking for four estimated maxes on
+   * generic patterns — see engine/strengthBaseline.ts. Absent on the first-ever
+   * diagnostic, where there is nothing logged to read.
+   */
+  strengthBaseline?: BaselineLift[]
 }
 
-export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onComplete, onExit }: ScreeningProps) {
+export function DiagnosticIntake({
+  obstacle, sport, trainingAge, sessions, onComplete, onExit, strengthBaseline,
+}: ScreeningProps) {
   const [step, setStep] = useState<Step>('movement')
+  const u = useMemo(() => unitContext(), [])
+  const fromLog = (strengthBaseline?.length ?? 0) > 0
+  // Corrections the athlete typed over the log's numbers, keyed by lift name and
+  // held in DISPLAY units (they're typed) until submit converts them back.
+  const [liftOverrides, setLiftOverrides] = useState<Record<string, string>>({})
 
   const [movementScores, setMovementScores] = useState<Record<string, number | null>>(
     () => Object.fromEntries(MOVEMENT_PATTERNS.map((p) => [p.key, null])),
@@ -501,15 +600,32 @@ export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onCom
   function handleSubmit() {
     setStep('saving')
 
+    // From the log: the athlete's real lifts (plus the canonical slot keys, so
+    // the ratio check and every stored row keep meaning the same thing). A typed
+    // correction is in display units and converts back to storage on the way in.
+    // Otherwise: the manual battery, unchanged — a first-ever diagnostic has no
+    // log to read.
+    const strengthMap = fromLog
+      ? toStrengthMap(
+          strengthBaseline!.map((lift) => {
+            const typed = liftOverrides[lift.name]
+            const shown = typed != null && typed !== '' ? parseFloat(typed) : null
+            return shown != null && Number.isFinite(shown) && shown > 0
+              ? { ...lift, e1rm: u.store(shown) }
+              : lift
+          }),
+        )
+      : {
+          squat_1rm_est: parseFloat(strength.squat_1rm_est) || null,
+          hinge_1rm_est: parseFloat(strength.hinge_1rm_est) || null,
+          push_1rm_est:  parseFloat(strength.push_1rm_est)  || null,
+          pull_1rm_est:  parseFloat(strength.pull_1rm_est)  || null,
+          plank_secs:    parseFloat(strength.plank_secs)    || null,
+        }
+
     const results: DiagnosticResults = {
       movement: Object.fromEntries(MOVEMENT_PATTERNS.map((p) => [p.key, movementScores[p.key] ?? 3])),
-      strength: {
-        squat_1rm_est: parseFloat(strength.squat_1rm_est) || null,
-        hinge_1rm_est: parseFloat(strength.hinge_1rm_est) || null,
-        push_1rm_est:  parseFloat(strength.push_1rm_est)  || null,
-        pull_1rm_est:  parseFloat(strength.pull_1rm_est)  || null,
-        plank_secs:    parseFloat(strength.plank_secs)    || null,
-      },
+      strength: strengthMap,
       subjective: {
         sleep:  subjective.sleep  ?? 3,
         energy: subjective.energy ?? 3,
@@ -529,9 +645,14 @@ export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onCom
 
   const plan = useMemo(() => planBattery(obstacle, sport), [obstacle, sport])
 
+  // Reading the log costs the athlete nothing, so a retest shows the strength
+  // step whenever there IS something to show — the keyword guess in planBattery
+  // only decides whether to ASK. An endurance athlete with no loaded lifts still
+  // skips it, but now because the data says so rather than because a regex did.
+  const showStrength = fromLog || plan.includeStrength
   const activeSteps = useMemo<Step[]>(
-    () => ['movement', ...(plan.includeStrength ? (['strength'] as Step[]) : []), 'subjective'],
-    [plan.includeStrength],
+    () => ['movement', ...(showStrength ? (['strength'] as Step[]) : []), 'subjective'],
+    [showStrength],
   )
 
   const stepForIndex: Step = step === 'saving' ? 'subjective' : step
@@ -584,13 +705,24 @@ export function DiagnosticIntake({ obstacle, sport, trainingAge, sessions, onCom
           />
         )}
 
-        {step === 'strength' && plan.includeStrength && (
-          <StrengthStep
-            data={strength}
-            onChange={(k, v) => setStrength((prev) => ({ ...prev, [k]: v }))}
-            onNext={goNext}
-            onBack={goBack}
-          />
+        {step === 'strength' && showStrength && (
+          fromLog ? (
+            <StrengthFromLogStep
+              lifts={strengthBaseline!}
+              overrides={liftOverrides}
+              onOverride={(name, v) => setLiftOverrides((prev) => ({ ...prev, [name]: v }))}
+              u={u}
+              onNext={goNext}
+              onBack={goBack}
+            />
+          ) : (
+            <StrengthStep
+              data={strength}
+              onChange={(k, v) => setStrength((prev) => ({ ...prev, [k]: v }))}
+              onNext={goNext}
+              onBack={goBack}
+            />
+          )
         )}
 
         {(step === 'subjective' || step === 'saving') && (

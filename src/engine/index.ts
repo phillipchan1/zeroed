@@ -38,7 +38,16 @@ import {
   type CoachContext, type CoachChatTurn, type CoachAction,
 } from './agentClient'
 import { FELT_CHIPS, isClearanceTest, type FeltLabel, type ClearanceTest } from '../types/database'
-import { getWeightUnit } from '../lib/units'
+import { unitContext, type UnitContext } from '../lib/units'
+import {
+  estimate1RM, estimateIsReliable, displayPRs, foldBest, NO_BEST,
+  type LiftBest, type PrKind,
+} from './prs'
+import {
+  buildBaseline, namedLifts, strengthDeltas,
+  type BaselineLift, type StrengthDelta,
+} from './strengthBaseline'
+import { isSetLogged, tallySession, sumVolume, NO_VOLUME, type VolumeTally } from './volume'
 import { validateProvisionalProgram } from './safety'
 import {
   OBSTACLE_CATEGORY_HINTS, buildReadSkeleton, READ_FLOORS,
@@ -49,7 +58,7 @@ import {
 import {
   SEVERITY_STRONG, SEVERITY_PAIN,
   rpeContract, PHASE_RPE, tallyWeek, decidePrescription,
-  roundLoad, recommendedLoad, autoregulateDelta, maxUpFor,
+  recommendedLoad, autoregulateDelta, maxUpFor,
   P1_RESOLVE_THRESHOLD, P1_DISCONFIRM_STEP, advanceStatus,
   addressesLimiter, capIsActive, isLiftHeld,
   CLEARANCE_TOP_SETS, CLEARANCE_SESSIONS,
@@ -2339,14 +2348,14 @@ export interface ClearanceView {
   exerciseIndex: number
 }
 
-function buildHint(top: SetLog | null, unit: string, directive: WeeklyDirective | null, delta: number, rpe: number | null, target: number | null): string {
+function buildHint(top: SetLog | null, u: UnitContext, directive: WeeklyDirective | null, delta: number, rpe: number | null, target: number | null): string {
   const rpeStr = rpe != null ? `RPE ${rpe}` : null
   if (top && top.weight != null) {
-    const last = `${top.weight}${unit} last`
+    const last = `${u.fmt(top.weight)}${u.unit} last`
     if (delta !== 0 && target != null) {
       // Concrete recommended weight, not just a percentage — the actionable number.
       const pct = `${delta > 0 ? '+' : ''}${delta}%`
-      return `${last} → ${target}${unit} (${pct})${rpeStr ? `, aim ${rpeStr}` : ''}`
+      return `${last} → ${target}${u.unit} (${pct})${rpeStr ? `, aim ${rpeStr}` : ''}`
     }
     if (directive) return `${last} → repeat${rpeStr ? `, ${rpeStr}` : ''}`
     return last
@@ -2371,7 +2380,7 @@ export async function gatherSessionPrescription(
   athleteId: string,
   routineId: string,
   exercises: ExerciseTemplate[],
-  unit: string,
+  u: UnitContext,
 ): Promise<SessionPrescription> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
@@ -2450,7 +2459,7 @@ export async function gatherSessionPrescription(
     // program-wide delta.
     const exTarget = ex.target_rpe ?? phaseTarget ?? rpeTarget
     const exDelta = autoregulateDelta(top?.rpe, exTarget, loadDeltaPct, directive, maxUp)
-    const uncapped = recommendedLoad(top, exDelta)
+    const uncapped = recommendedLoad(top, exDelta, u)
 
     // Held when the cap is live AND this lift genuinely trains the limiter's
     // chain. `addressesLimiter` returning null means the library has no opinion
@@ -2466,13 +2475,13 @@ export async function gatherSessionPrescription(
     if (isHeld && directive === 'PROGRESS') {
       // Suppress the +5%: state the hold and why, grounded in the last load.
       // The recommendation under a held cap is the last load itself.
-      targets[i] = top?.weight ?? null
+      targets[i] = top?.weight != null ? u.show(top.weight) : null
       hints[i] = top && top.weight != null
-        ? `Hold ${top.weight}${unit} — cap stays until ${p1!.category} clears`
+        ? `Hold ${u.fmt(top.weight)}${u.unit} — cap stays until ${p1!.category} clears`
         : `Hold steady — ${p1!.category} not cleared yet`
     } else {
       targets[i] = uncapped
-      hints[i] = buildHint(top, unit, directive, exDelta, exTarget, targets[i])
+      hints[i] = buildHint(top, u, directive, exDelta, exTarget, targets[i])
     }
   })
 
@@ -2853,7 +2862,7 @@ async function gatherExerciseBases(programId: string): Promise<Map<string, SetLo
 // Newest logged top set per exercise across the program — the athlete's real
 // lifts, fed to the design agent so a new phase reuses the same names (history
 // carries forward) and the right working loads.
-async function gatherRecentLifts(programId: string, unit: string): Promise<Array<{ name: string; top_set: string; rpe: number | null }>> {
+async function gatherRecentLifts(programId: string, u: UnitContext): Promise<Array<{ name: string; top_set: string; rpe: number | null }>> {
   const { data: ws } = await supabase
     .from('workout')
     .select('rpe, performed_at, actual_weights, exercises_snapshot, routine!inner(exercises, program_id)')
@@ -2866,7 +2875,7 @@ async function gatherRecentLifts(programId: string, unit: string): Promise<Array
       if (seen.has(name)) continue   // newest wins
       const top = topWorkingSet(sets)
       if (!top) continue
-      const detail = top.weight != null ? `${top.weight}${unit}×${top.reps ?? '?'}`
+      const detail = top.weight != null ? `${u.fmt(top.weight)}${u.unit}×${top.reps ?? '?'}`
         : top.duration != null ? `${top.duration}s`
         : top.distance != null ? `${top.distance}`
         : `${top.reps ?? '?'} reps`
@@ -2947,7 +2956,7 @@ interface DesignedPhase {
 // DesignedPhase doc.
 async function designPhasePlan(
   athleteId: string, programId: string, phaseName: PhaseName, startDateStr: string,
-  category: string, p1InsightId: string | null, unit: string, emphasis?: string,
+  category: string, p1InsightId: string | null, u: UnitContext, emphasis?: string,
 ): Promise<DesignedPhase> {
   const template = (reason: string): DesignedPhase => ({
     plan: generatePhase(phaseName, category, startDateStr, { p1InsightId }),
@@ -2963,8 +2972,8 @@ async function designPhasePlan(
     // designer cannot tell progress from a plateau, and every block is built for
     // an athlete who just arrived.
     const [recent_lifts, history] = await Promise.all([
-      gatherRecentLifts(programId, unit),
-      gatherProgramHistory(athleteId, programId, unit).catch(() => null),
+      gatherRecentLifts(programId, u),
+      gatherProgramHistory(athleteId, programId, u).catch(() => null),
     ])
     const insights = ((insightRows ?? []) as Array<{ priority: string; category: string; claim: string; confidence: number; status: string }>)
       .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
@@ -3179,7 +3188,7 @@ export async function runPhaseAdvancement(athleteId: string): Promise<boolean> {
   // designer falls back, HOLD — the block they have beats a block we couldn't
   // build. (2026-08-11: this ran the other way round and replaced a real
   // 5-session week with a 3-session "Session A/B/C" template.)
-  const designed = await designPhasePlan(athleteId, prog.id, nextName, startsOn, category, p1?.id ?? null, getWeightUnit())
+  const designed = await designPhasePlan(athleteId, prog.id, nextName, startsOn, category, p1?.id ?? null, unitContext())
 
   if (designed.fellBack) {
     const heldUntil = weekEndingISO(startOfWeekMonday(new Date(`${addDays(isoDate(weekMonday), 7)}T12:00:00`)))
@@ -3258,6 +3267,12 @@ export interface RetestSummary {
   version: number
   resolvedCount: number
   improved: Array<{ pattern: string; from: number; to: number }>
+  /**
+   * Lifts that went up since the last retest. The retest's whole job is to say
+   * what changed, and until now it could only ever talk about movement scores —
+   * it collected strength numbers at every version and never once compared them.
+   */
+  stronger: StrengthDelta[]
   // The re-scoped block was queued for next Monday (the current week already had
   // logged sessions) rather than swapped in immediately. Lets the summary explain
   // why this week is unchanged.
@@ -3310,7 +3325,7 @@ async function rescopeAfterRetest(
   const deferred = (loggedThisWeek ?? 0) > 0
   const startsOn = deferred ? addDays(isoDate(weekMonday), 7) : today
 
-  const designed = await designPhasePlan(athleteId, prog.id, nextName, startsOn, category, p1?.id ?? null, getWeightUnit())
+  const designed = await designPhasePlan(athleteId, prog.id, nextName, startsOn, category, p1?.id ?? null, unitContext())
 
   // Same rule as the phase boundary: never retire a real block for a template
   // one. The retest itself still stands — the caller has already written the new
@@ -3369,6 +3384,11 @@ export async function runRetest(athleteId: string, newResults: DiagnosticResults
 
   // Delta vs baseline (per movement pattern).
   const baseMove = baseline?.raw_results?.movement ?? {}
+  // Strength moves against the PREVIOUS retest, not the first-ever baseline:
+  // "since we last looked" is the question a retest answers. Movement scores
+  // compare to baseline because a 0-3 score has a fixed ceiling; a lift doesn't.
+  const prior = diags.length ? diags[diags.length - 1] : null
+  const stronger = strengthDeltas(prior?.raw_results?.strength, newResults.strength)
   const delta: Record<string, number> = {}
   const improved: Array<{ pattern: string; from: number; to: number }> = []
   for (const p of MOVEMENT_PATTERNS) {
@@ -3418,6 +3438,9 @@ export async function runRetest(athleteId: string, newResults: DiagnosticResults
   const deltaSummary = improved.length
     ? improved.map((i) => `${labelOfPattern(i.pattern)} ${i.from}→${i.to}`).join(', ')
     : 'no pattern gains yet'
+  const strengthSummary = stronger.length
+    ? ` ${stronger.map((s) => `${s.name} ${s.from}→${s.to} (+${s.pct}%)`).join(', ')}.`
+    : ''
   const clearedNote = resolvedCount > 0
     ? `Cleared ${resolvedCount} weak link${resolvedCount === 1 ? '' : 's'}.`
     : 'Holding the line.'
@@ -3426,11 +3449,11 @@ export async function runRetest(athleteId: string, newResults: DiagnosticResults
     : ' Block re-scoped.'
   await insertCoachMessage(athleteId, {
     kind: 'retest',
-    body: `Retest v${newVersion}: ${deltaSummary}. ${clearedNote}${scopeNote}`,
+    body: `Retest v${newVersion}: ${deltaSummary}.${strengthSummary} ${clearedNote}${scopeNote}`,
     ref_id: newDiagId,
   })
 
-  return { version: newVersion, resolvedCount, improved, deferred: rescope.deferred }
+  return { version: newVersion, resolvedCount, improved, stronger, deferred: rescope.deferred }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -3750,7 +3773,9 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
 // actually logged that week and the reads that moved — everything the athlete
 // wants to see when the week closes.
 
-const isSetDone = (s: SetLog) => s.done || s.reps != null || s.duration != null || s.distance != null
+// The set predicate lives in volume.ts now — one definition, shared with the
+// logger, so "12 sets" means the same thing on every screen that says it.
+const isSetDone = isSetLogged
 
 export interface RecapSessionHighlight { name: string; set: SetLog }
 export interface RecapSession {
@@ -3759,6 +3784,13 @@ export interface RecapSession {
   performedAt: string
   setsDone: number
   rpe: number | null
+  /**
+   * Load moved this session (Σ weight × reps), in STORAGE units. OPTIONAL
+   * because a device holds cached views written by earlier builds: a required
+   * field here is a white screen on the first launch after an update, for
+   * exactly the athletes with the most history. Read with `?.`.
+   */
+  volume?: VolumeTally
   highlights: RecapSessionHighlight[]   // top set of the first few exercises
 }
 export interface RecapMovement {
@@ -3775,6 +3807,8 @@ export interface WeeklyRecap {
   weekEnd: string     // ISO date (Sunday) — review.week_ending
   planned: number     // sessions/week target, for the done/planned stat
   totalSets: number
+  /** The week's load moved. Absent on caches written before this field existed. */
+  totalVolume?: VolumeTally
   sessions: RecapSession[]
   movements: RecapMovement[]
 }
@@ -3829,7 +3863,7 @@ export async function gatherWeeklyRecap(athleteId: string, reviewId?: string): P
     id: string; performed_at: string; rpe: number | null
     routine: { name: string; exercises: ExerciseTemplate[] }
   }>).map((w) => {
-    const setsDone = Object.values(w.actual_weights ?? {}).flat().filter(isSetDone).length
+    const volume = tallySession(w.actual_weights)
     const highlights: RecapSessionHighlight[] = []
     for (const { name, sets } of readLoggedExercises(w)) {
       const top = topWorkingSet(sets)
@@ -3840,8 +3874,9 @@ export async function gatherWeeklyRecap(athleteId: string, reviewId?: string): P
       workoutId: w.id,
       routineName: w.routine.name,
       performedAt: w.performed_at,
-      setsDone,
+      setsDone: volume.loggedSets,
       rpe: w.rpe,
+      volume,
       highlights,
     }
   })
@@ -3859,6 +3894,7 @@ export async function gatherWeeklyRecap(athleteId: string, reviewId?: string): P
     .sort((a, b) => Number(!!b.prevStatus) - Number(!!a.prevStatus) || b.confidence - a.confidence)
 
   const totalSets = sessions.reduce((a, s) => a + s.setsDone, 0)
+  const totalVolume = sumVolume(sessions.map((s) => s.volume ?? NO_VOLUME))
 
   return {
     review: reviewRow,
@@ -3866,6 +3902,7 @@ export async function gatherWeeklyRecap(athleteId: string, reviewId?: string): P
     weekEnd: reviewRow.week_ending,
     planned,
     totalSets,
+    totalVolume,
     sessions,
     movements,
   }
@@ -3886,6 +3923,8 @@ export interface LogSession {
   performedAt: string
   setsDone: number
   rpe: number | null
+  /** Load moved this session, in STORAGE units. Absent on older caches. */
+  volume?: VolumeTally
   pending: boolean                     // finished offline, not yet synced
   highlights: RecapSessionHighlight[]  // top set of the first few exercises
 }
@@ -3893,6 +3932,8 @@ export interface LogWeek {
   weekStart: string   // ISO Monday
   weekEnding: string  // ISO Sunday
   totalSets: number
+  /** Absent on caches written before this field existed. */
+  totalVolume?: VolumeTally
   sessions: LogSession[]  // newest first within the week
 }
 export interface TrainingLog {
@@ -4002,23 +4043,30 @@ export async function gatherTrainingLog(
     id: string; routine_id: string; performed_at: string; rpe: number | null
     routine: { name: string; exercises: ExerciseTemplate[] }
   }
-  const committed: LogSession[] = ((ws ?? []) as unknown as Row[]).map((w) => ({
-    workoutId: w.id,
-    routineId: w.routine_id,
-    routineName: w.routine?.name ?? 'Session',
-    phaseName: null,  // reserved for the program timeline (Phase 3); not needed for the week-grouped log
-    performedAt: w.performed_at,
-    setsDone: Object.values(w.actual_weights ?? {}).flat().filter(isSetDone).length,
-    rpe: w.rpe,
-    pending: false,
-    highlights: topHighlights(w),
-  }))
+  const committed: LogSession[] = ((ws ?? []) as unknown as Row[]).map((w) => {
+    const volume = tallySession(w.actual_weights)
+    return {
+      workoutId: w.id,
+      routineId: w.routine_id,
+      routineName: w.routine?.name ?? 'Session',
+      phaseName: null,  // reserved for the program timeline (Phase 3); not needed for the week-grouped log
+      performedAt: w.performed_at,
+      setsDone: volume.loggedSets,
+      rpe: w.rpe,
+      volume,
+      pending: false,
+      highlights: topHighlights(w),
+    }
+  })
 
   // Fold in finished-but-uncommitted sessions. Resolve their routine names in one
   // query; skip any whose routine + calendar day a committed session already owns.
   const committedDayKeys = new Set(committed.map((s) => `${s.routineId}|${isoDate(new Date(s.performedAt))}`))
+  // Dedupe on the day the session HAPPENED. Keying on queuedAt filed a backdated
+  // session under the day it was typed in, so it both escaped the dedupe against
+  // its own committed row and landed in the wrong week of the log.
   const freshPending = pending.filter(
-    (p) => !committedDayKeys.has(`${p.routineId}|${isoDate(new Date(p.queuedAt))}`),
+    (p) => !committedDayKeys.has(`${p.routineId}|${isoDate(new Date(p.performedAt ?? p.queuedAt))}`),
   )
   let pendingSessions: LogSession[] = []
   if (freshPending.length) {
@@ -4032,14 +4080,18 @@ export async function gatherTrainingLog(
     )
     pendingSessions = freshPending.map((p) => {
       const r = byId.get(p.routineId)
+      const volume = tallySession(p.actualWeights)
       return {
         workoutId: `pending:${p.id}`,
         routineId: p.routineId,
         routineName: r?.name ?? 'Session',
         phaseName: null,
-        performedAt: p.queuedAt,
-        setsDone: p.setsDone,
+        // A backdated session belongs on the day it HAPPENED, not the moment it
+        // was queued — the same day the week strip already counts it on.
+        performedAt: p.performedAt ?? p.queuedAt,
+        setsDone: volume.loggedSets,
         rpe: p.rpe,
+        volume,
         pending: true,
         // A queued session carries the prescription it was logged against, so a
         // program edit while it sits in the outbox can't relabel it either.
@@ -4061,11 +4113,12 @@ export async function gatherTrainingLog(
     const weekEnding = weekEndingISO(monday)
     let wk = weeks.get(weekEnding)
     if (!wk) {
-      wk = { weekStart: isoDate(monday), weekEnding, totalSets: 0, sessions: [] }
+      wk = { weekStart: isoDate(monday), weekEnding, totalSets: 0, totalVolume: { load: 0, loadedSets: 0, loggedSets: 0, reps: 0 }, sessions: [] }
       weeks.set(weekEnding, wk)
     }
     wk.sessions.push(s)
     wk.totalSets += s.setsDone
+    wk.totalVolume = sumVolume([wk.totalVolume ?? NO_VOLUME, s.volume ?? NO_VOLUME])
   }
 
   return { weeks: [...weeks.values()].sort((a, b) => b.weekEnding.localeCompare(a.weekEnding)) }
@@ -4075,29 +4128,39 @@ export async function gatherTrainingLog(
 
 export interface ExercisePoint {
   performedAt: string
-  topWeight: number | null
+  topWeight: number | null   // display unit
   topReps: number | null
-  e1rm: number | null    // Epley estimate when weight & reps are both present
+  e1rm: number | null        // display unit; Epley, exact at one rep
   rpe: number | null
+  /** Which records this session broke, if any. Absent on older caches. */
+  prs?: PrKind[]
+  /** False above ~12 reps, where an e1RM stops being a strength number. */
+  e1rmReliable?: boolean
 }
 export interface ExerciseHistory {
   name: string
   points: ExercisePoint[]   // oldest → newest
-  bestWeight: number | null
-  bestE1rm: number | null
-}
-
-// Epley 1-rep-max estimate — the standard load×reps → strength proxy.
-function epley1rm(weight: number, reps: number): number {
-  return Math.round(weight * (1 + reps / 30))
+  bestWeight: number | null // display unit
+  bestE1rm: number | null   // display unit
+  /** How many sessions on this lift set a record. Absent on older caches. */
+  prCount?: number
 }
 
 /**
  * Every logged top set for one exercise (matched by name across all routines in
- * the active program), oldest → newest, with an Epley e1RM trend and PR markers.
+ * the active program), oldest → newest, with an e1RM trend and — the point of
+ * the rewrite — a PR marker on each session that actually beat something.
+ *
+ * The running best is folded forward as the sessions are walked, so a marker
+ * means "this was a record ON THE DAY", not "this ties the all-time best". The
+ * numbers come back in the athlete's DISPLAY unit; the comparison happens in
+ * storage units, before any rounding, so a conversion can never invent or erase
+ * a record.
  */
-export async function gatherExerciseHistory(athleteId: string, exerciseName: string): Promise<ExerciseHistory> {
-  const empty: ExerciseHistory = { name: exerciseName, points: [], bestWeight: null, bestE1rm: null }
+export async function gatherExerciseHistory(
+  athleteId: string, exerciseName: string, u: UnitContext,
+): Promise<ExerciseHistory> {
+  const empty: ExerciseHistory = { name: exerciseName, points: [], bestWeight: null, bestE1rm: null, prCount: 0 }
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
   if (!prog?.id) return empty
@@ -4110,13 +4173,24 @@ export async function gatherExerciseHistory(athleteId: string, exerciseName: str
 
   type Row = LoggedWorkoutLike & { performed_at: string; rpe: number | null }
   const points: ExercisePoint[] = []
+  let running: LiftBest = NO_BEST
   for (const w of (ws ?? []) as unknown as Row[]) {
     for (const { name, sets } of readLoggedExercises(w)) {
       if (name !== exerciseName) continue
       const top = topWorkingSet(sets)
       if (!top) continue
-      const e1rm = top.weight != null && top.reps != null ? epley1rm(top.weight, top.reps) : null
-      points.push({ performedAt: w.performed_at, topWeight: top.weight ?? null, topReps: top.reps ?? null, e1rm, rpe: top.rpe ?? w.rpe })
+      const prs = displayPRs(top, running)
+      running = foldBest(running, top)
+      const e1rm = top.weight != null && top.reps != null ? estimate1RM(top.weight, top.reps) : null
+      points.push({
+        performedAt: w.performed_at,
+        topWeight: top.weight != null ? u.show(top.weight) : null,
+        topReps: top.reps ?? null,
+        e1rm: e1rm != null ? u.show(e1rm) : null,
+        rpe: top.rpe ?? w.rpe,
+        prs,
+        e1rmReliable: estimateIsReliable(top.reps),
+      })
       break // one entry (the top set) per session
     }
   }
@@ -4124,9 +4198,78 @@ export async function gatherExerciseHistory(athleteId: string, exerciseName: str
   return {
     name: exerciseName,
     points,
-    bestWeight: points.reduce<number | null>((m, p) => (p.topWeight != null && (m == null || p.topWeight > m) ? p.topWeight : m), null),
-    bestE1rm: points.reduce<number | null>((m, p) => (p.e1rm != null && (m == null || p.e1rm > m) ? p.e1rm : m), null),
+    bestWeight: running.weight != null ? u.show(running.weight) : null,
+    bestE1rm: running.e1rm != null ? u.show(running.e1rm) : null,
+    prCount: points.filter((p) => (p.prs?.length ?? 0) > 0).length,
   }
+}
+
+/**
+ * The athlete's standing record on every lift in the program, keyed by name —
+ * what a live set has to beat. One scan, shared by the workout screen (the PR
+ * chip) and anything else that needs "have they ever done better than this".
+ * Weights are in STORAGE units, like every other stored number.
+ */
+export async function gatherExerciseBests(programId: string): Promise<Record<string, LiftBest>> {
+  const { data: ws } = await supabase
+    .from('workout')
+    .select('performed_at, actual_weights, exercises_snapshot, routine!inner(exercises, program_id)')
+    .eq('routine.program_id', programId)
+    .order('performed_at', { ascending: true })
+    .limit(400)
+  const out: Record<string, LiftBest> = {}
+  for (const w of (ws ?? []) as unknown as LoggedWorkoutLike[]) {
+    for (const { name, sets } of readLoggedExercises(w)) {
+      let best = out[name] ?? NO_BEST
+      for (const s of sets) best = foldBest(best, s)
+      out[name] = best
+    }
+  }
+  return out
+}
+
+/**
+ * The athlete's strength baseline, READ OFF THEIR LOG rather than asked for.
+ *
+ * The retest's strength half used to be a fixed battery of four estimated 1RMs
+ * on four generic patterns — cumbersome (an estimated max on a lift you train
+ * for fives means going and testing something), ambiguous ("Press" is not a
+ * lift), and inert (only two of the five fields were ever read, and no strength
+ * number was ever compared across versions, so the retest could not tell you
+ * your squat had gone up).
+ *
+ * Every top set the athlete has logged is already a test. This returns the lifts
+ * they actually train, with the best estimate their own log supports, and what
+ * the last retest recorded for the same lift — so the step becomes "confirm or
+ * correct" instead of "go and do four more exercises".
+ *
+ * Empty when there's no loaded history to read (a brand-new athlete), which is
+ * the caller's signal to fall back to asking.
+ */
+export async function gatherStrengthBaseline(athleteId: string): Promise<BaselineLift[]> {
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return []
+
+  const [{ data: routineRows }, bests, { data: priorDiag }] = await Promise.all([
+    supabase.from('routine').select('exercises').eq('program_id', prog.id),
+    gatherExerciseBests(prog.id),
+    supabase
+      .from('diagnostic').select('raw_results')
+      .eq('athlete_id', athleteId).order('version', { ascending: false })
+      .limit(1).maybeSingle(),
+  ])
+
+  // Program order, so the lifts the block is actually built on come first.
+  const names: string[] = []
+  for (const r of (routineRows ?? []) as Array<{ exercises: ExerciseTemplate[] | null }>) {
+    for (const ex of r.exercises ?? []) names.push(ex.name)
+  }
+
+  const previous = namedLifts(
+    ((priorDiag as { raw_results: DiagnosticResults | null } | null)?.raw_results?.strength) ?? undefined,
+  )
+  return buildBaseline(names, bests, previous)
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -4168,7 +4311,7 @@ export interface ProgramMap {
  * forward for next week (provisional); and canonical concept previews for the
  * phases after this one (generatePhase is pure — no rows are written).
  */
-export async function gatherProgramMap(athleteId: string, unit: string): Promise<ProgramMap | null> {
+export async function gatherProgramMap(athleteId: string, u: UnitContext): Promise<ProgramMap | null> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
   if (!prog?.id) return null
@@ -4216,7 +4359,7 @@ export async function gatherProgramMap(athleteId: string, unit: string): Promise
   if (routines.length) {
     const sessions: ProjectedSession[] = []
     for (const r of routines) {
-      const rx = await gatherSessionPrescription(athleteId, r.id, r.exercises, unit)
+      const rx = await gatherSessionPrescription(athleteId, r.id, r.exercises, u)
       const lines = r.exercises
         .map((ex, i) => ({ name: ex.name, hint: rx.hints[i] ?? '', held: !!rx.held[i] }))
         .filter((l) => l.hint)
@@ -4272,7 +4415,7 @@ const PHASE_WEEKLY_STEP_PCT: Record<PhaseName, number> = {
   Stability: 0, Strength: 3, Power: 2, Sport: 0,
 }
 
-export async function gatherWeekPager(athleteId: string, unit: string): Promise<WeekPagerData | null> {
+export async function gatherWeekPager(athleteId: string, u: UnitContext): Promise<WeekPagerData | null> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
   if (!prog?.id) return null
@@ -4293,7 +4436,7 @@ export async function gatherWeekPager(athleteId: string, unit: string): Promise<
         routineName: s.routineName,
         intent: null,
         tag: `${new Date(s.performedAt).toLocaleDateString(undefined, { weekday: 'short' })} · ${s.setsDone} set${s.setsDone === 1 ? '' : 's'}${s.rpe != null ? ` · RPE ${s.rpe}` : ''}`,
-        lines: s.highlights.map((h) => ({ name: h.name, detail: fmtSetDetail(h.set, unit) })),
+        lines: s.highlights.map((h) => ({ name: h.name, detail: fmtSetDetail(h.set, u) })),
       })),
     }))
     .sort((a, b) => a.weekEnd.localeCompare(b.weekEnd))   // oldest first
@@ -4352,9 +4495,9 @@ export async function gatherWeekPager(athleteId: string, unit: string): Promise<
           lines: r.exercises.map((ex, i) => {
             const b = base[i]
             const detail = b != null && stepPct > 0
-              ? `≈${roundLoad(b * Math.pow(1 + stepPct / 100, k))}${unit}×${ex.reps}`
+              ? `≈${u.prescribe(b * Math.pow(1 + stepPct / 100, k))}${u.unit}×${ex.reps}`
               : b != null
-                ? `${b}${unit}×${ex.reps}`
+                ? `${u.fmt(b)}${u.unit}×${ex.reps}`
                 : `${ex.sets}×${ex.reps}${ex.load ? ` · ${ex.load}` : ''}`
             return { name: ex.name, detail }
           }),
@@ -4375,8 +4518,8 @@ export async function gatherWeekPager(athleteId: string, unit: string): Promise<
 }
 
 // Compact one-set detail for the pager (e.g. "275lb×5", "30s", "5m").
-function fmtSetDetail(s: SetLog, unit: string): string {
-  if (s.weight != null) return `${s.weight}${unit}×${s.reps ?? '?'}`
+function fmtSetDetail(s: SetLog, u: UnitContext): string {
+  if (s.weight != null) return `${u.fmt(s.weight)}${u.unit}×${s.reps ?? '?'}`
   if (s.duration != null) return `${s.duration}s`
   if (s.distance != null) return `${s.distance}`
   return `${s.reps ?? '?'} reps`

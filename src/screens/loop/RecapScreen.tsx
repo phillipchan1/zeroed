@@ -1,7 +1,7 @@
 import { useNavigate, useParams } from 'react-router-dom'
 import { useCachedLoader } from '../../lib/cache'
 import { gatherWeeklyRecap, type RecapSession } from '../../engine'
-import { getWeightUnit, getDistanceUnit } from '../../lib/units'
+import { unitContext, type UnitContext } from '../../lib/units'
 import { Button, SectionHeader, Skeleton, PageHeader, Stat, StatGrid } from '../../components/ui'
 import type { SetLog, WeeklyDirective, WeeklyPrescription, WeeklyReviewAdjustments } from '../../types/database'
 
@@ -25,27 +25,28 @@ function fmtRange(startISO: string, endISO: string): string {
 
 const shortDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short' })
 
-function fmtSet(s: SetLog, unit: string, distanceUnit: string): string {
-  if (s.weight != null) return `${s.weight}${unit}×${s.reps ?? '?'}`
+function fmtSet(s: SetLog, u: UnitContext): string {
+  if (s.weight != null) return `${u.fmt(s.weight)}${u.unit}×${s.reps ?? '?'}`
   if (s.duration != null) return `${s.duration}s`
-  if (s.distance != null) return `${s.distance}${distanceUnit}`
+  if (s.distance != null) return `${s.distance}${u.distance}`
   return `${s.reps ?? '?'} reps`
 }
 
 function SessionRow({ s }: { s: RecapSession }) {
-  const unit = getWeightUnit()
-  const distanceUnit = getDistanceUnit(unit)
+  const u = unitContext()
   return (
     <div className="card" style={{ marginBottom: 10 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
         <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{s.routineName}</h3>
         <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
-          {shortDay(s.performedAt)} · {s.setsDone} sets{s.rpe != null ? ` · RPE ${s.rpe}` : ''}
+          {shortDay(s.performedAt)} · {s.setsDone} sets
+          {s.volume?.load ? ` · ${u.volume(s.volume.load)}${u.unit}` : ''}
+          {s.rpe != null ? ` · RPE ${s.rpe}` : ''}
         </span>
       </div>
       {s.highlights.length > 0 && (
         <p className="num text-xs text-dim" style={{ marginTop: 8, lineHeight: 1.5 }}>
-          {s.highlights.map((h) => `${h.name} ${fmtSet(h.set, unit, distanceUnit)}`).join('  ·  ')}
+          {s.highlights.map((h) => `${h.name} ${fmtSet(h.set, u)}`).join('  ·  ')}
         </p>
       )}
     </div>
@@ -94,6 +95,7 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
     )
   }
 
+  const u = unitContext()
   const adj = (recap.review.adjustments ?? null) as WeeklyReviewAdjustments | null
   const presc = (recap.review.next_week_prescription ?? null) as WeeklyPrescription | null
   const directive = presc?.directive ?? 'HOLD'
@@ -137,6 +139,11 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
               <Stat value={`${recap.sessions.length}/${recap.planned}`} label="Sessions" />
               {adherencePct !== null && <Stat value={`${adherencePct}%`} label="Adherence" />}
               <Stat value={recap.totalSets} label="Sets" />
+              {/* Load moved. Sets alone cannot tell the week that added a set
+                  while halving the bar from the week that got stronger. */}
+              {!!recap.totalVolume?.load && (
+                <Stat value={`${u.volume(recap.totalVolume.load)}${u.unit}`} label="Volume" />
+              )}
               <Stat value={adj?.avgRPE ?? '—'} label="Avg RPE" />
               {adj && adj.painCount > 0 && <Stat value={adj.painCount} label="Pain flags" tone="var(--pending)" />}
               {adj && adj.positiveCount > 0 && <Stat value={adj.positiveCount} label="Strong sets" tone="var(--confirmed)" />}

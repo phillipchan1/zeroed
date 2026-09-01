@@ -16,13 +16,19 @@
 import {
   rpeContract, DEFAULT_RPE_CONTRACT,
   tallyWeek, decidePrescription,
-  autoregulateDelta, recommendedLoad, maxUpFor,
+  autoregulateDelta, recommendedLoad, roundLoad, maxUpFor,
   advanceStatus, addressesLimiter, capIsActive, isLiftHeld,
   clearanceTestOf, pickClearanceLift, describeClearanceTest, newClearanceTest, judgeClearanceSession,
   P1_RESOLVE_THRESHOLD,
   type WeekWorkout, type WeekObservation, type LiftAttempt,
 } from './prescription.ts'
 import type { ExerciseTemplate, InsightRow, SetLog, ClearanceTest } from '../types/database.ts'
+import { unitContext } from '../lib/units.ts'
+
+// Both units supplied explicitly, so this stays pure — no localStorage, no browser.
+const LB = unitContext('lb', 'lb')
+const KG = unitContext('kg', 'kg')
+const KG_ON_LB = unitContext('kg', 'lb')   // a kg athlete reading lb-stored history
 
 const fails: string[] = []
 let checks = 0
@@ -125,11 +131,27 @@ eq(maxUpFor('Strength'), 15, 'Strength lets progression run')
 let oldWay = 225
 let newWay = 225
 for (let w = 0; w < 4; w++) {
-  oldWay = recommendedLoad(set(oldWay, 5, 8), autoregulateDelta(8, 7, 0, 'HOLD', 15))!
-  newWay = recommendedLoad(set(newWay, 5, 8), autoregulateDelta(8, 8, 0, 'HOLD', 15))!
+  oldWay = recommendedLoad(set(oldWay, 5, 8), autoregulateDelta(8, 7, 0, 'HOLD', 15), LB)!
+  newWay = recommendedLoad(set(newWay, 5, 8), autoregulateDelta(8, 8, 0, 'HOLD', 15), LB)!
 }
 ok(oldWay <= 205, `old contract drifts down over 4 weeks (got ${oldWay})`)
 eq(newWay, 225, 'the block-aware contract holds the bar where it was')
+
+// ---- 4b. the recommendation lands in the athlete's own unit -----------------
+// A recommended load is the number that goes on the bar, so it has to be racked
+// in the unit the athlete loads plates in — and read off history that may have
+// been stored in the other one.
+
+eq(recommendedLoad(set(225, 5, 8), 0, LB), 225, 'repeat-the-load returns the load as lifted')
+eq(recommendedLoad(set(225, 5, 8), 5, LB), 235, 'a +5% step off 225 lb racks to 235 lb')
+eq(recommendedLoad(set(100, 5, 8), 5, KG), 105, 'a +5% step off 100 kg racks to 105 kg, not 5-kg-rounded nonsense')
+eq(roundLoad(103.9, KG), 105, 'kg rounds on 2.5s')
+eq(roundLoad(227, LB), 225, 'lb rounds on 5s')
+eq(recommendedLoad(set(225, 5, 8), 0, KG_ON_LB), 102.1,
+  'a kg athlete reads an lb-stored 225 as 102.1 kg, never as "225 kg"')
+ok(recommendedLoad(set(225, 5, 8), 0, KG_ON_LB) !== 225,
+  'switching display units never relabels a stored load')
+eq(recommendedLoad(null, 5, LB), null, 'a lift with no weighted history recommends nothing')
 
 // ---- 5. limiter scope -------------------------------------------------------
 
