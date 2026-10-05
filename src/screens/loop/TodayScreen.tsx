@@ -18,7 +18,7 @@ import {
   pendingSessionsRaw, useOutboxStatus, retryBlocked, discardBlocked,
   pendingRef, parsePendingRef, pendingSessionById,
 } from '../../lib/workoutOutbox'
-import { setIntendedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
+import { setIntendedDay, orderByPlannedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
 import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, Meter } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate } from '../../types/database'
 
@@ -667,6 +667,8 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   }
   const plannedDowFor = (r: RoutineRow): number | null =>
     r.id in dowOverride ? dowOverride[r.id] : (r.intended_dow ?? null)
+  // The week list reads in calendar order by planned day, not by name.
+  const weekList = orderByPlannedDay(routines, plannedDowFor)
   // Sessions finished offline. Subscribed to the outbox, so the note appears and
   // clears as the queue actually moves rather than on a guessed delay.
   const outbox = useOutboxStatus()
@@ -774,8 +776,8 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // CTA even when the week has rolled over and there's no scheduled "today".
   const primaryRoutineId =
     (todayRoutine && statusFor(todayRoutine.id).kind === 'todo' ? todayRoutine.id : null)
-    ?? routines.find((r) => statusFor(r.id).kind === 'in_progress')?.id
-    ?? routines.find((r) => statusFor(r.id).kind === 'todo')?.id
+    ?? weekList.find((r) => statusFor(r.id).kind === 'in_progress')?.id
+    ?? weekList.find((r) => statusFor(r.id).kind === 'todo')?.id
     ?? null
 
   // Recap prompt: the latest review, shown for ~10 days after it's cut, until
@@ -1025,7 +1027,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                     History ›
                   </button>
                 </div>
-                {routines.map((r) => (
+                {weekList.map((r) => (
                   <SessionCard
                     key={r.id}
                     routine={r}

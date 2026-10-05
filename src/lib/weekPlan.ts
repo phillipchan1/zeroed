@@ -15,3 +15,17 @@ export const DAY_LABELS = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'] as c
 export async function setIntendedDay(routineId: string, dow: number | null): Promise<void> {
   await supabase.from('routine').update({ intended_dow: dow }).eq('id', routineId)
 }
+
+/**
+ * The week list in calendar order: sessions pinned to a day run Mon → Sun, and
+ * unpinned ones follow. Ties (same day, or both "any") keep name order. Without
+ * this the list is alphabetical, so a session planned for Friday can open the
+ * week.
+ */
+export function orderByPlannedDay<T extends { name: string }>(
+  routines: T[],
+  dowFor: (r: T) => number | null,
+): T[] {
+  const key = (r: T) => dowFor(r) ?? 7
+  return [...routines].sort((a, b) => key(a) - key(b) || a.name.localeCompare(b.name))
+}
