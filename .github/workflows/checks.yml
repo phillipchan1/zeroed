@@ -1,0 +1,39 @@
+# The cheap gate: typecheck, the engine/lib conformance files, the MCP
+# formatter check, and a structural check of the committed Capacitor iOS
+# project (as far as Linux can go without Xcode).
+#
+# The TestFlight upload (ios-release.yml) is manual — see docs/ios-releases.md.
+name: checks
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Typecheck
+        run: npm run type-check
+      - name: Engine / lib checks
+        run: npm run check
+      - name: MCP checks
+        run: |
+          npm --prefix mcp ci --no-audit --no-fund
+          npm run mcp:check
+      - name: Production web build
+        run: npm run build
+      - name: Capacitor iOS sync (no CocoaPods / Xcode on Linux)
+        run: npx cap sync ios
+      - name: iOS project structure
+        run: node scripts/ios-project-check.mjs

@@ -15,10 +15,13 @@
     "mcp:install": "npm --prefix mcp install",
     "mcp:check": "npm --prefix mcp run check",
     "check": "for f in src/engine/*.check.ts src/lib/*.check.ts; do node --experimental-strip-types \"$f\" || exit 1; done",
-    "check:layout": "node scripts/check-layout.mjs"
+    "check:layout": "node scripts/check-layout.mjs",
+    "ios:sync": "npm run build && npx cap sync ios",
+    "ios:check": "node scripts/ios-project-check.mjs"
   },
   "dependencies": {
     "@capacitor/core": "^6.2.0",
+    "@capacitor/ios": "^6.2.2",
     "@supabase/supabase-js": "^2.47.0",
     "lucide-react": "^1.17.0",
     "react": "^18.3.1",
