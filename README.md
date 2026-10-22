@@ -219,13 +219,15 @@ pip install Pillow
 python3 scripts/gen-icons.py
 ```
 
-## iOS (Capacitor)
+## iOS (TestFlight)
 
-The Capacitor config is committed (`capacitor.config.ts`). Add the iOS platform when ready:
+Native iPhone shell is Capacitor (`ios/`, bundle ID **`app.zeroed.app`**). Internal
+TestFlight upload is a manual GitHub Action — same signing secrets as Nuvo,
+same `xcodebuild` + `altool` path. Setup and the first-build trigger:
+[`docs/ios-releases.md`](docs/ios-releases.md).
 
 ```bash
 npm run build
-npx cap add ios
-npx cap sync
-npx cap open ios
+npx cap sync ios          # or: npm run ios:sync
+npx cap open ios          # local Mac only
 ```

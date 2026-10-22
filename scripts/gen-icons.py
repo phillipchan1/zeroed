@@ -127,3 +127,44 @@ save(draw_convergence(32), "favicon-32.png")
 fav = draw_convergence(32)
 fav.save(os.path.join(ROOT, "favicon.ico"), sizes=[(32, 32), (16, 16)])
 print("wrote public/favicon.ico")
+
+
+def write_ios_assets():
+    """App Store icon (1024 RGB, no alpha) + dark launch splash.
+
+    App Store Connect rejects any iOS app icon that still carries an alpha
+    channel (error 90717) — same constraint Nuvo documents in
+    docs/ios-releases.md. The Capacitor catalog is a single 1024 universal
+    image (`AppIcon-512@2x.png`).
+    """
+    ios_root = os.path.join(os.path.dirname(__file__), "..", "ios", "App", "App", "Assets.xcassets")
+    icon_dir = os.path.join(ios_root, "AppIcon.appiconset")
+    splash_dir = os.path.join(ios_root, "Splash.imageset")
+    if not os.path.isdir(icon_dir):
+        print("ios/ AppIcon catalog missing — skip native assets (run npx cap add ios first)")
+        return
+
+    icon = draw_convergence(1024, bg=GROUND).convert("RGB")
+    icon_path = os.path.join(icon_dir, "AppIcon-512@2x.png")
+    icon.save(icon_path, "PNG")
+    print("wrote", os.path.relpath(icon_path, ROOT + "/.."))
+
+    if not os.path.isdir(splash_dir):
+        return
+    # Full-bleed ground with the mark centered. Three filenames, one image —
+    # Capacitor's template catalog uses 1x/2x/3x slots that all expect 2732.
+    splash = Image.new("RGB", (2732, 2732), GROUND)
+    mark = draw_convergence(1024, bg=GROUND).convert("RGB")
+    origin = (2732 - 1024) // 2
+    splash.paste(mark, (origin, origin))
+    for name in (
+        "splash-2732x2732.png",
+        "splash-2732x2732-1.png",
+        "splash-2732x2732-2.png",
+    ):
+        path = os.path.join(splash_dir, name)
+        splash.save(path, "PNG")
+        print("wrote", os.path.relpath(path, ROOT + "/.."))
+
+
+write_ios_assets()

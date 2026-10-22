@@ -1,15 +1,19 @@
 /* Registers the service worker for PWA / offline support and wires the
- * update flow. No-ops during `vite dev` and in browsers without SW support.
+ * update flow. No-ops during `vite dev`, in browsers without SW support,
+ * and inside the Capacitor iOS shell (WKWebView loads capacitor:// and a
+ * service worker would fight the native asset copy).
  *
  * Update flow: when a new worker finishes installing while an old one still
  * controls the page, we raise SW_UPDATE_EVENT so the UI can offer a refresh.
  * Calling applyUpdate() posts SKIP_WAITING; the new worker activates and the
  * `controllerchange` listener reloads the page exactly once.
  */
+import { Capacitor } from '@capacitor/core'
 import { SW_UPDATE_EVENT } from './lib/useOnline'
 
 export function registerServiceWorker() {
   if (import.meta.env.DEV) return
+  if (Capacitor.isNativePlatform()) return
   if (!('serviceWorker' in navigator)) return
 
   window.addEventListener('load', () => {
