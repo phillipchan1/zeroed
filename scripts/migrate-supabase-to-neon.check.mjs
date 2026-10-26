@@ -17,16 +17,19 @@ import {
   argValue,
   authUsersToCopyCsv,
   formatCountComparison,
+  missingMappedAuthUserIds,
   orderRestoreList,
   orphanAthleteQuery,
   parseAuthUsersMapping,
   parseCounts,
+  parseIdList,
   parseOrphanIds,
   parseMigrateArgs,
   redactSecrets,
   requireCounts,
   resolveSourceUrl,
   resolveTargetUrl,
+  wrapRestoreTransaction,
 } from './migrate-supabase-to-neon.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -116,6 +119,35 @@ ok(missingFields, 'JSON without id is rejected')
 const copy = authUsersToCopyCsv(jsonRows)
 ok(copy.includes('33333333-3333-4333-8333-333333333333'), 'COPY CSV includes the UUID')
 ok(copy.includes('c@example.invalid'), 'COPY CSV includes email')
+
+const sourceIds = [
+  '11111111-1111-4111-8111-111111111111',
+  '22222222-2222-4222-8222-222222222222',
+  '33333333-3333-4333-8333-333333333333',
+]
+const wrongIdMap = parseAuthUsersMapping(JSON.stringify([
+  { id: '11111111-1111-4111-8111-111111111111', email: 'a@example.invalid' },
+  { id: '22222222-2222-4222-8222-222222222222', email: 'b@example.invalid' },
+  { id: '33333333-3333-4333-8333-000000000099', email: 'wrong@example.invalid' },
+]))
+eq(wrongIdMap.length, 3, 'wrong-id fixture has 3 mapping rows (same count as source)')
+const missingIds = missingMappedAuthUserIds(sourceIds, wrongIdMap)
+eq(missingIds.length, 1, 'id-match guard flags one missing source id when counts match')
+eq(missingIds[0], '33333333-3333-4333-8333-333333333333', 'id-match guard reports the unmapped source id')
+eq(
+  missingMappedAuthUserIds(sourceIds, parseAuthUsersMapping(JSON.stringify(sourceIds.map((id, i) => ({
+    id,
+    email: `${i}@example.invalid`,
+  }))))).length,
+  0,
+  'id-match guard passes when every source id is present',
+)
+eq(parseIdList('aaa\nbbb\naaa\n').length, 2, 'parseIdList dedupes source ids')
+
+const txn = wrapRestoreTransaction('INSERT INTO "user" VALUES (1);', 'COPY public.athlete FROM stdin;\n\\.')
+ok(txn.startsWith('BEGIN;'), 'restore wrapper opens one transaction')
+ok(txn.trim().endsWith('COMMIT;'), 'restore wrapper commits one transaction')
+ok(txn.includes('INSERT INTO "user"') && txn.includes('COPY public.athlete'), 'restore wrapper includes users then data')
 
 // ---- counts / redact --------------------------------------------------------
 // Captured from `psql` 16 default aligned output (leading spaces, padded
@@ -223,6 +255,8 @@ ok(
   'dry-run documents schema then data-only restore',
 )
 ok(/live restore without --auth-users-file exits 2/.test(drySkip.stdout), 'dry-run documents live exit 2')
+ok(/every source auth_user_id/.test(drySkip.stdout), 'dry-run documents id-match mapping guard')
+ok(/one transaction/.test(drySkip.stdout), 'dry-run documents a single restore transaction')
 ok(!/would COPY auth\.users from source/.test(drySkip.stdout), 'skip path does not COPY auth.users')
 
 const liveNoMap = spawnMigrate(['--skip-auth-users'], {
@@ -271,6 +305,7 @@ const appSqlCode = appSql.replace(/--.*$/gm, '')
 ok(!/ENABLE ROW LEVEL SECURITY/i.test(appSqlCode), 'app.sql has no ENABLE ROW LEVEL SECURITY')
 ok(!/CREATE POLICY/i.test(appSqlCode), 'app.sql has no CREATE POLICY')
 ok(!/auth\.uid\(\)/i.test(appSqlCode), 'app.sql has no auth.uid()')
+ok(!/request\.jwt\.claim\.sub/.test(appSqlCode), 'app.sql has no Supabase JWT claim fallback')
 ok(!/\bGRANT\b/.test(appSqlCode), 'app.sql has no GRANT')
 ok(!/\bauthenticated\b/.test(appSqlCode), 'app.sql has no authenticated role')
 ok(/CREATE TABLE IF NOT EXISTS public\.athlete/.test(appSql), 'app.sql creates athlete')
@@ -301,7 +336,10 @@ ok(/umask 077/.test(workflow), 'workflow writes the mapping under umask 077')
 ok(/if: always\(\)/.test(workflow), 'workflow deletes the mapping in always()')
 ok(/Recommended/.test(workflow) && /Environment/.test(workflow), 'workflow documents a GitHub Environment as recommended')
 ok(!/^\s+environment:/.test(workflow), 'workflow does not add a protected environment key')
-ok(!/disable-triggers/.test(readFileSync(join(root, 'scripts/migrate-supabase-to-neon.mjs'), 'utf8')), 'migrate script does not use --disable-triggers')
+const migrateSrc = readFileSync(join(root, 'scripts/migrate-supabase-to-neon.mjs'), 'utf8')
+ok(!/disable-triggers/.test(migrateSrc), 'migrate script does not use --disable-triggers')
+ok(/DROP SCHEMA IF EXISTS public CASCADE/.test(migrateSrc), 'live restore drops public so a rerun starts empty')
+ok(/wrapRestoreTransaction/.test(migrateSrc), 'live restore wraps data in one transaction')
 
 const db = new PGlite()
 await db.exec(readFileSync(join(root, 'worker/schema/app.sql'), 'utf8'))
@@ -325,6 +363,7 @@ const athletes = await db.query(`SELECT COUNT(*)::int AS n FROM public.athlete`)
 eq(Number(athletes.rows[0]?.n ?? 0), 1, 'preview seed inserts one synthetic athlete')
 
 ok(/reset_athlete_orientation/.test(appSql), 'app.sql defines reset_athlete_orientation')
+ok(/do not re-add request\.jwt\.claim\.sub/.test(appSql), 'app.sql documents when the JWT fallback must stay gone')
 await db.query(`SELECT set_config('app.current_auth_user_id', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', false)`)
 await db.query(`SELECT public.reset_athlete_orientation()`)
 const afterReset = await db.query(`SELECT onboarding_step, obstacle FROM public.athlete WHERE id = '11111111-1111-4111-8111-111111111111'`)

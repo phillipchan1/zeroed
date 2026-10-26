@@ -8,9 +8,12 @@
  * anything on the source.
  *
  * Schema then data (the script handles this):
- *   1. Apply worker/schema/app.sql + better-auth.sql on Neon if needed
- *   2. Load auth user mappings into auth.users + Better Auth "user"
- *   3. Data-only restore of public.* (no Supabase RLS / GRANT dump)
+ *   1. Live run: DROP SCHEMA public/auth and recreate, then apply
+ *      worker/schema/app.sql + better-auth.sql (reruns start empty)
+ *   2. Before any Neon write, every distinct source athlete.auth_user_id
+ *      must appear in the mapping (id match, not just counts)
+ *   3. Load mappings + data-only restore in one transaction
+ *      (failure rolls back to empty tables)
  *
  * The migration role often cannot read auth.users. In that case:
  *   --skip-auth-users --auth-users-file=users.json
@@ -271,6 +274,30 @@ export function parseOrphanIds(text) {
   return String(text ?? '').split('\n').map((s) => s.trim()).filter(Boolean)
 }
 
+export function parseIdList(text) {
+  return [...new Set(String(text ?? '').split('\n').map((s) => s.trim()).filter(Boolean))]
+}
+
+export function distinctAuthUserIdQuery() {
+  return `SELECT DISTINCT auth_user_id::text FROM public.athlete ORDER BY 1;`
+}
+
+export function normalizeAuthUserId(id) {
+  return String(id ?? '').trim().toLowerCase()
+}
+
+/** Source athlete.auth_user_id values that do not appear in the mapping. */
+export function missingMappedAuthUserIds(sourceIds, mappingRows) {
+  const mapped = new Set((mappingRows ?? []).map((r) => normalizeAuthUserId(r.id)))
+  return parseIdList(Array.isArray(sourceIds) ? sourceIds.join('\n') : sourceIds)
+    .map(normalizeAuthUserId)
+    .filter((id) => id && !mapped.has(id))
+}
+
+export function wrapRestoreTransaction(userSql, restoreSql) {
+  return ['BEGIN;', userSql || '', restoreSql || '', 'COMMIT;'].join('\n')
+}
+
 export function formatCountComparison(srcCounts, dstCounts) {
   const tables = REQUIRED_COUNT_TABLES
   const lines = []
@@ -424,6 +451,8 @@ function printOfflineDryRun(args) {
     ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
     : 'dry-run: would leave any leftover RLS artifacts on Neon (pass --relax-target-rls to drop them on the target)')
   console.log('dry-run: would compare row counts per table and abort on mismatch')
+  console.log('dry-run: would require every source auth_user_id to appear in the mapping (ids, not counts)')
+  console.log('dry-run: live restore drops and recreates public/auth, then restores in one transaction')
   console.log('dry-run: live restore without --auth-users-file exits 2')
   console.log('tools required: pg_dump, pg_restore, psql')
 }
@@ -510,12 +539,13 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     ])
 
     let mappedUsers = 0
+    let mappingRows = []
     if (args.skipAuthUsers) {
       console.log('skipping auth.users export (--skip-auth-users)')
       if (args.authUsersFile) {
-        const rows = loadProvidedAuthUsers(args)
-        mappedUsers = rows.length
-        writeFileSync(usersPath, authUsersToCopyCsv(rows))
+        mappingRows = loadProvidedAuthUsers(args)
+        mappedUsers = mappingRows.length
+        writeFileSync(usersPath, authUsersToCopyCsv(mappingRows))
         console.log(`loaded ${mappedUsers} auth users from provided mapping`)
       } else {
         writeFileSync(usersPath, '')
@@ -544,10 +574,10 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     for (const line of before.lines) console.log(line)
 
     if (args.skipAuthUsers && args.authUsersFile) {
-      const needed = Number(psqlTuples(source, 'SELECT COUNT(DISTINCT auth_user_id)::text FROM public.athlete').trim())
-      if (!Number.isFinite(needed)) throw new Error('source: could not count distinct athlete.auth_user_id')
-      if (mappedUsers < needed) {
-        console.error(`Partial --auth-users-file: mapped ${mappedUsers} users, source has ${needed} distinct athlete.auth_user_id values`)
+      const sourceIds = parseIdList(psqlTuples(source, distinctAuthUserIdQuery()))
+      const missing = missingMappedAuthUserIds(sourceIds, mappingRows)
+      if (missing.length) {
+        console.error(`--auth-users-file is missing ${missing.length} source auth_user_id(s) (id match, not counts)`)
         return 1
       }
     }
@@ -561,30 +591,38 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       return 0
     }
 
+    console.log('resetting Neon public/auth schemas so a rerun starts empty…')
+    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-c', `
+      DROP SCHEMA IF EXISTS public CASCADE;
+      DROP SCHEMA IF EXISTS auth CASCADE;
+      CREATE SCHEMA public;
+    `])
     console.log('applying worker/schema/app.sql + better-auth.sql on Neon…')
     run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(root, 'worker/schema/app.sql')])
     run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(root, 'worker/schema/better-auth.sql')])
 
-    if (mappedUsers > 0) {
-      console.log('mapping auth users → "user" + stub auth.users…')
-      writeFileSync(join(dir, 'load_users.sql'), loadUsersSql(usersPath))
-      run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(dir, 'load_users.sql')])
-    }
-
-    console.log('restoring public data into Neon (FK-safe order, triggers stay on)…')
+    console.log('restoring users + public data in one transaction…')
     const tocPath = join(dir, 'restore.list')
+    const restoreSqlPath = join(dir, 'restore.sql')
     writeFileSync(tocPath, orderRestoreList(run('pg_restore', ['-l', dumpPath])))
     run('pg_restore', [
-      '--exit-on-error',
       '--data-only',
       '--no-owner',
       '--no-acl',
       '-L',
       tocPath,
-      '--dbname',
-      target,
+      '-f',
+      restoreSqlPath,
       dumpPath,
     ])
+    writeFileSync(
+      join(dir, 'restore_txn.sql'),
+      wrapRestoreTransaction(
+        mappedUsers > 0 ? loadUsersSql(usersPath) : '',
+        readFileSync(restoreSqlPath, 'utf8'),
+      ),
+    )
+    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(dir, 'restore_txn.sql')])
 
     if (args.relaxTargetRls) {
       console.log('relaxing leftover RLS / auth helpers on Neon (--relax-target-rls)…')

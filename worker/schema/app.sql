@@ -356,7 +356,12 @@ CREATE INDEX IF NOT EXISTS mcp_token_hash_live_idx ON public.mcp_token (token_ha
 -- =============================================================================
 -- DEBUG RESET — same no-arg signature DebugReset.tsx calls.
 -- Neon has no auth.uid() / get_current_athlete_id(). Resolve the athlete from
--- app.current_auth_user_id (Worker) or request.jwt.claim.sub (legacy JWT).
+-- app.current_auth_user_id (set by a Worker caller). The Worker never sets
+-- request.jwt.claim.sub (that is a Supabase PostgREST GUC), so there is no
+-- JWT fallback. DebugReset.tsx still talks to Supabase PostgREST until that
+-- client is retired; do not re-add request.jwt.claim.sub unless a Neon
+-- PostgREST layer is introduced during cutover — and remove it when that
+-- layer goes away.
 -- =============================================================================
 CREATE OR REPLACE FUNCTION public.reset_athlete_orientation()
 RETURNS void
@@ -368,9 +373,6 @@ DECLARE
   uid TEXT;
 BEGIN
   uid := NULLIF(current_setting('app.current_auth_user_id', true), '');
-  IF uid IS NULL THEN
-    uid := NULLIF(current_setting('request.jwt.claim.sub', true), '');
-  END IF;
   IF uid IS NOT NULL THEN
     SELECT id INTO aid FROM public.athlete WHERE auth_user_id::text = uid LIMIT 1;
   END IF;

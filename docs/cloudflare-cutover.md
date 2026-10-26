@@ -158,15 +158,16 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 
 1. Write-freeze is optional here; run it anyway so the template is exercised.
 2. `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --skip-auth-users --auth-users-file=users.json`
-   — abort on a row-count mismatch or an athlete whose `auth_user_id`
-   has no Better Auth `"user"`. A live run without `--auth-users-file`
-   exits 2. Order is **schema then data-only restore**: the script
-   applies `worker/schema/app.sql` + `better-auth.sql`, maps the
-   provided auth users (same UUIDs) into Better Auth `"user"`, then
-   `pg_restore --data-only` in FK-safe table order (no
+   — abort on a row-count mismatch, a mapping that is missing any
+   source `athlete.auth_user_id` (ids, not counts), or an athlete
+   whose `auth_user_id` has no Better Auth `"user"`. A live run
+   without `--auth-users-file` exits 2. A live run **drops and
+   recreates** Neon `public` + `auth` first (reruns start empty),
+   applies `worker/schema/app.sql` + `better-auth.sql`, then loads
+   mappings + data-only restore **in one transaction** so a failure
+   rolls back to empty tables. Table order is FK-safe (no
    `--disable-triggers`; Neon’s `neondb_owner` is not superuser).
-   The source URL is **read-only**. RLS artifacts stay on Supabase. The
-   Neon schema has no Supabase roles, policies, or `auth.uid()` grants.
+   The source URL is **read-only**. RLS artifacts stay on Supabase.
    Pass `--relax-target-rls` only if a leftover RLS artifact needs
    dropping **on Neon** (the Worker already scopes every query; the table
    owner bypasses RLS unless `FORCE ROW LEVEL SECURITY`).
