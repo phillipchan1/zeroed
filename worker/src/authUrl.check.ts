@@ -11,6 +11,7 @@ import {
   isLocalAuthHost,
   isLocalAuthRuntime,
   isLoopbackHostname,
+  refuseUnsafeTestUrl,
   resolveAuthBaseURL,
 } from './authUrl.ts'
 
@@ -51,6 +52,27 @@ ok(authCookieSecure('https://zeroed.example.workers.dev'), 'prod cookies are Sec
 ok(!isLocalAuthRuntime({ DATABASE_URL: prodWithLocalUser }), 'user localhost_admin is not local')
 ok(!isLocalAuthRuntime({ DATABASE_URL: prodWithLocalDb }), 'db name localhost is not local')
 ok(!isLocalAuthRuntime({ DATABASE_URL: prodWithLocalQuery }), 'query localhost is not local')
+function throwsRefuse(url: string, label?: string): string | false {
+  try {
+    refuseUnsafeTestUrl(url, label)
+    return false
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
+}
+
+ok(throwsRefuse(neon) !== false && String(throwsRefuse(neon)).includes('not loopback'), 'refuseUnsafeTestUrl: Neon throws')
+ok(
+  String(throwsRefuse(neon, 'DATABASE_URL')).includes('DATABASE_URL host "ep-prod.us-east-1.aws.neon.tech"'),
+  'refuseUnsafeTestUrl: DATABASE_URL label names the Neon host',
+)
+ok(throwsRefuse(prodWithLocalUser) !== false, 'refuseUnsafeTestUrl: localhost in user is not loopback')
+ok(throwsRefuse(prodWithLocalQuery) !== false, 'refuseUnsafeTestUrl: localhost in query is not loopback')
+ok(throwsRefuse('postgresql://app@127.0.0.1.example.com/zeroed') !== false, 'refuseUnsafeTestUrl: 127.0.0.1.example.com is not loopback')
+ok(throwsRefuse(loopbackPg) === false, 'refuseUnsafeTestUrl: localhost URL is allowed')
+ok(throwsRefuse(loopbackV4) === false, 'refuseUnsafeTestUrl: 127.0.0.1 URL is allowed')
+ok(throwsRefuse(loopbackV6) === false, 'refuseUnsafeTestUrl: [::1] URL is allowed')
+
 ok(!isLocalAuthRuntime({ DATABASE_URL: neon }), 'Neon URL is not local')
 ok(!isLocalAuthRuntime({}), 'empty env is not local')
 ok(!isLocalAuthRuntime({ ENVIRONMENT: 'dev' }), 'ENVIRONMENT=dev is not local')

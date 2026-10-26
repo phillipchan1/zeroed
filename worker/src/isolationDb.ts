@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
 import { Client } from 'pg'
-import { isLoopbackHostname } from './authUrl.ts'
+import { refuseUnsafeTestUrl } from './authUrl.ts'
 import { makeClientSql, type Sql } from './db.ts'
 import { makePgliteSql } from './pgliteSql.ts'
 
@@ -77,19 +77,7 @@ export function assertCiUsesRealPostgres(): void {
   )
 }
 
-function refuseUnsafeTestUrl(url: string): void {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error('ZEROED_TEST_DATABASE_URL is not a valid URL')
-  }
-  if (!isLoopbackHostname(parsed.hostname)) {
-    throw new Error(
-      `ZEROED_TEST_DATABASE_URL host "${parsed.hostname}" is not loopback — refusing to wipe`,
-    )
-  }
-}
+export { refuseUnsafeTestUrl } from './authUrl.ts'
 
 function migrationFiles(): string[] {
   const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort()
@@ -167,26 +155,5 @@ export async function openIsolationHarness(): Promise<IsolationHarness> {
     async close() {
       await client.end()
     },
-  }
-}
-
-export async function openIsolationSql(): Promise<{ sql: Sql; close: () => Promise<void> }> {
-  const url = process.env.ZEROED_REAL_PG === '1' ? process.env.DATABASE_URL?.trim() : ''
-  if (!url) {
-    const db = new PGlite()
-    await applyIsolationSchema(db)
-    return {
-      sql: makePgliteSql(db),
-      close: async () => {
-        await db.close()
-      },
-    }
-  }
-  const client = new Client({ connectionString: url })
-  await client.connect()
-  await applyIsolationSchemaPg(client)
-  return {
-    sql: makeClientSql((text, params) => client.query(text, params ?? [])),
-    close: () => client.end(),
   }
 }

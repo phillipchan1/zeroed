@@ -6,11 +6,13 @@
 import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { refuseUnsafeTestUrl } from '../worker/src/authUrl.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
 const url = process.env.DATABASE_URL?.trim()
 if (!url) throw new Error('DATABASE_URL is required for check:postgres')
+refuseUnsafeTestUrl(url, 'DATABASE_URL')
 
 function run(label, args, extraEnv = {}) {
   const res = spawnSync(process.execPath, args, {
@@ -34,9 +36,7 @@ for (let i = 1; i <= 5; i++) {
   console.log(`sequential withSql ${i}/5 ok`)
 }
 
-run('access isolation on Postgres', ['--experimental-strip-types', 'worker/src/access.check.ts'], {
-  ZEROED_REAL_PG: '1',
-})
+run('access isolation on Postgres', ['--experimental-strip-types', 'worker/src/access.check.ts'])
 run(
   'better-auth schema',
   ['--experimental-strip-types', 'scripts/prove-better-auth-schema.mjs'],
