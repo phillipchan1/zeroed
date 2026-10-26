@@ -327,7 +327,9 @@ const EMPTY_PARSE: ParsedPrescription = {
 
 const QUALITATIVE = /^(light|moderate|heavy|bodyweight|bw)$/i
 const SETS_REPS = /(\d+)\s*[x×]\s*(\d+(?:\.\d+)?)(?:\s*(lbs?|kg|#)\b)?/i
+const MAX_REALISTIC_SETS = 10
 const MAX_REALISTIC_REPS = 30
+const MIN_BARE_LOAD = 20
 const PERCENT = /(\d+(?:\.\d+)?)\s*(?:[-–—]\s*(\d+(?:\.\d+)?))?\s*%(?:\s*(?:of\s+)?1\s*rm)?/i
 const RPE = /\brpe\s*[:\s]*(\d+(?:\.\d+)?)/i
 const LOAD_UNIT = /(?:(?:about|approx(?:imately)?|around)\s+)?~?\s*(\d+(?:\.\d+)?)\s*(lbs?|kg|#)\b/i
@@ -350,18 +352,39 @@ export function parsePrescription(load: string | null | undefined): ParsedPrescr
 
   const sxr = rest.match(SETS_REPS)
   if (sxr) {
-    const sets = Number(sxr[1])
-    const second = Number(sxr[2])
+    const left = Number(sxr[1])
+    const right = Number(sxr[2])
     const unitTok = sxr[3]
-    if (second > MAX_REALISTIC_REPS || unitTok) {
-      // "2x170" is two sets at 170, not 2×170 reps. A unit on the second
-      // number is a load even when the count would be a plausible rep.
-      out.sets = Number.isFinite(sets) ? sets : null
-      if (Number.isFinite(second) && second > 0) out.load = second
-      if (unitTok) out.loadUnit = unitTok.toLowerCase() === 'kg' ? 'kg' : 'lb'
+    const unit: WeightUnit | null = unitTok
+      ? (unitTok.toLowerCase() === 'kg' ? 'kg' : 'lb')
+      : null
+    const leftSets = left >= 1 && left <= MAX_REALISTIC_SETS
+    const rightReps = right >= 1 && right <= MAX_REALISTIC_REPS
+    const leftLoad = left >= MIN_BARE_LOAD
+    const rightLoad = right >= MIN_BARE_LOAD
+    // In NxM, a number outside realistic sets (>10) or reps (>30) is a load.
+    // A unit on the right number always wins. 3x25 is both 25 reps and 25 lb
+    // — ambiguous, no +5% unless a separate load is given.
+    if (unit) {
+      out.load = right
+      out.loadUnit = unit
+      if (leftSets) out.sets = left
+      else out.ambiguous = true
+    } else if (!leftSets && leftLoad && rightReps) {
+      out.load = left
+      out.reps = right
+    } else if (leftSets && right > MAX_REALISTIC_REPS) {
+      out.sets = left
+      out.load = right
+    } else if (leftSets && rightReps && rightLoad) {
+      out.sets = left
+      out.reps = right
+      out.ambiguous = true
+    } else if (leftSets && rightReps) {
+      out.sets = left
+      out.reps = right
     } else {
-      out.sets = Number.isFinite(sets) ? sets : null
-      out.reps = Number.isFinite(second) ? second : null
+      out.ambiguous = true
     }
     rest = rest.replace(sxr[0], ' ')
   }
