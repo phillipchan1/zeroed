@@ -64,64 +64,52 @@ Rules, so it stays dialed-in rather than gimmicky:
 New primitives: `LockOn` (corner brackets), `.converge`, `.stagger`,
 `TickingNumber` `format` prop, `tick()`.
 
-## Screen findings (not yet addressed)
+## Round two (shipped)
 
-Ordered by how much they'd improve the feel per hour spent.
+Everything the first pass left as findings, done.
 
-### Workout, the screen that matters most
-- **Prescription is stated twice.** The chip `225 LBS · +5 FROM LAST WEEK` and the
-  column header row `LB 225 lbs / REPS 5` say the same thing. Keep the chip;
-  make the header just column labels.
-- **The `RPE` placeholder looks filled.** It renders bright and bold while
-  `lb`/`reps` placeholders are dim, so an empty RPE reads as entered.
-- **The title truncates** (`Lower A — Squat…`) because `WHY` and `COACH` pills
-  take half the header. Icon-only buttons would give the name its width back.
-- **`Complete workout` goes full signal-yellow after 1 of 13 sets.** It competes
-  with the next set for the eye. Keep it quiet (outline) until the last
-  exercise is reached.
-- **The rest pill floats over content** (covers `Add set` and the felt chips).
-  Dock it in the footer above Complete, where it can't cover a tap target.
+### Workout
+- **Today's target, everywhere.** The set header and the one-tap check used the
+  program's raw load text, while Train's preview and the hint chip quoted the
+  engine's target. So the preview could say 230 and the check could log last
+  week's 225. Both now use the target (the uncapped number when *Push it* is on),
+  and set 1 no longer carries last session's weight over it.
+- **Placeholders preview the tap.** An empty field shows, dimmed and light, exactly
+  what ✓ will log into it. An empty RPE now looks empty.
+- **Header:** *Why* and *Coach* are icon buttons, so the session name fits.
+- **Complete** is a quiet outline until you reach the last lift.
+- **Rest timer** docks in the footer above Complete instead of floating over the
+  set list. When it runs out, **Rest's up · next set** locks on in its place.
 
-### Today
-- No gap between *The read* and the *Done with the week?* banner.
-- The week ring is the best "instrument" element in the app. When the last
-  planned session lands, it should close with a lock-on: **Week zeroed**.
+### Feel
+- **Haptics** (`@capacitor/haptics`): light per set, heavy on a PR, success at
+  the finish, warning when rest is up. This is native in the iOS shell, falls back
+  to vibrate on Android web, and does nothing on iOS Safari.
+- **Sound effects** (Profile → *Sound effects*, **off by default**: every Web
+  Audio play can duck your music): a click per set, a rising fifth on a PR, a
+  three-note chord closing onto the octave at the finish. These are short sine
+  tones, never longer than half a second. The rest beep keeps its own switch.
+- **Starting a session** zooms into it (View Transitions; Chrome, Safari 18+).
 
-### Coach
-- The empty state is a void under three suggestion chips. Put the reticle (large,
-  with its state label) at the top as the coach's presence. That one element is
-  already a live picture of what the coach knows.
-- Suggestion chips are 42px, under the 44px floor (`check-layout` notes).
+### Moments
+- **Week zeroed.** When the week is full, the brackets close on the ring. The
+  finish screen says *Week zeroed* only for the session that filled it.
+- **Coach presence.** While the thread is empty, the live reticle (with its state
+  label) sits at the top of Coach. Suggestion chips meet the 44px floor.
 
-### History
-- Lift pills are tappable but look like tags, and the subtitle (*"Tap a session
-  to review it, or a lift…"*) is instruction copy compensating for that. Give
-  them an affordance (a chevron or a 3-point sparkline) and drop the sentence.
+### System
+- **History** lift pills look like what they are, a door to the lift's line:
+  the name in Inter, the set in mono, and a trend glyph. The instruction sentence
+  is gone.
+- **Program** has one yellow: the phase name. Week dots and the *Change the
+  program* card went to text tones and the standard border.
+- **Type rule, in code:** `.readout` for the big mono instrument words (phase,
+  recap verdict) and `.meta` for metadata lines (Inter, tabular figures). Mono
+  is for numbers, units, labels and readouts; Inter is for anything read as words.
+- Today: spacing under *The read*.
 
-### Program
-- Three yellow signals on one screen. Make the phase name the only one; the week
-  dots can be text-coloured and the *Change the program* card can use the
-  standard border.
-
-### Type rule (proposed)
-- **Mono** = numbers, units, and labels (eyebrows, chips, column heads).
-- **Inter** = anything read as words, metadata lines included
-  (`2 exercises · last Oct 14` becomes Inter with mono only on `2` and `Oct 14`).
-- Big "instrument readouts" (phase name, recap verdict) get one named class,
-  `.readout`, instead of the inline `fontFamily: var(--font-mono)` styles they
-  use today.
-
-## Next fun, ranked
-
-1. **Native haptics on iOS.** `navigator.vibrate` is ignored on iOS, including in
-   the Capacitor shell. Add `@capacitor/haptics` and swap the body of `tick()`:
-   light impact on a set, success notification on finish, heavy on a PR. This is
-   the single biggest "dialed-in tool" upgrade, and it needs a TestFlight build.
-2. **Week zeroed.** The ring-closing moment above.
-3. **Rest timer lock.** A countdown ring around the pill; at zero, the brackets
-   lock on and it pulses once (pairs with the existing beep/buzz).
-4. **Coach presence.** The reticle as the coach's avatar (above).
-5. **Session card → workout shared transition** via the View Transitions API
-   (Safari 18+), so starting a session feels like zooming into it.
-6. **One sound setting.** Rename *Rest timer sound* to *Sounds* and add an
-   optional soft click on set-complete.
+## Still open
+- Retire the remaining inline `fontFamily: var(--font-mono)` styles screen by
+  screen in favour of `.readout` / `.meta` / `.num`.
+- Shared-element morph from the session card title into the workout header
+  (needs a per-card `view-transition-name`).

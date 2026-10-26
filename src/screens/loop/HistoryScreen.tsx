@@ -1,4 +1,5 @@
 import { useState } from 'react'
+import { TrendingUp } from 'lucide-react'
 import { useNavigate } from 'react-router-dom'
 import { useCachedLoader } from '../../lib/cache'
 import {
@@ -50,7 +51,7 @@ function LogSessionCard({
     >
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
         <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700, minWidth: 0 }}>{s.routineName}</h3>
-        <span className="num text-xs text-dim" style={{ whiteSpace: 'nowrap' }}>
+        <span className="meta" style={{ whiteSpace: 'nowrap' }}>
           {dayAndDate(s.performedAt)}
         </span>
       </div>
@@ -68,18 +69,19 @@ function LogSessionCard({
       {s.highlights.length > 0 && (
         <div style={{ marginTop: 12, display: 'flex', flexWrap: 'wrap', gap: 8 }} onClick={(e) => e.stopPropagation()}>
           {s.highlights.map((h, i) => (
+            // A lift is a door to its progression, so it looks like one: name in
+            // the reading face, the set in mono, and a trend glyph that says
+            // "there's a line behind this" without a sentence telling you to tap.
             <button
               key={i}
               type="button"
               onClick={() => onExercise(h.name)}
-              className="num"
-              style={{
-                minHeight: 36, padding: '6px 12px', cursor: 'pointer',
-                background: 'var(--ground)', border: '1px solid var(--line)', borderRadius: 999,
-                color: 'var(--text-dim)', fontSize: 'var(--fs-xs)',
-              }}
+              className="lift-pill"
+              aria-label={`${h.name} ${fmtSet(h.set, u)} — see progression`}
             >
-              {h.name} {fmtSet(h.set, u)}
+              <span>{h.name}</span>
+              <span className="num lift-pill__set">{fmtSet(h.set, u)}</span>
+              <TrendingUp size={14} strokeWidth={2} className="lift-pill__icon" aria-hidden />
             </button>
           ))}
         </div>
@@ -207,7 +209,7 @@ function BalanceCard({ balance, u }: { balance: BalanceRead; u: UnitContext }) {
     <div className="card fade-rise" style={{ marginBottom: 28 }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
         <SectionHeader>Balance</SectionHeader>
-        <span className="num text-xs text-dim">vs your own lifts</span>
+        <span className="meta">vs your own lifts</span>
       </div>
 
       <p className="text-base" style={{ marginTop: 12, marginBottom: 18, lineHeight: 1.5 }}>
@@ -270,7 +272,6 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
         <PageHeader
           eyebrow="The log"
           title="History"
-          subtitle="Tap a session to review it, or a lift to see its progression."
           onBack={() => navigate('/app/today')}
         />
 

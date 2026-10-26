@@ -1,10 +1,15 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check } from 'lucide-react'
 import { LockOn, TickingNumber } from './ui'
+import { success } from '../lib/haptics'
+import { playZeroed } from '../lib/restAlert'
 
 /** What a just-finished session came to — handed from the workout screen to
  *  Today through router state, so it never outlives the navigation. */
 export interface FinishedSession {
+  /** The outbox id it was queued under — lets Train tell whether THIS session
+   *  is the one that filled the week. */
+  pendingId: string
   name: string
   sets: number
   /** Total load in the DISPLAY unit, already converted. 0 = nothing loaded. */
@@ -31,7 +36,12 @@ const reducedMotion = () =>
  * It celebrates numbers the athlete actually produced, never a streak or a
  * badge invented to make them come back.
  */
-export function SessionZeroed({ session, onDone }: { session: FinishedSession; onDone: () => void }) {
+export function SessionZeroed({ session, week, onDone }: {
+  session: FinishedSession
+  /** Set when this session filled the week's plan. */
+  week?: { done: number; planned: number } | null
+  onDone: () => void
+}) {
   const [counting, setCounting] = useState(false)
   const [leaving, setLeaving] = useState(false)
   const doneRef = useRef(onDone)
@@ -39,7 +49,7 @@ export function SessionZeroed({ session, onDone }: { session: FinishedSession; o
 
   useEffect(() => {
     // Start the count-up just after the check lands, and leave on our own.
-    const start = setTimeout(() => setCounting(true), 450)
+    const start = setTimeout(() => { setCounting(true); success(); playZeroed() }, 450)
     const leave = setTimeout(() => setLeaving(true), HOLD_MS)
     return () => { clearTimeout(start); clearTimeout(leave) }
   }, [])
@@ -77,7 +87,7 @@ export function SessionZeroed({ session, onDone }: { session: FinishedSession; o
         </span>
       </LockOn>
 
-      <p className="eyebrow zeroed-moment__eyebrow converge">Session zeroed</p>
+      <p className="eyebrow zeroed-moment__eyebrow converge">{week ? 'Week zeroed' : 'Session zeroed'}</p>
       <h1 className="screen-title zeroed-moment__title">{session.name}</h1>
 
       <div className="zeroed-moment__stats">
@@ -102,6 +112,12 @@ export function SessionZeroed({ session, onDone }: { session: FinishedSession; o
           <span className="text-sm" style={{ marginLeft: 10, color: 'var(--text)' }}>
             {prs.slice(0, 2).join(' · ')}{prs.length > 2 ? ` +${prs.length - 2}` : ''}
           </span>
+        </p>
+      )}
+
+      {week && (
+        <p className="zeroed-moment__pr num text-sm" style={{ color: 'var(--confirmed)' }}>
+          {week.done} of {week.planned} this week · every session in
         </p>
       )}
 

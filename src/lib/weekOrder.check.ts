@@ -38,5 +38,23 @@ eq('Full day names count', dayFromName('Thursday Lower'), 3)
 eq('Sat', dayFromName('Sat Long Run'), 5)
 eq('No day', dayFromName('Upper A'), null)
 
+eq('projected sessions sort Mon → Sun by planned day',
+  orderByPlannedDay(
+    [
+      { name: 'Fri Speed Bench', intended_dow: 4 },
+      { name: 'Mon Lower', intended_dow: 0 },
+      { name: 'Wed Posterior', intended_dow: 2 },
+    ],
+    (r) => r.intended_dow,
+  ).map((r) => r.name.slice(0, 3)),
+  ['Mon', 'Wed', 'Fri'])
+
+eq('name-led days fill in when intended_dow is missing',
+  orderByPlannedDay(
+    [{ name: 'Thu OHP' }, { name: 'Tue Bench' }, { name: 'Sun Easy' }],
+    () => null,
+  ).map((r) => r.name.slice(0, 3)),
+  ['Tue', 'Thu', 'Sun'])
+
 if (failed) { console.error(`${failed} failed`); process.exit(1) }
 console.log('weekOrder.check: ok')

@@ -14,6 +14,7 @@
 
 import { supabase } from './supabaseClient'
 import type { SetLog, ExerciseFeedback, WorkoutDraftRow } from '../types/database'
+import { weekWindowInZone, upcomingWeekWindow, isoInWeek } from '../engine/weekDates'
 
 export interface DraftPayload {
   setLogs: Record<number, SetLog[]>
@@ -40,7 +41,10 @@ export function weekStart(now = new Date()): Date {
 }
 
 function withinThisWeek(startedAt: string, now = new Date()): boolean {
-  return new Date(startedAt).getTime() >= weekStart(now).getTime()
+  const cur = weekWindowInZone(now)
+  const next = upcomingWeekWindow(now)
+  return isoInWeek(startedAt, cur.weekStart, cur.weekEnd)
+    || isoInWeek(startedAt, next.weekStart, next.weekEnd)
 }
 
 function setsLoggedIn(setLogs: Record<string, SetLog[]> | null | undefined): number {
@@ -247,8 +251,8 @@ export async function loadActiveDraft(athleteId: string): Promise<ActiveDraft | 
 // Every routine with a live (this-week) draft, for the week view's "In progress"
 // markers. Offline-first: the local scan alone is enough; the remote set is
 // merged in when reachable (cross-device drafts).
-export async function loadDraftRoutineIds(athleteId: string): Promise<string[]> {
-  const ids = new Set<string>()
+export async function loadDraftStarts(athleteId: string): Promise<Record<string, string>> {
+  const starts: Record<string, string> = {}
   try {
     const keys: string[] = []
     for (let i = 0; i < localStorage.length; i++) {
@@ -257,7 +261,8 @@ export async function loadDraftRoutineIds(athleteId: string): Promise<string[]> 
     }
     for (const k of keys) {
       const routineId = k.slice(LOCAL_PREFIX.length)
-      if (readStored(routineId)) ids.add(routineId)   // readStored sweeps stale
+      const s = readStored(routineId)
+      if (s?.startedAt) starts[routineId] = s.startedAt
     }
   } catch { /* non-fatal */ }
 
@@ -266,11 +271,14 @@ export async function loadDraftRoutineIds(athleteId: string): Promise<string[]> 
       .from('workout_draft')
       .select('routine_id, started_at')
       .eq('athlete_id', athleteId)
-    const monday = weekStart()
     for (const r of (data ?? []) as { routine_id: string; started_at: string }[]) {
-      if (new Date(r.started_at).getTime() >= monday.getTime()) ids.add(r.routine_id)
+      if (r.started_at) starts[r.routine_id] = starts[r.routine_id] ?? r.started_at
     }
   } catch { /* offline — local set covers it */ }
 
-  return [...ids]
+  return starts
+}
+
+export async function loadDraftRoutineIds(athleteId: string): Promise<string[]> {
+  return Object.keys(await loadDraftStarts(athleteId))
 }

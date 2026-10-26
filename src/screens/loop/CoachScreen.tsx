@@ -12,6 +12,8 @@ import {
   applyCoachActions, describeCoachAction,
 } from '../../engine'
 import type { CoachContext, CoachChatTurn, CoachAction } from '../../engine/agentClient'
+import { ConvergenceReticle } from '../../components/convergence/ConvergenceReticle'
+import { computeLoopConvergence } from '../../components/convergence/state'
 import type { InsightRow, CoachMessageRow, WeeklyPrescription } from '../../types/database'
 
 /**
@@ -132,6 +134,10 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   const p1read = active[0] ?? null         // the anchor read, always shown
   const rest   = active.slice(1)           // the rest of the stack, one tap away
   const statusCounts = countInsightsByStatus(insights)
+  // The coach's presence: the same live reticle the desktop rail carries, read
+  // off the whole stack. Only while the thread is empty — once you're talking,
+  // the conversation is the screen.
+  const conv = active.length ? computeLoopConvergence(insights, Date.now()) : null
 
   // The pre-emptive opener — the system has already noticed something. Deterministic
   // (no model call) so the conversation feels alive the instant it loads.
@@ -305,6 +311,16 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             title, and the input placeholder already says what this is for. */}
         <div className="fade-rise fade-rise-delay-1 page__main coach-convo">
           <div className="coach-chat" style={{ marginTop: 12 }}>
+            {conv && turns.length === 0 && (
+              <div className="coach-presence">
+                <ConvergenceReticle
+                  confidence={conv.confidence}
+                  axes={conv.axes}
+                  context={conv.context}
+                  size={132}
+                />
+              </div>
+            )}
             {/* Pre-emptive opener. Speaker is read from alignment + fill, not a
                 label — one presence dot per screen lives in the telemetry strip. */}
             {context && (

@@ -44,6 +44,14 @@ export interface LiveProgram {
     exercises: ExerciseTemplate[]
   }>
   scheduledPhase: { id: string; name: string; weekStart: string } | null
+  scheduledSessions: Array<{
+    routineId: string
+    name: string
+    intent: string
+    sessionType: string
+    intendedDow: number | null
+    exercises: ExerciseTemplate[]
+  }>
 }
 
 export interface WorkoutRowView extends LoggedWorkoutLike {
@@ -169,6 +177,38 @@ export async function loadLiveProgram(store: ConnectedStore): Promise<LiveProgra
     SELECT sessions_per_week, training_preferences FROM athlete WHERE id = ${store.athleteId} LIMIT 1
   `
 
+  const mapSession = (r: {
+    id: string
+    name: string
+    intent: string | null
+    session_type: string | null
+    intended_dow: number | null
+    exercises: unknown
+  }) => ({
+    routineId: r.id,
+    name: r.name,
+    intent: r.intent ?? '',
+    sessionType: r.session_type ?? 'strength',
+    intendedDow: r.intended_dow ?? null,
+    exercises: asJson<ExerciseTemplate[]>(r.exercises, []),
+  })
+
+  const queuedRoutines = queued
+    ? await store.sql<{
+      id: string
+      name: string
+      intent: string | null
+      session_type: string | null
+      intended_dow: number | null
+      exercises: unknown
+    }[]>`
+      SELECT id, name, intent, session_type, intended_dow, exercises
+      FROM routine
+      WHERE program_id = ${prog.id} AND phase_id = ${queued.id}
+      ORDER BY intended_dow NULLS LAST, name
+    `
+    : []
+
   return {
     programId: prog.id,
     goal: prog.goal ?? null,
@@ -180,17 +220,11 @@ export async function loadLiveProgram(store: ConnectedStore): Promise<LiveProgra
     advancementCriteria: asJson<string[]>(phaseRow.advancement_criteria, []),
     sessionsPerWeek: Number(athlete?.sessions_per_week) || Math.max(1, routineRows.length),
     standingPreferences: athlete?.training_preferences ?? null,
-    sessions: routineRows.map((r) => ({
-      routineId: r.id,
-      name: r.name,
-      intent: r.intent ?? '',
-      sessionType: r.session_type ?? 'strength',
-      intendedDow: r.intended_dow ?? null,
-      exercises: asJson<ExerciseTemplate[]>(r.exercises, []),
-    })),
+    sessions: routineRows.map(mapSession),
     scheduledPhase: queued
       ? { id: queued.id, name: queued.name, weekStart: queued.week_start }
       : null,
+    scheduledSessions: queuedRoutines.map(mapSession),
   }
 }
 
