@@ -106,8 +106,10 @@ jobs:
           BUILD_NUMBER=$(git rev-list --count HEAD)
           MAJOR_MINOR=$(node -p "require('./package.json').version.split('.').slice(0,2).join('.')")
           VERSION="${MAJOR_MINOR}.${BUILD_NUMBER}"
-          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          {
+            echo "APP_VERSION=$VERSION"
+            echo "BUILD_NUMBER=$BUILD_NUMBER"
+          } >> "$GITHUB_ENV"
           echo "Building iOS version $VERSION (build $BUILD_NUMBER)"
 
       - name: Configure App Store Connect API key
@@ -122,9 +124,11 @@ jobs:
           KEY_PATH="${KEY_DIR}/AuthKey_${APPSTORE_KEY_ID}.p8"
           echo "$APPSTORE_PRIVATE_KEY" | base64 --decode > "$KEY_PATH"
           chmod 600 "$KEY_PATH"
-          echo "APPLE_API_KEY=${APPSTORE_KEY_ID}" >> "$GITHUB_ENV"
-          echo "APPLE_API_ISSUER=${APPSTORE_ISSUER_ID}" >> "$GITHUB_ENV"
-          echo "APPLE_API_KEY_PATH=${KEY_PATH}" >> "$GITHUB_ENV"
+          {
+            echo "APPLE_API_KEY=${APPSTORE_KEY_ID}"
+            echo "APPLE_API_ISSUER=${APPSTORE_ISSUER_ID}"
+            echo "APPLE_API_KEY_PATH=${KEY_PATH}"
+          } >> "$GITHUB_ENV"
 
       - name: Resolve build number against App Store Connect
         run: |
@@ -188,8 +192,10 @@ jobs:
           PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$PROFILE_PLIST")
           cp "$PROFILE_PATH" "$PROFILES_DIR/${PROFILE_UUID}.mobileprovision"
 
-          echo "SIGNING_STYLE=manual" >> "$GITHUB_ENV"
-          echo "IOS_PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
+          {
+            echo "SIGNING_STYLE=manual"
+            echo "IOS_PROFILE_NAME=$PROFILE_NAME"
+          } >> "$GITHUB_ENV"
           echo "Using manual signing (IOS_CERTIFICATE + provisioning profile '$PROFILE_NAME')."
 
       - name: Build signed IPA
