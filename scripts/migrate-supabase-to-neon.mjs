@@ -227,6 +227,64 @@ export function libpqCleanEnv(base = process.env) {
   return env
 }
 
+/** Same GUC pins on every checksum session so source and Neon md5s match. */
+export const CHECKSUM_SESSION_GUC = Object.freeze({
+  TimeZone: 'UTC',
+  extra_float_digits: '1',
+  IntervalStyle: 'postgres',
+})
+
+export function checksumPgOptions() {
+  return '-c TimeZone=UTC -c extra_float_digits=1 -c IntervalStyle=postgres'
+}
+
+export function checksumSessionSetSql() {
+  return [
+    "SET TimeZone = 'UTC'",
+    'SET extra_float_digits = 1',
+    "SET IntervalStyle = 'postgres'",
+  ].join('; ')
+}
+
+/** Snapshot session stays open for the whole dump; disable idle/statement kills. */
+export const SNAPSHOT_TIMEOUT_SQL = [
+  'SET statement_timeout = 0',
+  'SET idle_in_transaction_session_timeout = 0',
+].join('; ')
+
+/**
+ * Transaction-mode PgBouncer cannot hold REPEATABLE READ / pg_export_snapshot.
+ * Supabase transaction pooler is port 6543; session mode is 5432 on the pooler
+ * host; direct is db.*.supabase.co:5432.
+ */
+export function refuseTransactionPoolerReason(sourceUrl) {
+  let parts
+  let parsed
+  try {
+    parsed = new URL(sourceUrl)
+    parts = postgresUrlParts(sourceUrl)
+  } catch {
+    return 'source URL is not a valid postgres URL'
+  }
+  if (String(parts.port) === '6543') {
+    return 'source is the transaction pooler (port 6543); use a direct or session-mode connection'
+  }
+  const mode = String(
+    parsed.searchParams.get('mode')
+    || parsed.searchParams.get('pool_mode')
+    || parsed.searchParams.get('pooler')
+    || '',
+  ).toLowerCase()
+  if (mode === 'transaction') {
+    return 'source is the transaction pooler (mode=transaction); use a direct or session-mode connection'
+  }
+  const options = String(parsed.searchParams.get('options') || '')
+  if (/(?:^|[\s,])(?:pooler\s+)?(?:pool_)?mode=transaction(?:[\s,]|$)/i.test(options)) {
+    return 'source is the transaction pooler (mode=transaction); use a direct or session-mode connection'
+  }
+  return ''
+}
+
 export function newAdvisoryLockKey() {
   const buf = randomBytes(8)
   let key = buf.readBigInt64BE()
@@ -658,6 +716,8 @@ export async function withSourceSnapshot(sourceUrl, work) {
   })
   await client.connect()
   try {
+    await client.query(checksumSessionSetSql())
+    await client.query(SNAPSHOT_TIMEOUT_SQL)
     await client.query(SNAPSHOT_BEGIN_SQL)
     const exported = await client.query(SNAPSHOT_EXPORT_SQL)
     const snapshotId = String(exported.rows[0]?.snapshot || '')
@@ -856,7 +916,9 @@ function needBin(name) {
 }
 
 function psqlTuples(url, sql) {
-  return run('psql', ['-v', 'ON_ERROR_STOP=1', '-At', '-F', ',', '-d', url, '-c', sql])
+  const env = libpqCleanEnv()
+  env.PGOPTIONS = checksumPgOptions()
+  return run('psql', ['-v', 'ON_ERROR_STOP=1', '-At', '-F', ',', '-d', url, '-c', sql], { env })
 }
 
 function printDryRunCreatedAt(sourceUrl, targetUrl) {
@@ -953,6 +1015,9 @@ function printOfflineDryRun(args) {
     ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
     : 'dry-run: would leave any leftover RLS artifacts on Neon (pass --relax-target-rls to drop them on the target)')
   console.log('dry-run: would dump under REPEATABLE READ (pg_export_snapshot + pg_dump --snapshot) so counts/hashes match the dump')
+  console.log('dry-run: would pin TimeZone=UTC extra_float_digits=1 IntervalStyle=postgres on both checksum sessions')
+  console.log('dry-run: would set statement_timeout=0 and idle_in_transaction_session_timeout=0 on the snapshot session')
+  console.log('dry-run: would refuse a transaction-pooler source (port 6543 / mode=transaction); direct or session mode required')
   console.log('dry-run: would compare row counts and per-table content md5 (PK-ordered) and exit non-zero on mismatch')
   console.log('dry-run: would refuse if a public table is missing from the coverage list (Better Auth excluded on purpose)')
   console.log('dry-run: would require every source auth_user_id to appear in the mapping (ids, not counts)')
@@ -1018,6 +1083,12 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   const wipeReason = refuseSourceWipeReason(source, target)
   if (wipeReason) {
     console.error(`Refusing to continue: ${wipeReason}. Source is read-only.`)
+    return 2
+  }
+
+  const poolerReason = refuseTransactionPoolerReason(source)
+  if (poolerReason) {
+    console.error(`Refusing to continue: ${poolerReason}.`)
     return 2
   }
 
