@@ -259,6 +259,7 @@ const PARSER_PROBES: Array<{
   sets?: number | null
   reps?: number | null
   unit?: 'lb' | 'kg' | null
+  ambiguous?: boolean
 }> = [
   { load: '70%', explicit: null, percent: 70, rpe: null },
   { load: '70% 1RM', explicit: null, percent: 70, rpe: null },
@@ -274,6 +275,11 @@ const PARSER_PROBES: Array<{
   { load: 'RPE 5', explicit: null, percent: null, rpe: 5 },
   { load: '5x2 @70%', explicit: null, percent: 70, rpe: null, sets: 5, reps: 2 },
   { load: '77kg', explicit: 77, percent: null, rpe: null, unit: 'kg' },
+  { load: '2x170', explicit: 170, percent: null, rpe: null, sets: 2 },
+  { load: '2x170 lb', explicit: 170, percent: null, rpe: null, sets: 2, unit: 'lb' },
+  { load: 'heavy-ish', explicit: null, percent: null, rpe: null, ambiguous: true },
+  { load: 'top set', explicit: null, percent: null, rpe: null, ambiguous: true },
+  { load: 'work up', explicit: null, percent: null, rpe: null, ambiguous: true },
 ]
 
 for (const row of PARSER_PROBES) {
@@ -284,7 +290,7 @@ for (const row of PARSER_PROBES) {
   if (row.sets != null) eq(p.sets, row.sets, `${row.load} → sets ${row.sets}`)
   if (row.reps != null) eq(p.reps, row.reps, `${row.load} → reps ${row.reps}`)
   if (row.unit != null) eq(p.loadUnit, row.unit, `${row.load} → unit ${row.unit}`)
-  ok(!p.ambiguous, `${row.load} is not ambiguous`)
+  eq(p.ambiguous, !!row.ambiguous, `${row.load} ambiguous=${!!row.ambiguous}`)
 }
 
 ok(!allowsAutoProgress({
@@ -379,6 +385,10 @@ const PROJECT_PROBES: Array<{
   { load: '@70%', lastWeight: 250, lastRpe: 8, lastIntent: 'work', oneRm: 285, sessionIntent: 'Strength', expectWeight: 200, expectSource: 'explicit' },
   { load: '60-65%', lastWeight: 250, lastRpe: 8, lastIntent: 'work', oneRm: 280, sessionIntent: 'Strength', expectWeight: 175, expectSource: 'explicit' },
   { load: '70%', lastWeight: 250, lastRpe: 8, lastIntent: 'work', oneRm: null, sessionIntent: 'Strength', expectWeight: null, expectSource: 'explicit' },
+  { load: '2x170', lastWeight: 250, lastRpe: 8, lastIntent: 'work', sessionIntent: 'Strength', targetRpe: 8, expectWeight: 170, expectSource: 'explicit' },
+  { load: 'heavy-ish', lastWeight: 250, lastRpe: 8, lastIntent: 'work', sessionIntent: 'Strength', targetRpe: 8, expectWeight: null, expectSource: 'none' },
+  { load: 'top set', lastWeight: 250, lastRpe: 8, lastIntent: 'work', sessionIntent: 'Strength', targetRpe: 8, expectWeight: null, expectSource: 'none' },
+  { load: 'work up', lastWeight: 250, lastRpe: 8, lastIntent: 'work', sessionIntent: 'Strength', targetRpe: 8, expectWeight: null, expectSource: 'none' },
 ]
 
 for (const row of PROJECT_PROBES) {

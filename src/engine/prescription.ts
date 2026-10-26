@@ -326,7 +326,8 @@ const EMPTY_PARSE: ParsedPrescription = {
 }
 
 const QUALITATIVE = /^(light|moderate|heavy|bodyweight|bw)$/i
-const SETS_REPS = /(\d+)\s*[x×]\s*(\d+)/i
+const SETS_REPS = /(\d+)\s*[x×]\s*(\d+(?:\.\d+)?)(?:\s*(lbs?|kg|#)\b)?/i
+const MAX_REALISTIC_REPS = 30
 const PERCENT = /(\d+(?:\.\d+)?)\s*(?:[-–—]\s*(\d+(?:\.\d+)?))?\s*%(?:\s*(?:of\s+)?1\s*rm)?/i
 const RPE = /\brpe\s*[:\s]*(\d+(?:\.\d+)?)/i
 const LOAD_UNIT = /(?:(?:about|approx(?:imately)?|around)\s+)?~?\s*(\d+(?:\.\d+)?)\s*(lbs?|kg|#)\b/i
@@ -349,8 +350,19 @@ export function parsePrescription(load: string | null | undefined): ParsedPrescr
 
   const sxr = rest.match(SETS_REPS)
   if (sxr) {
-    out.sets = Number(sxr[1])
-    out.reps = Number(sxr[2])
+    const sets = Number(sxr[1])
+    const second = Number(sxr[2])
+    const unitTok = sxr[3]
+    if (second > MAX_REALISTIC_REPS || unitTok) {
+      // "2x170" is two sets at 170, not 2×170 reps. A unit on the second
+      // number is a load even when the count would be a plausible rep.
+      out.sets = Number.isFinite(sets) ? sets : null
+      if (Number.isFinite(second) && second > 0) out.load = second
+      if (unitTok) out.loadUnit = unitTok.toLowerCase() === 'kg' ? 'kg' : 'lb'
+    } else {
+      out.sets = Number.isFinite(sets) ? sets : null
+      out.reps = Number.isFinite(second) ? second : null
+    }
     rest = rest.replace(sxr[0], ' ')
   }
 
@@ -413,6 +425,13 @@ export function parsePrescription(load: string | null | undefined): ParsedPrescr
     .map((m) => Number(m[0]))
     .filter((n) => Number.isFinite(n) && n >= 20)
   if (leftovers.length) out.ambiguous = true
+
+  const parsedNumber = out.load != null || out.percent != null || out.rpe != null
+    || out.sets != null || out.reps != null
+  // Exact light/moderate/heavy/bodyweight stay qualitative. Any other
+  // non-empty text with no number ("heavy-ish", "top set", "work up")
+  // is ambiguous — never +5%. Empty load is left alone.
+  if (!parsedNumber && !out.qualitative) out.ambiguous = true
 
   return out
 }
