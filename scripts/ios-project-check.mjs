@@ -40,7 +40,7 @@ if (pbx) {
   if (/MARKETING_VERSION = 0\.1\.0;/.test(pbx)) ok('pbxproj MARKETING_VERSION 0.1.0')
   else fail('pbxproj MARKETING_VERSION', 'expected 0.1.0 (package.json major.minor)')
 
-  if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (CI overrides for manual fallback)')
+  if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (CI uses cloud-managed ASC signing)')
   else fail('pbxproj CODE_SIGN_STYLE')
 }
 
@@ -96,20 +96,59 @@ if (!existsSync(iconPath)) {
 
 const workflow = read('.github/workflows/ios-release.yml')
 if (workflow) {
-  if (workflow.includes('workflow_dispatch:')) ok('ios-release.yml is manually dispatched')
-  else fail('ios-release.yml trigger')
+  if (workflow.includes('workflow_dispatch:')) ok('ios-release.yml keeps workflow_dispatch')
+  else fail('ios-release.yml workflow_dispatch')
+  if (
+    /push:\s*\n\s*branches:\s*\[master\]/.test(workflow) ||
+    workflow.includes('branches: [master]')
+  ) {
+    ok('ios-release.yml runs on push to master')
+  } else fail('ios-release.yml push-to-master trigger')
+
+  if (workflow.includes('vars.VITE_API_BASE_URL')) {
+    ok('workflow reads VITE_API_BASE_URL from a repo variable')
+  } else fail('workflow VITE_API_BASE_URL var')
+  if (workflow.includes('unset VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY')) {
+    ok('workflow does not bake VITE_SUPABASE_* when VITE_API_BASE_URL is set')
+  } else fail('workflow still bakes VITE_SUPABASE_* unconditionally')
+
+  if (
+    workflow.includes('ready=false') &&
+    workflow.includes('Skipping iOS TestFlight') &&
+    /needs\.secrets-ready\.outputs\.ready == 'true'/.test(workflow)
+  ) {
+    ok('workflow skips TestFlight (green) when secrets are missing')
+  } else fail('workflow missing-secrets skip')
+
   for (const secret of [
-    'APPSTORE_KEY_ID',
-    'APPSTORE_ISSUER_ID',
-    'APPSTORE_PRIVATE_KEY',
+    'ASC_API_KEY_ID',
+    'ASC_API_ISSUER_ID',
+    'ASC_API_KEY_P8',
     'APPLE_TEAM_ID',
-    'IOS_CERTIFICATE',
-    'IOS_CERTIFICATE_PASSWORD',
-    'IOS_MOBILE_PROVISION',
   ]) {
     if (workflow.includes(secret)) ok(`workflow references ${secret}`)
     else fail(`workflow missing secret ${secret}`)
   }
+
+  for (const dropped of [
+    'IOS_CERTIFICATE',
+    'IOS_CERTIFICATE_PASSWORD',
+    'IOS_MOBILE_PROVISION',
+    'APPSTORE_KEY_ID',
+    'APPSTORE_ISSUER_ID',
+    'APPSTORE_PRIVATE_KEY',
+  ]) {
+    if (workflow.includes(dropped)) fail(`workflow still references dropped secret ${dropped}`)
+    else ok(`workflow dropped ${dropped}`)
+  }
+
+  if (workflow.includes('-allowProvisioningUpdates') && workflow.includes('-authenticationKeyPath')) {
+    ok('workflow uses automatic signing with ASC API key')
+  } else fail('workflow automatic signing / authenticationKey flags')
+
+  if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete App Store Connect API key')) {
+    ok('workflow deletes the .p8 in an always() step')
+  } else fail('workflow .p8 cleanup')
 }
 
 const exportScript = join(root, 'scripts/ios-write-export-options.sh')

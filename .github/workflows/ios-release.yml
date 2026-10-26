@@ -1,23 +1,25 @@
 name: iOS TestFlight
 
 # Builds a signed iOS IPA and uploads to Internal TestFlight.
-# Manual only — this is not a web prod deploy and does not submit for App Review.
+# Not a web prod deploy and does not submit for App Review / external testers.
 # One-time Apple + GitHub secrets setup: docs/ios-releases.md
 #
-# Mirrors phillipchan1/nuvo `.github/workflows/ios-release.yml`:
-#   - same account-level secret names (ASC API key, team id, distribution cert)
+# Signing is automatic + cloud-managed via an App Store Connect API key
+# (no .p12, no hand-made provisioning profile):
+#   xcodebuild archive / -exportArchive
+#     -allowProvisioningUpdates
+#     -authenticationKeyPath / -authenticationKeyID / -authenticationKeyIssuerID
+#
+# Also:
+#   - push to master + workflow_dispatch
 #   - version stamp <major>.<minor>.<commit_count>
 #   - scripts/appstore-next-build-number.mjs so a re-run never collides
-#   - xcodebuild archive + export (Nuvo wraps this in `tauri ios build`;
-#     Zeroed is Capacitor, so the xcodebuild is inlined)
-#   - xcrun altool --upload-app
-#
-# Zeroed differences (intentional):
-#   - workflow_dispatch only (no push-to-master auto-upload)
-#   - Capacitor ios/ project, not Tauri src-tauri/gen/apple
-#   - no watch / widget targets
+#   - skip green when the ASC secrets are missing
+#   - VITE_API_BASE_URL from a repo variable; VITE_SUPABASE_* only when it is empty
 
 on:
+  push:
+    branches: [master]
   workflow_dispatch:
 
 permissions:
@@ -28,7 +30,48 @@ env:
   IOS_BUNDLE_ID: app.zeroed.app
 
 jobs:
+  secrets-ready:
+    name: Check TestFlight secrets
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.guard.outputs.ready }}
+    steps:
+      - name: Require App Store Connect API key secrets
+        id: guard
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
+          VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+        run: |
+          set -euo pipefail
+          missing=()
+          [ -n "${ASC_API_KEY_ID:-}" ] || missing+=("ASC_API_KEY_ID")
+          [ -n "${ASC_API_ISSUER_ID:-}" ] || missing+=("ASC_API_ISSUER_ID")
+          [ -n "${ASC_API_KEY_P8:-}" ] || missing+=("ASC_API_KEY_P8")
+          [ -n "${APPLE_TEAM_ID:-}" ] || missing+=("APPLE_TEAM_ID")
+          if [ -z "${VITE_API_BASE_URL:-}" ]; then
+            [ -n "${VITE_SUPABASE_URL:-}" ] || missing+=("VITE_SUPABASE_URL")
+            [ -n "${VITE_SUPABASE_ANON_KEY:-}" ] || missing+=("VITE_SUPABASE_ANON_KEY")
+          fi
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::notice::Skipping iOS TestFlight — missing GitHub Actions secrets: ${missing[*]}."
+            echo "Add them under Settings → Secrets and variables → Actions. See docs/ios-releases.md."
+            echo "The TestFlight job stays skipped (workflow stays green) until those secrets exist."
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "TestFlight secrets are present — continuing."
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
   testflight:
+    name: Upload Internal TestFlight
+    needs: secrets-ready
+    if: needs.secrets-ready.outputs.ready == 'true'
     concurrency:
       group: ios-testflight
       cancel-in-progress: true
@@ -55,29 +98,41 @@ jobs:
           BUILD_NUMBER=$(git rev-list --count HEAD)
           MAJOR_MINOR=$(node -p "require('./package.json').version.split('.').slice(0,2).join('.')")
           VERSION="${MAJOR_MINOR}.${BUILD_NUMBER}"
-          echo "APP_VERSION=$VERSION" >> "$GITHUB_ENV"
-          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+          {
+            echo "APP_VERSION=$VERSION"
+            echo "BUILD_NUMBER=$BUILD_NUMBER"
+          } >> "$GITHUB_ENV"
           echo "Building iOS version $VERSION (build $BUILD_NUMBER)"
 
-      - name: Configure App Store Connect API key
+      - name: Write App Store Connect API key
         env:
-          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
-          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
-          APPSTORE_PRIVATE_KEY: ${{ secrets.APPSTORE_PRIVATE_KEY }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
         run: |
           set -euo pipefail
-          if [ -z "${APPSTORE_KEY_ID:-}" ] || [ -z "${APPSTORE_ISSUER_ID:-}" ] || [ -z "${APPSTORE_PRIVATE_KEY:-}" ]; then
-            echo "::error::Missing App Store Connect API secrets. See docs/ios-releases.md § One-time setup."
-            exit 1
+          KEY_PATH="${RUNNER_TEMP}/AuthKey_${ASC_API_KEY_ID}.p8"
+          if printf '%s' "$ASC_API_KEY_P8" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$ASC_API_KEY_P8" > "$KEY_PATH"
+          else
+            printf '%s' "$ASC_API_KEY_P8" | base64 --decode > "$KEY_PATH"
+            if ! grep -q -- '-----BEGIN' "$KEY_PATH"; then
+              echo "::error::ASC_API_KEY_P8 is neither a PEM .p8 nor valid base64 of one."
+              exit 1
+            fi
           fi
-          KEY_DIR="${HOME}/.appstoreconnect/private_keys"
-          mkdir -p "$KEY_DIR"
-          KEY_PATH="${KEY_DIR}/AuthKey_${APPSTORE_KEY_ID}.p8"
-          echo "$APPSTORE_PRIVATE_KEY" | base64 --decode > "$KEY_PATH"
           chmod 600 "$KEY_PATH"
-          echo "APPLE_API_KEY=${APPSTORE_KEY_ID}" >> "$GITHUB_ENV"
-          echo "APPLE_API_ISSUER=${APPSTORE_ISSUER_ID}" >> "$GITHUB_ENV"
-          echo "APPLE_API_KEY_PATH=${KEY_PATH}" >> "$GITHUB_ENV"
+          # altool looks up AuthKey_<id>.p8 under ~/.appstoreconnect/private_keys
+          ALTOOL_DIR="${HOME}/.appstoreconnect/private_keys"
+          mkdir -p "$ALTOOL_DIR"
+          cp "$KEY_PATH" "${ALTOOL_DIR}/AuthKey_${ASC_API_KEY_ID}.p8"
+          chmod 600 "${ALTOOL_DIR}/AuthKey_${ASC_API_KEY_ID}.p8"
+          {
+            echo "APPLE_API_KEY=${ASC_API_KEY_ID}"
+            echo "APPLE_API_ISSUER=${ASC_API_ISSUER_ID}"
+            echo "APPLE_API_KEY_PATH=${KEY_PATH}"
+            echo "APPLE_API_KEY_ALTOOL_PATH=${ALTOOL_DIR}/AuthKey_${ASC_API_KEY_ID}.p8"
+          } >> "$GITHUB_ENV"
 
       - name: Resolve build number against App Store Connect
         run: |
@@ -94,61 +149,19 @@ jobs:
 
       - name: Build web assets and sync Capacitor iOS
         env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
         run: |
           set -euo pipefail
-          if [ -z "${VITE_SUPABASE_URL:-}" ] || [ -z "${VITE_SUPABASE_ANON_KEY:-}" ]; then
-            echo "::error::Missing VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY. These are NEW repo secrets (not on Nuvo). See docs/ios-releases.md."
-            exit 1
+          if [ -n "${VITE_API_BASE_URL:-}" ]; then
+            echo "VITE_API_BASE_URL is set (${VITE_API_BASE_URL}) — Worker API. Not baking VITE_SUPABASE_*."
+            unset VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY
+          else
+            echo "VITE_API_BASE_URL is empty — pre-cutover Supabase client (VITE_SUPABASE_*)."
           fi
           npm run build
           npx cap sync ios
-
-      - name: Import signing certificate (manual fallback)
-        env:
-          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
-          IOS_CERTIFICATE: ${{ secrets.IOS_CERTIFICATE }}
-          IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
-          IOS_MOBILE_PROVISION: ${{ secrets.IOS_MOBILE_PROVISION }}
-        run: |
-          set -euo pipefail
-          if [ -z "${APPLE_DEVELOPMENT_TEAM:-}" ]; then
-            echo "::error::Missing APPLE_TEAM_ID secret. See docs/ios-releases.md."
-            exit 1
-          fi
-          if [ -z "${IOS_CERTIFICATE:-}" ] || [ -z "${IOS_CERTIFICATE_PASSWORD:-}" ] || [ -z "${IOS_MOBILE_PROVISION:-}" ]; then
-            echo "SIGNING_STYLE=automatic" >> "$GITHUB_ENV"
-            echo "Using automatic signing (App Store Connect API key)."
-            exit 0
-          fi
-
-          KEYCHAIN_PATH="$RUNNER_TEMP/zeroed-signing.keychain-db"
-          KEYCHAIN_PASSWORD=$(openssl rand -base64 24)
-          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
-          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-
-          CERT_PATH="$RUNNER_TEMP/dist.p12"
-          echo "$IOS_CERTIFICATE" | base64 --decode > "$CERT_PATH"
-          security import "$CERT_PATH" -k "$KEYCHAIN_PATH" -P "$IOS_CERTIFICATE_PASSWORD" \
-            -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcodebuild
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
-          security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
-
-          PROFILE_PATH="$RUNNER_TEMP/zeroed.mobileprovision"
-          echo "$IOS_MOBILE_PROVISION" | base64 --decode > "$PROFILE_PATH"
-          PROFILES_DIR="$HOME/Library/MobileDevice/Provisioning Profiles"
-          mkdir -p "$PROFILES_DIR"
-          PROFILE_PLIST="$RUNNER_TEMP/profile.plist"
-          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
-          PROFILE_UUID=$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$PROFILE_PLIST")
-          PROFILE_NAME=$(/usr/libexec/PlistBuddy -c 'Print :Name' "$PROFILE_PLIST")
-          cp "$PROFILE_PATH" "$PROFILES_DIR/${PROFILE_UUID}.mobileprovision"
-
-          echo "SIGNING_STYLE=manual" >> "$GITHUB_ENV"
-          echo "IOS_PROFILE_NAME=$PROFILE_NAME" >> "$GITHUB_ENV"
-          echo "Using manual signing (IOS_CERTIFICATE + provisioning profile '$PROFILE_NAME')."
 
       - name: Build signed IPA
         env:
@@ -158,9 +171,15 @@ jobs:
           ARCHIVE_PATH="$RUNNER_TEMP/Zeroed.xcarchive"
           EXPORT_PATH="$RUNNER_TEMP/Zeroed-export"
           EXPORT_PLIST="$RUNNER_TEMP/ExportOptions.plist"
-          bash scripts/ios-write-export-options.sh "$EXPORT_PLIST"
+          SIGNING_STYLE=automatic bash scripts/ios-write-export-options.sh "$EXPORT_PLIST"
 
           cd ios/App
+          AUTH=(
+            -allowProvisioningUpdates
+            -authenticationKeyPath "$APPLE_API_KEY_PATH"
+            -authenticationKeyID "$APPLE_API_KEY"
+            -authenticationKeyIssuerID "$APPLE_API_ISSUER"
+          )
           COMMON=(
             -workspace App.xcworkspace
             -scheme App
@@ -170,37 +189,18 @@ jobs:
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
             DEVELOPMENT_TEAM="$APPLE_DEVELOPMENT_TEAM"
             PRODUCT_BUNDLE_IDENTIFIER="$IOS_BUNDLE_ID"
+            CODE_SIGN_STYLE=Automatic
           )
 
-          if [ "${SIGNING_STYLE}" = "manual" ]; then
-            xcodebuild archive \
-              "${COMMON[@]}" \
-              -archivePath "$ARCHIVE_PATH" \
-              CODE_SIGN_STYLE=Manual \
-              CODE_SIGN_IDENTITY="Apple Distribution" \
-              PROVISIONING_PROFILE_SPECIFIER="$IOS_PROFILE_NAME"
-            xcodebuild -exportArchive \
-              -archivePath "$ARCHIVE_PATH" \
-              -exportPath "$EXPORT_PATH" \
-              -exportOptionsPlist "$EXPORT_PLIST"
-          else
-            xcodebuild archive \
-              "${COMMON[@]}" \
-              -archivePath "$ARCHIVE_PATH" \
-              -allowProvisioningUpdates \
-              -authenticationKeyPath "$APPLE_API_KEY_PATH" \
-              -authenticationKeyID "$APPLE_API_KEY" \
-              -authenticationKeyIssuerID "$APPLE_API_ISSUER" \
-              CODE_SIGN_STYLE=Automatic
-            xcodebuild -exportArchive \
-              -archivePath "$ARCHIVE_PATH" \
-              -exportPath "$EXPORT_PATH" \
-              -exportOptionsPlist "$EXPORT_PLIST" \
-              -allowProvisioningUpdates \
-              -authenticationKeyPath "$APPLE_API_KEY_PATH" \
-              -authenticationKeyID "$APPLE_API_KEY" \
-              -authenticationKeyIssuerID "$APPLE_API_ISSUER"
-          fi
+          xcodebuild archive \
+            "${COMMON[@]}" \
+            "${AUTH[@]}" \
+            -archivePath "$ARCHIVE_PATH"
+          xcodebuild -exportArchive \
+            -archivePath "$ARCHIVE_PATH" \
+            -exportPath "$EXPORT_PATH" \
+            -exportOptionsPlist "$EXPORT_PLIST" \
+            "${AUTH[@]}"
 
           IPA=$(find "$EXPORT_PATH" -name '*.ipa' -print | head -1)
           if [ -z "$IPA" ]; then
@@ -211,15 +211,23 @@ jobs:
           echo "IPA_PATH=$IPA" >> "$GITHUB_ENV"
           echo "Archived $IPA"
 
-      - name: Upload to TestFlight
+      - name: Upload to Internal TestFlight
         env:
-          APPSTORE_KEY_ID: ${{ secrets.APPSTORE_KEY_ID }}
-          APPSTORE_ISSUER_ID: ${{ secrets.APPSTORE_ISSUER_ID }}
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
         run: |
           set -euo pipefail
-          echo "Uploading $IPA_PATH (v${APP_VERSION}, build ${BUILD_NUMBER})"
+          echo "Uploading $IPA_PATH (v${APP_VERSION}, build ${BUILD_NUMBER}) to Internal TestFlight"
           xcrun altool --upload-app \
             --type ios \
             --file "$IPA_PATH" \
-            --apiKey "$APPSTORE_KEY_ID" \
-            --apiIssuer "$APPSTORE_ISSUER_ID"
+            --apiKey "$ASC_API_KEY_ID" \
+            --apiIssuer "$ASC_API_ISSUER_ID"
+          echo "Upload queued. Assign the build to an Internal Testing group in App Store Connect — do not submit for App Review."
+
+      - name: Delete App Store Connect API key
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f "${APPLE_API_KEY_PATH:-}" "${APPLE_API_KEY_ALTOOL_PATH:-}"
+          echo "Removed App Store Connect API key files."
