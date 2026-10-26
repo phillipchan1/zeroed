@@ -241,8 +241,9 @@ python3 scripts/gen-icons.py
 
 Native iPhone shell is Capacitor (`ios/`, bundle ID **`app.zeroed.app`**). Internal
 TestFlight upload runs on push to `master` and on **Run workflow**. Signing is
-automatic via an App Store Connect API key (no `.p12`, no hand-made profile).
-The job skips green until those secrets exist. Setup:
+manual Apple Distribution: CI imports a `.p12` and an App Store provisioning
+profile from GitHub secrets. The job **fails** if those secrets are missing —
+it never creates or revokes certificates. Setup:
 [`docs/ios-releases.md`](docs/ios-releases.md).
 
 ```bash

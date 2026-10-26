@@ -6,7 +6,7 @@
 // App Store icon (1024 RGB, no alpha), and that capacitor.config.ts agrees.
 
 import { execFileSync } from 'node:child_process'
-import { readFileSync, existsSync, statSync } from 'node:fs'
+import { readFileSync, existsSync, statSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -41,7 +41,7 @@ if (pbx) {
   if (/MARKETING_VERSION = 0\.1\.0;/.test(pbx)) ok('pbxproj MARKETING_VERSION 0.1.0')
   else fail('pbxproj MARKETING_VERSION', 'expected 0.1.0 (package.json major.minor)')
 
-  if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (CI uses cloud-managed ASC signing)')
+  if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (local Xcode; CI overrides to Manual Distribution)')
   else fail('pbxproj CODE_SIGN_STYLE')
 
   // A forced identity makes `xcodebuild archive` request a development
@@ -138,18 +138,22 @@ if (workflow) {
   } else fail('workflow still bakes VITE_SUPABASE_* unconditionally')
 
   if (
-    workflow.includes('ready=false') &&
-    workflow.includes('Skipping iOS TestFlight') &&
-    /needs\.secrets-ready\.outputs\.ready == 'true'/.test(workflow)
+    workflow.includes('::error::Missing GitHub Actions secrets required for iOS TestFlight') &&
+    workflow.includes('exit 1') &&
+    !workflow.includes('ready=false') &&
+    !workflow.includes('Skipping iOS TestFlight')
   ) {
-    ok('workflow skips TestFlight (green) when secrets are missing')
-  } else fail('workflow missing-secrets skip')
+    ok('workflow fails when TestFlight secrets are missing')
+  } else fail('workflow missing-secrets fail', 'must exit 1 with ::error:: — no skip-green, no automatic-signing fallback')
 
   for (const secret of [
     'ASC_API_KEY_ID',
     'ASC_API_ISSUER_ID',
     'ASC_API_KEY_P8',
     'APPLE_TEAM_ID',
+    'IOS_DIST_CERT_P12_BASE64',
+    'IOS_DIST_CERT_PASSWORD',
+    'IOS_APPSTORE_PROFILE_BASE64',
   ]) {
     if (workflow.includes(secret)) ok(`workflow references ${secret}`)
     else fail(`workflow missing secret ${secret}`)
@@ -167,21 +171,33 @@ if (workflow) {
     else ok(`workflow dropped ${dropped}`)
   }
 
-  if (workflow.includes('-allowProvisioningUpdates') && workflow.includes('-authenticationKeyPath')) {
-    ok('workflow uses automatic signing with ASC API key')
-  } else fail('workflow automatic signing / authenticationKey flags')
+  if (workflow.includes('-allowProvisioningUpdates')) {
+    fail('workflow uses -allowProvisioningUpdates', 'manual Distribution signing must not mint certificates')
+  } else ok('workflow does not pass -allowProvisioningUpdates')
 
-  if (!/CODE_SIGN_STYLE=Automatic/.test(workflow) && !/CODE_SIGN_IDENTITY=/.test(workflow) && !/DEVELOPMENT_TEAM="\$APPLE_DEVELOPMENT_TEAM"/.test(workflow)) {
-    ok('workflow does not force development signing on the xcodebuild command line')
-  } else fail('workflow signing overrides', 'do not pass CODE_SIGN_STYLE, CODE_SIGN_IDENTITY, or DEVELOPMENT_TEAM to xcodebuild')
+  if (workflow.includes('asc-revoke-api-dev-certs') || workflow.includes('Drop stale API')) {
+    fail('workflow still revokes certificates')
+  } else ok('workflow does not revoke certificates')
+  if (existsSync(join(root, 'scripts/asc-revoke-api-dev-certs.mjs'))) {
+    fail('scripts/asc-revoke-api-dev-certs.mjs is still present')
+  } else ok('revoke-certs script is gone')
 
-  if (workflow.includes('ios-set-development-team.mjs') && workflow.includes('asc-revoke-api-dev-certs.mjs')) {
-    ok('workflow installs the team in the project and drops stale API development certs')
-  } else fail('workflow signing prep', 'expected ios-set-development-team.mjs and asc-revoke-api-dev-certs.mjs')
+  if (
+    /CODE_SIGN_STYLE=Manual/.test(workflow) &&
+    /CODE_SIGN_IDENTITY="Apple Distribution"/.test(workflow) &&
+    workflow.includes('PROVISIONING_PROFILE_SPECIFIER') &&
+    /DEVELOPMENT_TEAM="\$APPLE_DEVELOPMENT_TEAM"/.test(workflow)
+  ) {
+    ok('workflow archives with manual Apple Distribution signing')
+  } else fail('workflow manual Distribution flags')
 
-  if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete App Store Connect API key')) {
-    ok('workflow deletes the .p8 in an always() step')
-  } else fail('workflow .p8 cleanup')
+  if (workflow.includes('create-keychain') && workflow.includes('security import') && workflow.includes('delete-keychain')) {
+    ok('workflow imports the Distribution .p12 into a temporary keychain')
+  } else fail('workflow keychain import / cleanup')
+
+  if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete signing keychain')) {
+    ok('workflow deletes the signing keychain and .p8 in an always() step')
+  } else fail('workflow keychain / .p8 cleanup')
 
   if (workflow.includes('umask 077')) ok('workflow sets umask 077 before writing the .p8')
   else fail('workflow umask 077')
@@ -222,7 +238,39 @@ if (workflow) {
 
 const exportScript = join(root, 'scripts/ios-write-export-options.sh')
 if (!existsSync(exportScript)) fail('scripts/ios-write-export-options.sh missing')
-else ok('export-options writer present')
+else {
+  ok('export-options writer present')
+  const exportOut = join(root, 'scripts/.ios-export-options-self-test.plist')
+  try {
+    execFileSync('bash', [exportScript, exportOut], {
+      env: {
+        ...process.env,
+        APPLE_DEVELOPMENT_TEAM: 'ABCDE12345',
+        PROVISIONING_PROFILE_SPECIFIER: 'Zeroed App Store',
+        IOS_BUNDLE_ID: BUNDLE_ID,
+      },
+    })
+    const plist = readFileSync(exportOut, 'utf8')
+    if (
+      plist.includes('<string>app-store</string>') &&
+      plist.includes('<string>manual</string>') &&
+      plist.includes('<string>Apple Distribution</string>') &&
+      plist.includes(`<key>${BUNDLE_ID}</key>`) &&
+      plist.includes('<string>Zeroed App Store</string>') &&
+      plist.includes('<string>ABCDE12345</string>')
+    ) {
+      ok('export-options writer emits manual app-store signing')
+    } else fail('export-options writer contents', plist)
+  } catch (err) {
+    fail('export-options writer self-test', err instanceof Error ? err.message : String(err))
+  } finally {
+    try {
+      unlinkSync(exportOut)
+    } catch {
+      // ignore
+    }
+  }
+}
 
 try {
   execFileSync(process.execPath, [join(root, 'scripts/ios-check-ipa-bundle-ids.mjs'), '--self-test'], {
@@ -232,12 +280,12 @@ try {
   fail('ios-check-ipa-bundle-ids --self-test')
 }
 
-for (const script of ['ios-set-development-team.mjs', 'asc-revoke-api-dev-certs.mjs']) {
-  try {
-    execFileSync(process.execPath, [join(root, 'scripts', script), '--self-test'], { stdio: 'inherit' })
-  } catch {
-    fail(`${script} --self-test`)
-  }
+try {
+  execFileSync(process.execPath, [join(root, 'scripts/ios-set-development-team.mjs'), '--self-test'], {
+    stdio: 'inherit',
+  })
+} catch {
+  fail('ios-set-development-team --self-test')
 }
 
 if (failed) {

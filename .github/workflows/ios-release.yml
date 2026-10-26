@@ -4,24 +4,26 @@ name: iOS TestFlight
 # Not a web prod deploy and does not submit for App Review / external testers.
 # One-time Apple + GitHub secrets setup: docs/ios-releases.md
 #
-# Signing is automatic + cloud-managed via an App Store Connect API key
-# (no .p12, no hand-made provisioning profile). DEVELOPMENT_TEAM is
-# written into the project on the runner. Passing it (or CODE_SIGN_STYLE)
-# as an xcodebuild argument forces development signing, and each runner
-# then mints an Apple Development cert until the account cap blocks
-# the upload. Stale "Created via API" development certs are revoked
-# first; distribution certs are left in place.
-#   xcodebuild archive / -exportArchive
-#     -allowProvisioningUpdates
-#     -authenticationKeyPath / -authenticationKeyID / -authenticationKeyIssuerID
+# Signing is manual Apple Distribution. The runner imports a .p12 and an
+# App Store provisioning profile into a temporary keychain, then archives
+# with CODE_SIGN_STYLE=Manual. This workflow must never create or revoke
+# certificates — do not pass allowProvisioningUpdates, and do not call
+# the App Store Connect certificates API.
+#   xcodebuild archive
+#     CODE_SIGN_STYLE=Manual
+#     CODE_SIGN_IDENTITY='Apple Distribution'
+#     PROVISIONING_PROFILE_SPECIFIER / DEVELOPMENT_TEAM
+#   xcodebuild -exportArchive
+#     method=app-store, signingStyle=manual
 #
 # Also:
 #   - push to master + workflow_dispatch
 #   - version stamp <major>.<minor>.<commit_count>
 #   - scripts/appstore-next-build-number.mjs so a re-run never collides
-#   - skip green when the ASC secrets are missing
+#   - fail clearly when the signing / ASC secrets are missing
 #   - VITE_API_BASE_URL from a repo variable; VITE_SUPABASE_* only when it is empty
 #   - .p8 written with umask 077 after cap sync, deleted via a fixed path/glob
+#   - signing keychain deleted in an always() step
 
 on:
   push:
@@ -40,16 +42,16 @@ jobs:
     name: Check TestFlight secrets
     runs-on: ubuntu-latest
     timeout-minutes: 5
-    outputs:
-      ready: ${{ steps.guard.outputs.ready }}
     steps:
-      - name: Require App Store Connect API key secrets
-        id: guard
+      - name: Require TestFlight and Distribution signing secrets
         env:
           ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
           ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
           ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          IOS_APPSTORE_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
@@ -60,24 +62,24 @@ jobs:
           [ -n "${ASC_API_ISSUER_ID:-}" ] || missing+=("ASC_API_ISSUER_ID")
           [ -n "${ASC_API_KEY_P8:-}" ] || missing+=("ASC_API_KEY_P8")
           [ -n "${APPLE_TEAM_ID:-}" ] || missing+=("APPLE_TEAM_ID")
+          [ -n "${IOS_DIST_CERT_P12_BASE64:-}" ] || missing+=("IOS_DIST_CERT_P12_BASE64")
+          [ -n "${IOS_DIST_CERT_PASSWORD:-}" ] || missing+=("IOS_DIST_CERT_PASSWORD")
+          [ -n "${IOS_APPSTORE_PROFILE_BASE64:-}" ] || missing+=("IOS_APPSTORE_PROFILE_BASE64")
           if [ -z "${VITE_API_BASE_URL:-}" ]; then
             [ -n "${VITE_SUPABASE_URL:-}" ] || missing+=("VITE_SUPABASE_URL")
             [ -n "${VITE_SUPABASE_ANON_KEY:-}" ] || missing+=("VITE_SUPABASE_ANON_KEY")
           fi
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::notice::Skipping iOS TestFlight — missing GitHub Actions secrets: ${missing[*]}."
+            echo "::error::Missing GitHub Actions secrets required for iOS TestFlight: ${missing[*]}."
             echo "Add them under Settings → Secrets and variables → Actions. See docs/ios-releases.md."
-            echo "The TestFlight job stays skipped (workflow stays green) until those secrets exist."
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "TestFlight secrets are present — continuing."
-            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "The workflow will not create or revoke Apple certificates, and there is no automatic-signing fallback."
+            exit 1
           fi
+          echo "TestFlight secrets are present — continuing."
 
   testflight:
     name: Upload Internal TestFlight
     needs: secrets-ready
-    if: needs.secrets-ready.outputs.ready == 'true'
     concurrency:
       group: ios-testflight
       cancel-in-progress: false
@@ -171,38 +173,109 @@ jobs:
           echo "BUILD_NUMBER=$RESOLVED" >> "$GITHUB_ENV"
           echo "Resolved iOS build number: $RESOLVED"
 
-      - name: Drop stale API development certificates
+      - name: Import Distribution certificate and App Store profile
+        env:
+          IOS_DIST_CERT_P12_BASE64: ${{ secrets.IOS_DIST_CERT_P12_BASE64 }}
+          IOS_DIST_CERT_PASSWORD: ${{ secrets.IOS_DIST_CERT_PASSWORD }}
+          IOS_APPSTORE_PROFILE_BASE64: ${{ secrets.IOS_APPSTORE_PROFILE_BASE64 }}
+          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: |
-          node scripts/asc-revoke-api-dev-certs.mjs \
-            --key-id "$APPLE_API_KEY" \
-            --issuer-id "$APPLE_API_ISSUER" \
-            --key-path "${{ runner.temp }}/zeroed-asc.p8"
+          set -euo pipefail
+          missing=()
+          [ -n "${IOS_DIST_CERT_P12_BASE64:-}" ] || missing+=("IOS_DIST_CERT_P12_BASE64")
+          [ -n "${IOS_DIST_CERT_PASSWORD:-}" ] || missing+=("IOS_DIST_CERT_PASSWORD")
+          [ -n "${IOS_APPSTORE_PROFILE_BASE64:-}" ] || missing+=("IOS_APPSTORE_PROFILE_BASE64")
+          [ -n "${APPLE_DEVELOPMENT_TEAM:-}" ] || missing+=("APPLE_TEAM_ID")
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing GitHub Actions secrets required for manual Distribution signing: ${missing[*]}."
+            echo "See docs/ios-releases.md. The workflow will not create or revoke certificates."
+            exit 1
+          fi
+
+          umask 077
+          KEYCHAIN_PATH="${RUNNER_TEMP}/zeroed-signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+          P12_PATH="${RUNNER_TEMP}/zeroed-dist.p12"
+          PROFILE_PATH="${RUNNER_TEMP}/zeroed-appstore.mobileprovision"
+          PROFILE_PLIST="${RUNNER_TEMP}/zeroed-profile.plist"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security list-keychains -d user -s "$KEYCHAIN_PATH" login.keychain-db
+          security default-keychain -d user -s "$KEYCHAIN_PATH"
+
+          printf '%s' "$IOS_DIST_CERT_P12_BASE64" | base64 --decode > "$P12_PATH"
+          if [ ! -s "$P12_PATH" ]; then
+            echo "::error::IOS_DIST_CERT_P12_BASE64 did not decode to a .p12 file."
+            exit 1
+          fi
+          security import "$P12_PATH" \
+            -k "$KEYCHAIN_PATH" \
+            -P "$IOS_DIST_CERT_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security \
+            -T /usr/bin/xcodebuild \
+            -A
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" \
+            "$KEYCHAIN_PATH" >/dev/null
+
+          IDENTITIES="$(security find-identity -v -p codesigning "$KEYCHAIN_PATH")"
+          echo "$IDENTITIES"
+          if ! printf '%s\n' "$IDENTITIES" | grep -q 'Apple Distribution'; then
+            echo "::error::Imported .p12 does not contain an Apple Distribution identity. Export an Apple Distribution certificate, not Apple Development."
+            exit 1
+          fi
+
+          printf '%s' "$IOS_APPSTORE_PROFILE_BASE64" | base64 --decode > "$PROFILE_PATH"
+          if [ ! -s "$PROFILE_PATH" ]; then
+            echo "::error::IOS_APPSTORE_PROFILE_BASE64 did not decode to a provisioning profile."
+            exit 1
+          fi
+          security cms -D -i "$PROFILE_PATH" > "$PROFILE_PLIST"
+          PROFILE_UUID="$(/usr/libexec/PlistBuddy -c 'Print :UUID' "$PROFILE_PLIST")"
+          PROFILE_NAME="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$PROFILE_PLIST")"
+          PROFILE_TEAM="$(/usr/libexec/PlistBuddy -c 'Print :TeamIdentifier:0' "$PROFILE_PLIST")"
+          if [ "$PROFILE_TEAM" != "$APPLE_DEVELOPMENT_TEAM" ]; then
+            echo "::error::Provisioning profile team ${PROFILE_TEAM} does not match APPLE_TEAM_ID ${APPLE_DEVELOPMENT_TEAM}."
+            exit 1
+          fi
+          if /usr/libexec/PlistBuddy -c 'Print :ProvisionedDevices' "$PROFILE_PLIST" >/dev/null 2>&1; then
+            echo "::error::IOS_APPSTORE_PROFILE_BASE64 looks like a development or ad-hoc profile (has ProvisionedDevices). Use an App Store profile."
+            exit 1
+          fi
+
+          PP_DIR="${HOME}/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PP_DIR"
+          cp "$PROFILE_PATH" "${PP_DIR}/${PROFILE_UUID}.mobileprovision"
+
+          {
+            echo "APPLE_DEVELOPMENT_TEAM=${APPLE_DEVELOPMENT_TEAM}"
+            echo "PROVISIONING_PROFILE_SPECIFIER=${PROFILE_NAME}"
+            echo "IOS_PROFILE_UUID=${PROFILE_UUID}"
+          } >> "$GITHUB_ENV"
+          echo "Imported Apple Distribution certificate and App Store profile '${PROFILE_NAME}' (${PROFILE_UUID})."
 
       - name: Build signed IPA
-        env:
-          APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
         run: |
           set -euo pipefail
           ARCHIVE_PATH="$RUNNER_TEMP/Zeroed.xcarchive"
           EXPORT_PATH="$RUNNER_TEMP/Zeroed-export"
           EXPORT_PLIST="$RUNNER_TEMP/ExportOptions.plist"
-          SIGNING_STYLE=automatic bash scripts/ios-write-export-options.sh "$EXPORT_PLIST"
-          # Team goes in the project. An xcodebuild DEVELOPMENT_TEAM= argument
-          # signs the archive for development and burns a certificate slot.
-          node scripts/ios-set-development-team.mjs "$APPLE_DEVELOPMENT_TEAM" ios/App/App.xcodeproj/project.pbxproj
+          APPLE_DEVELOPMENT_TEAM="$APPLE_DEVELOPMENT_TEAM" \
+            PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_SPECIFIER" \
+            IOS_BUNDLE_ID="$IOS_BUNDLE_ID" \
+            bash scripts/ios-write-export-options.sh "$EXPORT_PLIST"
 
           cd ios/App
-          AUTH=(
-            -allowProvisioningUpdates
-            -authenticationKeyPath "${{ runner.temp }}/zeroed-asc.p8"
-            -authenticationKeyID "$APPLE_API_KEY"
-            -authenticationKeyIssuerID "$APPLE_API_ISSUER"
-          )
           # Do not pass PRODUCT_BUNDLE_IDENTIFIER here — xcodebuild applies
           # it to every target, so Capacitor.framework / CapacitorCordova.framework
           # inherit app.zeroed.app and App Store rejects the IPA (ITMS-90685).
           # The App target already has PRODUCT_BUNDLE_IDENTIFIER in pbxproj.
-          # Do not pass DEVELOPMENT_TEAM, CODE_SIGN_STYLE, or CODE_SIGN_IDENTITY.
+          # Do not pass allowProvisioningUpdates — that mints a Development
+          # cert on a fresh runner that has no private key to keep.
           COMMON=(
             -workspace App.xcworkspace
             -scheme App
@@ -210,17 +283,19 @@ jobs:
             -destination 'generic/platform=iOS'
             MARKETING_VERSION="$APP_VERSION"
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
+            CODE_SIGN_STYLE=Manual
+            CODE_SIGN_IDENTITY="Apple Distribution"
+            PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_SPECIFIER"
+            DEVELOPMENT_TEAM="$APPLE_DEVELOPMENT_TEAM"
           )
 
           xcodebuild archive \
             "${COMMON[@]}" \
-            "${AUTH[@]}" \
             -archivePath "$ARCHIVE_PATH"
           xcodebuild -exportArchive \
             -archivePath "$ARCHIVE_PATH" \
             -exportPath "$EXPORT_PATH" \
-            -exportOptionsPlist "$EXPORT_PLIST" \
-            "${AUTH[@]}"
+            -exportOptionsPlist "$EXPORT_PLIST"
 
           IPA=$(find "$EXPORT_PATH" -name '*.ipa' -print | head -1)
           if [ -z "$IPA" ]; then
@@ -248,10 +323,23 @@ jobs:
             --apiIssuer "$ASC_API_ISSUER_ID"
           echo "Upload queued. Assign the build to an Internal Testing group in App Store Connect — do not submit for App Review."
 
-      - name: Delete App Store Connect API key
+      - name: Delete signing keychain and App Store Connect API key
         if: always()
         run: |
           set -euo pipefail
+          KEYCHAIN_PATH="${RUNNER_TEMP}/zeroed-signing.keychain-db"
+          if [ -f "$KEYCHAIN_PATH" ]; then
+            security delete-keychain "$KEYCHAIN_PATH" || true
+          fi
+          security default-keychain -d user -s login.keychain-db || true
+          security list-keychains -d user -s login.keychain-db || true
+          rm -f "$KEYCHAIN_PATH"
+          rm -f "${RUNNER_TEMP}/zeroed-dist.p12"
+          rm -f "${RUNNER_TEMP}/zeroed-appstore.mobileprovision"
+          rm -f "${RUNNER_TEMP}/zeroed-profile.plist"
           rm -f "${{ runner.temp }}/zeroed-asc.p8"
           rm -f "${HOME}/.appstoreconnect/private_keys/AuthKey_"*.p8
-          echo "Removed App Store Connect API key files."
+          if [ -n "${IOS_PROFILE_UUID:-}" ]; then
+            rm -f "${HOME}/Library/MobileDevice/Provisioning Profiles/${IOS_PROFILE_UUID}.mobileprovision"
+          fi
+          echo "Removed signing keychain, certificate, profile, and App Store Connect API key files."

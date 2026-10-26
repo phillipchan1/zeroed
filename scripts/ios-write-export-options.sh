@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
 # Write an ExportOptions.plist for xcodebuild -exportArchive.
-# Automatic / cloud-managed distribution signing via the App Store Connect
-# API key passed as -authenticationKeyPath on archive + export.
+# Manual App Store signing with a pre-imported Apple Distribution
+# certificate and App Store provisioning profile. Never uses
+# allowProvisioningUpdates.
 #
 # Usage:
 #   APPLE_DEVELOPMENT_TEAM=... \
+#   PROVISIONING_PROFILE_SPECIFIER=... \
+#   IOS_BUNDLE_ID=app.zeroed.app \
 #   scripts/ios-write-export-options.sh /path/ExportOptions.plist
 set -euo pipefail
 
 out="${1:?export options path}"
+team="${APPLE_DEVELOPMENT_TEAM:?APPLE_DEVELOPMENT_TEAM is required}"
+profile="${PROVISIONING_PROFILE_SPECIFIER:?PROVISIONING_PROFILE_SPECIFIER is required}"
+bundle="${IOS_BUNDLE_ID:?IOS_BUNDLE_ID is required}"
+
+xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'
+}
 
 cat > "$out" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -16,13 +26,20 @@ cat > "$out" <<EOF
 <plist version="1.0">
 <dict>
   <key>method</key>
-  <string>app-store-connect</string>
+  <string>app-store</string>
   <key>destination</key>
   <string>export</string>
   <key>signingStyle</key>
-  <string>automatic</string>
+  <string>manual</string>
+  <key>signingCertificate</key>
+  <string>Apple Distribution</string>
   <key>teamID</key>
-  <string>${APPLE_DEVELOPMENT_TEAM:?}</string>
+  <string>$(xml_escape "$team")</string>
+  <key>provisioningProfiles</key>
+  <dict>
+    <key>$(xml_escape "$bundle")</key>
+    <string>$(xml_escape "$profile")</string>
+  </dict>
   <key>uploadSymbols</key>
   <true/>
 </dict>
