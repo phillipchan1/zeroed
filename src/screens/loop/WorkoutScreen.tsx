@@ -45,7 +45,7 @@ import type {
   RoutineRow, ExerciseTemplate, SetLog, InsightRow, TrackingType,
   OnboardingStep, FeltLabel, ExerciseFeedback,
 } from '../../types/database'
-import { FELT_CHIPS } from '../../types/database'
+import { FELT_CHIPS, FELT_OFFERED } from '../../types/database'
 
 // ---- small parse helpers ---------------------------------------------------
 
@@ -564,13 +564,18 @@ interface FeltChipsProps {
 // The note field is folded away until it's wanted. With seven exercises on a
 // screen, seven always-open textareas were most of the page's height and most
 // of its visual noise — for a field almost nobody fills in mid-session.
+//
+// Only the injury flags are offered: effort is the RPE on each set. A session
+// that already carries an older chip (Solid, Hard…) keeps showing it, so it
+// stays visible and can be cleared.
 function FeltChips({ value, note, onFelt, onNote }: FeltChipsProps) {
   const [noteOpen, setNoteOpen] = useState(() => note.trim().length > 0)
+  const chips = FELT_CHIPS.filter((c) => FELT_OFFERED.includes(c.label) || c.label === value)
   return (
     <div className="felt">
       <div className="felt__row">
-        <span className="felt__label">Felt</span>
-        {FELT_CHIPS.map((c) => (
+        <span className="felt__label">Flag</span>
+        {chips.map((c) => (
           <button
             key={c.label}
             type="button"
@@ -580,9 +585,14 @@ function FeltChips({ value, note, onFelt, onNote }: FeltChipsProps) {
             {c.label}
           </button>
         ))}
+        {!noteOpen && (
+          <button type="button" className="felt__add-note" onClick={() => setNoteOpen(true)}>
+            + Note
+          </button>
+        )}
       </div>
 
-      {noteOpen ? (
+      {noteOpen && (
         <textarea
           className="input felt__note"
           rows={2}
@@ -591,17 +601,6 @@ function FeltChips({ value, note, onFelt, onNote }: FeltChipsProps) {
           value={note}
           onChange={(e) => onNote(e.target.value)}
         />
-      ) : (
-        <button
-          type="button"
-          onClick={() => setNoteOpen(true)}
-          style={{
-            marginTop: 10, minHeight: 40, padding: 0, background: 'none', border: 'none',
-            color: 'var(--text-dim)', fontSize: 'var(--fs-sm)', cursor: 'pointer',
-          }}
-        >
-          + Add a note
-        </button>
       )}
     </div>
   )

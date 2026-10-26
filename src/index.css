@@ -1674,6 +1674,16 @@ textarea.input {
 .felt__chip--on.felt__chip--mid  { border-color: #8A8A8A; color: var(--text); }
 .felt__chip--on.felt__chip--bad  { border-color: var(--pending); color: var(--pending); }
 .felt__chip--on.felt__chip--veto { border-color: var(--veto); color: var(--veto); background: rgba(232, 112, 112, 0.1); }
+.felt__add-note {
+  margin-left: auto;
+  min-height: 40px;
+  padding: 0 4px;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
 /* 16px (not 13) so iOS doesn't zoom on focus — this rule overrides .input, so
    the 16px on .input alone isn't enough for the coach-note textarea. */
 .felt__note { margin-top: 10px; font-size: var(--fs-base); width: 100%; resize: vertical; line-height: 1.5; font-family: inherit; }

@@ -18,7 +18,7 @@ import {
   tallyWeek, decidePrescription,
   autoregulateDelta, recommendedLoad, roundLoad, maxUpFor,
   parseExplicitLoad, parsePrescription, trainingIntent, allowsAutoProgress, projectExerciseLoad, isComparableWorkingBase,
-  advanceStatus, addressesLimiter, capIsActive, isLiftHeld,
+  advanceStatus, addressesLimiter, capIsActive, isLiftHeld, strongTopSet,
   clearanceTestOf, pickClearanceLift, describeClearanceTest, newClearanceTest, judgeClearanceSession,
   P1_RESOLVE_THRESHOLD,
   type WeekWorkout, type WeekObservation, type LiftAttempt,
@@ -439,6 +439,19 @@ for (const word of ['explosive', 'mobility', 'warm-up', 'warmup', 'primer', 'tem
 }
 
 // ---- report -----------------------------------------------------------------
+
+// ---- strong work, read off the sets (the chips that said it are gone) --------
+
+{
+  const at = (weight: number, rpe: number | null, extra: Partial<SetLog> = {}): SetLog =>
+    ({ set: 1, weight, reps: 5, rpe, done: true, ...extra })
+  eq(strongTopSet([at(185, 7), at(195, 8)], 8)?.weight, 195, 'a top set on target is strong work')
+  eq(strongTopSet([at(185, 7), at(195, 8.5)], 8), null, 'a top set over target is not')
+  eq(strongTopSet([at(195, null)], 8), null, 'no RPE on the top set says nothing')
+  eq(strongTopSet([at(195, 7), at(195, 9, { missed_reps: 2 })], 8), null, 'a missed rep anywhere on the lift is not strong')
+  eq(strongTopSet([at(195, 7, { done: false })], 8), null, 'an unfinished set is not a top set')
+  eq(strongTopSet([], 8), null, 'nothing logged, nothing strong')
+}
 
 if (fails.length) {
   console.error(`\n✗ ${fails.length} of ${checks} checks failed:\n`)

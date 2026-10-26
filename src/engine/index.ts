@@ -58,7 +58,7 @@ import {
 // The deterministic prescription rules live in their own pure module so they can
 // be exercised without a database — see prescription.check.ts.
 import {
-  SEVERITY_STRONG, SEVERITY_PAIN,
+  SEVERITY_STRONG, SEVERITY_PAIN, strongTopSet,
   rpeContract, PHASE_RPE, tallyWeek, decidePrescription,
   recommendedLoad, autoregulateDelta, maxUpFor,
   projectExerciseLoad, allowsAutoProgress,
@@ -1035,8 +1035,11 @@ function topWorkingSet(sets: SetLog[] | undefined): SetLog | null {
 // and directive; this is the floor, never wrong.
 function weeklyCoachNotes(weekEnding: string, t: WeeklyTally, p: WeeklyPrescription): string {
   const rpeStr = t.avgRPE != null ? `avg RPE ${t.avgRPE}` : 'RPE not logged'
+  // Hard / strong come from the old effort chips, which sessions no longer
+  // offer — named when a week has them, silent otherwise, never "0 strong sets".
   const hardStr = t.hardCount ? ` · ${t.hardCount} hard set${t.hardCount === 1 ? '' : 's'}` : ''
-  const tally = `Week to ${weekEnding}: ${t.done}/${t.planned} sessions · ${rpeStr} · ${t.painCount} pain flag${t.painCount === 1 ? '' : 's'}${hardStr} · ${t.positiveCount} strong set${t.positiveCount === 1 ? '' : 's'}.`
+  const strongStr = t.positiveCount ? ` · ${t.positiveCount} strong set${t.positiveCount === 1 ? '' : 's'}` : ''
+  const tally = `Week to ${weekEnding}: ${t.done}/${t.planned} sessions · ${rpeStr} · ${t.painCount} pain flag${t.painCount === 1 ? '' : 's'}${hardStr}${strongStr}.`
   return `${tally} ${p.rationale}`
 }
 
@@ -2754,11 +2757,11 @@ export interface SessionAdaptation {
  */
 export async function recordSessionAdaptation(athleteId: string, workoutId: string): Promise<SessionAdaptation | null> {
   const { data: workout } = await supabase
-    .from('workout').select('routine_id, performed_at, exercises_snapshot').eq('id', workoutId).maybeSingle()
+    .from('workout').select('routine_id, performed_at, exercises_snapshot, actual_weights').eq('id', workoutId).maybeSingle()
   if (!workout) return null
 
   const { data: routine } = await supabase
-    .from('routine').select('exercises').eq('id', workout.routine_id).maybeSingle()
+    .from('routine').select('exercises, phase_id').eq('id', workout.routine_id).maybeSingle()
   // As performed: a stand-in carries its slot's insight_id, so a felt "Solid" on
   // the dumbbell press that replaced the bench is evidence about the same read.
   const exercises = resolveLoggedExercises({
@@ -2798,20 +2801,43 @@ export async function recordSessionAdaptation(athleteId: string, workoutId: stri
   })
   if (debriefAlreadyLowered) return null
 
-  // This session's felt signal on the P1-linked work.
+  // This session's evidence on the P1-linked work. "Strong" is read off the
+  // sets: a top set at or under the lift's target RPE with nothing missed (see
+  // strongTopSet). Pain is still the athlete's Tweak / Pain flag — RPE can't
+  // say a set hurt. Sessions logged with the old Easy / Solid chips still count.
   const { data: obs } = await supabase
     .from('session_observation').select('signal, severity, category').eq('workout_id', workoutId)
   const felt = ((obs ?? []) as Array<{ signal: string; severity: number; category: string }>)
     .filter((o) => o.category === 'Felt')
-  let strong = 0
+  let phaseName: string | null = null
+  const phaseId = (routine as { phase_id?: string | null } | null)?.phase_id ?? null
+  if (phaseId) {
+    const { data: ph } = await supabase.from('phase').select('name').eq('id', phaseId).maybeSingle()
+    phaseName = (ph as { name?: string } | null)?.name ?? null
+  }
+  const units = unitContext()
+  const strongLifts = new Set<string>()
   let pain = 0
   let exemplar: string | null = null
+  const logged = readLoggedExercises({
+    actual_weights: (workout.actual_weights as Record<string, SetLog[]> | null) ?? null,
+    exercises_snapshot: workout.exercises_snapshot as ExerciseTemplate[] | null,
+    routine: { exercises: (routine?.exercises as ExerciseTemplate[] | null) ?? [] },
+  })
+  for (const { name, exercise, sets } of logged) {
+    if (!p1Names.has(name)) continue
+    const top = strongTopSet(sets, exercise?.target_rpe ?? rpeContract(phaseName).target)
+    if (!top) continue
+    strongLifts.add(name)
+    if (!exemplar) exemplar = `${name} (${units.fmt(top.weight!)}${units.unit}×${top.reps} @${top.rpe})`
+  }
   for (const o of felt) {
     const name = o.signal.split('—')[0].trim()
     if (!p1Names.has(name)) continue
     if (o.severity >= SEVERITY_PAIN) pain++
-    else if (o.severity <= SEVERITY_STRONG) { strong++; if (!exemplar) exemplar = name }
+    else if (o.severity <= SEVERITY_STRONG && !strongLifts.has(name)) { strongLifts.add(name); if (!exemplar) exemplar = name }
   }
+  const strong = strongLifts.size
 
   // The rule: strong, pain-free P1 work disconfirms the limiter. Anything else
   // (pain, or no strong signal) → no surfaced moment; the limiter stands.
@@ -2841,7 +2867,7 @@ export async function recordSessionAdaptation(athleteId: string, workoutId: stri
   const prevPct = Math.round(previousConfidence * 100)
   const newPct = Math.round(newConfidence * 100)
   const where = exemplar ?? 'your P1 work'
-  const sets = `${strong} strong set${strong === 1 ? '' : 's'}`
+  const sets = `${strong} top set${strong === 1 ? '' : 's'} on target`
   const note = resolved
     ? `${p1.category} is clearing. ${sets} on ${where} with no pain dropped the limiter to ${newPct}% — I'm calling it resolved. The load cap on that pattern lifts now.`
     : `${p1.category} is resolving. ${sets} on ${where}, no pain — limiter confidence ${prevPct}%→${newPct}% because of what you just did. Keep this up and we clear it.`

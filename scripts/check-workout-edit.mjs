@@ -79,7 +79,7 @@ const QUEUED = {
   debrief: {
     reflection: 'Left hip held this time.', readingAnswer: '', reading: null,
     exercises: [
-      { name: 'Back Squat', felt: 'Solid', note: 'Left hip held.', prescribed: '3×5', performed: '' },
+      { name: 'Back Squat', felt: 'Tweak', note: 'Left hip held.', prescribed: '3×5', performed: '' },
       { name: 'Romanian Deadlift', felt: null, note: '', prescribed: '3×8', performed: '' },
     ],
   },
@@ -192,7 +192,7 @@ check(
 )
 check(
   'queued session carries its felt chips back too',
-  dEarly.feltOn.length === 1 && dEarly.feltOn[0] === 'Solid',
+  dEarly.feltOn.length === 1 && dEarly.feltOn[0] === 'Tweak',
   `chips on: ${JSON.stringify(dEarly.feltOn)}`,
 )
 

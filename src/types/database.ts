@@ -373,6 +373,13 @@ export const FELT_CHIPS = [
 
 export type FeltLabel = typeof FELT_CHIPS[number]['label']
 
+// The chips a session still offers. Easy / Solid / Hard / Off said what RPE
+// already says, set by set, more precisely — and nothing that decides a load
+// read them. Tweak and Pain are the injury reports RPE can't carry (an RPE 7 can
+// still hurt), and they veto a push. The full list stays above so every
+// session logged before this reads exactly as it did.
+export const FELT_OFFERED: readonly FeltLabel[] = ['Tweak', 'Pain']
+
 export interface ExerciseFeedback {
   name: string             // exercise name, so the agent can attribute it
   felt: FeltLabel | null

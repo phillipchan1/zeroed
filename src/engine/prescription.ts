@@ -37,6 +37,21 @@ export const SEVERITY_STRONG = 1   // ≤ → the work felt strong (disconfirms 
 export const SEVERITY_HARD = 3     // = → hard but not hurt; effort, never a veto
 export const SEVERITY_PAIN = 4     // ≥ → a real pain signal; always a veto
 
+/**
+ * The top set, when it says the work was strong: it landed at or under the
+ * lift's target RPE with nothing missed anywhere in the lift. This is what
+ * "Easy" / "Solid" used to say by hand — the chips are gone from the session,
+ * and the set's own RPE says it more precisely. Null for no top set, no RPE on
+ * it, an RPE over target, or a missed rep.
+ */
+export function strongTopSet(sets: SetLog[] | null | undefined, targetRpe: number): SetLog | null {
+  const loaded = (sets ?? []).filter((s) => s.done !== false && s.weight != null && s.weight > 0 && (s.reps ?? 0) > 0)
+  if (!loaded.length) return null
+  if ((sets ?? []).some((s) => (s.missed_reps ?? 0) > 0)) return null
+  const top = loaded.reduce((a, b) => ((b.weight ?? 0) > (a.weight ?? 0) ? b : a))
+  return top.rpe != null && top.rpe <= targetRpe ? top : null
+}
+
 // ────────────────────────────────────────────────────────────────────────────
 // THE RPE CONTRACT — one source of truth for how hard a block is MEANT to feel.
 //
