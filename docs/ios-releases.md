@@ -209,6 +209,9 @@ python3 scripts/gen-icons.py
 | Workflow fails at signing | Check `ASC_API_KEY_*`, `APPLE_TEAM_ID`, and that the key is Admin / App Manager |
 | `No profiles for app.zeroed.app` | Register the App ID, then re-run — automatic signing creates the profile |
 | Upload rejected (SDK too old) | Bump `runs-on:` to a newer `macos-*` in `ios-release.yml` |
+| ITMS-90685 CFBundleIdentifier collision | Do not pass `PRODUCT_BUNDLE_IDENTIFIER` to `xcodebuild`. Pod frameworks (`Capacitor`, `CapacitorCordova`, `Pods_App`) inherit it. The Podfile pins them to `org.cocoapods.*`; CI unzips the IPA and fails on a duplicate. |
+| ITMS-90474 iPad orientations | `UIRequiresFullScreen=true` in `Info.plist` (portrait-only). |
+| 90068 deployment target | `IPHONEOS_DEPLOYMENT_TARGET` / `platform :ios` are **15.0** |
 | Build not in TestFlight | App Store Connect → Activity; check email for compliance questions |
 | Encryption export questionnaire | `ITSAppUsesNonExemptEncryption=false` is set in `ios/App/App/Info.plist` |
 | Icon rejected (90717 alpha channel) | Re-run `python3 scripts/gen-icons.py` — it writes RGB, no alpha |

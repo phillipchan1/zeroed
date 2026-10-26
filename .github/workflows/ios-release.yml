@@ -179,6 +179,10 @@ jobs:
             -authenticationKeyID "$APPLE_API_KEY"
             -authenticationKeyIssuerID "$APPLE_API_ISSUER"
           )
+          # Do not pass PRODUCT_BUNDLE_IDENTIFIER here — xcodebuild applies
+          # it to every target, so Capacitor.framework / CapacitorCordova.framework
+          # inherit app.zeroed.app and App Store rejects the IPA (ITMS-90685).
+          # The App target already has PRODUCT_BUNDLE_IDENTIFIER in pbxproj.
           COMMON=(
             -workspace App.xcworkspace
             -scheme App
@@ -187,7 +191,6 @@ jobs:
             MARKETING_VERSION="$APP_VERSION"
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
             DEVELOPMENT_TEAM="$APPLE_DEVELOPMENT_TEAM"
-            PRODUCT_BUNDLE_IDENTIFIER="$IOS_BUNDLE_ID"
             CODE_SIGN_STYLE=Automatic
           )
 
@@ -209,6 +212,9 @@ jobs:
           fi
           echo "IPA_PATH=$IPA" >> "$GITHUB_ENV"
           echo "Archived $IPA"
+
+      - name: Reject duplicate embedded bundle IDs
+        run: node scripts/ios-check-ipa-bundle-ids.mjs "$IPA_PATH"
 
       - name: Upload to Internal TestFlight
         env:

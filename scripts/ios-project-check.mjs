@@ -5,6 +5,7 @@
 // Verifies the bundle ID, marketing version, encryption export flag,
 // App Store icon (1024 RGB, no alpha), and that capacitor.config.ts agrees.
 
+import { execFileSync } from 'node:child_process'
 import { readFileSync, existsSync, statSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -42,6 +43,11 @@ if (pbx) {
 
   if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (CI uses cloud-managed ASC signing)')
   else fail('pbxproj CODE_SIGN_STYLE')
+
+  const deployTargets = [...pbx.matchAll(/IPHONEOS_DEPLOYMENT_TARGET = ([^;]+);/g)].map((m) => m[1])
+  if (deployTargets.length && deployTargets.every((t) => t === '15.0')) {
+    ok(`pbxproj IPHONEOS_DEPLOYMENT_TARGET 15.0 (${deployTargets.length} configs)`)
+  } else fail('pbxproj IPHONEOS_DEPLOYMENT_TARGET', `got ${JSON.stringify(deployTargets)}, expected 15.0`)
 }
 
 const plist = read('ios/App/App/Info.plist')
@@ -59,12 +65,21 @@ if (plist) {
   if (plist.includes('$(MARKETING_VERSION)') && plist.includes('$(CURRENT_PROJECT_VERSION)')) {
     ok('Info.plist versions come from Xcode build settings (CI stamps them)')
   } else fail('Info.plist version keys')
+
+  if (/<key>UIRequiresFullScreen<\/key>\s*<true\/>/.test(plist)) {
+    ok('Info.plist UIRequiresFullScreen=true (ITMS-90474, portrait-only iPad)')
+  } else fail('Info.plist UIRequiresFullScreen')
 }
 
 const podfile = read('ios/App/Podfile')
 if (podfile) {
   if (podfile.includes("@capacitor/ios")) ok('Podfile points at @capacitor/ios')
   else fail('Podfile Capacitor pods')
+  if (/platform :ios, ['"]15\.0['"]/.test(podfile)) ok('Podfile platform iOS 15.0')
+  else fail('Podfile platform', 'expected platform :ios, \'15.0\'')
+  if (podfile.includes("org.cocoapods.") && podfile.includes('PRODUCT_BUNDLE_IDENTIFIER')) {
+    ok('Podfile assigns unique PRODUCT_BUNDLE_IDENTIFIER to pod targets')
+  } else fail('Podfile pod bundle ids')
 }
 
 const cap = read('capacitor.config.ts')
@@ -177,11 +192,27 @@ if (workflow) {
   ) {
     ok('ios-release.yml pins checkout and setup-node to full SHAs')
   } else fail('ios-release.yml floating action tags')
+
+  if (workflow.includes('PRODUCT_BUNDLE_IDENTIFIER="$IOS_BUNDLE_ID"')) {
+    fail('workflow passes PRODUCT_BUNDLE_IDENTIFIER to xcodebuild (ITMS-90685)')
+  } else ok('workflow does not stamp every target with app.zeroed.app')
+
+  if (workflow.includes('ios-check-ipa-bundle-ids.mjs')) {
+    ok('workflow inspects the IPA for duplicate CFBundleIdentifier values')
+  } else fail('workflow missing IPA bundle-id check')
 }
 
 const exportScript = join(root, 'scripts/ios-write-export-options.sh')
 if (!existsSync(exportScript)) fail('scripts/ios-write-export-options.sh missing')
 else ok('export-options writer present')
+
+try {
+  execFileSync(process.execPath, [join(root, 'scripts/ios-check-ipa-bundle-ids.mjs'), '--self-test'], {
+    stdio: 'inherit',
+  })
+} catch {
+  fail('ios-check-ipa-bundle-ids --self-test')
+}
 
 if (failed) {
   console.error(`\n${failed} check(s) failed`)
