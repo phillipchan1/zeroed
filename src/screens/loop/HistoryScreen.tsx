@@ -291,7 +291,7 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
             </p>
           </div>
         ) : (
-          weeks.map((wk) => (
+          <div className="stagger">{weeks.map((wk) => (
             <div key={wk.weekEnding} style={{ marginBottom: 28 }}>
               <div className="section__head">
                 <SectionHeader>{fmtRange(wk.weekStart, wk.weekEnding)}</SectionHeader>
@@ -310,7 +310,7 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
                 />
               ))}
             </div>
-          ))
+          ))}</div>
         )}
       </div></div>
 

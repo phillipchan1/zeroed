@@ -107,7 +107,7 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
         <div className="card fade-rise" style={{ marginBottom: 28, borderLeft: `3px solid ${tone.color}` }}>
           <p className="section-header" style={{ marginBottom: 8 }}>Next week</p>
           <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-            <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-2xl)', fontWeight: 700, letterSpacing: '-0.01em', color: tone.color }}>
+            <span className="verdict-stamp" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-2xl)', fontWeight: 700, letterSpacing: '-0.01em', color: tone.color }}>
               {directive}
             </span>
             {delta !== 0 && (

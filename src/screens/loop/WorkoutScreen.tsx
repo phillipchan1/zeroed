@@ -26,8 +26,10 @@ import {
 import { loadSwapGear, saveSwapGear, recentSwapsFor, rememberSwap } from '../../lib/swapMemory'
 import { restSecondsFor, adjustRest, formatRest } from '../../engine/restTimer'
 import { fireRestAlert } from '../../lib/restAlert'
+import { tick } from '../../lib/haptics'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
-import { unitContext, type UnitContext } from '../../lib/units'
+import { unitContext, convertWeight, type UnitContext } from '../../lib/units'
+import type { FinishedSession } from '../../components/SessionZeroed'
 import { fetchCoachView } from './CoachScreen'
 import type { CoachChatTurn } from '../../engine/agentClient'
 import {
@@ -190,6 +192,9 @@ function SetRow({
   // Which fields *this row's* check auto-filled — so un-checking can revert
   // exactly those, while anything the athlete typed by hand is left alone.
   const [autofilled, setAutofilled] = useState<MetricField[]>([])
+  // The lock-on animation plays for the tap that completes the set — not when a
+  // resumed session repaints sets that were already done.
+  const [snap, setSnap] = useState(false)
 
   // `min={0}` on a number input is validation, not a restriction — a typed "-5"
   // still reaches onChange. Every metric here (weight, reps, seconds, distance)
@@ -242,14 +247,17 @@ function SetRow({
     }
     setAutofilled(filled)
     onChange(next)
+    setSnap(true)
+    tick()
     onComplete()
   }
 
   const doneBtn = (
     <button
       type="button"
-      className={`set-row__done${log.done ? ' set-row__done--checked' : ''}`}
+      className={`set-row__done${log.done ? ' set-row__done--checked' : ''}${snap ? ' set-row__done--snap' : ''}`}
       onClick={toggleDone}
+      onAnimationEnd={(e) => { if (e.animationName === 'done-ring') setSnap(false) }}
       aria-label={log.done ? 'Mark set not done' : 'Complete set'}
     >
       {log.done && <Check size={22} strokeWidth={2.5} color="var(--signal)" />}
@@ -367,9 +375,20 @@ function SetRow({
   // The one moment the whole log exists for. Computed live off what's typed, so
   // it appears as the number goes in — not in a summary three taps later.
   const pr = prLabel(displayPRs(log, best))
+  // Celebrate the record as it's made: flash when this row BECOMES a PR, not on
+  // every render of one (a resumed draft, a scroll back up).
+  const prevPr = useRef(pr)
+  const [prFlash, setPrFlash] = useState(false)
+  useEffect(() => {
+    if (pr && !prevPr.current) setPrFlash(true)
+    prevPr.current = pr
+  }, [pr])
 
   return (
-    <div className={`set-row ${gridClass(trackingType)}${log.done ? ' set-row--done' : ''}${pr ? ' set-row--pr' : ''}`}>
+    <div
+      className={`set-row ${gridClass(trackingType)}${log.done ? ' set-row--done' : ''}${pr ? ' set-row--pr' : ''}${prFlash ? ' set-row--pr-flash' : ''}`}
+      onAnimationEnd={(e) => { if (e.animationName === 'pr-sweep') setPrFlash(false) }}
+    >
       <span className="set-row__num">
         {setNum}
         {pr && <span className="set-row__pr" title={`${pr} ever`} aria-label={`Personal record: ${pr} ever`}>PR</span>}
@@ -1859,6 +1878,26 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     }
   }
 
+  // What the finish moment on Train shows: the session's own numbers, and which
+  // lifts set a record — judged the same way the set-row PR badge is.
+  function finishedSummary(): FinishedSession {
+    const exercises = (routine!.exercises as ExerciseTemplate[]) ?? []
+    const prLifts = exercises
+      .filter((_, i) => (setLogs[i] ?? []).some(
+        (log) => isSetLogged(log) && displayPRs(log, bestByExercise[i] ?? NO_BEST).length > 0,
+      ))
+      .map((ex) => ex.name)
+    const tally = tallySession(setLogs)
+    return {
+      name: routine!.name,
+      sets: tally.loggedSets,
+      volume: Math.round(convertWeight(tally.load, u.storage, u.unit)),
+      unit: u.unit,
+      minutes: Math.ceil(finalElapsedRef.current / 60),
+      prLifts,
+    }
+  }
+
   // Build the debrief payload from the per-exercise feedback + performed numbers.
   function buildDebrief(reflection: string, readingAnswer: string): PendingDebrief {
     const exercises = sessionExercises
@@ -1954,14 +1993,15 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     // the outbox retries on the next `online` event if it fails.
     onCommitted?.()
 
+    // A finished session lands on Train with its finish moment, debrief or not.
+    // (It used to land on Profile after a debrief — a leftover from when Profile
+    // pulsed the insight the debrief moved, which it no longer does — so the
+    // payoff of a workout was a settings screen.) An edit is a correction, not a
+    // finish, so it returns quietly.
     if (isEdit) {
       navigate('/app/today', { replace: true })
-    } else if (debrief) {
-      // Navigate to profile without waiting for the AI agent; the category
-      // pulse is skipped but the session is saved.
-      navigate('/app/profile', { replace: true })
     } else {
-      navigate('/app/today', { replace: true })
+      navigate('/app/today', { replace: true, state: { finished: finishedSummary() } })
     }
 
     void commitPending(pending).catch(() => { /* stays queued */ })
