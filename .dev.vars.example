@@ -12,5 +12,6 @@ ENVIRONMENT=local
 BETTER_AUTH_URL=http://localhost:8787
 # RESEND_API_KEY=
 RESEND_FROM=Zeroed <noreply@localhost>
-# Optional when Hyperdrive localConnectionString is not used:
-# DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/zeroed
+# Local Postgres. When ENVIRONMENT=local this beats Hyperdrive — wrangler's
+# Hyperdrive emulator hangs postgres.js connect/end across requests.
+DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/zeroed

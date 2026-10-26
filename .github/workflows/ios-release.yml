@@ -118,6 +118,10 @@ jobs:
         run: |
           set -euo pipefail
           if [ -n "${VITE_API_BASE_URL:-}" ]; then
+            if [[ "${VITE_API_BASE_URL}" != http://* && "${VITE_API_BASE_URL}" != https://* ]]; then
+              echo "::error::iOS VITE_API_BASE_URL must be absolute (https://<worker>/api). Relative /api cannot reach the Worker from Capacitor."
+              exit 1
+            fi
             echo "VITE_API_BASE_URL is set (${VITE_API_BASE_URL}) — Worker API. Not baking VITE_SUPABASE_*."
             unset VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY
           else

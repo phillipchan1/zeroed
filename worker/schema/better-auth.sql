@@ -49,6 +49,22 @@ CREATE TABLE IF NOT EXISTS verification (
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
 
+DO $$
+DECLARE
+  listing text;
+BEGIN
+  SELECT string_agg(format('%s %s', id, email), E'\n' ORDER BY lower(email), id)
+  INTO listing
+  FROM "user" u
+  WHERE EXISTS (
+    SELECT 1 FROM "user" o
+    WHERE lower(o.email) = lower(u.email) AND o.id <> u.id
+  );
+  IF listing IS NOT NULL THEN
+    RAISE EXCEPTION 'cannot create unique index user_email_lower_uidx: case-insensitive email duplicates:%', E'\n' || listing;
+  END IF;
+END $$;
+CREATE UNIQUE INDEX IF NOT EXISTS user_email_lower_uidx ON "user" (lower(email));
 CREATE INDEX IF NOT EXISTS session_user_id_idx ON session(user_id);
 CREATE INDEX IF NOT EXISTS account_user_id_idx ON account(user_id);
 CREATE INDEX IF NOT EXISTS verification_identifier_idx ON verification(identifier);

@@ -71,8 +71,11 @@ npm run build
 npx wrangler dev                 # SPA + /api on :8787
 ```
 
-`VITE_API_BASE_URL` empty = today's Supabase path. Set it to `/api` (same-origin
-Worker) or `https://<project>.supabase.co/functions/v1` to roll back.
+`VITE_API_BASE_URL` empty = today's Supabase path (auth, functions, PostgREST).
+Set it to `/api` on the Worker-hosted PWA so auth, agent, MCP, **and every
+row read/write** go through `/api/*` on Neon. **iOS / Capacitor needs an
+absolute URL** (`https://<worker>/api`) — a relative `/api` does not work in
+the WebView. Rollback: `https://<project>.supabase.co/functions/v1`.
 
 ## Deploy to Vercel
 

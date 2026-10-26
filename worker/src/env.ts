@@ -1,3 +1,5 @@
+import { isLoopbackHostname } from './authUrl.ts'
+
 export interface HyperdriveBinding {
   connectionString: string
 }
@@ -18,10 +20,43 @@ export interface Env {
 }
 
 export function databaseUrl(env: Env): string | null {
+  const fallback = env.DATABASE_URL?.trim() ?? ''
+  // wrangler Hyperdrive local hangs postgres.js connect/end. Prefer a direct
+  // loopback URL when this process is marked local.
+  if (env.ENVIRONMENT?.trim().toLowerCase() === 'local' && fallback) return fallback
   const fromHyperdrive = env.HYPERDRIVE?.connectionString?.trim() ?? ''
   if (fromHyperdrive && !fromHyperdrive.includes('00000000000000000000000000000000')) {
     return fromHyperdrive
   }
-  const fallback = env.DATABASE_URL?.trim() ?? ''
   return fallback || fromHyperdrive || null
+}
+
+/**
+ * pg Client ssl option. Bound Hyperdrive (`url === env.HYPERDRIVE.connectionString`)
+ * is a local proxy — TLS is already terminated. An unbound `*.hyperdrive.local`
+ * URL is treated like any other remote host (ssl true).
+ */
+export function useDatabaseSsl(
+  url: string,
+  env: Pick<Env, 'ENVIRONMENT' | 'HYPERDRIVE'> = {},
+): boolean {
+  if (env.ENVIRONMENT?.trim().toLowerCase() === 'local') return false
+  const bound = env.HYPERDRIVE?.connectionString?.trim() ?? ''
+  if (bound && url.trim() === bound) return false
+  try {
+    const parsed = new URL(url)
+    if (isLoopbackHostname(parsed.hostname)) return false
+    const mode = parsed.searchParams.get('sslmode')
+    if (mode === 'disable' || mode === 'allow' || mode === 'prefer') return false
+  } catch {
+    if (url.includes('localhost') || url.includes('127.0.0.1') || url.includes('[::1]')) return false
+  }
+  return true
+}
+
+export function pgClientSsl(
+  url: string,
+  env: Pick<Env, 'ENVIRONMENT' | 'HYPERDRIVE'> = {},
+): false | { rejectUnauthorized: false } {
+  return useDatabaseSsl(url, env) ? { rejectUnauthorized: false } : false
 }

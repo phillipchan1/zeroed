@@ -2,7 +2,7 @@
 /**
  * Mutation proof for access isolation.
  * Asserts the unmutated tree is green, then deletes each owner filter in
- * store.ts / edits.ts on its own and expects access.check to fail.
+ * store.ts / edits.ts / data.ts on its own and expects access.check to fail.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -13,16 +13,19 @@ if (process.env.CI && !String(process.env.ZEROED_TEST_DATABASE_URL ?? '').trim()
 
 const storePath = 'worker/src/store.ts'
 const editsPath = 'worker/src/edits.ts'
+const dataPath = 'worker/src/data.ts'
 const originalStore = readFileSync(storePath, 'utf8')
 const originalEdits = readFileSync(editsPath, 'utf8')
+const originalData = readFileSync(dataPath, 'utf8')
 
-const ATHLETE_FILTER = /(?:p\.)?athlete_id = \$\{store\.athleteId\}/g
+const ATHLETE_FILTER = /(?:p\.)?athlete_id = \$\{(?:store\.)?athleteId\}/g
 // Owner `id =` filters only — not the `athlete_id =` substring.
-const ID_FILTER = /(?<![A-Za-z_])id = \$\{store\.athleteId\}/g
+const ID_FILTER = /(?<![A-Za-z_])id = \$\{(?:store\.)?athleteId\}/g
 
 function restore() {
   writeFileSync(storePath, originalStore)
   writeFileSync(editsPath, originalEdits)
+  writeFileSync(dataPath, originalData)
 }
 
 function runCheck() {
@@ -58,6 +61,7 @@ function collectFilters() {
   const items = [
     ...collectFrom('store', storePath, originalStore),
     ...collectFrom('edits', editsPath, originalEdits),
+    ...collectFrom('data', dataPath, originalData),
   ]
   items.sort((a, b) => a.file.localeCompare(b.file) || a.index - b.index)
   return items
@@ -98,7 +102,7 @@ console.log('baseline: isolation check green')
 
 const filters = collectFilters()
 if (filters.length === 0) {
-  throw new Error('no owner filters found in store.ts / edits.ts')
+  throw new Error('no owner filters found in store.ts / edits.ts / data.ts')
 }
 console.log(`derived ${filters.length} owner filters:`)
 for (const f of filters) console.log(`  ${f.file}.ts:${f.line} ${f.text}`)
@@ -114,11 +118,12 @@ expectFail('M1 delete loadWorkout athlete_id filter', () => {
 
 expectFail('M2 set athlete_id filters to TRUE', () => {
   const repl = (source) => source
-    .replace(/p\.athlete_id = \$\{store\.athleteId\}/g, 'TRUE')
-    .replace(/athlete_id = \$\{store\.athleteId\}/g, 'TRUE')
-    .replace(/(?<![A-Za-z_])id = \$\{store\.athleteId\}/g, 'TRUE')
+    .replace(/p\.athlete_id = \$\{(?:store\.)?athleteId\}/g, 'TRUE')
+    .replace(/athlete_id = \$\{(?:store\.)?athleteId\}/g, 'TRUE')
+    .replace(/(?<![A-Za-z_])id = \$\{(?:store\.)?athleteId\}/g, 'TRUE')
   writeFileSync(storePath, repl(originalStore))
   writeFileSync(editsPath, repl(originalEdits))
+  writeFileSync(dataPath, repl(originalData))
 })
 
 for (const filter of filters) {
@@ -128,4 +133,32 @@ for (const filter of filters) {
   })
 }
 
-console.log(`\nmutation proof: ok (${filters.length}/${filters.length})`)
+expectFail('data.ts drop join-alias owner predicates', () => {
+  const next = originalData.replace(
+    /for \(const alias of joins\.keys\(\)\) \{\n\s+parts\.push\(bindOwner\(alias, athleteId, ownerSlot, alias\)\.text\)\n\s+\}/,
+    '',
+  )
+  if (next === originalData) throw new Error('could not find join-alias owner loop')
+  writeFileSync(dataPath, next)
+})
+
+expectFail('data.ts drop DELETABLE gate', () => {
+  const next = originalData.replace(
+    /if \(!DELETABLE\.has\(table\)\) return fail\('not found', 404\)\n/,
+    '',
+  )
+  if (next === originalData) throw new Error('could not find DELETABLE gate')
+  writeFileSync(dataPath, next)
+})
+
+expectFail('data.ts drop upsert 0-row 404', () => {
+  const next = originalData.replace(
+    /if \(query\.op === 'upsert' && rows\.length === 0 && ctx\.athleteId\) return fail\('not found', 404\)\n/,
+    '',
+  )
+  if (next === originalData) throw new Error('could not find upsert 0-row 404')
+  writeFileSync(dataPath, next)
+})
+
+const structural = 3
+console.log(`\nmutation proof: ok (${filters.length + structural}/${filters.length + structural})`)

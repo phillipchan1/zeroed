@@ -1,4 +1,6 @@
 import { createClient } from '@supabase/supabase-js'
+import { isCloudflareApi } from './api'
+import { createDataFacade } from './dataClient'
 
 // NOTE: VITE_* values are inlined at BUILD time (not runtime). Whatever these
 // were when Vercel last built is what ships in the bundle — so a change to the
@@ -23,7 +25,7 @@ function normalizeUrl(v: string | undefined): string {
 export const supabaseUrl = normalizeUrl(import.meta.env.VITE_SUPABASE_URL) || 'https://placeholder.supabase.co'
 export const supabaseAnonKey = clean(import.meta.env.VITE_SUPABASE_ANON_KEY) || 'placeholder'
 
-if (supabaseUrl.includes('placeholder') || supabaseAnonKey === 'placeholder') {
+if (!isCloudflareApi() && (supabaseUrl.includes('placeholder') || supabaseAnonKey === 'placeholder')) {
   // Visible, non-fatal: the app still mounts, but Supabase calls will fail until
   // the env vars are set in Vercel AND the project is redeployed.
   console.error(
@@ -32,4 +34,13 @@ if (supabaseUrl.includes('placeholder') || supabaseAnonKey === 'placeholder') {
   )
 }
 
-export const supabase = createClient(supabaseUrl, supabaseAnonKey)
+const live = isCloudflareApi()
+  ? null
+  : createClient(supabaseUrl, supabaseAnonKey)
+
+/**
+ * When VITE_API_BASE_URL is the Worker, every `.from()` / `.rpc()` goes through
+ * `/api/data` (Neon + Better Auth). Empty API base keeps today's supabase-js
+ * client and PostgREST + RLS.
+ */
+export const supabase = (isCloudflareApi() ? createDataFacade() : live) as unknown as NonNullable<typeof live>

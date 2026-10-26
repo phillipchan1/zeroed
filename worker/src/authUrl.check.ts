@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import app from './index.ts'
 import { authConfigErrorResponse, beginAuthCors } from './cors.ts'
+import { databaseUrl, pgClientSsl, useDatabaseSsl } from './env.ts'
 import {
   authCookieSecure,
   connectionHostname,
@@ -12,6 +13,7 @@ import {
   isLoopbackHostname,
   resolveAuthBaseURL,
 } from './authUrl.ts'
+import { refuseUnsafeTestUrl } from './refuseTestUrl.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -50,11 +52,109 @@ ok(authCookieSecure('https://zeroed.example.workers.dev'), 'prod cookies are Sec
 ok(!isLocalAuthRuntime({ DATABASE_URL: prodWithLocalUser }), 'user localhost_admin is not local')
 ok(!isLocalAuthRuntime({ DATABASE_URL: prodWithLocalDb }), 'db name localhost is not local')
 ok(!isLocalAuthRuntime({ DATABASE_URL: prodWithLocalQuery }), 'query localhost is not local')
+function throwsRefuse(url: string, label?: string): string | false {
+  try {
+    refuseUnsafeTestUrl(url, label)
+    return false
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
+}
+
+function throwsRefuseEnv(
+  url: string,
+  env: { PGHOST?: string; PGHOSTADDR?: string },
+): string | false {
+  const prev = { PGHOST: process.env.PGHOST, PGHOSTADDR: process.env.PGHOSTADDR }
+  try {
+    if (env.PGHOST === undefined) delete process.env.PGHOST
+    else process.env.PGHOST = env.PGHOST
+    if (env.PGHOSTADDR === undefined) delete process.env.PGHOSTADDR
+    else process.env.PGHOSTADDR = env.PGHOSTADDR
+    return throwsRefuse(url)
+  } finally {
+    if (prev.PGHOST === undefined) delete process.env.PGHOST
+    else process.env.PGHOST = prev.PGHOST
+    if (prev.PGHOSTADDR === undefined) delete process.env.PGHOSTADDR
+    else process.env.PGHOSTADDR = prev.PGHOSTADDR
+  }
+}
+
+ok(throwsRefuse(neon) !== false && String(throwsRefuse(neon)).includes('not loopback'), 'refuseUnsafeTestUrl: Neon throws')
+ok(
+  String(throwsRefuse(neon, 'DATABASE_URL')).includes('DATABASE_URL host "ep-prod.us-east-1.aws.neon.tech"'),
+  'refuseUnsafeTestUrl: DATABASE_URL label names the Neon host',
+)
+ok(throwsRefuse(prodWithLocalUser) !== false, 'refuseUnsafeTestUrl: localhost in user is not loopback')
+ok(throwsRefuse(prodWithLocalQuery) !== false, 'refuseUnsafeTestUrl: localhost in query is not loopback')
+ok(throwsRefuse('postgresql://app@127.0.0.1.example.com/zeroed') !== false, 'refuseUnsafeTestUrl: 127.0.0.1.example.com is not loopback')
+ok(throwsRefuse(loopbackPg) === false, 'refuseUnsafeTestUrl: localhost URL is allowed')
+ok(throwsRefuse(loopbackV4) === false, 'refuseUnsafeTestUrl: 127.0.0.1 URL is allowed')
+ok(throwsRefuse(loopbackV6) === false, 'refuseUnsafeTestUrl: [::1] URL is allowed')
+ok(throwsRefuse('postgresql://postgres@127.1:5432/zeroed') !== false, 'refuseUnsafeTestUrl: 127.1 is not an allowed test host')
+
+const hostBypass = 'postgres://u:x@localhost:55440/db?host=ep-x.neon.tech'
+const hostaddrBypass = 'postgres://u:x@localhost:55440/db?sslmode=disable&hostaddr=1.2.3.4'
+const serviceBypass = 'postgres://u:x@localhost:5432/db?service=neon'
+const multiHost = 'postgresql://localhost,ep-x.neon.tech/zeroed'
+ok(
+  String(throwsRefuse(hostBypass)).includes('query param "host"') && String(throwsRefuse(hostBypass)).includes('refusing to wipe'),
+  'refuseUnsafeTestUrl: ?host= redirect is refused',
+)
+ok(
+  String(throwsRefuse(hostaddrBypass)).includes('query param "hostaddr"'),
+  'refuseUnsafeTestUrl: &hostaddr= redirect is refused',
+)
+ok(String(throwsRefuse(serviceBypass)).includes('query param "service"'), 'refuseUnsafeTestUrl: ?service= is refused')
+ok(String(throwsRefuse(multiHost)).includes('multi-host'), 'refuseUnsafeTestUrl: multi-host list is refused')
+ok(
+  String(throwsRefuseEnv(loopbackV4, { PGHOST: 'ep-x.neon.tech' })).includes('PGHOST host "ep-x.neon.tech"'),
+  'refuseUnsafeTestUrl: PGHOST override is refused',
+)
+ok(
+  String(throwsRefuseEnv(loopbackV4, { PGHOSTADDR: '1.2.3.4' })).includes('PGHOSTADDR host "1.2.3.4"'),
+  'refuseUnsafeTestUrl: PGHOSTADDR override is refused',
+)
+ok(throwsRefuseEnv(loopbackV4, { PGHOST: '127.0.0.1' }) === false, 'refuseUnsafeTestUrl: loopback PGHOST is allowed')
+ok(throwsRefuse('/var/run/postgresql zeroed') !== false, 'refuseUnsafeTestUrl: unix socket path is not a URL / not loopback')
+
 ok(!isLocalAuthRuntime({ DATABASE_URL: neon }), 'Neon URL is not local')
 ok(!isLocalAuthRuntime({}), 'empty env is not local')
 ok(!isLocalAuthRuntime({ ENVIRONMENT: 'dev' }), 'ENVIRONMENT=dev is not local')
 ok(!isLocalAuthRuntime({ ENVIRONMENT: 'development' }), 'ENVIRONMENT=development is not local')
 ok(isLocalAuthRuntime({ ENVIRONMENT: 'local' }), 'ENVIRONMENT=local is local')
+ok(!useDatabaseSsl(neon, { ENVIRONMENT: 'local' }), 'local env disables postgres.js ssl')
+ok(useDatabaseSsl(neon), 'Neon URL uses ssl')
+ok(!useDatabaseSsl(loopbackPg), 'loopback postgres URL disables ssl')
+ok(!useDatabaseSsl('postgresql://u:p@hyperdrive.internal/db?sslmode=disable'), 'sslmode=disable is not require')
+const hyperdriveLocal = 'postgresql://u:p@abc123def456.hyperdrive.local:5432/db'
+ok(useDatabaseSsl(hyperdriveLocal), 'unbound hyperdrive.local URL keeps ssl')
+ok(
+  !useDatabaseSsl(hyperdriveLocal, { HYPERDRIVE: { connectionString: hyperdriveLocal } }),
+  'bound Hyperdrive connectionString disables ssl',
+)
+ok(
+  useDatabaseSsl(neon, { HYPERDRIVE: { connectionString: hyperdriveLocal } }),
+  'remote URL stays ssl even when Hyperdrive is bound',
+)
+ok(
+  useDatabaseSsl(hyperdriveLocal, { HYPERDRIVE: { connectionString: `${hyperdriveLocal}?sslmode=require` } }),
+  'hyperdrive.local that is not the bound connectionString stays ssl',
+)
+ok(pgClientSsl(hyperdriveLocal) !== false, 'unbound hyperdrive.local applies ssl on the client')
+ok(
+  pgClientSsl(hyperdriveLocal, { HYPERDRIVE: { connectionString: hyperdriveLocal } }) === false,
+  'bound Hyperdrive client ssl is false',
+)
+ok(pgClientSsl(neon) !== false, 'remote URL client ssl stays on')
+ok(
+  databaseUrl({ ENVIRONMENT: 'local', DATABASE_URL: loopbackPg, HYPERDRIVE: { connectionString: neon } }) === loopbackPg,
+  'local DATABASE_URL beats Hyperdrive',
+)
+ok(
+  databaseUrl({ HYPERDRIVE: { connectionString: neon }, DATABASE_URL: loopbackPg }) === neon,
+  'prod Hyperdrive beats DATABASE_URL',
+)
 ok(isLocalAuthRuntime({ ENVIRONMENT: 'LOCAL' }), 'ENVIRONMENT=LOCAL is local')
 ok(isLocalAuthRuntime({ DATABASE_URL: loopbackPg }), 'hostname localhost is local')
 ok(isLocalAuthRuntime({ DATABASE_URL: loopbackV4 }), 'hostname 127.0.0.1 is local')
