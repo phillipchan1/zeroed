@@ -68,8 +68,10 @@ On every push to `master` (and **Run workflow**):
    exact version was already uploaded (manual re-run of the same commit).
 4. `npm ci` → `vite build` → `npx cap sync ios`.
    `VITE_API_BASE_URL` comes from a **repo variable**. When it is empty,
-   the build bakes `VITE_SUPABASE_*` (today's path). When it is set to the
-   Worker URL at cutover, those Supabase values are **not** baked. See
+   the build bakes `VITE_SUPABASE_*` (today's path). When it is set, it
+   must be an **absolute** `https://<worker>/api` — a relative `/api`
+   resolves against `capacitor://localhost` and never reaches the Worker
+   — and `VITE_SUPABASE_*` are **not** baked. See
    [`cloudflare-cutover.md`](./cloudflare-cutover.md) § iOS TestFlight at cutover.
 5. After the web build, write the App Store Connect `.p8` under
    `$RUNNER_TEMP/zeroed-asc.p8` with `umask 077` (raw PEM or base64). Copy
@@ -147,7 +149,7 @@ creates the App Store Connect distribution profile against `app.zeroed.app`.
 |---|---|---|
 | `VITE_SUPABASE_URL` | secret | Zeroed's Supabase project (same value as Vercel Production). Used only while `VITE_API_BASE_URL` is empty. |
 | `VITE_SUPABASE_ANON_KEY` | secret | Zeroed's anon key (same value as Vercel Production). Used only while `VITE_API_BASE_URL` is empty. |
-| `VITE_API_BASE_URL` | **variable** | Leave empty until Cloudflare cutover. Then set to `https://<worker>/api`. See [`cloudflare-cutover.md`](./cloudflare-cutover.md). |
+| `VITE_API_BASE_URL` | **variable** | Leave empty until Cloudflare cutover. Then set to an **absolute** `https://<worker>/api` — relative `/api` is rejected in CI. See [`cloudflare-cutover.md`](./cloudflare-cutover.md). |
 
 Settings → Secrets and variables → Actions on **phillipchan1/zeroed**.
 This repo does not change secrets for you. Until they exist, the
@@ -219,6 +221,7 @@ python3 scripts/gen-icons.py
 | Encryption export questionnaire | `ITSAppUsesNonExemptEncryption=false` is set in `ios/App/App/Info.plist` |
 | Icon rejected (90717 alpha channel) | Re-run `python3 scripts/gen-icons.py` — it writes RGB, no alpha |
 | `cap sync` on Linux skips pods | Expected. CI is `macos-latest` and runs CocoaPods |
+| Sign-in works on the PWA but the iOS app cannot load/save | The iOS build baked a relative `VITE_API_BASE_URL=/api`. Rebuild with `https://<worker>/api`. |
 
 ---
 

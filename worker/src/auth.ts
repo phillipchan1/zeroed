@@ -2,6 +2,7 @@ import { betterAuth } from 'better-auth'
 import { bearer, emailOTP } from 'better-auth/plugins'
 import { Pool } from 'pg'
 import { authCookieSecure, isLocalAuthHost, resolveAuthBaseURL } from './authUrl.ts'
+import { NATIVE_APP_ORIGINS } from './cors.ts'
 import { databaseUrl, type Env } from './env.ts'
 
 type AuthInstance = ReturnType<typeof createAuth>
@@ -48,9 +49,12 @@ export function createAuth(env: Env) {
     basePath: '/api/auth',
     database: new Pool({ connectionString: url, max: 5 }),
     emailAndPassword: { enabled: false },
-    trustedOrigins: isLocalAuthHost(baseURL)
-      ? [baseURL, 'http://localhost:5173', 'http://localhost:8787', 'http://[::1]:5173', 'http://[::1]:8787']
-      : [baseURL],
+    trustedOrigins: [
+      ...(isLocalAuthHost(baseURL)
+        ? [baseURL, 'http://localhost:5173', 'http://localhost:8787', 'http://[::1]:5173', 'http://[::1]:8787']
+        : [baseURL]),
+      ...NATIVE_APP_ORIGINS,
+    ],
     advanced: {
       defaultCookieAttributes: {
         sameSite: 'lax',

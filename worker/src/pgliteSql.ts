@@ -70,6 +70,10 @@ export function makePgliteSql(db: PGlite): Sql {
     array(value: unknown[]) {
       return { [ARRAY_MARK]: true, value } satisfies ArrayParam
     },
+    async unsafe(text: string, params: unknown[] = []) {
+      const result = await db.query(text, params)
+      return result.rows
+    },
   })
   return query
 }

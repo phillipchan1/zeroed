@@ -13,16 +13,22 @@ Supabase until that night.
 | `mcp` | Supabase Edge Function `functions/v1/mcp` | Hono Worker `/api/mcp` (and `/mcp`). **Edge MCP is retired at cutover** — tokens keep working because `#17` copies `mcp_token` and the Worker hashes the same way. | Last Vercel build (empty `VITE_API_BASE_URL`) or set the API base back at `https://<project>.supabase.co/functions/v1`. The edge function stays in the repo; it is not the cutover target. |
 | Auth | Supabase email OTP | Better Auth email OTP (no passwords) on `/api/auth` | Same API-URL flip; existing Vercel build still uses Supabase auth |
 | Database | Supabase Postgres + RLS | Neon Postgres via Hyperdrive; access checks in the Worker | Leave Neon in place; app no longer writes it |
+| Client row I/O | `supabase.from()` → PostgREST + RLS | `POST /api/data` on the Worker (Neon, per-athlete owner filters) | Empty `VITE_API_BASE_URL` keeps PostgREST |
 
-The SPA still talks to Supabase PostgREST for row reads/writes when
-`VITE_API_BASE_URL` is unset (today's Vercel build). After the Worker hosts the
-SPA, set `VITE_API_BASE_URL=/api` so agent / MCP / auth hit the Worker. Profile
-already uses `mcpUrl()` (`${base}/mcp` → `/api/mcp`). While the flag is off,
-Claude connectors keep using `functions/v1/mcp`. At cutover they must be
-re-pointed at the Worker URL — the edge function is retired then and would
-keep reading the old Supabase store if left in front. A later change can move
-client PostgREST calls onto Neon; it is **not** required to roll the functions
-and auth first.
+`VITE_API_BASE_URL` empty = today's Vercel build: Supabase auth, functions, and
+PostgREST. Once it is set to the Worker, **every** client read and write goes
+through `/api/*` on Neon — including the ~90 `supabase.from()` call sites
+(engine, program history, screens). Those calls would otherwise run anonymous:
+Supabase RLS would hide Phil's rows and reject writes, while the agent/MCP
+already write Neon, and the two would drift. After the Worker hosts the SPA,
+set `VITE_API_BASE_URL=/api` so agent / MCP / auth / data hit the Worker.
+Profile already uses `mcpUrl()` (`${base}/mcp` → `/api/mcp`). While the flag
+is off, Claude connectors keep using `functions/v1/mcp`. At cutover they must
+be re-pointed at the Worker URL — the edge function is retired then and would
+keep reading the old Supabase store if left in front. A relative `/api` is
+fine for the PWA on the Worker origin. **iOS / Capacitor must use an
+absolute** `https://<worker>/api` — a relative `/api` resolves against
+`capacitor://localhost` and never reaches the Worker.
 
 ## Secrets and bindings
 
@@ -48,9 +54,9 @@ Client build-time (Vite / Vercel, unchanged until cutover):
 
 | Name | Notes |
 |---|---|
-| `VITE_SUPABASE_URL` | Keep until PostgREST is retired. |
-| `VITE_SUPABASE_ANON_KEY` | Keep until PostgREST is retired. |
-| `VITE_API_BASE_URL` | Empty = today's path. Worker: `/api` (same origin) or `https://<worker>/api`. Rollback: `https://<project>.supabase.co/functions/v1`. iOS TestFlight reads this from a **repo variable** (not a secret) — see [iOS TestFlight at cutover](#ios-testflight-at-cutover). |
+| `VITE_SUPABASE_URL` | Keep for the empty-API-base (Vercel) path only. |
+| `VITE_SUPABASE_ANON_KEY` | Keep for the empty-API-base (Vercel) path only. |
+| `VITE_API_BASE_URL` | Empty = today's path. Worker: `/api` (same origin) or `https://<worker>/api`. **iOS: `https://<worker>/api` (absolute).** Rollback: `https://<project>.supabase.co/functions/v1`. iOS TestFlight reads this from a **repo variable** (not a secret) — see [iOS TestFlight at cutover](#ios-testflight-at-cutover). |
 
 Replace the placeholder Hyperdrive `id` in `wrangler.jsonc` before a real deploy.
 
@@ -78,10 +84,11 @@ Internal TestFlight build ships with the new API target.
 This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 
 - Free Workers: **10 ms CPU per request** (I/O wait is not counted). `/api/health`
-  and static assets are fine. `/api/agent` does JSON-schema validation + one
-  OpenAI Responses call; the wait on OpenAI is I/O, but parsing a large
-  `program_edit` payload can blow 10 ms CPU. `/api/mcp` tool handlers that walk
-  a long lift history are the other hot path.
+  and static assets are fine. `/api/data` is one small owned SQL (session →
+  athlete → one query) — do not split it into per-table routes. `/api/agent` does
+  JSON-schema validation + one OpenAI Responses call; the wait on OpenAI is I/O,
+  but parsing a large `program_edit` payload can blow 10 ms CPU. `/api/mcp` tool
+  handlers that walk a long lift history are the other hot path.
 - Free Workers bundle limit is **3 MB compressed** (Paid is 10 MB). Better Auth +
   `pg` + Hono + the ported MCP store is the size risk; check `wrangler deploy`
   output before relying on Free.
@@ -111,16 +118,18 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 ## Pre-checks (T-24h)
 
 1. Phil sign-off recorded. No deploy happens without it.
-2. `npm run type-check && npm run lint && npm run check && npm run check:isolation-mutation`
+2. `npm run type-check && npm run lint && npm run check && npm run check:client-data-gate && npm run check:isolation-mutation`
    green on this branch. Isolation applies `supabase/migrations` onto
    real Postgres 17 in CI (`ZEROED_TEST_DATABASE_URL`; PGlite locally when
    that URL is unset), then seeds two athletes. The mutation script first
    asserts the unmutated check is green, then deletes each derived owner
    filter (`athlete_id =` and `id =`, including the phase-rollback owner
-   clause) on its own and expects at least one failure — CI fails if the
-   URL is missing so those mutations are not PGlite-only. `worker/src/mcp.check.ts`
-   (picked up by `npm run check`) is the MCP parity + token isolation +
-   revoked 401 + load-a-full-program gate.
+   clause and the `/api/data` predicates) on its own and expects at least
+   one failure — CI fails if the URL is missing so those mutations are not
+   PGlite-only. `worker/src/mcp.check.ts` (picked up by `npm run check`) is
+   the MCP parity + token isolation + revoked 401 + load-a-full-program
+   gate. `check:client-data-gate` lists every `supabase.from()` as going
+   through the Worker facade when the API base is set.
 3. `npm run build && npx wrangler dev` serves `/` and `/api/health`.
    `POST /functions/v1/agent` reaches the Worker (not a 405 from assets).
    Missing `/assets/*` is 404 text/plain, not `index.html`.
@@ -150,7 +159,8 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 5. Set the Worker `BETTER_AUTH_URL` var/secret to the public Worker origin
    (never leave it as `http://localhost:8787`, and do not set
    `ENVIRONMENT=local` in prod). Rebuild the SPA with
-   `VITE_API_BASE_URL=/api` (or the workers.dev origin + `/api`) and
+   `VITE_API_BASE_URL=/api` for the PWA (or the workers.dev origin + `/api`)
+   and an **absolute** `https://<worker>/api` for the iOS build, then
    `wrangler deploy`. Do **not** flip the production hostname until smoke
    passes on workers.dev.
 6. Smoke:
@@ -158,6 +168,9 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    - `GET /app/today` → `index.html` (SPA fallback).
    - `GET /api/health` → `{ ok: true }`.
    - Request a sign-in code; verify the 6-digit OTP.
+   - Load today's workout list and save (complete) one session — both must
+     hit `POST /api/data`, not Supabase PostgREST.
+   - `node scripts/smoke-wrangler-data.mjs` while `wrangler dev` is up.
    - One authenticated `POST /api/agent` (`probe` is pre-auth; use `coach_chat`
      or `target` with a session cookie / bearer).
    - `POST /api/mcp` with `Accept: text/event-stream` and a minted token —

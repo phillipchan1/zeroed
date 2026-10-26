@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 import { handleAgent } from './agent.ts'
 import { API_SECURITY, beginAuthCors } from './cors.ts'
+import { handleData } from './data.ts'
 import { getAuth } from './auth.ts'
 import type { Env } from './env.ts'
 import { handleMcp } from './mcp.ts'
@@ -79,6 +80,7 @@ function waitUntilCtx(c: { executionCtx?: WaitUntilCtx }): WaitUntilCtx | undefi
 app.all('/api/agent', (c) => handleAgent(c.req.raw, c.env, waitUntilCtx(c)))
 app.all('/api/mcp', (c) => handleMcp(c.req.raw, c.env, { ctx: waitUntilCtx(c) }))
 app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, { ctx: waitUntilCtx(c) }))
+app.all('/api/data', (c) => handleData(c.req.raw, c.env))
 
 // Compatibility aliases so VITE_API_BASE_URL can point at either
 // `https://<worker>/api` or the old `/functions/v1` prefix.

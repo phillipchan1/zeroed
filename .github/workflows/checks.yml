@@ -69,6 +69,8 @@ jobs:
         run: npm run lint
       - name: Engine / lib / access checks
         run: npm run check
+      - name: Client data gate
+        run: npm run check:client-data-gate
       - name: MCP checks
         run: |
           npm --prefix mcp ci --no-audit --no-fund
