@@ -20,7 +20,7 @@ import {
   writeDraftInPlace,
   type EditInput,
 } from './edits.ts'
-import { openIsolationHarness } from './isolationDb.ts'
+import { openIsolationHarness, openIsolationSql } from './isolationDb.ts'
 import { resolveMcpToken, sha256Hex } from './mcpToken.ts'
 import {
   loadAthlete,
@@ -71,7 +71,21 @@ const WORKOUT_A = '99999999-9999-9999-9999-999999999999'
 const WORKOUT_B = 'bbbb9999-9999-4999-8999-999999999999'
 const INSIGHT_B = 'bbbb2222-0000-4000-8000-000000000001'
 
-const harness = await openIsolationHarness()
+const usePostgresJob =
+  process.env.ZEROED_REAL_PG === '1' && !String(process.env.ZEROED_TEST_DATABASE_URL ?? '').trim()
+const harness = usePostgresJob
+  ? await (async () => {
+      const opened = await openIsolationSql()
+      return {
+        sql: opened.sql,
+        backend: 'postgres' as const,
+        query<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {
+          return opened.sql.unsafe<T>(text, params)
+        },
+        close: opened.close,
+      }
+    })()
+  : await openIsolationHarness()
 const sql = harness.sql
 const storeA = makeStore(sql, A)
 const storeB = makeStore(sql, B)
