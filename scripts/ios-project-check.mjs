@@ -182,14 +182,24 @@ if (workflow) {
     fail('scripts/asc-revoke-api-dev-certs.mjs is still present')
   } else ok('revoke-certs script is gone')
 
-  if (
-    /CODE_SIGN_STYLE=Manual/.test(workflow) &&
-    /CODE_SIGN_IDENTITY="Apple Distribution"/.test(workflow) &&
-    workflow.includes('PROVISIONING_PROFILE_SPECIFIER') &&
-    /DEVELOPMENT_TEAM="\$APPLE_DEVELOPMENT_TEAM"/.test(workflow)
-  ) {
-    ok('workflow archives with manual Apple Distribution signing')
-  } else fail('workflow manual Distribution flags')
+  if (workflow.includes('ios-apply-app-signing.mjs')) {
+    ok('workflow writes Distribution signing onto the App target only')
+  } else fail('workflow App-target signing', 'must call ios-apply-app-signing.mjs so pods do not inherit the App Store profile')
+
+  // xcodebuild SETTING=value applies to CocoaPods too. Identity / profile /
+  // team / style belong on the App target, not on the archive command line.
+  if (/^\s+CODE_SIGN_IDENTITY=/.test(workflow)) {
+    fail('workflow passes CODE_SIGN_IDENTITY to xcodebuild', 'scope it to the App target — pods have different bundle IDs')
+  } else ok('workflow does not pass CODE_SIGN_IDENTITY to every target')
+  if (/^\s+PROVISIONING_PROFILE_SPECIFIER=/.test(workflow)) {
+    fail('workflow passes PROVISIONING_PROFILE_SPECIFIER to xcodebuild', 'scope it to the App target — the App Store profile is for app.zeroed.app only')
+  } else ok('workflow does not pass PROVISIONING_PROFILE_SPECIFIER to every target')
+  if (/^\s+DEVELOPMENT_TEAM=/.test(workflow)) {
+    fail('workflow passes DEVELOPMENT_TEAM to xcodebuild', 'scope it to the App target')
+  } else ok('workflow does not pass DEVELOPMENT_TEAM to every target')
+  if (/^\s+CODE_SIGN_STYLE=/.test(workflow)) {
+    fail('workflow passes CODE_SIGN_STYLE to xcodebuild', 'scope it to the App target')
+  } else ok('workflow does not pass CODE_SIGN_STYLE to every target')
 
   if (workflow.includes('create-keychain') && workflow.includes('security import') && workflow.includes('delete-keychain')) {
     ok('workflow imports the Distribution .p12 into a temporary keychain')
@@ -280,12 +290,43 @@ try {
   fail('ios-check-ipa-bundle-ids --self-test')
 }
 
+if (existsSync(join(root, 'scripts/ios-set-development-team.mjs'))) {
+  fail('scripts/ios-set-development-team.mjs is still present', 'unused after App-target signing moved to ios-apply-app-signing.mjs')
+} else ok('ios-set-development-team.mjs is gone')
+
 try {
-  execFileSync(process.execPath, [join(root, 'scripts/ios-set-development-team.mjs'), '--self-test'], {
+  execFileSync(process.execPath, [join(root, 'scripts/ios-apply-app-signing.mjs'), '--self-test'], {
     stdio: 'inherit',
   })
 } catch {
-  fail('ios-set-development-team --self-test')
+  fail('ios-apply-app-signing --self-test')
+}
+
+if (pbx) {
+  try {
+    const { withAppSigning } = await import(new URL('./ios-apply-app-signing.mjs', import.meta.url))
+    const signed = withAppSigning(pbx, { teamId: 'ABCDE12345', profileSpecifier: 'Zeroed App Store' })
+    const appRelease = [...signed.matchAll(/\/\* Release \*\/ = \{[\s\S]*?name = Release;\n\t\t\};/g)].map((m) => m[0])
+    const appBlocks = appRelease.filter((b) => b.includes('PRODUCT_BUNDLE_IDENTIFIER = app.zeroed.app;'))
+    const projectBlocks = appRelease.filter((b) => !b.includes('PRODUCT_BUNDLE_IDENTIFIER'))
+    if (
+      appBlocks.length === 1 &&
+      appBlocks[0].includes('CODE_SIGN_STYLE = Manual;') &&
+      appBlocks[0].includes('CODE_SIGN_IDENTITY = "Apple Distribution";') &&
+      appBlocks[0].includes('PROVISIONING_PROFILE_SPECIFIER = "Zeroed App Store";') &&
+      appBlocks[0].includes('DEVELOPMENT_TEAM = ABCDE12345;')
+    ) {
+      ok('apply-app-signing writes Manual Distribution onto the App Release target')
+    } else fail('apply-app-signing App Release target')
+    if (projectBlocks.every((b) => !b.includes('CODE_SIGN_IDENTITY') && !b.includes('DEVELOPMENT_TEAM'))) {
+      ok('apply-app-signing does not write signing onto project-level Release')
+    } else fail('apply-app-signing leaked signing onto project-level Release')
+    if (signed.includes('ProvisioningStyle = Manual;') && !signed.includes('ProvisioningStyle = Automatic;')) {
+      ok('apply-app-signing sets TargetAttributes ProvisioningStyle=Manual')
+    } else fail('apply-app-signing ProvisioningStyle')
+  } catch (err) {
+    fail('apply-app-signing against committed pbxproj', err instanceof Error ? err.message : String(err))
+  }
 }
 
 if (failed) {

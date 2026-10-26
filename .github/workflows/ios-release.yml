@@ -5,14 +5,15 @@ name: iOS TestFlight
 # One-time Apple + GitHub secrets setup: docs/ios-releases.md
 #
 # Signing is manual Apple Distribution. The runner imports a .p12 and an
-# App Store provisioning profile into a temporary keychain, then archives
-# with CODE_SIGN_STYLE=Manual. This workflow must never create or revoke
-# certificates — do not pass allowProvisioningUpdates, and do not call
-# the App Store Connect certificates API.
-#   xcodebuild archive
-#     CODE_SIGN_STYLE=Manual
-#     CODE_SIGN_IDENTITY='Apple Distribution'
-#     PROVISIONING_PROFILE_SPECIFIER / DEVELOPMENT_TEAM
+# App Store provisioning profile into a temporary keychain, then writes
+# CODE_SIGN_STYLE=Manual / identity / profile / team onto the App target
+# only (scripts/ios-apply-app-signing.mjs) before archive. Do not pass
+# those as xcodebuild SETTING=value flags — they apply to every target,
+# including CocoaPods (CODE_SIGNING_ALLOWED=NO, org.cocoapods.* ids).
+# This workflow must never create or revoke certificates — do not pass
+# allowProvisioningUpdates, and do not call the App Store Connect
+# certificates API.
+#   xcodebuild archive  (App target already has Manual Distribution)
 #   xcodebuild -exportArchive
 #     method=app-store, signingStyle=manual
 #
@@ -269,6 +270,15 @@ jobs:
             IOS_BUNDLE_ID="$IOS_BUNDLE_ID" \
             bash scripts/ios-write-export-options.sh "$EXPORT_PLIST"
 
+          # Scope Manual Distribution to the App target. xcodebuild
+          # SETTING=value applies to every target in the workspace, so a
+          # global PROVISIONING_PROFILE_SPECIFIER / CODE_SIGN_IDENTITY /
+          # DEVELOPMENT_TEAM would be inherited by CocoaPods (which already
+          # set CODE_SIGNING_ALLOWED=NO and org.cocoapods.* bundle ids).
+          node scripts/ios-apply-app-signing.mjs \
+            --team "$APPLE_DEVELOPMENT_TEAM" \
+            --profile "$PROVISIONING_PROFILE_SPECIFIER"
+
           cd ios/App
           # Do not pass PRODUCT_BUNDLE_IDENTIFIER here — xcodebuild applies
           # it to every target, so Capacitor.framework / CapacitorCordova.framework
@@ -283,10 +293,6 @@ jobs:
             -destination 'generic/platform=iOS'
             MARKETING_VERSION="$APP_VERSION"
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
-            CODE_SIGN_STYLE=Manual
-            CODE_SIGN_IDENTITY="Apple Distribution"
-            PROVISIONING_PROFILE_SPECIFIER="$PROVISIONING_PROFILE_SPECIFIER"
-            DEVELOPMENT_TEAM="$APPLE_DEVELOPMENT_TEAM"
           )
 
           xcodebuild archive \

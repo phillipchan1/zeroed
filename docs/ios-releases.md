@@ -79,11 +79,15 @@ On every push to `master` (and **Run workflow**):
    to `~/.appstoreconnect/private_keys/AuthKey_<id>.p8` for `altool`
    (upload + build-number only — not for signing).
 6. Import the Apple Distribution `.p12` and App Store `.mobileprovision`
-   into a temporary keychain. Then `xcodebuild archive` with
-   `CODE_SIGN_STYLE=Manual`, `CODE_SIGN_IDENTITY='Apple Distribution'`,
-   `PROVISIONING_PROFILE_SPECIFIER`, and `DEVELOPMENT_TEAM`. Export with
-   `method=app-store` and `signingStyle=manual`. Do not pass
-   allowProvisioningUpdates.
+   into a temporary keychain. Then write `CODE_SIGN_STYLE=Manual`,
+   `CODE_SIGN_IDENTITY='Apple Distribution'`,
+   `PROVISIONING_PROFILE_SPECIFIER`, and `DEVELOPMENT_TEAM` onto the
+   **App target only** (`scripts/ios-apply-app-signing.mjs`) and
+   `xcodebuild archive`. Those settings are not passed as xcodebuild
+   flags — command-line `SETTING=value` applies to every target,
+   including CocoaPods (`CODE_SIGNING_ALLOWED=NO`, `org.cocoapods.*`
+   bundle ids). Export with `method=app-store` and `signingStyle=manual`.
+   Do not pass allowProvisioningUpdates.
 7. `xcrun altool --upload-app` → App Store Connect → **Internal** TestFlight.
    The workflow does not submit for App Review and does not add external testers.
 8. An `always()` step deletes the temporary keychain, the imported `.p12`
@@ -263,7 +267,7 @@ python3 scripts/gen-icons.py
 | Workflow fails at **Check TestFlight secrets** | Missing secrets listed in the error — add `IOS_DIST_CERT_*`, `IOS_APPSTORE_PROFILE_BASE64`, `ASC_API_KEY_*`, and `APPLE_TEAM_ID` |
 | Workflow fails at signing | Re-export the Apple Distribution `.p12` (must include the private key) and an App Store profile for `app.zeroed.app`. Confirm `IOS_DIST_CERT_PASSWORD` matches |
 | `No profiles for app.zeroed.app` | Create an App Store provisioning profile for the App ID and set `IOS_APPSTORE_PROFILE_BASE64` |
-| `Choose a certificate to revoke` / `iOS App Development provisioning profiles` | The archive is still requesting a Development cert. Confirm the workflow does not pass allowProvisioningUpdates and that `CODE_SIGN_STYLE=Manual` / `CODE_SIGN_IDENTITY='Apple Distribution'` are set. Do not revoke Distribution certs — Nuvo shares this team |
+| `Choose a certificate to revoke` / `iOS App Development provisioning profiles` | The archive is still requesting a Development cert. Confirm the workflow does not pass allowProvisioningUpdates and that `ios-apply-app-signing.mjs` wrote Manual / Apple Distribution onto the App target. Do not revoke Distribution certs — Nuvo shares this team |
 | Upload rejected (SDK too old) | Bump `runs-on:` to a newer `macos-*` in `ios-release.yml` |
 | ITMS-90685 CFBundleIdentifier collision | Do not pass `PRODUCT_BUNDLE_IDENTIFIER` to `xcodebuild`. Pod frameworks (`Capacitor`, `CapacitorCordova`, `Pods_App`) inherit it. The Podfile pins them to `org.cocoapods.*`; CI unzips the IPA and fails on a duplicate. |
 | ITMS-90474 iPad orientations | `UIRequiresFullScreen=true` in `Info.plist` (portrait-only). |
