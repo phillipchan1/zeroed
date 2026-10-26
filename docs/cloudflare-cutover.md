@@ -141,12 +141,22 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 5. Apply `worker/schema/app.sql` then `worker/schema/better-auth.sql` on an
    empty Neon (or let the migrate script do it). Then
    `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --dry-run --skip-auth-users --auth-users-file=users.json`
-   (read-only source is enough for dry-run). The dump and the source
+   (read-only source is enough for dry-run). `SUPABASE_READONLY_URL` must
+   be a **direct** connection or the **session** pooler (port 5432). The
+   transaction pooler (port 6543 / `mode=transaction`) cannot hold
+   `REPEATABLE READ` or `pg_export_snapshot` — the script refuses it.
+   The dump and the source
    counts/hashes share one `REPEATABLE READ` transaction:
    `BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ`,
    `pg_export_snapshot()`, `pg_dump --snapshot=<id>`, then `COUNT(*)` plus
    a per-table content md5 (`md5(to_jsonb(t))` aggregated `ORDER BY t.id`)
-   on the same snapshot. Live writes on Supabase cannot make the dump and
+   on the same snapshot. The snapshot session sets
+   `statement_timeout=0` and `idle_in_transaction_session_timeout=0` so a
+   long dump cannot kill the exporting transaction while it sits idle.
+   Both checksum sessions pin `TimeZone=UTC`, `extra_float_digits=1`, and
+   `IntervalStyle=postgres` (PGOPTIONS on `psql`, `SET` on the snapshot
+   client) so a timestamptz / float / interval display difference cannot
+   look like a content mismatch. Live writes on Supabase cannot make the dump and
    the checksums diverge, so a mismatch is a real restore problem, not
    snapshot skew. Dry-run prints those counts and hashes only (the dump
    file is discarded, never uploaded) and **exits non-zero on any

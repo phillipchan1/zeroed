@@ -21,8 +21,11 @@ import {
   authUsersToCopyCsv,
   canExecutePgControlSystemQuery,
   checkSourceLockAbsentOnTarget,
+  checksumPgOptions,
   checksumQuery,
   checksumRowsToMaps,
+  checksumSessionSetSql,
+  CHECKSUM_SESSION_GUC,
   confirmDropMismatchReason,
   createdAtTablesQuery,
   EXCLUDED_PUBLIC_TABLES,
@@ -51,6 +54,7 @@ import {
   readFingerprint,
   redactSecrets,
   refuseSourceWipeReason,
+  refuseTransactionPoolerReason,
   refuseUncoveredPublicTables,
   refuseUnexpectedPrimaryKeys,
   releaseHeldAdvisoryLocks,
@@ -62,6 +66,7 @@ import {
   resolveTargetUrl,
   SNAPSHOT_BEGIN_SQL,
   SNAPSHOT_EXPORT_SQL,
+  SNAPSHOT_TIMEOUT_SQL,
   systemIdentifierQuery,
   uncoveredPublicTablesQuery,
   unexpectedPrimaryKeyQuery,
@@ -267,6 +272,47 @@ try {
   pkFailed = /primary key is not id/.test(err instanceof Error ? err.message : '')
 }
 ok(pkFailed, 'pk guard fails when a covered table is not keyed by id')
+eq(CHECKSUM_SESSION_GUC.TimeZone, 'UTC', 'checksum sessions pin TimeZone=UTC')
+eq(CHECKSUM_SESSION_GUC.extra_float_digits, '1', 'checksum sessions pin extra_float_digits=1')
+eq(CHECKSUM_SESSION_GUC.IntervalStyle, 'postgres', 'checksum sessions pin IntervalStyle=postgres')
+ok(checksumPgOptions().includes('TimeZone=UTC'), 'psql PGOPTIONS pins TimeZone=UTC')
+ok(checksumPgOptions().includes('extra_float_digits=1'), 'psql PGOPTIONS pins extra_float_digits=1')
+ok(checksumPgOptions().includes('IntervalStyle=postgres'), 'psql PGOPTIONS pins IntervalStyle=postgres')
+ok(checksumSessionSetSql().includes("SET TimeZone = 'UTC'"), 'snapshot client SET pins TimeZone')
+ok(checksumSessionSetSql().includes('SET extra_float_digits = 1'), 'snapshot client SET pins extra_float_digits')
+ok(checksumSessionSetSql().includes("SET IntervalStyle = 'postgres'"), 'snapshot client SET pins IntervalStyle')
+ok(SNAPSHOT_TIMEOUT_SQL.includes('statement_timeout = 0'), 'snapshot session disables statement_timeout')
+ok(SNAPSHOT_TIMEOUT_SQL.includes('idle_in_transaction_session_timeout = 0'), 'snapshot session disables idle-in-transaction timeout')
+eq(
+  refuseTransactionPoolerReason('postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres'),
+  '',
+  'direct Supabase :5432 is allowed',
+)
+eq(
+  refuseTransactionPoolerReason('postgresql://reader@aws-0-us-east-1.pooler.supabase.com:5432/postgres'),
+  '',
+  'session-mode pooler :5432 is allowed',
+)
+ok(
+  /port 6543/.test(refuseTransactionPoolerReason('postgresql://reader@aws-0-us-east-1.pooler.supabase.com:6543/postgres')),
+  'transaction pooler :6543 is refused',
+)
+ok(
+  /port 6543/.test(refuseTransactionPoolerReason('postgresql://reader@db.abcdefghijkl.supabase.co/postgres?port=6543')),
+  'libpq ?port=6543 is refused as transaction pooler',
+)
+ok(
+  /mode=transaction/.test(refuseTransactionPoolerReason('postgresql://reader@aws-0-us-east-1.pooler.supabase.com:5432/postgres?mode=transaction')),
+  'mode=transaction is refused',
+)
+ok(
+  /mode=transaction/.test(refuseTransactionPoolerReason('postgresql://reader@aws-0-us-east-1.pooler.supabase.com:5432/postgres?pool_mode=transaction')),
+  'pool_mode=transaction is refused',
+)
+ok(
+  /mode=transaction/.test(refuseTransactionPoolerReason('postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?options=-c%20pool_mode=transaction')),
+  'options pool_mode=transaction is refused',
+)
 ok(createdAtTablesQuery().includes("column_name = 'created_at'"), 'createdAtTablesQuery finds created_at columns')
 ok(maxCreatedAtQuery('athlete').includes('MAX(created_at)'), 'maxCreatedAtQuery reads athlete.created_at')
 let refusedAuthTable = false
@@ -651,6 +697,9 @@ ok(/\.neon\.tech/.test(drySkip.stdout), 'dry-run documents a .neon.tech target')
 ok(/unreadable fingerprint/.test(drySkip.stdout), 'dry-run documents fail-closed fingerprints')
 ok(/advisory lock/.test(drySkip.stdout), 'dry-run documents the advisory-lock same-server check')
 ok(/pg_export_snapshot/.test(drySkip.stdout), 'offline dry-run documents the snapshot dump')
+ok(/TimeZone=UTC/.test(drySkip.stdout) && /extra_float_digits=1/.test(drySkip.stdout), 'offline dry-run documents checksum GUC pins')
+ok(/idle_in_transaction_session_timeout=0/.test(drySkip.stdout), 'offline dry-run documents snapshot timeouts')
+ok(/transaction-pooler source/.test(drySkip.stdout), 'offline dry-run documents the transaction-pooler refuse')
 ok(/content md5/.test(drySkip.stdout), 'offline dry-run documents per-table content md5')
 ok(/exit non-zero on mismatch/.test(drySkip.stdout), 'offline dry-run documents mismatch abort')
 ok(/coverage list/.test(drySkip.stdout), 'offline dry-run documents the public-table coverage guard')
@@ -681,6 +730,16 @@ ok(
   'live run masks DB users before exiting',
 )
 ok(!/dumping/i.test(`${liveNoMap.stdout}\n${liveNoMap.stderr}`), 'live run without a mapping does not dump')
+
+const txnPooler = spawnMigrate(['--dry-run', '--skip-auth-users'], {
+  SUPABASE_READONLY_URL: 'postgresql://reader@aws-0-us-east-1.pooler.supabase.com:6543/postgres',
+  NEON_DIRECT_URL: neonDirect,
+})
+const txnPoolerOut = `${txnPooler.stdout}\n${txnPooler.stderr}`
+eq(txnPooler.status, 2, 'transaction-pooler source dry-run exits 2')
+ok(/transaction pooler/.test(txnPoolerOut), 'transaction-pooler source prints a refuse reason')
+ok(!/dumping/i.test(txnPoolerOut), 'transaction-pooler source does not dump')
+ok(!/postgresql:\/\//i.test(txnPoolerOut), 'transaction-pooler refuse does not print a URL')
 
 refusedBeforeWrite(spawnMigrate(['--skip-auth-users', '--confirm-drop=neondb'], {
   SUPABASE_READONLY_URL: neonDirect,
@@ -838,12 +897,19 @@ ok(/--snapshot=/.test(migrateSrc), 'migrate passes --snapshot to pg_dump')
 ok(/to_jsonb\(t\)/.test(migrateSrc), 'migrate hashes row content as to_jsonb')
 ok(/uncoveredPublicTablesQuery/.test(migrateSrc), 'migrate refuses uncovered public tables')
 ok(/count\/hash mismatch/.test(migrateSrc), 'dry-run aborts on a count/hash mismatch')
+ok(/checksumPgOptions/.test(migrateSrc) && /PGOPTIONS/.test(migrateSrc), 'psqlTuples pins checksum GUCs via PGOPTIONS')
+ok(/checksumSessionSetSql/.test(migrateSrc), 'snapshot client applies checksum SET pins')
+ok(/refuseTransactionPoolerReason/.test(migrateSrc), 'migrate refuses a transaction-pooler source')
+ok(/idle_in_transaction_session_timeout = 0/.test(migrateSrc), 'snapshot session clears idle_in_transaction_session_timeout')
 ok(!/upload-artifact/.test(workflow), 'manual migrate does not upload dump artifacts')
 const runbook = readFileSync(join(root, 'docs/cloudflare-cutover.md'), 'utf8')
 ok(/pg_export_snapshot/.test(runbook), 'RUNBOOK documents pg_export_snapshot')
 ok(/pg_dump --snapshot/.test(runbook), 'RUNBOOK documents pg_dump --snapshot')
 ok(/REPEATABLE READ/.test(runbook), 'RUNBOOK documents the REPEATABLE READ snapshot')
 ok(/exits non-zero on any/.test(runbook), 'RUNBOOK documents dry-run mismatch abort')
+ok(/statement_timeout=0/.test(runbook) && /idle_in_transaction_session_timeout=0/.test(runbook), 'RUNBOOK documents snapshot timeouts')
+ok(/TimeZone=UTC/.test(runbook) && /extra_float_digits=1/.test(runbook), 'RUNBOOK documents checksum GUC pins')
+ok(/transaction pooler/.test(runbook), 'RUNBOOK documents the transaction-pooler refuse')
 ok(/PGPASSFILE=\/dev\/null/.test(workflow), 'migrate workflow version-check nulls PGPASSFILE')
 ok(/-u PGSSLMODE|-u PGHOSTADDR|PGHOSTADDR/.test(workflow), 'migrate workflow version-check unsets inherited PGHOSTADDR/PGSSLMODE')
 ok(/PGPASSFILE=\/dev\/null/.test(checksYml), 'migrate-pg version-check nulls PGPASSFILE')
@@ -901,6 +967,34 @@ await db.query(`SELECT public.reset_athlete_orientation()`)
 const afterReset = await db.query(`SELECT onboarding_step, obstacle FROM public.athlete WHERE id = '11111111-1111-4111-8111-111111111111'`)
 eq(afterReset.rows[0]?.onboarding_step, 'hook', 'reset_athlete_orientation returns the athlete to hook')
 eq(Number((await db.query(`SELECT COUNT(*)::int AS n FROM public.workout`)).rows[0]?.n ?? -1), 0, 'reset_athlete_orientation clears workouts')
+
+const TZ_HASH_SQL = `SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ',' ORDER BY t.id), '')) AS h FROM tz_hash_probe t`
+await db.exec(`CREATE TABLE tz_hash_probe (id int PRIMARY KEY, ts timestamptz NOT NULL)`)
+await db.exec(`INSERT INTO tz_hash_probe VALUES (1, TIMESTAMPTZ '2026-01-15 12:00:00+00')`)
+async function hashProbe(tz) {
+  await db.exec(`SET TimeZone TO '${tz}'`)
+  return String((await db.query(TZ_HASH_SQL)).rows[0]?.h || '')
+}
+let driftTz = 'America/New_York'
+let drifted
+try {
+  drifted = await hashProbe(driftTz)
+} catch {
+  driftTz = '-05'
+  drifted = await hashProbe(driftTz)
+}
+const unpinnedUtc = await hashProbe('UTC')
+ok(
+  drifted !== unpinnedUtc,
+  `unpinned TimeZone=${driftTz} vs UTC hashes the same timestamptz differently (false mismatch)`,
+)
+await db.exec(checksumSessionSetSql())
+const pinnedA = String((await db.query(TZ_HASH_SQL)).rows[0]?.h || '')
+await db.exec(`SET TimeZone TO '${driftTz}'`)
+await db.exec(checksumSessionSetSql())
+const pinnedB = String((await db.query(TZ_HASH_SQL)).rows[0]?.h || '')
+eq(pinnedA, pinnedB, 'checksum session pins make TimeZone drift hash the same (false mismatch gone)')
+eq(pinnedA, unpinnedUtc, 'pinned TimeZone=UTC matches an explicit UTC hash')
 
 const livePsqlUrl = checkPsqlUrl
 const livePsql = livePsqlUrl
@@ -978,6 +1072,25 @@ async function runLivePostgresChecks() {
 
   const athletesBefore = Number(pinnedPsql(sourceUrl, 'SELECT COUNT(*) FROM public.athlete').trim())
   const nspBefore = pinnedPsql(sourceUrl, `SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' ORDER BY 1`)
+
+  const tzLive = pinnedPsql(sourceUrl, `
+    CREATE TEMP TABLE tz_hash_probe (id int PRIMARY KEY, ts timestamptz NOT NULL);
+    INSERT INTO tz_hash_probe VALUES (1, TIMESTAMPTZ '2026-01-15 12:00:00+00');
+    SET TimeZone = 'America/New_York';
+    SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ',' ORDER BY t.id), '')) FROM tz_hash_probe t;
+    SET TimeZone = 'UTC';
+    SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ',' ORDER BY t.id), '')) FROM tz_hash_probe t;
+    ${checksumSessionSetSql()};
+    SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ',' ORDER BY t.id), '')) FROM tz_hash_probe t;
+    SET TimeZone = 'America/New_York';
+    ${checksumSessionSetSql()};
+    SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ',' ORDER BY t.id), '')) FROM tz_hash_probe t;
+  `)
+  const tzHashes = tzLive.split('\n').map((s) => s.trim()).filter((s) => /^[0-9a-f]{32}$/i.test(s))
+  eq(tzHashes.length, 4, 'live TimeZone probe returns four hashes')
+  ok(tzHashes[0] !== tzHashes[1], 'live unpinned TimeZone=America/New_York vs UTC is a false mismatch')
+  eq(tzHashes[2], tzHashes[3], 'live checksum session pins make TimeZone drift hash the same')
+  eq(tzHashes[2], tzHashes[1], 'live pinned TimeZone=UTC matches an explicit UTC hash')
 
   const dryLive = spawnMigrate(['--dry-run', '--skip-auth-users', '--auth-users-file', mapPath], {
     SUPABASE_READONLY_URL: sourceUrl,
