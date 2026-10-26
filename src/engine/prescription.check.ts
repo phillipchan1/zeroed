@@ -17,7 +17,7 @@ import {
   rpeContract, DEFAULT_RPE_CONTRACT,
   tallyWeek, decidePrescription,
   autoregulateDelta, recommendedLoad, roundLoad, maxUpFor,
-  parseExplicitLoad, trainingIntent, allowsAutoProgress, projectExerciseLoad, isComparableWorkingBase,
+  parseExplicitLoad, parsePrescription, trainingIntent, allowsAutoProgress, projectExerciseLoad, isComparableWorkingBase,
   advanceStatus, addressesLimiter, capIsActive, isLiftHeld,
   clearanceTestOf, pickClearanceLift, describeClearanceTest, newClearanceTest, judgeClearanceSession,
   P1_RESOLVE_THRESHOLD,
@@ -246,13 +246,46 @@ eq(clearanceTestOf(insight()), null, 'no evidence → no test')
 // The safety bug: a deload-week speed bench prescribed 5×2 at ~170 lb, RPE 5
 // was projected as 265×2 because +5% ran on last week's heavy top set.
 
-eq(parseExplicitLoad('about 170 lb'), 170, 'about 170 lb is an explicit load')
-eq(parseExplicitLoad('~170'), 170, '~170 is an explicit load')
-eq(parseExplicitLoad('170lbs'), 170, '170lbs is an explicit load')
-eq(parseExplicitLoad('light'), null, 'light is qualitative, not a number')
-eq(parseExplicitLoad('5x2'), null, '5x2 is sets×reps, not a load')
 eq(trainingIntent('Speed bench', 'deload week'), 'deload', 'deload wins over speed in the same text')
 eq(trainingIntent('Convert strength into speed', 'Speed bench 5x2'), 'speed', 'speed session')
+
+// QA probe strings — table-driven. Percentages are never pounds; mixed
+// strings keep the lb/kg load even when they start with RPE or 5x2.
+const PARSER_PROBES: Array<{
+  load: string
+  explicit: number | null
+  percent: number | null
+  rpe: number | null
+  sets?: number | null
+  reps?: number | null
+  unit?: 'lb' | 'kg' | null
+}> = [
+  { load: '70%', explicit: null, percent: 70, rpe: null },
+  { load: '70% 1RM', explicit: null, percent: 70, rpe: null },
+  { load: '@70%', explicit: null, percent: 70, rpe: null },
+  { load: '60-65%', explicit: null, percent: 62.5, rpe: null },
+  { load: '5x2 @ 170 lb', explicit: 170, percent: null, rpe: null, sets: 5, reps: 2, unit: 'lb' },
+  { load: 'RPE 5 · ~170 lb', explicit: 170, percent: null, rpe: 5, unit: 'lb' },
+  { load: 'about 170 lb', explicit: 170, percent: null, rpe: null, unit: 'lb' },
+  { load: '~170', explicit: 170, percent: null, rpe: null },
+  { load: '170lbs', explicit: 170, percent: null, rpe: null, unit: 'lb' },
+  { load: 'light', explicit: null, percent: null, rpe: null },
+  { load: '5x2', explicit: null, percent: null, rpe: null, sets: 5, reps: 2 },
+  { load: 'RPE 5', explicit: null, percent: null, rpe: 5 },
+  { load: '5x2 @70%', explicit: null, percent: 70, rpe: null, sets: 5, reps: 2 },
+  { load: '77kg', explicit: 77, percent: null, rpe: null, unit: 'kg' },
+]
+
+for (const row of PARSER_PROBES) {
+  const p = parsePrescription(row.load)
+  eq(parseExplicitLoad(row.load), row.explicit, `${row.load} → explicit ${row.explicit}`)
+  eq(p.percent, row.percent, `${row.load} → percent ${row.percent}`)
+  eq(p.rpe, row.rpe, `${row.load} → rpe ${row.rpe}`)
+  if (row.sets != null) eq(p.sets, row.sets, `${row.load} → sets ${row.sets}`)
+  if (row.reps != null) eq(p.reps, row.reps, `${row.load} → reps ${row.reps}`)
+  if (row.unit != null) eq(p.loadUnit, row.unit, `${row.load} → unit ${row.unit}`)
+  ok(!p.ambiguous, `${row.load} is not ambiguous`)
+}
 
 ok(!allowsAutoProgress({
   exercise: ex('Bench Press', { load: 'about 170 lb', target_rpe: 5 }),
@@ -324,6 +357,68 @@ const explicitBeats = projectExerciseLoad({
 })
 eq(explicitBeats.weight, 185, 'an explicit load always beats +5% off last week')
 eq(explicitBeats.source, 'explicit', 'source is explicit')
+
+const plusFiveOff250 = recommendedLoad(set(250, 2, 8), 5, LB)
+const PROJECT_PROBES: Array<{
+  load: string
+  lastWeight: number
+  lastRpe: number
+  lastReps?: number
+  lastIntent: 'work'
+  oneRm?: number | null
+  sessionIntent?: string
+  sessionName?: string
+  targetRpe?: number
+  expectWeight: number | null
+  expectSource: 'explicit' | 'none' | 'held' | 'progressed'
+}> = [
+  { load: '5x2 @ 170 lb', lastWeight: 250, lastRpe: 8, lastIntent: 'work', sessionIntent: 'Strength', targetRpe: 8, expectWeight: 170, expectSource: 'explicit' },
+  { load: 'RPE 5 · ~170 lb', lastWeight: 250, lastRpe: 8, lastIntent: 'work', sessionIntent: 'Strength', targetRpe: 5, expectWeight: 170, expectSource: 'explicit' },
+  { load: '70%', lastWeight: 250, lastRpe: 8, lastIntent: 'work', oneRm: 285, sessionIntent: 'Strength', expectWeight: 200, expectSource: 'explicit' },
+  { load: '70% 1RM', lastWeight: 250, lastRpe: 8, lastIntent: 'work', oneRm: 285, sessionIntent: 'Strength', expectWeight: 200, expectSource: 'explicit' },
+  { load: '@70%', lastWeight: 250, lastRpe: 8, lastIntent: 'work', oneRm: 285, sessionIntent: 'Strength', expectWeight: 200, expectSource: 'explicit' },
+  { load: '60-65%', lastWeight: 250, lastRpe: 8, lastIntent: 'work', oneRm: 280, sessionIntent: 'Strength', expectWeight: 175, expectSource: 'explicit' },
+  { load: '70%', lastWeight: 250, lastRpe: 8, lastIntent: 'work', oneRm: null, sessionIntent: 'Strength', expectWeight: null, expectSource: 'explicit' },
+]
+
+for (const row of PROJECT_PROBES) {
+  const proj = projectExerciseLoad({
+    exercise: ex('Bench Press', { sets: 5, reps: '2', load: row.load, target_rpe: row.targetRpe ?? 8 }),
+    lastWeight: row.lastWeight,
+    lastRpe: row.lastRpe,
+    lastReps: row.lastReps,
+    lastIntent: row.lastIntent,
+    oneRm: row.oneRm,
+    weeklyDelta: 5,
+    directive: 'PROGRESS',
+    sessionIntent: row.sessionIntent ?? 'Strength',
+    sessionName: row.sessionName,
+    u: LB,
+  })
+  eq(proj.source, row.expectSource, `${row.load} source is ${row.expectSource}`)
+  eq(proj.weight, row.expectWeight, `${row.load} projects ${row.expectWeight}, not ${plusFiveOff250}`)
+  ok(proj.source !== 'progressed', `${row.load} never applies +5%`)
+  ok(proj.weight !== plusFiveOff250, `${row.load} is not 265 off last week's 250`)
+}
+
+for (const word of ['explosive', 'mobility', 'warm-up', 'warmup', 'primer', 'tempo', 'opener', 'activation']) {
+  ok(!allowsAutoProgress({
+    exercise: ex('Bench Press', { load: 'heavy', target_rpe: 8 }),
+    sessionIntent: `${word} work`,
+    directive: 'PROGRESS',
+  }), `${word} never auto-progresses`)
+  const held = projectExerciseLoad({
+    exercise: ex('Bench Press', { load: 'heavy', target_rpe: 8 }),
+    lastWeight: 250,
+    lastRpe: 8,
+    lastIntent: 'work',
+    weeklyDelta: 5,
+    directive: 'PROGRESS',
+    sessionIntent: `${word} work`,
+    u: LB,
+  })
+  ok(held.source !== 'progressed', `${word} projection does not apply +5%`)
+}
 
 // ---- report -----------------------------------------------------------------
 

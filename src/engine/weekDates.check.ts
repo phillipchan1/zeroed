@@ -8,6 +8,7 @@
 import {
   ATHLETE_TIME_ZONE, addDaysISO, isoDateInZone, weekWindowInZone, upcomingWeekWindow,
   isSundayInZone, nextMondayISO, logTimestampForWeek, isoInWeek, planPagerFutureWeeks,
+  zonedCivilTime,
 } from './weekDates.ts'
 import { logTimestampForWeek as logTs } from './weekDates.ts'
 
@@ -61,6 +62,20 @@ ok(isoInWeek(stamped.toISOString(), '2026-10-26', '2026-11-01', TZ),
 
 const sameDay = logTs(mondayMorning, '2026-10-26', '2026-11-01', TZ)
 eq(sameDay.toISOString(), mondayMorning.toISOString(), 'a start already inside the week keeps its timestamp')
+
+// Device TZ must not move Monday noon. A UTC+11 phone's local `T12:00:00` is
+// still Sunday afternoon in America/Los_Angeles and would log into the closed week.
+const sydneyDeviceNoon = new Date('2026-10-26T12:00:00+11:00')
+eq(isoDateInZone(sydneyDeviceNoon, TZ), '2026-10-25', 'Sydney Monday noon is Sunday in LA')
+const programNoon = zonedCivilTime('2026-10-26', 12, 0, TZ)
+eq(isoDateInZone(programNoon, TZ), '2026-10-26', 'program noon is Monday in LA')
+const sydneySunday = new Date('2026-10-25T23:00:00+11:00')
+const stampedFromSydney = logTimestampForWeek(sydneySunday, '2026-10-26', '2026-11-01', TZ)
+eq(isoDateInZone(stampedFromSydney, TZ), '2026-10-26', 'a UTC+11 Sunday start still logs as LA Monday')
+ok(!isoInWeek(stampedFromSydney.toISOString(), '2026-10-19', '2026-10-25', TZ),
+  'that stamp is not in the closed week')
+eq(isoDateInZone(stampedFromSydney, 'Australia/Sydney'), '2026-10-27',
+  'LA Monday noon is Tuesday morning in Sydney — still next week, not Sunday')
 
 // Pager: Sunday's next week is always present, including a queued block's sessions.
 const sundayPlans = planPagerFutureWeeks({

@@ -18,11 +18,12 @@ import type {
   WeeklyDirective, WeeklyPrescription, ClearanceTest,
 } from '../types/database.ts'
 import { isClearanceTest } from '../types/database.ts'
-import { roundToIncrement, type UnitContext } from '../lib/units.ts'
+import { convertWeight, roundToIncrement, type UnitContext, type WeightUnit } from '../lib/units.ts'
 import { resolveCategory } from './exerciseLibrary.ts'
 import { MAIN_LIFT } from './weekDiff.ts'
 import { weekAdherence } from './weekStatus.ts'
 import { isoInWeek } from './weekDates.ts'
+import { estimate1RM } from './prs.ts'
 
 // ────────────────────────────────────────────────────────────────────────────
 // FELT-CHIP SEVERITY BANDS — one vocabulary, read the same way everywhere.
@@ -280,10 +281,19 @@ export function maxUpFor(phaseName: string | null | undefined): number {
   return phaseName === 'Stability' ? 5 : 15
 }
 
-export type TrainingIntent = 'work' | 'speed' | 'technique' | 'prehab' | 'test' | 'deload'
+export type TrainingIntent =
+  | 'work' | 'speed' | 'technique' | 'prehab' | 'test' | 'deload'
+  | 'explosive' | 'mobility' | 'warmup' | 'primer' | 'tempo' | 'opener' | 'activation'
 
 const INTENT_RULES: Array<{ intent: TrainingIntent; re: RegExp }> = [
   { intent: 'deload', re: /\bdeload\b/i },
+  { intent: 'warmup', re: /\b(warm[\s-]?up|warmup)\b/i },
+  { intent: 'primer', re: /\bprimer\b/i },
+  { intent: 'opener', re: /\bopener\b/i },
+  { intent: 'activation', re: /\bactivat(?:e|ion|ing)\b/i },
+  { intent: 'mobility', re: /\bmobility\b/i },
+  { intent: 'tempo', re: /\btempo\b/i },
+  { intent: 'explosive', re: /\bexplosive\b/i },
   { intent: 'speed', re: /\b(speed|velocity|dynamic[\s-]?effort|\bde\b)\b/i },
   { intent: 'technique', re: /\b(technique|tech work|form work|groove)\b/i },
   { intent: 'prehab', re: /\b(prehab|rehab|corrective)\b/i },
@@ -299,20 +309,123 @@ export function trainingIntent(...texts: Array<string | null | undefined>): Trai
   return 'work'
 }
 
+export interface ParsedPrescription {
+  load: number | null
+  loadUnit: WeightUnit | null
+  percent: number | null
+  rpe: number | null
+  sets: number | null
+  reps: number | null
+  qualitative: boolean
+  ambiguous: boolean
+}
+
+const EMPTY_PARSE: ParsedPrescription = {
+  load: null, loadUnit: null, percent: null, rpe: null,
+  sets: null, reps: null, qualitative: false, ambiguous: false,
+}
+
+const QUALITATIVE = /^(light|moderate|heavy|bodyweight|bw)$/i
+const SETS_REPS = /(\d+)\s*[x×]\s*(\d+)/i
+const PERCENT = /(\d+(?:\.\d+)?)\s*(?:[-–—]\s*(\d+(?:\.\d+)?))?\s*%(?:\s*(?:of\s+)?1\s*rm)?/i
+const RPE = /\brpe\s*[:\s]*(\d+(?:\.\d+)?)/i
+const LOAD_UNIT = /(?:(?:about|approx(?:imately)?|around)\s+)?~?\s*(\d+(?:\.\d+)?)\s*(lbs?|kg|#)\b/i
+const LOAD_APPROX = /(?:(?:about|approx(?:imately)?|around)\s+|~)\s*(\d+(?:\.\d+)?)/i
+const AT_RPE = /@\s*(\d+(?:\.\d+)?)\b/
+
 /**
- * An explicit number on the prescription ("170 lb", "about 170", "~77kg").
- * Qualitative stamps (light / moderate / heavy / bodyweight) are not loads.
+ * Split a prescription into sets×reps, bar load, RPE and % — independently,
+ * in any order. A unit (lb/kg) always wins over a bare number. A percentage
+ * is never a poundage. Fail-safe: leftover unclassified loads mark ambiguous.
+ */
+export function parsePrescription(load: string | null | undefined): ParsedPrescription {
+  if (!load) return { ...EMPTY_PARSE }
+  const trimmed = load.trim()
+  if (!trimmed) return { ...EMPTY_PARSE }
+  if (QUALITATIVE.test(trimmed)) return { ...EMPTY_PARSE, qualitative: true }
+
+  let rest = trimmed
+  const out: ParsedPrescription = { ...EMPTY_PARSE }
+
+  const sxr = rest.match(SETS_REPS)
+  if (sxr) {
+    out.sets = Number(sxr[1])
+    out.reps = Number(sxr[2])
+    rest = rest.replace(sxr[0], ' ')
+  }
+
+  const pct = rest.match(PERCENT)
+  if (pct) {
+    const a = Number(pct[1])
+    const b = pct[2] != null ? Number(pct[2]) : a
+    if (Number.isFinite(a) && Number.isFinite(b)) out.percent = (a + b) / 2
+    rest = rest.replace(pct[0], ' ')
+  }
+
+  const rpeM = rest.match(RPE)
+  if (rpeM) {
+    const n = Number(rpeM[1])
+    if (n > 0 && n <= 10) out.rpe = n
+    rest = rest.replace(rpeM[0], ' ')
+  }
+
+  const unitM = rest.match(LOAD_UNIT)
+  if (unitM) {
+    const n = Number(unitM[1])
+    if (Number.isFinite(n) && n > 0) {
+      out.load = n
+      const u = unitM[2].toLowerCase()
+      out.loadUnit = u === 'kg' ? 'kg' : 'lb'
+    }
+    rest = rest.replace(unitM[0], ' ')
+  }
+
+  if (out.load == null) {
+    const approx = rest.match(LOAD_APPROX)
+    if (approx) {
+      const n = Number(approx[1])
+      if (Number.isFinite(n) && n >= 20) out.load = n
+      rest = rest.replace(approx[0], ' ')
+    }
+  }
+
+  if (out.rpe == null) {
+    const at = rest.match(AT_RPE)
+    if (at) {
+      const n = Number(at[1])
+      if (n > 0 && n <= 10 && out.percent == null) out.rpe = n
+      rest = rest.replace(at[0], ' ')
+    }
+  }
+
+  if (out.load == null && out.percent == null) {
+    const bare = rest.match(/(\d+(?:\.\d+)?)/)
+    if (bare) {
+      const n = Number(bare[1])
+      if (Number.isFinite(n) && n >= 20) {
+        out.load = n
+        rest = rest.replace(bare[0], ' ')
+      }
+    }
+  }
+
+  const leftovers = [...rest.matchAll(/\d+(?:\.\d+)?/g)]
+    .map((m) => Number(m[0]))
+    .filter((n) => Number.isFinite(n) && n >= 20)
+  if (leftovers.length) out.ambiguous = true
+
+  return out
+}
+
+/**
+ * Bar weight from a prescription string. Percentages are never pounds.
+ * Ambiguous or RPE/%-only strings return null.
  */
 export function parseExplicitLoad(load: string | null | undefined): number | null {
-  if (!load) return null
-  const trimmed = load.trim()
-  if (/^(light|moderate|heavy|bodyweight|bw|rpe\b)/i.test(trimmed)) return null
-  const m = trimmed.match(/(?:(?:about|approx(?:imately)?|around|~)\s*)?(\d+(?:\.\d+)?)\s*(?:lb|lbs|kg|#)?/i)
-  if (!m) return null
-  const n = Number(m[1])
-  // Guard against reading "5x2" or a lone RPE as a bar weight.
-  if (!Number.isFinite(n) || n < 20) return null
-  return n
+  const p = parsePrescription(load)
+  if (p.ambiguous) return null
+  if (p.percent != null && p.load == null) return null
+  return p.load
 }
 
 export function allowsAutoProgress(opts: {
@@ -322,6 +435,9 @@ export function allowsAutoProgress(opts: {
   directive?: WeeklyDirective | null
 }): boolean {
   if (opts.directive === 'DELOAD' || opts.directive === 'RECOVERY') return false
+  const parsed = parsePrescription(opts.exercise.load)
+  if (parsed.ambiguous) return false
+  if (parsed.load != null || parsed.percent != null || parsed.rpe != null) return false
   const intent = trainingIntent(opts.sessionIntent, opts.sessionName, opts.exercise.name, opts.exercise.load)
   if (intent !== 'work') return false
   if (opts.exercise.target_rpe != null && opts.exercise.target_rpe <= 5) return false
@@ -351,27 +467,56 @@ export interface ProjectedLoad {
   source: ProjectedLoadSource
 }
 
+function storedBarWeight(parsed: ParsedPrescription, u: UnitContext): number | null {
+  if (parsed.load == null) return null
+  const from = parsed.loadUnit ?? u.unit
+  return convertWeight(parsed.load, from, u.storage)
+}
+
+function resolveOneRm(opts: {
+  oneRm?: number | null
+  lastWeight?: number | null
+  lastReps?: number | null
+}): number | null {
+  if (opts.oneRm != null && opts.oneRm > 0) return opts.oneRm
+  if (opts.lastWeight != null && opts.lastReps != null && opts.lastReps >= 1) {
+    return estimate1RM(opts.lastWeight, opts.lastReps)
+  }
+  return null
+}
+
 /**
  * What next week should put on the bar.
  *
- * Explicit prescribed load / RPE-% always wins. Auto +5% never runs on a
- * deload week or on speed / technique / prehab / test work, and never off a
- * top set logged under a different intent.
+ * An explicit load, %, or RPE always wins. Auto +5% never runs on a deload
+ * week, on non-progressive intents, or off a top set logged under a different
+ * intent. Ambiguous parses fail safe: no progression.
  */
 export function projectExerciseLoad(opts: {
   exercise: Pick<ExerciseTemplate, 'name' | 'sets' | 'reps' | 'load' | 'target_rpe'>
   lastWeight: number | null
   lastRpe?: number | null
+  lastReps?: number | null
   lastIntent?: TrainingIntent | null
+  oneRm?: number | null
   weeklyDelta: number
   directive: WeeklyDirective | null
   sessionIntent?: string | null
   sessionName?: string | null
   u: UnitContext
 }): ProjectedLoad {
-  const explicit = parseExplicitLoad(opts.exercise.load)
-  if (explicit != null) {
-    return { weight: opts.u.prescribe(explicit), source: 'explicit' }
+  const parsed = parsePrescription(opts.exercise.load)
+  if (parsed.ambiguous) return { weight: null, source: 'none' }
+
+  const stored = storedBarWeight(parsed, opts.u)
+  if (stored != null) {
+    return { weight: opts.u.prescribe(stored), source: 'explicit' }
+  }
+
+  if (parsed.percent != null) {
+    const max = resolveOneRm(opts)
+    if (max == null) return { weight: null, source: 'explicit' }
+    return { weight: opts.u.prescribe(max * parsed.percent / 100), source: 'explicit' }
   }
 
   const currentIntent = trainingIntent(opts.sessionIntent, opts.sessionName, opts.exercise.name, opts.exercise.load)
@@ -386,7 +531,7 @@ export function projectExerciseLoad(opts: {
     lastIntent: opts.lastIntent,
     lastRpe: opts.lastRpe,
     lastWeight: opts.lastWeight,
-    prescribedWeight: explicit,
+    prescribedWeight: stored,
   })
 
   if (!canProgress || !comparable) {

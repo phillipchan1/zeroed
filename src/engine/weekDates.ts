@@ -105,10 +105,48 @@ export function isSundayInZone(at: Date, timeZone = ATHLETE_TIME_ZONE): boolean 
   return zonedParts(at, timeZone).dow === 0
 }
 
+function civilStampInZone(d: Date, timeZone: string): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d)
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? ''
+  return `${get('year')}-${get('month')}-${get('day')}T${get('hour')}:${get('minute')}:00`
+}
+
+/** Civil clock time in `timeZone` as a real UTC instant. Device TZ is ignored. */
+export function zonedCivilTime(
+  dateStr: string,
+  hour: number,
+  minute = 0,
+  timeZone = ATHLETE_TIME_ZONE,
+): Date {
+  const hh = String(hour).padStart(2, '0')
+  const mm = String(minute).padStart(2, '0')
+  const wanted = `${dateStr}T${hh}:${mm}:00`
+  let utc = Date.parse(`${wanted}Z`)
+  for (let i = 0; i < 4; i++) {
+    const shown = civilStampInZone(new Date(utc), timeZone)
+    const delta = Date.parse(`${wanted}Z`) - Date.parse(`${shown}Z`)
+    utc += delta
+    if (delta === 0) break
+  }
+  return new Date(utc)
+}
+
 /**
  * When a session is started for a week the athlete is not currently in
  * (Sunday → next week), stamp the log on that week's Monday noon so it
  * counts for the upcoming week, not the closed one.
+ *
+ * Noon is the athlete/program timezone (America/Los_Angeles by default), never
+ * the device's local zone — a UTC+10 phone would otherwise land Monday noon
+ * local on Sunday afternoon in LA and log into the closed week.
  */
 export function logTimestampForWeek(
   at: Date,
@@ -118,7 +156,7 @@ export function logTimestampForWeek(
 ): Date {
   const day = isoDateInZone(at, timeZone)
   if (day >= weekStart && day <= weekEnd) return at
-  if (day < weekStart) return new Date(`${weekStart}T12:00:00`)
+  if (day < weekStart) return zonedCivilTime(weekStart, 12, 0, timeZone)
   return at
 }
 
