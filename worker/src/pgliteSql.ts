@@ -30,8 +30,12 @@ export function makePgliteSql(db: PGlite): Sql {
         continue
       }
       params.push(value)
-      if (Array.isArray(value)) text += `$${params.length}::text[]`
-      else text += `$${params.length}`
+      if (Array.isArray(value)) {
+        const uuidish = value.every((item) => typeof item === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(item))
+        text += uuidish ? `$${params.length}::uuid[]` : `$${params.length}::text[]`
+      } else {
+        text += `$${params.length}`
+      }
     }
     const result = await db.query(text, params)
     return result.rows
