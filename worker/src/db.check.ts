@@ -66,6 +66,13 @@ ok(!/ANY\(\$\{ids\}\)/.test(storeSrc), 'store.ts has no uncast ANY(${ids})')
 const dataSrc = readFileSync(join(here, 'data.ts'), 'utf8')
 ok(dataSrc.includes('unnest($${idx}${cast})'), 'data in-filter uses unnest + cast')
 ok(dataSrc.includes('::uuid[]') && dataSrc.includes('::text[]'), 'data in-filter has explicit array casts')
+ok(dataSrc.includes("op === 'in' ? 'FALSE' : 'TRUE'"), 'empty in[] does not bind an empty uuid[] as text[]')
+
+const authSrc = readFileSync(join(here, 'auth.ts'), 'utf8')
+ok(!authSrc.includes('allowExitOnIdle'), 'auth.ts has no allowExitOnIdle (workerd tid.unref)')
+ok(authSrc.includes('new Client('), 'auth.ts opens a Workers-safe Client per request')
+ok(authSrc.includes('waitUntil'), 'auth.ts closes the client via waitUntil')
+ok(authSrc.includes('lower("email") = lower($1)'), 'auth.ts adoption lookup is lower(email)')
 
 const uuid = '11111111-1111-1111-1111-111111111111'
 const compiled = compileTagged(

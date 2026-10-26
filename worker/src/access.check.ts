@@ -787,6 +787,15 @@ const inIds = Array.isArray(inFilter.data) ? (inFilter.data as { id: string }[])
 ok(inFilter.error == null, 'data in: uuid[] filter succeeds')
 ok(inIds.includes(WORKOUT_A) && !inIds.includes(WORKOUT_B), 'data in: A sees own id only from mixed list')
 
+const emptyIn = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'select',
+  columns: 'id',
+  filters: [{ column: 'id', op: 'in', value: [] }],
+})
+ok(emptyIn.error == null && emptyIn.status === 200, 'empty in[] on uuid does not 400')
+ok(Array.isArray(emptyIn.data) && (emptyIn.data as unknown[]).length === 0, 'empty in[] on uuid returns []')
+
 ok((await loadNotes(storeA)).weekly.length >= 1, 'loadNotes: ANY(uuid[]) returns A weekly reviews')
 
 await harness.close()

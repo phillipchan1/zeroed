@@ -1,6 +1,6 @@
 import { betterAuth } from 'better-auth'
 import { bearer, emailOTP } from 'better-auth/plugins'
-import { Pool } from 'pg'
+import { Client, type Pool } from 'pg'
 import { authCookieSecure, isLocalAuthHost, resolveAuthBaseURL } from './authUrl.ts'
 import { NATIVE_APP_ORIGINS } from './cors.ts'
 import { sessionFromRequest } from './data.ts'
@@ -94,16 +94,70 @@ async function sendOtpEmail(env: Env, email: string, otp: string, type: string):
   }
 }
 
-function authPool(url: string, env: Env): Pool {
-  return new Pool({
-    connectionString: url,
-    max: 1,
-    allowExitOnIdle: true,
-    ssl: useDatabaseSsl(url, env) ? { rejectUnauthorized: false } : false,
-  })
+/**
+ * Better Auth findUserByEmail compares the lowercased input to the stored
+ * email as-is. Migrated users can have mixed-case emails, so a new row would
+ * be created. Rewrite equality lookups to lower() so we adopt the existing user.
+ */
+export function rewriteUserEmailLookup(text: string): string {
+  if (!/"user"/.test(text)) return text
+  return text.replace(/"email"\s*=\s*(\$\d+)/g, 'lower("email") = lower($1)')
 }
 
-export function createAuth(env: Env, pool?: Pool) {
+export function installEmailAdoption<T extends { query: Client['query'] }>(db: T): T {
+  const orig = db.query.bind(db) as Client['query']
+  const wrapped: Client['query'] = ((textOrConfig: unknown, values?: unknown, cb?: unknown) => {
+    if (typeof textOrConfig === 'string') {
+      return (orig as (text: string, values?: unknown, cb?: unknown) => unknown)(
+        rewriteUserEmailLookup(textOrConfig),
+        values,
+        cb,
+      )
+    }
+    if (textOrConfig && typeof textOrConfig === 'object' && 'text' in textOrConfig) {
+      const cfg = textOrConfig as { text: string }
+      return (orig as (q: { text: string }, values?: unknown, cb?: unknown) => unknown)(
+        { ...cfg, text: rewriteUserEmailLookup(cfg.text) },
+        values,
+        cb,
+      )
+    }
+    return (orig as (q: unknown, values?: unknown, cb?: unknown) => unknown)(textOrConfig, values, cb)
+  }) as Client['query']
+  db.query = wrapped
+  return db
+}
+
+function clientOptions(url: string, env: Env) {
+  return {
+    connectionString: url,
+    ssl: useDatabaseSsl(url, env) ? { rejectUnauthorized: false } : false,
+    connectionTimeoutMillis: 5_000,
+    keepAlive: false,
+  }
+}
+
+/** Duck-typed Pool for Better Auth's Kysely dialect. One Client, no pg-pool. */
+function clientAsAuthDb(client: Client): Pool {
+  const query = client.query.bind(client) as Pool['query']
+  return {
+    query,
+    connect: async () => ({ query, release() {} }),
+    end: () => client.end(),
+  } as unknown as Pool
+}
+
+async function openAuthDb(url: string, env: Env): Promise<{ db: Pool; close: () => Promise<void> }> {
+  const client = new Client(clientOptions(url, env))
+  await client.connect()
+  installEmailAdoption(client)
+  return {
+    db: clientAsAuthDb(client),
+    close: () => client.end().then(() => undefined, () => undefined),
+  }
+}
+
+export function createAuth(env: Env, pool: Pool) {
   const url = databaseUrl(env)
   if (!url) throw new Error('database is not configured (HYPERDRIVE or DATABASE_URL)')
   const secret = env.BETTER_AUTH_SECRET
@@ -113,7 +167,7 @@ export function createAuth(env: Env, pool?: Pool) {
     secret,
     baseURL,
     basePath: '/api/auth',
-    database: pool ?? authPool(url, env),
+    database: pool,
     emailAndPassword: { enabled: false },
     user: BETTER_AUTH_SNAKE_CASE.user,
     session: BETTER_AUTH_SNAKE_CASE.session,
@@ -151,7 +205,7 @@ export function createAuth(env: Env, pool?: Pool) {
   })
 }
 
-/** One Pool per request; `waitUntil` finishes `pool.end()` after the response. */
+/** One Client per request; `waitUntil` finishes `client.end()` after the response. */
 export async function withAuth<T>(
   env: Env,
   fn: (auth: AuthInstance) => Promise<T>,
@@ -159,11 +213,11 @@ export async function withAuth<T>(
 ): Promise<T> {
   const url = databaseUrl(env)
   if (!url) throw new Error('database is not configured (HYPERDRIVE or DATABASE_URL)')
-  const pool = authPool(url, env)
+  const { db, close } = await openAuthDb(url, env)
   try {
-    return await fn(createAuth(env, pool))
+    return await fn(createAuth(env, db))
   } finally {
-    const ending = pool.end().catch(() => undefined)
+    const ending = close()
     if (waitUntil) waitUntil(ending)
     else await ending
   }

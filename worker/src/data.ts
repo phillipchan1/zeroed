@@ -5,6 +5,7 @@
  * the store/edits paths use, and runs one parameterized SQL. Keep this file
  * small: Free-plan CPU is 10ms/request.
  */
+import { getCryptoKey, makeSignature } from 'better-auth/crypto'
 import { beginAuthCors, json } from './cors.ts'
 import { withSql, type Sql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
@@ -313,46 +314,15 @@ function decodeCookieValue(raw: string): string {
   }
 }
 
-function bytesToBase64(bytes: Uint8Array): string {
-  let bin = ''
-  for (const b of bytes) bin += String.fromCharCode(b)
-  return btoa(bin)
-}
-
-/** better-call signs with standard base64; accept url-safe too. */
-function decodeSignatureBytes(sig: string): Uint8Array | null {
-  try {
-    const decoded = decodeCookieValue(sig)
-    const normalized = decoded.replace(/-/g, '+').replace(/_/g, '/')
-    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4)
-    const bin = atob(padded)
-    const out = new Uint8Array(bin.length)
-    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
-    return out
-  } catch {
-    return null
-  }
-}
-
-async function hmacKey(secret: string, usage: ('sign' | 'verify')[]): Promise<CryptoKey> {
-  return crypto.subtle.importKey(
-    'raw',
-    new TextEncoder().encode(secret),
-    { name: 'HMAC', hash: 'SHA-256' },
-    false,
-    usage,
-  )
-}
-
-/** better-call `signCookieValue`: HMAC-SHA256, standard base64 (`btoa`). */
+/**
+ * Better-call cookie HMAC: HMAC-SHA256 encoded as standard padded base64
+ * (`btoa`, `+` `/` `=`). Reuses Better Auth's makeSignature / getCryptoKey.
+ */
 export async function signSessionToken(token: string, secret: string): Promise<string> {
-  const sig = new Uint8Array(await crypto.subtle.sign(
-    'HMAC',
-    await hmacKey(secret, ['sign']),
-    new TextEncoder().encode(token),
-  ))
-  return `${token}.${bytesToBase64(sig)}`
+  return `${token}.${await makeSignature(token, secret)}`
 }
+
+const STANDARD_PADDED_HMAC = /^[A-Za-z0-9+/]{43}=$/
 
 export function splitSessionToken(raw: string | null | undefined): { token: string; signature: string | null } | null {
   if (!raw) return null
@@ -374,14 +344,16 @@ export async function verifySessionSignature(
   secret: string | undefined,
 ): Promise<boolean> {
   if (!signature || !secret || !token) return false
-  const sigBytes = decodeSignatureBytes(signature)
-  if (!sigBytes?.length) return false
-  return crypto.subtle.verify(
-    'HMAC',
-    await hmacKey(secret, ['verify']),
-    sigBytes,
-    new TextEncoder().encode(token),
-  )
+  if (!STANDARD_PADDED_HMAC.test(signature)) return false
+  try {
+    const key = await getCryptoKey(secret)
+    const bin = atob(signature)
+    const bytes = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i)
+    return await crypto.subtle.verify('HMAC', key, bytes, new TextEncoder().encode(token))
+  } catch {
+    return false
+  }
 }
 
 export async function sessionTokenFromRequest(
@@ -543,8 +515,11 @@ function bindFilter(
   const op = filter.op
   if (op === 'in' || op === 'not_in') {
     const list = Array.isArray(filter.value) ? filter.value : parseInTuple(filter.value)
+    if (list.length === 0) {
+      return { text: op === 'in' ? 'FALSE' : 'TRUE', params: [] }
+    }
     const idx = start
-    const cast = list.length && list.every((v) => typeof v === 'string' && UUID_RE.test(v))
+    const cast = list.every((v) => typeof v === 'string' && UUID_RE.test(v))
       ? '::uuid[]'
       : '::text[]'
     return {

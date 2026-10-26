@@ -2,8 +2,9 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { makeSignature } from 'better-auth/crypto'
 import { serializeSignedCookie } from 'better-call'
-import { BETTER_AUTH_SNAKE_CASE } from './auth.ts'
+import { BETTER_AUTH_SNAKE_CASE, rewriteUserEmailLookup } from './auth.ts'
 import {
   bindOwner,
   ownerPredicate,
@@ -68,6 +69,10 @@ ok(authSrc.includes('session: BETTER_AUTH_SNAKE_CASE.session'), 'auth.ts applies
 ok(authSrc.includes('account: BETTER_AUTH_SNAKE_CASE.account'), 'auth.ts applies account snake_case map')
 ok(authSrc.includes('verification: BETTER_AUTH_SNAKE_CASE.verification'), 'auth.ts applies verification snake_case map')
 ok(authSrc.includes('bearer({ requireSignature: true })'), 'auth.ts requires signed bearers')
+ok(!authSrc.includes('allowExitOnIdle'), 'auth.ts does not use pg-pool allowExitOnIdle')
+ok(authSrc.includes('installEmailAdoption'), 'auth.ts installs case-insensitive email adoption')
+ok(rewriteUserEmailLookup('select * from "user" where "email" = $1') === 'select * from "user" where lower("email") = lower($1)', 'adoption lookup uses lower(email)')
+ok(rewriteUserEmailLookup('select * from session where token = $1') === 'select * from session where token = $1', 'adoption rewrite leaves session SQL alone')
 
 const schemaSql = readFileSync(join(here, '../schema/better-auth.sql'), 'utf8')
 ok(schemaSql.includes('email_verified') && schemaSql.includes('user_id') && schemaSql.includes('expires_at'), 'better-auth.sql is snake_case')
@@ -78,14 +83,28 @@ const corsSrc = readFileSync(join(here, 'cors.ts'), 'utf8')
 ok(corsSrc.includes("'Access-Control-Expose-Headers': 'set-auth-token'"), 'CORS exposes set-auth-token')
 const dataSrc = readFileSync(join(here, 'data.ts'), 'utf8')
 ok(!dataSrc.includes('requireSignature: false'), 'data.ts has no unsigned-bearer fallback')
+ok(dataSrc.includes("op === 'in' ? 'FALSE' : 'TRUE'"), 'empty in[] short-circuits to FALSE')
+ok(dataSrc.includes("from 'better-auth/crypto'"), 'session HMAC reuses better-auth/crypto')
+ok(dataSrc.includes('STANDARD_PADDED_HMAC') && dataSrc.includes('atob(signature)'), 'session HMAC verifies standard padded base64')
+ok(!dataSrc.includes('bytesToBase64UrlNoPad'), 'session HMAC does not use unpadded url-safe encoding')
+const workflow = readFileSync(join(here, '../../.github/workflows/checks.yml'), 'utf8')
+ok(workflow.includes('postgres:17'), 'CI postgres service is 17')
+ok(!workflow.includes('postgres:16'), 'CI postgres service is not 16')
 
 const secret = 's'.repeat(32)
+const official = await makeSignature('tok', secret)
 const signed = await signSessionToken('tok', secret)
 const signature = signed.slice(signed.indexOf('.') + 1)
+ok(signed === `tok.${official}`, 'signSessionToken matches better-auth makeSignature')
+ok(/^[A-Za-z0-9+/]+={1,2}$/.test(official), 'Better Auth HMAC is standard padded base64')
 ok(signature.length > 10, 'signSessionToken writes an HMAC')
+ok(await verifySessionSignature('tok', official, secret), 'Better Auth makeSignature verifies')
 ok(await verifySessionSignature('tok', signature, secret), 'valid cookie HMAC is accepted')
 ok(!(await verifySessionSignature('tok', 'not-the-real-signature', secret)), 'tampered cookie HMAC is rejected')
 ok(!(await verifySessionSignature('tok', null, secret)), 'unsigned token is rejected')
+const urlSafe = official.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+ok(urlSafe !== official, 'base64url-nopad differs from the Better Auth signature')
+ok(!(await verifySessionSignature('tok', urlSafe, secret)), 'base64url-nopad HMAC is rejected')
 
 const cookieReq = new Request('http://local/api/data', {
   headers: { cookie: `better-auth.session_token=${signed}` },
