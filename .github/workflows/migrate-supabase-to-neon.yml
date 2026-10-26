@@ -1,0 +1,113 @@
+# Manual-only Supabase → Neon data restore. Does not run on push/PR.
+# Does not deploy, change DNS, or write production hosts.
+#
+# Required repository secrets (never printed):
+#   SUPABASE_READONLY_URL
+#   NEON_DIRECT_URL
+#   AUTH_USERS_MAPPING   base64 CSV of id,email,created_at
+#                        A live run (dry_run=false) without this secret exits 2.
+#   A live run also requires the confirm_drop input (target dbname). The
+#   script refuses a target that is not *.neon.tech, looks like Supabase,
+#   matches the source host+port+dbname, or fingerprints as the source.
+#
+# Recommended (repo settings, not created by this PR): pin this workflow
+# to a GitHub Environment with required reviewers so a live restore cannot
+# run from an arbitrary click.
+name: migrate-supabase-to-neon
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Dump source and compare row counts without writing Neon
+        type: boolean
+        default: true
+      confirm_drop:
+        description: Target database name; required when dry_run is false (--confirm-drop)
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migrate-supabase-to-neon
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Install PostgreSQL client tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+      - name: Prepare auth user mapping
+        env:
+          AUTH_USERS_MAPPING: ${{ secrets.AUTH_USERS_MAPPING }}
+        run: |
+          set -euo pipefail
+          AUTH_FILE="${RUNNER_TEMP}/auth-users.mapping"
+          echo "AUTH_FILE=${AUTH_FILE}" >> "$GITHUB_ENV"
+          if [ -z "${AUTH_USERS_MAPPING}" ]; then
+            echo "AUTH_USERS_MAPPING secret is not set. A live restore will exit 2."
+            exit 0
+          fi
+          umask 077
+          printf '%s' "${AUTH_USERS_MAPPING}" | base64 --decode > "${AUTH_FILE}"
+          echo "Auth user mapping decoded (contents not printed)."
+      - name: Run migration
+        env:
+          SUPABASE_READONLY_URL: ${{ secrets.SUPABASE_READONLY_URL }}
+          NEON_DIRECT_URL: ${{ secrets.NEON_DIRECT_URL }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+          CONFIRM_DROP: ${{ github.event.inputs.confirm_drop }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_READONLY_URL}" ]; then
+            echo "::error::Missing repository secret SUPABASE_READONLY_URL"
+            exit 1
+          fi
+          if [ -z "${NEON_DIRECT_URL}" ]; then
+            echo "::error::Missing repository secret NEON_DIRECT_URL"
+            exit 1
+          fi
+          echo "Secrets are present (values not printed)."
+
+          ARGS=(--skip-auth-users)
+          if [ "${DRY_RUN}" = "true" ]; then
+            ARGS+=(--dry-run)
+            echo "Mode: dry-run (no writes to Neon)"
+          else
+            echo "Mode: live data-only restore to Neon"
+            if [ -z "${CONFIRM_DROP}" ]; then
+              echo "::error::Live restore requires the confirm_drop input (target dbname)"
+              exit 1
+            fi
+            ARGS+=(--confirm-drop="${CONFIRM_DROP}")
+          fi
+
+          if [ -n "${AUTH_FILE:-}" ] && [ -f "${AUTH_FILE}" ] && [ -s "${AUTH_FILE}" ]; then
+            ARGS+=(--auth-users-file="${AUTH_FILE}")
+            echo "Auth user mapping file attached (contents not printed)."
+          else
+            echo "No AUTH_USERS_MAPPING; source auth.users will not be read. Live restore exits 2."
+          fi
+
+          node scripts/migrate-supabase-to-neon.mjs "${ARGS[@]}"
+      - name: Delete auth user mapping
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${AUTH_FILE:-}" ]; then
+            rm -f "${AUTH_FILE}"
+          fi

@@ -273,23 +273,24 @@ ok(!schemaSql.includes('emailVerified') && !schemaSql.includes('"userId"'), 'bet
 ok(schemaSql.includes('user_email_lower_uidx') && schemaSql.includes('lower(email)'), 'better-auth.sql has case-insensitive email uniqueness')
 ok(schemaSql.includes('cannot create unique index user_email_lower_uidx'), 'better-auth.sql index migration names existing dupes')
 const migrateSrc = readFileSync(join(here, '../../scripts/migrate-supabase-to-neon.mjs'), 'utf8')
-ok(migrateSrc.includes('assertSourceUsersReady'), 'migrate pre-checks source emails before any target write')
-ok(migrateSrc.includes('formatNonEmptyTargetAbort'), 'migrate refuses a non-empty target')
-ok(migrateSrc.includes('dropCreatedSql'), 'migrate drops only objects this run created')
-ok(migrateSrc.includes('--exit-on-error'), 'migrate pg_restore is not error-tolerant')
-ok(migrateSrc.includes('resolvePgBin'), 'migrate picks a client matching the server major')
-ok(migrateSrc.includes("'-tA'"), 'migrate counts use psql -tA')
-ok(migrateSrc.includes('assertCountsMatch'), 'migrate fails when a row count is missing or differs')
-ok(migrateSrc.includes('loadStubAuthUsersSql'), 'migrate loads auth.users before pg_restore')
-ok(migrateSrc.includes('loadBetterAuthUsersSql'), 'migrate user load is one transaction')
-ok(migrateSrc.includes('runToFile'), 'auth.users export streams to a file')
-ok(migrateSrc.includes('maxBuffer'), 'spawnSync raises maxBuffer for large COPY leftovers')
-ok(migrateSrc.includes('REQUIRED_EXTENSIONS_SQL'), 'migrate creates required extensions itself')
-ok(migrateSrc.includes('ZEROED_MIGRATE_FAIL_AFTER'), 'migrate supports a forced-failure hook for e2e')
-ok(migrateSrc.indexOf('required_ext.sql') < migrateSrc.lastIndexOf("'--exit-on-error'"), 'pgcrypto is created before restore')
-ok(migrateSrc.indexOf('load_stub_users.sql') < migrateSrc.lastIndexOf("'--exit-on-error'"), 'stub users land before restore FKs')
-ok(migrateSrc.indexOf('assertSourceUsersReady') < migrateSrc.indexOf('creating stub auth.users'), 'source validation runs before the first target write')
-ok(migrateSrc.indexOf('checking target is empty') < migrateSrc.indexOf('ensuring pgcrypto'), 'empty-target check runs before the first target write')
+ok(migrateSrc.includes('refuseSourceWipeReason'), 'migrate refuses source-wipe aliases before a write')
+ok(migrateSrc.includes('confirmDropMismatchReason'), 'migrate requires --confirm-drop on a live run')
+ok(migrateSrc.includes('wrapRestoreTransaction'), 'migrate restores users + data in one transaction')
+ok(migrateSrc.includes('DROP SCHEMA IF EXISTS public CASCADE'), 'migrate drops public so a rerun starts empty')
+ok(migrateSrc.includes('missingMappedAuthUserIds'), 'migrate matches auth mappings by id, not counts')
+ok(migrateSrc.includes('skip-auth-users'), 'migrate can skip auth.users and use a provided mapping')
+ok(migrateSrc.includes('ON_ERROR_STOP'), 'migrate psql is not error-tolerant')
+ok(migrateSrc.includes("'-At'"), 'migrate tuples use psql -At')
+ok(migrateSrc.includes('refuseTargetFingerprintReason'), 'migrate fingerprints source and target before DROP')
+ok(migrateSrc.includes('checkSourceLockAbsentOnTarget'), 'migrate proves source and target differ with an advisory lock')
+ok(
+  migrateSrc.indexOf('refuseSourceWipeReason') < migrateSrc.indexOf('resetting Neon'),
+  'wipe refuse runs before DROP',
+)
+ok(
+  migrateSrc.indexOf('probing target identity before drop') < migrateSrc.indexOf('DROP SCHEMA IF EXISTS public CASCADE'),
+  'fingerprint probe runs before DROP',
+)
 ok(CHECKSUM_TABLES.length === 16, 'checksum covers all 16 public tables')
 ok(CHECKSUM_TABLES.includes('coach_message') && CHECKSUM_TABLES.includes('weekly_review'), 'checksum includes coach_message and weekly_review')
 const toc = '1; 3079 1 EXTENSION - pgcrypto\n2; 1259 2 TABLE public athlete\n'
@@ -314,8 +315,8 @@ ok(dataSrc.includes("from 'better-auth/crypto'"), 'session HMAC reuses better-au
 ok(dataSrc.includes('STANDARD_PADDED_HMAC') && dataSrc.includes('atob(signature)'), 'session HMAC verifies standard padded base64')
 ok(!dataSrc.includes('bytesToBase64UrlNoPad'), 'session HMAC does not use unpadded url-safe encoding')
 const workflow = readFileSync(join(here, '../../.github/workflows/checks.yml'), 'utf8')
-ok(workflow.includes('postgres:17'), 'CI postgres service is 17')
-ok(!workflow.includes('postgres:16'), 'CI postgres service is not 16')
+ok(workflow.includes('postgres:17'), 'CI postgres/isolation services are 17')
+ok(/migrate-pg:[\s\S]*image: postgres:16/.test(workflow), 'migrate-pg uses Postgres 16 to match the runner client')
 ok(workflow.includes('/usr/lib/postgresql/17/bin'), 'CI puts the Postgres 17 client first on PATH')
 
 const secret = 's'.repeat(32)

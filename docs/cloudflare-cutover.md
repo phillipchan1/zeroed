@@ -58,7 +58,8 @@ Client build-time (Vite / Vercel, unchanged until cutover):
 | `VITE_SUPABASE_ANON_KEY` | Keep for the empty-API-base (Vercel) path only. |
 | `VITE_API_BASE_URL` | Empty = today's path. Worker: `/api` (same origin) or `https://<worker>/api`. **iOS: `https://<worker>/api` (absolute).** Rollback: `https://<project>.supabase.co/functions/v1`. iOS TestFlight reads this from a **repo variable** (not a secret) — see [iOS TestFlight at cutover](#ios-testflight-at-cutover). |
 
-Replace the placeholder Hyperdrive `id` in `wrangler.jsonc` before a real deploy.
+Hyperdrive `id` in `wrangler.jsonc` is `feb7018e2ce14f3981fe2a43f3e2851b`.
+Point that Hyperdrive config at the Neon connection string before a real deploy.
 
 ## iOS TestFlight at cutover
 
@@ -137,9 +138,31 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    `POST /functions/v1/agent` reaches the Worker (not a 405 from assets).
    Missing `/assets/*` is 404 text/plain, not `index.html`.
 4. Fresh Supabase backup. Neon project created, empty or schema-only.
-5. `node scripts/migrate-supabase-to-neon.mjs --dry-run` with the dump URLs
-   (read-only source is enough for dry-run). Do not pass `--relax-target-rls`
-   unless you intend to drop RLS on the Neon target.
+5. Apply `worker/schema/app.sql` then `worker/schema/better-auth.sql` on an
+   empty Neon (or let the migrate script do it). Then
+   `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --dry-run --skip-auth-users --auth-users-file=users.json`
+   (read-only source is enough for dry-run). The migration role cannot read
+   `auth.users` — provide a CSV/JSON of `(id, email, created_at)`. A live
+   restore without that mapping exits 2. A live restore also requires
+   `--confirm-drop=<target dbname>` and a `*.neon.tech` target. The script
+   refuses when source and target normalize to the same host+port+dbname
+   (user, password, and query are ignored; libpq `?host=` / `hostaddr=` /
+   `dbname=` overrides are honored), when the target host looks like
+   Supabase (`supabase.co` / `supabase.com` / `pooler.supabase`), is a
+   socket path, or a host override that is not `*.neon.tech`, or when a
+   pre-DROP probe cannot read either fingerprint (fail closed), finds a
+   `storage` schema, any `pg_policies` row, a matching
+   `current_database()` plus `inet_server_addr()` / port / start time /
+   `system_identifier`, or a source session advisory lock visible in the
+   target's `pg_locks`. The source is never written (no marker DDL/DML).
+   Do not pass
+   `--relax-target-rls` unless you intend to drop leftover RLS on Neon.
+   Manual GitHub Action: `migrate-supabase-to-neon` (`workflow_dispatch` only,
+   `dry_run` defaults to true). Secrets: `SUPABASE_READONLY_URL`,
+   `NEON_DIRECT_URL`, `AUTH_USERS_MAPPING` (base64 CSV). Live dispatch
+   also needs the `confirm_drop` input (Neon dbname). Recommended: pin
+   the workflow to a GitHub Environment with required reviewers (repo
+   settings — not created by this PR).
 6. Worker deployed to `*.workers.dev` only (not the production hostname).
 7. Rollback values written down: current Vercel URL, `VITE_SUPABASE_*`,
    Supabase functions base `https://<project>.supabase.co/functions/v1`.
@@ -147,25 +170,33 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 ## Cutover (rehearsal — Zeroed is not live-critical)
 
 1. Write-freeze is optional here; run it anyway so the template is exercised.
-2. `SUPABASE_DB_URL=… NEON_DB_URL=… node scripts/migrate-supabase-to-neon.mjs`
-   — abort on a row-count mismatch. The source URL is **read-only**
-   (`pg_dump` + `COPY … TO STDOUT`). RLS, `athlete_select`,
-   `get_current_athlete_id()`, and `athlete_auth_user_id_fkey` are left
-   intact on Supabase. The script stubs `auth.users` on Neon so the dumped
-   FK can restore. Pass `--relax-target-rls` only if you want those
-   Supabase RLS artifacts dropped **on Neon** (the Worker already scopes
-   every query; the table owner bypasses RLS unless `FORCE ROW LEVEL
-   SECURITY`).
+2. `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --confirm-drop=neondb --skip-auth-users --auth-users-file=users.json`
+   — abort on a row-count mismatch, a mapping that is missing any
+   source `athlete.auth_user_id` (ids, not counts), or an athlete
+   whose `auth_user_id` has no Better Auth `"user"`. A live run
+   without `--auth-users-file` exits 2. A live run without
+   `--confirm-drop=<target dbname>` exits 2. A live run **drops and
+   recreates** Neon `public` + `auth` first (reruns start empty),
+   applies `worker/schema/app.sql` + `better-auth.sql`, then loads
+   mappings + data-only restore **in one transaction** so a failure
+   rolls back to empty tables. Table order is FK-safe (no
+   `--disable-triggers`; Neon’s `neondb_owner` is not superuser).
+   The source URL is **read-only**. RLS artifacts stay on Supabase.
+   Pass `--relax-target-rls` only if a leftover RLS artifact needs
+   dropping **on Neon** (the Worker already scopes every query; the table
+   owner bypasses RLS unless `FORCE ROW LEVEL SECURITY`).
 3. Apply `worker/schema/better-auth.sql` only if the script did not already
    create those tables. Columns are snake_case (`email_verified`, `user_id`,
    `expires_at`). `createAuth` in `worker/src/auth.ts` maps Better Auth's
    camelCase fields onto those names — do not regenerate camelCase tables.
-   `#17` copies `auth.users` into `"user"`; it does **not** mint signed
+   `#17` copies mapped auth users into `"user"`; it does **not** mint signed
    Better Auth session cookies. Those people must request a new OTP.
    `Authorization: Bearer` must be the signed `token.signature` from
    `set-auth-token` (or the session cookie), never the raw `session.token`
    column. `bearer({ requireSignature: true })` and `/api/data` both 401
    unsigned tokens. Rotating `BETTER_AUTH_SECRET` also forces re-sign-in.
+   For the workers.dev preview only, `node scripts/seed-preview.mjs --preview`
+   loads synthetic rows (no production data). Skip this on a real restore.
 4. Point the Worker Hyperdrive config at the Neon connection string.
 5. Set the Worker `BETTER_AUTH_URL` var/secret to the public Worker origin
    (never leave it as `http://localhost:8787`, and do not set

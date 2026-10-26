@@ -156,3 +156,58 @@ jobs:
           command -v pg_dump
           pg_dump --version
           npm run check:postgres
+
+  migrate-pg:
+    name: migrate-pg
+    runs-on: ubuntu-latest
+    services:
+      pg-source:
+        image: postgres:16
+        env:
+          POSTGRES_USER: src
+          POSTGRES_PASSWORD: dummy
+          POSTGRES_DB: srcdb
+        ports:
+          - 55418:5432
+        options: >-
+          --health-cmd "pg_isready -U src -d srcdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      pg-target:
+        image: postgres:16
+        env:
+          POSTGRES_USER: dst
+          POSTGRES_PASSWORD: dummy
+          POSTGRES_DB: dstdb
+        ports:
+          - 55419:5432
+        options: >-
+          --health-cmd "pg_isready -U dst -d dstdb"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Install PostgreSQL client tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+      - name: Map Neon-style aliases to the service containers
+        run: |
+          set -euo pipefail
+          echo "127.0.0.1 ep-src.neon.tech ep-dst.neon.tech" | sudo tee -a /etc/hosts
+      - name: Live two-Postgres migrate guards
+        env:
+          ZEROED_REQUIRE_PG: "1"
+          ZEROED_PG_SOURCE_URL: postgresql://src:dummy@127.0.0.1:55418/srcdb
+          ZEROED_PG_TARGET_URL: postgresql://dst:dummy@ep-dst.neon.tech:55419/dstdb
+          ZEROED_PG_ALIAS_URL: postgresql://src:dummy@ep-src.neon.tech:55418/srcdb
+          ZEROED_CHECK_PSQL_URL: postgresql://src:dummy@127.0.0.1:55418/srcdb
+        run: node --experimental-strip-types scripts/migrate-supabase-to-neon.check.mjs

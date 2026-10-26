@@ -63,11 +63,21 @@ function refuseEnvHost(name: 'PGHOST' | 'PGHOSTADDR'): void {
   }
 }
 
+/** Service-file redirects can ignore the loopback URL — refuse if set. */
+function refuseEnvService(name: 'PGSERVICE' | 'PGSERVICEFILE' | 'PGSYSCONFDIR'): void {
+  const raw = process.env[name]?.trim()
+  if (!raw) return
+  throw new Error(`${name} is set — refusing to wipe`)
+}
+
 /** Throw before any connect/query when a wipe/test URL is not loopback. */
 export function refuseUnsafeTestUrl(
   url: string,
   label = 'ZEROED_TEST_DATABASE_URL',
 ): void {
+  refuseEnvService('PGSERVICE')
+  refuseEnvService('PGSERVICEFILE')
+  refuseEnvService('PGSYSCONFDIR')
   refuseEnvHost('PGHOST')
   refuseEnvHost('PGHOSTADDR')
 
