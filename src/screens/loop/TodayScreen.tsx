@@ -34,7 +34,6 @@ const PAGER_DIRECTIVE_TONE: Record<WeeklyDirective, 'done' | 'todo' | 'pending'>
 
 interface TodayScreenProps {
   athleteId: string
-  todayRoutine: RoutineRow | null
   routines: RoutineRow[]
   onboardingStep?: OnboardingStep
 }
@@ -692,7 +691,7 @@ function StuckSessionsSheet({
  * summary instrument, at most one attention banner, then the session list.
  * Detail lives in sheets, never inline.
  */
-export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep }: TodayScreenProps) {
+export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
   const location   = useLocation()
   // A session finished a moment ago rides in on router state. Cleared on dismiss
@@ -821,12 +820,11 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const doneCount = new Set(weekWorkouts.map((w) => localIso(new Date(w.performedAt)))).size
   const lastDoneByRoutine = view?.lastDoneByRoutine ?? {}
 
-  // Exactly one session gets the primary (yellow) Start: the scheduler's pick if
-  // it's still to-do, otherwise the first to-do in the list. Guarantees a clear
-  // CTA even when the week has rolled over and there's no scheduled "today".
+  // Exactly one session gets the primary Start. It follows the list: the open
+  // draft if there is one, otherwise the earliest session still to do. The list
+  // is already in calendar order, so the button lands on Monday before Friday.
   const primaryRoutineId =
-    (todayRoutine && statusFor(todayRoutine.id).kind === 'todo' ? todayRoutine.id : null)
-    ?? weekList.find((r) => statusFor(r.id).kind === 'in_progress')?.id
+    weekList.find((r) => statusFor(r.id).kind === 'in_progress')?.id
     ?? weekList.find((r) => statusFor(r.id).kind === 'todo')?.id
     ?? null
 

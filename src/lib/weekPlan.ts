@@ -1,7 +1,7 @@
 // Soft day-pinning — an optional, never-enforced "I mean to do this session on
-// this day" hint. Scheduling stays count-based (computeWeekSchedule is
-// untouched); this only labels the cards so the athlete can plan a week without
-// the app policing it.
+// this day" hint. It does not change how many days the week expects. It does
+// place the session in the Train list and in the order the next session is
+// chosen, so the athlete can plan a week without the app policing it.
 //
 // Persisted on routine.intended_dow (migration 20260628000001), so a plan syncs
 // across devices. The value rides along with the routine rows the app already

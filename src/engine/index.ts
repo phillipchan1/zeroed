@@ -31,6 +31,7 @@ import type {
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
+import { orderByPlannedDay } from '../lib/weekOrder'
 import {
   callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callPhaseDesign, callInfoGain, callTarget,
   callCoachChat, callWeeklyDebrief,
@@ -2259,11 +2260,12 @@ function sameCalendarDay(a: Date, b: Date): boolean {
 
 /**
  * This week's plan (§4.1). The plan is `sessionsPerWeek` sessions across the
- * Mon–Sun week, routines assigned in order (A, B, C, A…). Today's routine is the
- * NEXT routine not yet done this week — unless a workout is already logged today
- * (no double-log) or the week's sessions are all done (→ null = rest). Count-based
- * (not weekday-pinned) so the athlete can train whenever they show up and the
- * first-ever session is always Session A.
+ * Mon–Sun week. Routines run in the same order as the Train list: a pinned day,
+ * else the day the name leads with, else the name — so "Fri…" does not open the
+ * week ahead of Monday. Today's routine is the NEXT routine in that order not
+ * yet done this week — unless a workout is already logged today (no double-log)
+ * or the week's sessions are all done (→ null = rest). Count-based, so the
+ * athlete can train whenever they show up.
  */
 export function computeWeekSchedule(
   routines: RoutineRow[],
@@ -2271,7 +2273,7 @@ export function computeWeekSchedule(
   sessionsPerWeek: number,
   now: Date = new Date(),
 ): WeekSchedule {
-  const ordered = [...routines].sort((a, b) => a.name.localeCompare(b.name))
+  const ordered = orderByPlannedDay(routines, (r) => r.intended_dow ?? null)
   const planned = Math.max(1, sessionsPerWeek || 3)
   const monday = startOfWeekMonday(now)
   const todayOffset = (now.getDay() + 6) % 7
