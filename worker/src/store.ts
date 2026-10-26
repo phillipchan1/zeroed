@@ -305,11 +305,14 @@ export async function selectOwnedWorkout(store: ConnectedStore, workoutId: strin
   return row ?? null
 }
 
-export async function loadWorkout(store: ConnectedStore, workoutId: string): Promise<{
+export async function hydrateOwnedWorkout(
+  store: ConnectedStore,
+  row: Awaited<ReturnType<typeof selectOwnedWorkout>>,
+  workoutId: string,
+): Promise<{
   workout: WorkoutRowView
   observations: Array<{ category: string; signal: string; severity: number }>
 } | null> {
-  const row = await selectOwnedWorkout(store, workoutId)
   if (!row) return null
   if (!(await workoutProgramOwned(store, row.r_program_id))) return null
   const obs = await store.sql<{ category: string; signal: string; severity: number }[]>`
@@ -336,6 +339,13 @@ export async function loadWorkout(store: ConnectedStore, workoutId: string): Pro
     },
     observations: obs,
   }
+}
+
+export async function loadWorkout(store: ConnectedStore, workoutId: string): Promise<{
+  workout: WorkoutRowView
+  observations: Array<{ category: string; signal: string; severity: number }>
+} | null> {
+  return hydrateOwnedWorkout(store, await selectOwnedWorkout(store, workoutId), workoutId)
 }
 
 export function epley1rm(weight: number, reps: number): number {

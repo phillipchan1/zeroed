@@ -202,6 +202,19 @@ export async function writeDraftInPlace(
   return written
 }
 
+export async function rollbackPhaseWeekEnd(
+  store: ConnectedStore, phaseId: string, weekEnd: string,
+): Promise<void> {
+  await store.sql`
+    UPDATE phase ph
+    SET week_end = ${weekEnd}
+    FROM program p
+    WHERE ph.id = ${phaseId}
+      AND ph.program_id = p.id
+      AND p.athlete_id = ${store.athleteId}
+  `
+}
+
 export async function scheduleDraftForNextWeek(
   store: ConnectedStore, live: LiveProgram, draft: ProgramDraft, errors: string[], startsOn: string,
 ): Promise<number> {
@@ -239,9 +252,7 @@ export async function scheduleDraftForNextWeek(
   `
   const newPhase = inserted[0]
   if (!newPhase) {
-    await store.sql`
-      UPDATE phase SET week_end = ${live.weekEnd} WHERE id = ${live.phaseId}
-    `
+    await rollbackPhaseWeekEnd(store, live.phaseId, live.weekEnd)
     errors.push(`couldn't schedule the new block`)
     return 0
   }

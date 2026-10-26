@@ -11,6 +11,8 @@ export interface Env {
   OPENAI_MODEL_HEAVY?: string
   BETTER_AUTH_SECRET?: string
   BETTER_AUTH_URL?: string
+  /** wrangler / tests: `development` | `dev` | `local` allow a localhost auth fallback. */
+  ENVIRONMENT?: string
   RESEND_API_KEY?: string
   RESEND_FROM?: string
 }
