@@ -21,9 +21,7 @@ end
 
 post_install do |installer|
   assertDeploymentTarget(installer)
-  # xcodebuild command-line PRODUCT_BUNDLE_IDENTIFIER applies to every target.
-  # Give each pod its own id so Capacitor.framework / CapacitorCordova.framework
-  # / Pods_App.framework cannot reuse app.zeroed.app (ITMS-90685).
+  # Unique pod ids so frameworks stay distinct from the app target.
   installer.pods_project.targets.each do |target|
     slug = target.name.gsub(/[^A-Za-z0-9.-]/, '-')
     target.build_configurations.each do |config|
