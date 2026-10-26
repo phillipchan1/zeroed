@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell } from 'lucide-react'
+import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell, Volume2 } from 'lucide-react'
 import { supabase, supabaseAnonKey, supabaseUrl } from '../../lib/supabaseClient'
 import { signOutLocal } from '../../lib/authClient'
 import { mcpUrl } from '../../lib/api'
 import { useCachedLoader, mutateCache } from '../../lib/cache'
 import { cacheKeys } from '../../lib/loopCache'
 import { getWeightUnit, setWeightUnit, type WeightUnit } from '../../lib/units'
-import { restAlertEnabled, setRestAlertEnabled } from '../../lib/restAlert'
+import { restAlertEnabled, setRestAlertEnabled, setClickEnabled, setSetClickEnabled } from '../../lib/restAlert'
 import {
   PageHeader, SectionHeader, Skeleton, Button, Input, Row, Sheet,
 } from '../../components/ui'
@@ -95,6 +95,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   // A beep at the end of rest is the default — a silent timer is a stopwatch,
   // and the point is knowing without looking. Off is a deliberate choice.
   const [restAlert, setRestAlert] = useState(() => restAlertEnabled())
+  const [setClick, setSetClick] = useState(() => setClickEnabled())
 
   const [editing, setEditing] = useState<EditField | null>(null)
   const [draft, setDraft] = useState('')
@@ -303,6 +304,14 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
               sub="A beep and a buzz when the rest is up"
               value={restAlert ? 'On' : 'Off'}
               onClick={() => { const next = !restAlert; setRestAlert(next); setRestAlertEnabled(next) }}
+              chevron={false}
+            />
+            <Row
+              leading={<Volume2 size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+              title="Sound effects"
+              sub="A click per set, a chime on a PR, a chord at the finish"
+              value={setClick ? 'On' : 'Off'}
+              onClick={() => { const next = !setClick; setSetClick(next); setSetClickEnabled(next) }}
               chevron={false}
             />
           </div>

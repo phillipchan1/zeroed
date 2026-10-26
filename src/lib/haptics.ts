@@ -6,6 +6,7 @@ import { Haptics, ImpactStyle, NotificationType } from '@capacitor/haptics'
 //   tick()    — a set logged. Light; it happens a dozen times a session.
 //   record()  — a PR typed. Heavy; it should feel different from a set.
 //   success() — a session finished. The system "success" pattern.
+//   alert()   — rest's up. The system "warning" pattern: you're needed.
 //
 // @capacitor/haptics drives the Taptic Engine in the iOS shell and falls back to
 // navigator.vibrate on the web (Android); iOS Safari has neither, so there it's a
@@ -27,4 +28,8 @@ export function record(): void {
 
 export function success(): void {
   fire(() => Haptics.notification({ type: NotificationType.Success }))
+}
+
+export function alert(): void {
+  fire(() => Haptics.notification({ type: NotificationType.Warning }))
 }

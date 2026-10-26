@@ -21,7 +21,7 @@ import {
   pendingRef, parsePendingRef, pendingSessionById,
 } from '../../lib/workoutOutbox'
 import { setIntendedDay, orderByPlannedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
-import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner } from '../../components/ui'
+import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, LockOn } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate } from '../../types/database'
 
 interface TodayScreenProps {
@@ -432,7 +432,7 @@ function SessionCard({
       <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
         <div style={{ flex: 1, minWidth: 0 }}>
           <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700, lineHeight: 1.3 }}>{routine.name}</h3>
-          <p className="text-xs text-dim num" style={{ marginTop: 4 }}>{meta}</p>
+          <p className="meta" style={{ marginTop: 4 }}>{meta}</p>
         </div>
         <Chip tone={chip.tone}>{chip.label}</Chip>
       </div>
@@ -776,6 +776,21 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // and twice in one day counts once.
   const plannedThisWeek = Math.max(1, view?.sessionsPerWeek ?? (routines.length || 3))
   const doneCount = new Set(weekWorkouts.map((w) => localIso(new Date(w.performedAt)))).size
+  const weekZeroed = doneCount >= plannedThisWeek
+  // "Week zeroed" on the finish moment only for the session that filled it, not
+  // every session logged after. Days are what count toward the week, so it's
+  // the day count without this session against the day count with it. (If the
+  // commit has already landed, the pending id is gone and this reads false:
+  // the moment just says "Session zeroed", which is still true.)
+  const filledWeekNow = (() => {
+    if (!finished || !weekZeroed) return false
+    const mine = pendingRef(finished.pendingId)
+    if (!weekWorkouts.some((w) => w.id === mine)) return false
+    const before = new Set(
+      weekWorkouts.filter((w) => w.id !== mine).map((w) => localIso(new Date(w.performedAt))),
+    ).size
+    return before < plannedThisWeek
+  })()
   const lastDoneByRoutine = view?.lastDoneByRoutine ?? {}
 
   // Exactly one session gets the primary (yellow) Start: the scheduler's pick if
@@ -914,7 +929,15 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
 
   return (
     <div className="screen with-nav">
-      {finished && <SessionZeroed session={finished} onDone={dismissFinished} />}
+      {finished && (
+        <SessionZeroed
+          session={finished}
+          // The session that fills the week says so. Queued sessions count the
+          // instant they're finished, so this is already true on arrival.
+          week={filledWeekNow ? { done: doneCount, planned: plannedThisWeek } : null}
+          onDone={dismissFinished}
+        />
+      )}
       <div className="page page--rail">
        <div className="page__main">
 
@@ -960,14 +983,25 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             {!loading && routines.length > 0 && (
               <div className="card fade-rise" style={{ marginBottom: 24 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
-                  <Ring value={doneCount / plannedThisWeek} size={72} label={`${doneCount} of ${plannedThisWeek} sessions logged this week`}>
-                    <span style={{ fontSize: 'var(--fs-xl)', fontWeight: 700 }}>{doneCount}</span>
-                    <span className="text-micro text-dim" style={{ marginTop: 2 }}>of {plannedThisWeek}</span>
-                  </Ring>
+                  {/* A full week is the instrument's lock: the brackets close on the
+                      ring. Anything short of it is just a ring. */}
+                  {weekZeroed ? (
+                    <LockOn style={{ '--lock-gap': '-6px', '--lock-from': '12px', '--lock-size': '10px' } as React.CSSProperties}>
+                      <Ring value={1} size={72} label={`${doneCount} of ${plannedThisWeek} sessions logged this week`}>
+                        <span style={{ fontSize: 'var(--fs-xl)', fontWeight: 700 }}>{doneCount}</span>
+                        <span className="text-micro text-dim" style={{ marginTop: 2 }}>of {plannedThisWeek}</span>
+                      </Ring>
+                    </LockOn>
+                  ) : (
+                    <Ring value={doneCount / plannedThisWeek} size={72} label={`${doneCount} of ${plannedThisWeek} sessions logged this week`}>
+                      <span style={{ fontSize: 'var(--fs-xl)', fontWeight: 700 }}>{doneCount}</span>
+                      <span className="text-micro text-dim" style={{ marginTop: 2 }}>of {plannedThisWeek}</span>
+                    </Ring>
+                  )}
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <p className="text-lg" style={{ fontWeight: 700, lineHeight: 1.25 }}>
                       {doneCount === 0 ? 'Nothing logged yet'
-                        : doneCount >= plannedThisWeek ? 'Week complete'
+                        : weekZeroed ? 'Week zeroed'
                         : `${plannedThisWeek - doneCount} to go`}
                     </p>
                     <div className="week-strip" style={{ marginTop: 12, padding: 0, gap: 2 }}>
@@ -1045,7 +1079,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                       lastDone={lastDoneByRoutine[r.id] ?? null}
                       plannedDow={plannedDowFor(r)}
                       onOpen={() => setOpenSessionId(r.id)}
-                      onStart={() => navigate(`/app/workout/${r.id}`)}
+                      onStart={() => navigate(`/app/workout/${r.id}`, { viewTransition: true })}
                     />
                   ))}
                 </div>
@@ -1059,7 +1093,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                 type="button"
                 onClick={() => navigate('/app/coach')}
                 className="card card--tap fade-rise"
-                style={{ width: '100%', textAlign: 'left', marginTop: 24, color: 'var(--text)' }}
+                style={{ width: '100%', textAlign: 'left', marginTop: 24, marginBottom: 12, color: 'var(--text)' }}
               >
                 {/* The brand's reticle, doing its actual job: its tightness IS this
                     read's confidence (real state, never a timer), so the one place
@@ -1123,7 +1157,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           plannedDow={plannedDowFor(openSession)}
           onPlanDay={(dow) => handlePlanDay(openSession.id, dow)}
           onClose={() => setOpenSessionId(null)}
-          onStart={() => navigate(`/app/workout/${openSession.id}`)}
+          onStart={() => navigate(`/app/workout/${openSession.id}`, { viewTransition: true })}
           onLogAgain={() => navigate(`/app/workout/${openSession.id}`)}
           onEdit={() => {
             const s = statusFor(openSession.id)

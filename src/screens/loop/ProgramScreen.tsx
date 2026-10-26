@@ -271,12 +271,12 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
               <PhaseArc currentIdx={currentIdx} />
 
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', marginTop: 26 }}>
-                <span style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-2xl)', fontWeight: 700, color: 'var(--signal)', letterSpacing: '-0.01em' }}>
+                <span className="readout" style={{ color: 'var(--signal)' }}>
                   {phaseName}
                 </span>
                 <div style={{ textAlign: 'right' }}>
                   <p className="text-xs text-dim" style={{ fontFamily: 'var(--font-mono)', letterSpacing: '0.06em', marginBottom: 8 }}>
-                    WEEK <span className="num text-signal">{weekCurrent}</span>/{weekTotal}
+                    WEEK <span className="num" style={{ color: 'var(--text)' }}>{weekCurrent}</span>/{weekTotal}
                   </p>
                   <WeekDots current={weekCurrent} total={weekTotal} />
                 </div>
@@ -560,7 +560,8 @@ function WeekDots({ current, total }: { current: number; total: number }) {
             width: i === current - 1 ? 18 : 9,
             height: 5,
             borderRadius: 3,
-            background: i < current ? 'var(--signal)' : 'var(--line)',
+            // Text tones, not signal: the phase name is the screen's one yellow.
+            background: i === current - 1 ? 'var(--text)' : i < current ? 'var(--text-dim)' : 'var(--line)',
           }}
         />
       ))}

@@ -107,7 +107,7 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
         <div className="card fade-rise" style={{ marginBottom: 28, borderLeft: `3px solid ${tone.color}` }}>
           <p className="section-header" style={{ marginBottom: 8 }}>Next week</p>
           <div style={{ display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
-            <span className="verdict-stamp" style={{ fontFamily: 'var(--font-mono)', fontSize: 'var(--fs-2xl)', fontWeight: 700, letterSpacing: '-0.01em', color: tone.color }}>
+            <span className="readout verdict-stamp" style={{ color: tone.color }}>
               {directive}
             </span>
             {delta !== 0 && (
@@ -154,7 +154,7 @@ export function RecapScreen({ athleteId }: { athleteId: string }) {
                 <div key={m.id} className="card">
                   <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
                     <span className="section-header" style={{ color: 'var(--computing)' }}>{m.category}</span>
-                    <span className="num text-xs text-dim">
+                    <span className="meta">
                       {m.prevStatus && m.prevStatus !== m.status ? `${m.prevStatus} → ${m.status}` : `${Math.round(m.confidence * 100)}%`}
                     </span>
                   </div>

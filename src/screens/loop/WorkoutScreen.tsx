@@ -21,7 +21,7 @@ import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
 import { isSetLogged, tallySession } from '../../engine/volume'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { restSecondsFor, adjustRest, formatRest } from '../../engine/restTimer'
-import { fireRestAlert } from '../../lib/restAlert'
+import { fireRestAlert, playSetClick, playRecord } from '../../lib/restAlert'
 import { tick, record } from '../../lib/haptics'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
 import { unitContext, convertWeight, type UnitContext } from '../../lib/units'
@@ -245,6 +245,7 @@ function SetRow({
     onChange(next)
     setSnap(true)
     tick()
+    playSetClick()
     onComplete()
   }
 
@@ -385,7 +386,7 @@ function SetRow({
   const prevPr = useRef(pr)
   const [prFlash, setPrFlash] = useState(false)
   useEffect(() => {
-    if (pr && !prevPr.current) { setPrFlash(true); record() }
+    if (pr && !prevPr.current) { setPrFlash(true); record(); playRecord() }
     prevPr.current = pr
   }, [pr])
 
@@ -1587,7 +1588,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   // What the finish moment on Train shows: the session's own numbers, and which
   // lifts set a record — judged the same way the set-row PR badge is.
-  function finishedSummary(): FinishedSession {
+  function finishedSummary(pendingId: string): FinishedSession {
     const exercises = (routine!.exercises as ExerciseTemplate[]) ?? []
     const prLifts = exercises
       .filter((_, i) => (setLogs[i] ?? []).some(
@@ -1596,6 +1597,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       .map((ex) => ex.name)
     const tally = tallySession(setLogs)
     return {
+      pendingId,
       name: routine!.name,
       sets: tally.loggedSets,
       volume: Math.round(convertWeight(tally.load, u.storage, u.unit)),
@@ -1708,7 +1710,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     if (isEdit) {
       navigate('/app/today', { replace: true })
     } else {
-      navigate('/app/today', { replace: true, state: { finished: finishedSummary() } })
+      navigate('/app/today', { replace: true, state: { finished: finishedSummary(pending.id) } })
     }
 
     void commitPending(pending).catch(() => { /* stays queued */ })
