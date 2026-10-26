@@ -302,6 +302,33 @@ try {
   fail('ios-apply-app-signing --self-test')
 }
 
+const buildNumberScript = read('scripts/appstore-next-build-number.mjs')
+if (buildNumberScript) {
+  if (
+    buildNumberScript.includes('/v1/builds?') &&
+    buildNumberScript.includes('filter[app]=') &&
+    buildNumberScript.includes('sort=-uploadedDate')
+  ) {
+    ok('appstore-next-build-number queries GET /v1/builds filter[app] sort=-uploadedDate')
+  } else {
+    fail(
+      'appstore-next-build-number ASC query',
+      'must use List Builds (GET /v1/builds?filter[app]=…&sort=-uploadedDate), not preReleaseVersions/…/builds?sort='
+    )
+  }
+  if (/falling back to proposed/.test(buildNumberScript)) {
+    fail('appstore-next-build-number still falls back on ASC errors')
+  } else ok('appstore-next-build-number fails closed on ASC errors')
+}
+
+try {
+  execFileSync(process.execPath, [join(root, 'scripts/appstore-next-build-number.mjs'), '--self-test'], {
+    stdio: 'inherit',
+  })
+} catch {
+  fail('appstore-next-build-number --self-test')
+}
+
 if (pbx) {
   try {
     const { withAppSigning } = await import(new URL('./ios-apply-app-signing.mjs', import.meta.url))
