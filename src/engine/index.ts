@@ -4614,6 +4614,10 @@ export interface PagerWeekView {
   weekEnd: string
   phaseName: string | null
   sessions: PagerSessionView[]
+  /** Coach call for this projected week (week+1 after close, or dry-run when the current week is logged out). */
+  directive?: WeeklyDirective | null
+  rationale?: string | null
+  provisional?: boolean
 }
 export interface WeekPagerData {
   past: PagerWeekView[]    // chronological (oldest first); excludes the current week
@@ -4664,6 +4668,37 @@ export async function gatherWeekPager(athleteId: string, u: UnitContext): Promis
   if (activePhase) {
     const phaseName = (activePhase as { name: PhaseName }).name
     const stepPct = PHASE_WEEKLY_STEP_PCT[phaseName] ?? 0
+    const [{ data: athRow }, { data: latestReview }] = await Promise.all([
+      supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle(),
+      supabase.from('weekly_review').select('week_ending, next_week_prescription')
+        .eq('program_id', prog.id).order('week_ending', { ascending: false }).limit(1).maybeSingle(),
+    ])
+    const plannedPerWeek = (athRow?.sessions_per_week as number | null) ?? 3
+    const weekClosed = (latestReview?.week_ending as string | undefined) === thisWeekEnding
+    const closedPresc = weekClosed
+      ? ((latestReview?.next_week_prescription as WeeklyPrescription | null) ?? null)
+      : null
+
+    // Once the athlete has logged their planned sessions (or closed the week),
+    // week+1 in the pager reads like the coach's call — not a generic % ramp.
+    let previewPresc: WeeklyPrescription | null = closedPresc
+    if (!previewPresc) {
+      const [{ data: cwWorkouts }, { data: cwObs }] = await Promise.all([
+        supabase.from('workout').select('performed_at, rpe, actual_weights, routine!inner(program_id)')
+          .eq('routine.program_id', prog.id).gte('performed_at', thisMonday.toISOString()),
+        supabase.from('session_observation').select('severity, signal, logged_at, workout!inner(routine!inner(program_id))')
+          .eq('workout.routine.program_id', prog.id).gte('logged_at', thisMonday.toISOString()),
+      ])
+      const cw = (cwWorkouts ?? []) as unknown as WeekWorkout[]
+      const distinctDays = new Set(cw.map((w) => isoDate(new Date(w.performed_at)))).size
+      if (distinctDays >= plannedPerWeek) {
+        previewPresc = decidePrescription(
+          tallyWeek(plannedPerWeek, cw, (cwObs ?? []) as unknown as WeekObservation[]),
+          { phaseName },
+        )
+      }
+    }
+
     const { data: routineRows } = await supabase
       .from('routine').select('id, name, exercises, intent').eq('phase_id', (activePhase as { id: string }).id).order('name')
     const routines = (routineRows ?? []) as unknown as Array<{ id: string; name: string; exercises: ExerciseTemplate[]; intent: string | null }>
@@ -4699,6 +4734,7 @@ export async function gatherWeekPager(athleteId: string, u: UnitContext): Promis
     for (let k = 1; k <= MAX_FORWARD; k++) {
       const wkMonday = new Date(thisMonday); wkMonday.setDate(thisMonday.getDate() + 7 * k)
       if (wkMonday > phaseEnd) break
+      const coachPresc = k === 1 ? previewPresc : null
       const sessions: PagerSessionView[] = routines.map((r) => {
         const base = baseByRoutine.get(r.id) ?? []
         return {
@@ -4708,16 +4744,34 @@ export async function gatherWeekPager(athleteId: string, u: UnitContext): Promis
           tag: null,
           lines: r.exercises.map((ex, i) => {
             const b = base[i]
-            const detail = b != null && stepPct > 0
-              ? `≈${u.prescribe(b * Math.pow(1 + stepPct / 100, k))}${u.unit}×${ex.reps}`
-              : b != null
-                ? `${u.fmt(b)}${u.unit}×${ex.reps}`
+            let detail: string
+            if (b != null && coachPresc) {
+              const projected = recommendedLoad({ weight: b } as SetLog, coachPresc.load_delta_pct, u)
+              detail = projected != null
+                ? `${u.fmt(projected)}${u.unit}×${ex.reps}`
                 : `${ex.sets}×${ex.reps}${ex.load ? ` · ${ex.load}` : ''}`
+            } else if (b != null && stepPct > 0) {
+              detail = `≈${u.prescribe(b * Math.pow(1 + stepPct / 100, k))}${u.unit}×${ex.reps}`
+            } else if (b != null) {
+              detail = `${u.fmt(b)}${u.unit}×${ex.reps}`
+            } else {
+              detail = `${ex.sets}×${ex.reps}${ex.load ? ` · ${ex.load}` : ''}`
+            }
             return { name: ex.name, detail }
           }),
         }
       })
-      future.push({ weekStart: isoDate(wkMonday), weekEnd: weekEndingISO(wkMonday), phaseName, sessions })
+      future.push({
+        weekStart: isoDate(wkMonday),
+        weekEnd: weekEndingISO(wkMonday),
+        phaseName,
+        sessions,
+        ...(k === 1 && previewPresc ? {
+          directive: previewPresc.directive,
+          rationale: previewPresc.rationale,
+          provisional: !weekClosed,
+        } : {}),
+      })
     }
 
     // The phase boundary — the next stage, concept only (no routine rows yet).

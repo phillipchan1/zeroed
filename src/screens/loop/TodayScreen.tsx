@@ -22,7 +22,15 @@ import {
 } from '../../lib/workoutOutbox'
 import { setIntendedDay, orderByPlannedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
 import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner } from '../../components/ui'
-import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate } from '../../types/database'
+import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate, WeeklyDirective } from '../../types/database'
+
+const PAGER_DIRECTIVE_TONE: Record<WeeklyDirective, 'done' | 'todo' | 'pending'> = {
+  PROGRESS: 'done',
+  HOLD: 'todo',
+  'HOLD (missed)': 'pending',
+  DELOAD: 'pending',
+  RECOVERY: 'pending',
+}
 
 interface TodayScreenProps {
   athleteId: string
@@ -176,6 +184,16 @@ function markRecapSeen(id: string): void {
     const seen = JSON.parse(localStorage.getItem(RECAP_SEEN_KEY) || '[]') as string[]
     if (!seen.includes(id)) localStorage.setItem(RECAP_SEEN_KEY, JSON.stringify([...seen.slice(-20), id]))
   } catch { /* non-fatal */ }
+}
+
+// Athlete swiped back to "This week" after we auto-opened next week's preview.
+function weekPreviewDismissed(weekEnding: string): boolean {
+  try { return localStorage.getItem(`zeroed:week-preview-dismiss:${weekEnding}`) === '1' }
+  catch { return false }
+}
+function dismissWeekPreview(weekEnding: string): void {
+  try { localStorage.setItem(`zeroed:week-preview-dismiss:${weekEnding}`, '1') }
+  catch { /* non-fatal */ }
 }
 
 // ---- one session row in the week list -------------------------------------
@@ -486,6 +504,17 @@ function PagerWeekBody({ week, mode, onTapSession }: {
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {mode === 'future' && week.directive && (
+        <div className="card">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <Chip tone={PAGER_DIRECTIVE_TONE[week.directive] ?? 'todo'}>{week.directive}</Chip>
+            {week.provisional && <Chip tone="pending">Provisional</Chip>}
+          </div>
+          {week.rationale && (
+            <p className="text-sm text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>{week.rationale}</p>
+          )}
+        </div>
+      )}
       {week.sessions.map((s, i) => (
         <div
           key={`${s.routineId}-${i}`}
@@ -839,6 +868,18 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // the CTA so it reads "done" rather than inviting a second close.
   const currentWeekEnding = localIso(weekDays[6].date)
   const weekClosed = (latestReview?.weekEnding ?? null) === currentWeekEnding
+  const weekLoggedOut = doneCount >= plannedThisWeek
+  const canPreviewNextWeek = (pager?.future?.length ?? 0) > 0
+
+  // Finished the week (or closed it) → land on next week's preview unless they
+  // explicitly swiped back to this week.
+  useEffect(() => {
+    if (loading || !canPreviewNextWeek) return
+    if (!weekLoggedOut && !weekClosed) return
+    if (weekPreviewDismissed(currentWeekEnding)) return
+    if (weekOffset !== 0) return
+    setWeekOffset(1)
+  }, [loading, canPreviewNextWeek, weekLoggedOut, weekClosed, currentWeekEnding, weekOffset])
 
   async function handleCloseWeek(injury: boolean) {
     if (closing) return
@@ -938,7 +979,10 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             type="button" aria-label="Previous week"
             className="pager__btn"
             disabled={wOffset <= minWeekOffset}
-            onClick={() => setWeekOffset(wOffset - 1)}
+            onClick={() => {
+              if (wOffset === 1 && (weekLoggedOut || weekClosed)) dismissWeekPreview(currentWeekEnding)
+              setWeekOffset(wOffset - 1)
+            }}
           >
             <ChevronLeft size={22} strokeWidth={2} />
           </button>
