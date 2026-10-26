@@ -3,11 +3,16 @@
 // Proves: athlete A cannot read, edit, or delete athlete B's rows on every
 // store / edits query path. Mutating those SQL filters must make this fail.
 
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
-import { applyEdits, writeDraftInPlace, type EditInput } from './edits.ts'
+import {
+  applyEdits,
+  insertProgramRevision,
+  liveToDraft,
+  scheduleDraftForNextWeek,
+  writeDraftInPlace,
+  type EditInput,
+} from './edits.ts'
+import { applyIsolationSchema } from './isolationDb.ts'
 import { resolveMcpToken } from './mcpToken.ts'
 import { makePgliteSql } from './pgliteSql.ts'
 import {
@@ -21,6 +26,7 @@ import {
   loadWorkouts,
   makeStore,
   programIds,
+  selectOwnedWorkout,
 } from './store.ts'
 import { executeZeroedTool } from './tools.ts'
 import type { LiveProgram } from './store.ts'
@@ -38,16 +44,15 @@ const A = '11111111-1111-1111-1111-111111111111'
 const B = '22222222-2222-2222-2222-222222222222'
 const PROG_A = '33333333-3333-3333-3333-333333333333'
 const PROG_B = '44444444-4444-4444-4444-444444444444'
+const PHASE_B = '66666666-6666-6666-6666-666666666666'
 const ROUTINE_A = '77777777-7777-7777-7777-777777777777'
 const ROUTINE_B = '88888888-8888-8888-8888-888888888888'
 const WORKOUT_A = '99999999-9999-9999-9999-999999999999'
 const WORKOUT_B = 'bbbb9999-9999-4999-8999-999999999999'
 const INSIGHT_B = 'bbbb2222-0000-4000-8000-000000000001'
 
-const schemaPath = join(dirname(fileURLToPath(import.meta.url)), '../schema/isolation.sql')
-
 const db = new PGlite()
-await db.exec(readFileSync(schemaPath, 'utf8'))
+await applyIsolationSchema(db)
 const sql = makePgliteSql(db)
 const storeA = makeStore(sql, A)
 const storeB = makeStore(sql, B)
@@ -69,21 +74,30 @@ ok((await programIds(storeA)).join() === PROG_A, 'programIds: A sees only own pr
 ok((await programIds(storeB)).join() === PROG_B, 'programIds: B sees only own program')
 
 const athleteA = await loadAthlete(storeA)
+const athleteB = await loadAthlete(storeB)
 ok(athleteA.id === A && athleteA.name === 'Athlete A', 'loadAthlete: A is A')
 ok(athleteA.goals === 'A only goal', 'loadAthlete: A does not see B goals')
-ok((await loadAthlete(storeB)).id === B, 'loadAthlete: B is B')
+ok(athleteB.id === B, 'loadAthlete: B is B')
+ok(athleteA.current_phase === 'Strength' && !/15/.test(String(athleteA.retest_date ?? '')), 'loadAthlete profile: A phase is A')
+ok(athleteB.current_phase === 'Power' && /15/.test(String(athleteB.retest_date ?? '')), 'loadAthlete profile: B phase is B')
 
 const liveA = await loadLiveProgram(storeA)
 const liveB = await loadLiveProgram(storeB)
 ok(liveA?.programId === PROG_A && liveA.sessions.every((s) => s.routineId === ROUTINE_A), 'loadLiveProgram: A week only')
 ok(liveB?.programId === PROG_B && !liveA?.sessions.some((s) => s.name === 'B day'), 'loadLiveProgram: A does not see B day')
 ok(liveA?.phaseName === 'Strength' && liveB?.phaseName === 'Power', 'loadLiveProgram: phases stay separate')
+ok(liveA?.standingPreferences === 'A prefers hills' && liveA.sessionsPerWeek === 3, 'loadLiveProgram prefs: A standing prefs')
+ok(liveB?.standingPreferences === 'B prefers ergs' && liveB.sessionsPerWeek === 4, 'loadLiveProgram prefs: B standing prefs')
 
 const insightsA = await loadInsights(storeA, true)
 const insightsB = await loadInsights(storeB, true)
-ok(insightsA.length === 1 && insightsA[0]?.claim === 'A only', 'loadInsights: A sees own claim')
-ok(!insightsA.some((i) => i.claim === 'B only'), 'loadInsights: A cannot read B claim')
-ok(insightsB.length === 1 && insightsB[0]?.claim === 'B only', 'loadInsights: B sees own claim')
+ok(insightsA.every((i) => i.claim !== 'B only') && insightsA.some((i) => i.claim === 'A only'), 'loadInsights settled: A cannot read B claim')
+ok(insightsB.length === 1 && insightsB[0]?.claim === 'B only', 'loadInsights settled: B sees own claim')
+const openA = await loadInsights(storeA)
+const openB = await loadInsights(storeB)
+ok(openA.length === 1 && openA[0]?.claim === 'A only' && openA[0]?.status !== 'resolved', 'loadInsights open: A open only')
+ok(!openA.some((i) => i.claim === 'B only'), 'loadInsights open: A cannot read B claim')
+ok(openB.length === 1 && openB[0]?.claim === 'B only', 'loadInsights open: B open only')
 
 const workoutsA = await loadWorkouts(storeA)
 const workoutsB = await loadWorkouts(storeB)
@@ -99,6 +113,8 @@ ok(crossed === null, 'loadWorkout: A asking for B workout_id gets null')
 ok(bOwn?.workout.id === WORKOUT_B, 'loadWorkout: B can read own id')
 ok(ownWorkout?.observations.every((o) => o.signal !== 'B felt good') ?? false, 'loadWorkout: A observations are A')
 ok(await loadWorkout(storeB, WORKOUT_A) === null, 'loadWorkout: B asking for A workout_id gets null')
+ok(await selectOwnedWorkout(storeA, WORKOUT_B) === null, 'selectOwnedWorkout: SQL athlete_id hides B')
+ok((await selectOwnedWorkout(storeA, WORKOUT_A))?.id === WORKOUT_A, 'selectOwnedWorkout: A own row')
 
 const liftsA = await loadLiftHistory(storeA, 'Deadlift')
 const liftsB = await loadLiftHistory(storeB, 'Deadlift')
@@ -195,6 +211,40 @@ const sneakB: EditInput[] = [{
 const sneak = await applyEdits(storeA, sneakB, { confirm: true, timing: 'now' })
 ok(!sneak.includes('should not apply') || sneak.includes('skipped') || sneak.includes('Nothing'), 'applyEdits: A cannot target B session name on A week')
 ok((await scalar<string>('SELECT name FROM routine WHERE id = $1', [ROUTINE_B])) === 'B day', 'applyEdits sneak: B name still B day')
+
+const bWeekEnd = await scalar<string>('SELECT week_end::text FROM phase WHERE id = $1', [PHASE_B])
+const closeErrors: string[] = []
+const closedB = await scheduleDraftForNextWeek(storeA, liveB, liveToDraft(liveB), closeErrors, '2026-11-02')
+ok(closedB === 0, 'scheduleDraft: A cannot close B phase')
+ok(closeErrors.some((e) => e.includes("couldn't close")), 'scheduleDraft: close refused (athlete filter)')
+ok((await scalar<string>('SELECT week_end::text FROM phase WHERE id = $1', [PHASE_B])) === bWeekEnd, 'scheduleDraft: B week_end unchanged')
+ok((await count('phase', 'program_id = $1', [PROG_B])) === 1, 'scheduleDraft: no extra B phase after close attempt')
+
+const bPhaseCount = await count('phase', 'program_id = $1', [PROG_B])
+const plantErrors: string[] = []
+const plantedPhase = await scheduleDraftForNextWeek(
+  storeA,
+  { ...liveA, programId: PROG_B },
+  liveToDraft(liveA),
+  plantErrors,
+  '2026-11-02',
+)
+ok(plantedPhase === 0, 'scheduleDraft: A cannot INSERT phase onto B program')
+ok(plantErrors.some((e) => e.includes("couldn't schedule") || e.includes("couldn't close")), 'scheduleDraft: B program insert refused')
+ok((await count('phase', 'program_id = $1', [PROG_B])) === bPhaseCount, 'scheduleDraft: B phase count unchanged')
+
+const bRevs = await count('program_revision', 'program_id = $1', [PROG_B])
+const stolenRev = await insertProgramRevision(storeA, { programId: PROG_B, phaseId: PHASE_B }, {
+  trigger: 'editor',
+  effectiveOn: '2026-10-26',
+  requests: ['steal'],
+  snapshot: [],
+  diff: {},
+  summary: 'stolen',
+})
+ok(stolenRev === 0, 'insertProgramRevision: A cannot write B revision')
+ok((await count('program_revision', 'program_id = $1', [PROG_B])) === bRevs, 'insertProgramRevision: B revision count unchanged')
+ok((await count('program_revision', 'summary = $1', ['stolen'])) === 0, 'insertProgramRevision: stolen summary absent')
 
 // --- deletes (same athlete_id / program-join scoping as store/edits) ---
 const deletedWorkout = await sql<{ id: string }[]>`

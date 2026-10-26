@@ -29,8 +29,6 @@ jobs:
         run: npm run lint
       - name: Engine / lib / access checks
         run: npm run check
-      - name: Isolation mutation proof
-        run: npm run check:isolation-mutation
       - name: MCP checks
         run: |
           npm --prefix mcp ci --no-audit --no-fund
@@ -41,3 +39,16 @@ jobs:
         run: npx cap sync ios
       - name: iOS project structure
         run: node scripts/ios-project-check.mjs
+
+  isolation-mutation:
+    name: isolation-mutation
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Isolation mutation proof
+        run: npm run check:isolation-mutation

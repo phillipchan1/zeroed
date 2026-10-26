@@ -1,9 +1,12 @@
-# Live Vercel (zeroed-two.vercel.app) sends only HSTS + cache-control
-# max-age=0 must-revalidate (+ ACAO on HTML). Do not invent XFO / XSS /
-# Permissions-Policy / Referrer-Policy / nosniff — production does not.
+# Live Vercel (zeroed-two.vercel.app, 2026-10-26):
+#   /  → HSTS + cache-control max-age=0 + ACAO *
+#   hashed /assets/*.js → ACAO * + HSTS; Vite hashed assets are served
+#   immutable 1y on a typical Vercel Vite deploy, so we restore that here.
+# nosniff stays. No XFO / XSS / Permissions / Referrer (live does not send them).
 
 /*
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  X-Content-Type-Options: nosniff
   Access-Control-Allow-Origin: *
 
 /
@@ -13,4 +16,4 @@
   Cache-Control: public, max-age=0, must-revalidate
 
 /assets/*
-  Cache-Control: public, max-age=0, must-revalidate
+  Cache-Control: public, max-age=31536000, immutable

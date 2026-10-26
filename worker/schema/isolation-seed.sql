@@ -1,141 +1,10 @@
--- Minimal public schema for access-isolation checks (PGlite).
--- Two athletes are seeded; queries run through worker store/edits.
+-- Seed two athletes after supabase/migrations have been applied to PGlite.
+-- IDs are fixed so access.check.ts can name them.
 
-CREATE TABLE athlete (
-  id UUID PRIMARY KEY,
-  auth_user_id UUID NOT NULL UNIQUE,
-  name TEXT,
-  sport TEXT,
-  goals TEXT,
-  obstacle TEXT,
-  training_age INTEGER,
-  sessions_per_week INTEGER,
-  training_preferences TEXT,
-  arena_type TEXT,
-  arena_raw TEXT,
-  limiter_choice TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
+INSERT INTO auth.users (id, email) VALUES
+  ('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'a@example.com'),
+  ('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'b@example.com');
 
-CREATE TABLE athlete_profile (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  athlete_id UUID NOT NULL UNIQUE REFERENCES athlete(id) ON DELETE CASCADE,
-  last_updated TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  current_phase TEXT,
-  retest_date DATE
-);
-
-CREATE TABLE program (
-  id UUID PRIMARY KEY,
-  athlete_id UUID NOT NULL REFERENCES athlete(id) ON DELETE CASCADE,
-  goal TEXT,
-  start_date DATE NOT NULL DEFAULT CURRENT_DATE,
-  retest_date DATE,
-  status TEXT NOT NULL DEFAULT 'active'
-);
-
-CREATE TABLE phase (
-  id UUID PRIMARY KEY,
-  program_id UUID NOT NULL REFERENCES program(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  week_start DATE NOT NULL,
-  week_end DATE NOT NULL,
-  non_negotiables JSONB,
-  advancement_criteria JSONB,
-  status TEXT NOT NULL DEFAULT 'pending'
-);
-
-CREATE TABLE routine (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  program_id UUID NOT NULL REFERENCES program(id) ON DELETE CASCADE,
-  phase_id UUID REFERENCES phase(id) ON DELETE SET NULL,
-  name TEXT NOT NULL,
-  session_type TEXT,
-  exercises JSONB NOT NULL DEFAULT '[]',
-  intent TEXT,
-  intended_dow SMALLINT
-);
-
-CREATE TABLE workout (
-  id UUID PRIMARY KEY,
-  routine_id UUID NOT NULL REFERENCES routine(id) ON DELETE RESTRICT,
-  performed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  actual_weights JSONB,
-  actual_reps JSONB,
-  rpe INTEGER,
-  duration_mins INTEGER,
-  exercises_snapshot JSONB
-);
-
-CREATE TABLE session_observation (
-  id UUID PRIMARY KEY,
-  workout_id UUID NOT NULL REFERENCES workout(id) ON DELETE RESTRICT,
-  category TEXT NOT NULL,
-  signal TEXT NOT NULL,
-  severity INTEGER NOT NULL DEFAULT 1,
-  logged_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE insight (
-  id UUID PRIMARY KEY,
-  athlete_id UUID NOT NULL REFERENCES athlete(id) ON DELETE CASCADE,
-  source_id UUID,
-  claim TEXT NOT NULL,
-  category TEXT NOT NULL,
-  priority TEXT NOT NULL,
-  confidence NUMERIC(4,3) NOT NULL DEFAULT 0.5,
-  status TEXT NOT NULL DEFAULT 'hypothesis',
-  evidence JSONB,
-  source TEXT,
-  program_impact TEXT,
-  generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  resolved_at TIMESTAMPTZ
-);
-
-CREATE TABLE weekly_review (
-  id UUID PRIMARY KEY,
-  program_id UUID NOT NULL REFERENCES program(id) ON DELETE CASCADE,
-  week_ending DATE NOT NULL,
-  coach_notes TEXT,
-  adjustments JSONB,
-  next_week_prescription JSONB
-);
-
-CREATE TABLE program_revision (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  program_id UUID NOT NULL REFERENCES program(id) ON DELETE CASCADE,
-  phase_id UUID REFERENCES phase(id) ON DELETE SET NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  trigger TEXT NOT NULL DEFAULT 'editor',
-  effective_on DATE NOT NULL,
-  requests JSONB NOT NULL DEFAULT '[]',
-  snapshot JSONB NOT NULL DEFAULT '[]',
-  diff JSONB NOT NULL DEFAULT '{}',
-  summary TEXT
-);
-
-CREATE TABLE coach_message (
-  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  athlete_id UUID NOT NULL REFERENCES athlete(id) ON DELETE CASCADE,
-  role TEXT NOT NULL,
-  kind TEXT NOT NULL DEFAULT 'note',
-  body TEXT NOT NULL,
-  ref_id UUID,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE mcp_token (
-  id UUID PRIMARY KEY,
-  athlete_id UUID NOT NULL REFERENCES athlete(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  token_hash TEXT NOT NULL UNIQUE,
-  last_four TEXT NOT NULL,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  revoked_at TIMESTAMPTZ,
-  last_used_at TIMESTAMPTZ
-);
-
--- Athlete A
 INSERT INTO athlete (id, auth_user_id, name, sport, goals, obstacle, training_age, sessions_per_week, training_preferences)
 VALUES (
   '11111111-1111-1111-1111-111111111111',
@@ -182,6 +51,12 @@ VALUES (
   '11111111-1111-1111-1111-111111111111',
   'A only', 'Lower Chain', 'P1', 0.8, 'likely', 'A impact'
 );
+INSERT INTO insight (id, athlete_id, claim, category, priority, confidence, status, program_impact)
+VALUES (
+  'aaaa2222-0000-4000-8000-000000000002',
+  '11111111-1111-1111-1111-111111111111',
+  'A resolved', 'Lower Chain', 'P3', 0.4, 'resolved', NULL
+);
 INSERT INTO weekly_review (id, program_id, week_ending, coach_notes)
 VALUES (
   'aaaa3333-0000-4000-8000-000000000001',
@@ -208,7 +83,6 @@ VALUES (
   'claude-a', 'hash-a', 'aaa1'
 );
 
--- Athlete B
 INSERT INTO athlete (id, auth_user_id, name, sport, goals, obstacle, training_age, sessions_per_week, training_preferences)
 VALUES (
   '22222222-2222-2222-2222-222222222222',

@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { handleAgent } from './agent.ts'
-import { API_SECURITY, AUTH_CORS } from './cors.ts'
+import { API_SECURITY, authCors } from './cors.ts'
 import { getAuth } from './auth.ts'
 import type { Env } from './env.ts'
 import { handleMcp } from './mcp.ts'
@@ -37,13 +37,21 @@ app.get('/api/health', (c) =>
 )
 
 app.all('/api/auth/*', async (c) => {
-  if (c.req.method === 'OPTIONS') return new Response('ok', { headers: AUTH_CORS })
+  const cors = authCors(c.req.header('Origin'), c.env)
+  if (c.req.method === 'OPTIONS') return new Response('ok', { headers: cors })
   try {
     const auth = getAuth(c.env)
     const res = await auth.handler(c.req.raw)
     const headers = new Headers(res.headers)
-    for (const [k, v] of Object.entries(AUTH_CORS)) {
-      if (!headers.has(k)) headers.set(k, v)
+    for (const [k, v] of Object.entries(cors)) {
+      if (k === 'Access-Control-Allow-Origin' || !headers.has(k)) headers.set(k, v)
+    }
+    headers.delete('Access-Control-Allow-Credentials')
+    if (cors['Access-Control-Allow-Credentials']) {
+      headers.set('Access-Control-Allow-Credentials', 'true')
+    }
+    if (headers.get('Access-Control-Allow-Origin') === '*' && headers.get('Access-Control-Allow-Credentials') === 'true') {
+      headers.set('Access-Control-Allow-Origin', cors['Access-Control-Allow-Origin'])
     }
     return new Response(res.body, { status: res.status, headers })
   } catch (err) {
@@ -62,13 +70,26 @@ app.all('/functions/v1/mcp', (c) => handleMcp(c.req.raw, c.env))
 
 // Hashed Vite assets must 404 when missing — SPA fallback would serve
 // index.html and the browser would try to execute HTML as JS.
-app.all('/assets/*', async (c) => {
+function hasFileExtension(path: string): boolean {
+  return /\.[A-Za-z0-9]{1,16}$/.test(path)
+}
+
+async function fromAssets(c: { env: Env; req: { raw: Request; url: string } }): Promise<Response> {
   const assets = c.env.ASSETS
   if (!assets) return missingAsset()
   const res = await assets.fetch(c.req.raw)
+  const path = new URL(c.req.url).pathname
   const contentType = res.headers.get('content-type') ?? ''
-  if (res.status === 404 || contentType.includes('text/html')) return missingAsset()
+  if (hasFileExtension(path) && (res.status === 404 || contentType.includes('text/html'))) {
+    return missingAsset()
+  }
   return res
-})
+}
+
+app.all('/assets/*', (c) => fromAssets(c))
+
+// Unknown paths with a file extension are real 404s. Extensionless deep
+// links still fall through to the SPA document.
+app.all('*', (c) => fromAssets(c))
 
 export default app

@@ -232,7 +232,6 @@ export async function loadWorkouts(
     JOIN routine r ON r.id = w.routine_id
     JOIN program p ON p.id = r.program_id
     WHERE p.athlete_id = ${store.athleteId}
-      AND p.id = ANY(${ids})
       AND (${opts.since ?? null}::timestamptz IS NULL OR w.performed_at >= ${opts.since ?? null}::timestamptz)
       AND (${opts.until ?? null}::timestamptz IS NULL OR w.performed_at <= ${opts.until ?? null}::timestamptz)
     ORDER BY w.performed_at DESC
@@ -260,9 +259,18 @@ export async function loadWorkouts(
   return mapped
 }
 
-export async function loadWorkout(store: ConnectedStore, workoutId: string): Promise<{
-  workout: WorkoutRowView
-  observations: Array<{ category: string; signal: string; severity: number }>
+export async function selectOwnedWorkout(store: ConnectedStore, workoutId: string): Promise<{
+  id: string
+  routine_id: string
+  performed_at: string
+  rpe: number | null
+  duration_mins: number | null
+  actual_weights: unknown
+  exercises_snapshot: unknown
+  r_id: string
+  r_name: string
+  r_exercises: unknown
+  r_program_id: string
 } | null> {
   const [row] = await store.sql<{
     id: string
@@ -287,7 +295,17 @@ export async function loadWorkout(store: ConnectedStore, workoutId: string): Pro
       AND p.athlete_id = ${store.athleteId}
     LIMIT 1
   `
+  return row ?? null
+}
+
+export async function loadWorkout(store: ConnectedStore, workoutId: string): Promise<{
+  workout: WorkoutRowView
+  observations: Array<{ category: string; signal: string; severity: number }>
+} | null> {
+  const row = await selectOwnedWorkout(store, workoutId)
   if (!row) return null
+  const ownedPrograms = await programIds(store)
+  if (!ownedPrograms.includes(row.r_program_id)) return null
   const obs = await store.sql<{ category: string; signal: string; severity: number }[]>`
     SELECT category, signal, severity
     FROM session_observation

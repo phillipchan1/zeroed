@@ -73,10 +73,9 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 
 1. Phil sign-off recorded. No deploy happens without it.
 2. `npm run type-check && npm run lint && npm run check && npm run check:isolation-mutation`
-   green on this branch. Isolation checks run store/edits against PGlite
-   seeded with two athletes. The mutation script must fail (and restore)
-   when the `loadWorkout` `athlete_id` filter is deleted or every
-   `athlete_id` filter is replaced with `TRUE`.
+   green on this branch. Isolation applies `supabase/migrations` onto
+   PGlite, then seeds two athletes. The mutation script deletes each of
+   the 16 per-athlete filters on its own and expects at least one failure.
 3. `npm run build && npx wrangler dev` serves `/` and `/api/health`.
    `POST /functions/v1/agent` reaches the Worker (not a 405 from assets).
    Missing `/assets/*` is 404 text/plain, not `index.html`.

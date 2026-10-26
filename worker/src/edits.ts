@@ -202,7 +202,7 @@ export async function writeDraftInPlace(
   return written
 }
 
-async function scheduleDraftForNextWeek(
+export async function scheduleDraftForNextWeek(
   store: ConnectedStore, live: LiveProgram, draft: ProgramDraft, errors: string[], startsOn: string,
 ): Promise<number> {
   if (live.scheduledPhase) {
@@ -257,6 +257,35 @@ async function scheduleDraftForNextWeek(
   return draft.sessions.length
 }
 
+export async function insertProgramRevision(
+  store: ConnectedStore,
+  live: Pick<LiveProgram, 'programId' | 'phaseId'>,
+  payload: {
+    trigger: string
+    effectiveOn: string
+    requests: unknown
+    snapshot: unknown
+    diff: unknown
+    summary: string
+  },
+): Promise<number> {
+  const inserted = await store.sql<{ id: string }[]>`
+    INSERT INTO program_revision (
+      program_id, phase_id, trigger, effective_on, requests, snapshot, diff, summary
+    )
+    SELECT ${live.programId}, ${live.phaseId}, ${payload.trigger}, ${payload.effectiveOn},
+           ${jsonParam(store.sql, payload.requests)},
+           ${jsonParam(store.sql, payload.snapshot)},
+           ${jsonParam(store.sql, payload.diff)},
+           ${payload.summary}
+    WHERE EXISTS (
+      SELECT 1 FROM program p WHERE p.id = ${live.programId} AND p.athlete_id = ${store.athleteId}
+    )
+    RETURNING id
+  `
+  return inserted.length
+}
+
 export async function applyEdits(
   store: ConnectedStore,
   inputs: EditInput[],
@@ -293,25 +322,20 @@ export async function applyEdits(
 
   const requests = opts.request ? [opts.request] : []
   const storedDiff = revisionPayload(base.sessions, diff)
-  await store.sql`
-    INSERT INTO program_revision (
-      program_id, phase_id, trigger, effective_on, requests, snapshot, diff, summary
-    )
-    SELECT ${live.programId}, ${live.phaseId}, 'editor', ${effectiveOn},
-           ${jsonParam(store.sql, requests)},
-           ${jsonParam(store.sql, base.sessions.map((s) => ({
-             name: s.name,
-             intent: s.intent,
-             session_type: s.sessionType,
-             intended_dow: s.intendedDow,
-             exercises: s.exercises,
-           })))},
-           ${jsonParam(store.sql, storedDiff)},
-           ${summarizeRevision(storedDiff)}
-    WHERE EXISTS (
-      SELECT 1 FROM program p WHERE p.id = ${live.programId} AND p.athlete_id = ${store.athleteId}
-    )
-  `
+  await insertProgramRevision(store, live, {
+    trigger: 'editor',
+    effectiveOn,
+    requests,
+    snapshot: base.sessions.map((s) => ({
+      name: s.name,
+      intent: s.intent,
+      session_type: s.sessionType,
+      intended_dow: s.intendedDow,
+      exercises: s.exercises,
+    })),
+    diff: storedDiff,
+    summary: summarizeRevision(storedDiff),
+  })
 
   if (draft.sessionsPerWeek !== live.sessionsPerWeek) {
     await store.sql`
