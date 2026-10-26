@@ -357,10 +357,8 @@ export async function verifySessionSignature(
   token: string,
   signature: string | null,
   secret: string | undefined,
-  requireSignature: boolean,
 ): Promise<boolean> {
-  if (!signature) return !requireSignature && Boolean(token)
-  if (!secret) return false
+  if (!signature || !secret || !token) return false
   const expected = await signSessionToken(token, secret)
   const got = `${token}.${signature}`
   return timingSafeEqual(expected, got)
@@ -374,14 +372,14 @@ export async function sessionTokenFromRequest(
   if (header && header.slice(0, 7).toLowerCase() === 'bearer ') {
     const parts = splitSessionToken(header.slice(7))
     if (!parts) return null
-    if (!(await verifySessionSignature(parts.token, parts.signature, secret, false))) return null
+    if (!(await verifySessionSignature(parts.token, parts.signature, secret))) return null
     return parts.token
   }
   const cookie = req.headers.get('cookie') ?? ''
   const match = cookie.match(/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=([^;]+)/)
   const parts = splitSessionToken(match?.[1] ?? null)
   if (!parts) return null
-  if (!(await verifySessionSignature(parts.token, parts.signature, secret, true))) return null
+  if (!(await verifySessionSignature(parts.token, parts.signature, secret))) return null
   return parts.token
 }
 

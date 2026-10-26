@@ -4,8 +4,9 @@
  *
  * Always proves load+save against PGlite (same predicates as wrangler).
  * When wrangler is already on :8787, also hits /api/health, unauthenticated
- * /api/data (401), OTP send (sign-in), and — with SMOKE_BEARER — load/save
- * of a workout against the live Worker.
+ * /api/data (401), OTP send (sign-in), and — with a signed SMOKE_BEARER
+ * (`set-auth-token`, not the raw session.token) — load/save of a workout
+ * against the live Worker.
  */
 import { spawnSync } from 'node:child_process'
 
@@ -68,6 +69,9 @@ if (unauth.status !== 401) throw new Error(`POST /api/data without session expec
 console.log('POST /api/data unauthenticated → 401')
 
 const bearer = process.env.SMOKE_BEARER
+if (bearer && !bearer.includes('.')) {
+  throw new Error('SMOKE_BEARER must be the signed set-auth-token value (token.signature), not session.token')
+}
 const email = process.env.SMOKE_EMAIL || 'smoke@example.com'
 
 async function requestOtp() {
@@ -93,7 +97,7 @@ async function requestOtp() {
 
 if (!bearer) {
   await requestOtp()
-  console.log('wrangler load/save skipped (set SMOKE_BEARER for a minted Better Auth session).')
+  console.log('wrangler load/save skipped (set SMOKE_BEARER to a signed set-auth-token).')
   console.log('PGlite already covered load + save of a workout under the same owner filters.')
   console.log('wrangler smoke: health + sign-in OTP + unauthorized data gate ok')
   process.exit(0)

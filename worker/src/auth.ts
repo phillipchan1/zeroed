@@ -139,7 +139,7 @@ export function createAuth(env: Env, pool?: Pool) {
       },
     },
     plugins: [
-      bearer(),
+      bearer({ requireSignature: true }),
       emailOTP({
         otpLength: 6,
         expiresIn: 300,

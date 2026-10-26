@@ -28,6 +28,7 @@ const AUTH_CORS_ALLOW = {
     'authorization, content-type, cookie, x-zeroed-token',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Credentials': 'true',
+  'Access-Control-Expose-Headers': 'set-auth-token',
   Vary: 'Origin',
 } as const
 

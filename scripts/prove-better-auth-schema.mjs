@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
  * Real Better Auth against worker/schema/better-auth.sql on real Postgres.
- * OTP send/verify, get-session, re-sign-in. Fails if the snake_case mapping
- * is removed from auth.ts.
+ * OTP send/verify, get-session, re-sign-in, signed bearer, raw DB token 401.
+ * Fails if the snake_case mapping is removed from auth.ts.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -78,6 +78,10 @@ async function runFlow(email) {
     const cookie = signIn.headers.getSetCookie?.().find((c) => c.includes('session_token'))
       ?? signIn.headers.get('set-cookie')
     if (!cookie) throw new Error('sign-in did not set a session cookie')
+    const signed = signIn.headers.get('set-auth-token')
+    if (!signed || !signed.includes('.')) {
+      throw new Error('sign-in did not expose a signed set-auth-token')
+    }
 
     const session = await auth.handler(new Request('http://localhost:8787/api/auth/get-session', {
       headers: { cookie, origin },
@@ -86,6 +90,68 @@ async function runFlow(email) {
     const body = await session.json()
     if (!body?.user?.id) throw new Error('get-session missing user')
 
+    const viaSigned = await auth.handler(new Request('http://localhost:8787/api/auth/get-session', {
+      headers: { authorization: `Bearer ${signed}`, origin },
+    }))
+    if (!viaSigned.ok) throw new Error(`signed bearer get-session ${viaSigned.status}`)
+    const viaSignedBody = await viaSigned.json()
+    if (!viaSignedBody?.user?.id) throw new Error('signed bearer get-session missing user')
+
+    const client = new Client({ connectionString: url })
+    await client.connect()
+    const user = await client.query('SELECT email_verified, created_at FROM "user" WHERE email = $1', [email])
+    if (!user.rows[0]) throw new Error('user row missing snake_case columns')
+    const sess = await client.query('SELECT token, user_id, expires_at FROM session LIMIT 1')
+    if (!sess.rows[0]) throw new Error('session row missing snake_case columns')
+    const rawToken = sess.rows[0].token
+    if (!rawToken || String(rawToken).includes('.')) {
+      throw new Error('session.token should be the raw unsigned DB token')
+    }
+
+    const viaRaw = await auth.handler(new Request('http://localhost:8787/api/auth/get-session', {
+      headers: { authorization: `Bearer ${rawToken}`, origin },
+    }))
+    const viaRawBody = viaRaw.ok ? await viaRaw.json() : null
+    if (viaRawBody?.user?.id) throw new Error('raw DB token authenticated via Better Auth')
+
+    const { handleData, sessionFromRequest } = await import('../worker/src/data.ts')
+    const { withSql } = await import('../worker/src/db.ts')
+    const dataEnv = {
+      DATABASE_URL: url,
+      BETTER_AUTH_SECRET: secret,
+      BETTER_AUTH_URL: origin,
+      ENVIRONMENT: 'local',
+    }
+    const query = JSON.stringify({ table: 'athlete', op: 'select', columns: 'id' })
+    const rawData = await handleData(new Request('http://localhost:8787/api/data', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin, authorization: `Bearer ${rawToken}` },
+      body: query,
+    }), dataEnv)
+    if (rawData.status !== 401) {
+      throw new Error(`raw DB token expected 401 from /api/data, got ${rawData.status}`)
+    }
+
+    const signedUser = await withSql(dataEnv, (sql) => sessionFromRequest(
+      sql,
+      new Request('http://localhost:8787/api/data', {
+        headers: { authorization: `Bearer ${signed}` },
+      }),
+      secret,
+    ))
+    if (!signedUser?.id) throw new Error('signed bearer sessionFromRequest missed user')
+
+    const rawUser = await withSql(dataEnv, (sql) => sessionFromRequest(
+      sql,
+      new Request('http://localhost:8787/api/data', {
+        headers: { authorization: `Bearer ${rawToken}` },
+      }),
+      secret,
+    ))
+    if (rawUser) throw new Error('raw DB token authenticated via sessionFromRequest')
+
+    await client.end()
+
     cap.otps.length = 0
     const send2 = await post(auth, '/api/auth/email-otp/send-verification-otp', { email, type: 'sign-in' })
     if (!send2.ok) throw new Error(`re-send otp ${send2.status}`)
@@ -93,14 +159,10 @@ async function runFlow(email) {
     if (!otp2) throw new Error('re-sign-in OTP was not logged')
     const signIn2 = await post(auth, '/api/auth/sign-in/email-otp', { email, otp: otp2 })
     if (!signIn2.ok) throw new Error(`re-sign-in ${signIn2.status}: ${(await signIn2.text()).slice(0, 240)}`)
+    if (!signIn2.headers.get('set-auth-token')?.includes('.')) {
+      throw new Error('re-sign-in did not expose a signed set-auth-token')
+    }
 
-    const client = new Client({ connectionString: url })
-    await client.connect()
-    const user = await client.query('SELECT email_verified, created_at FROM "user" WHERE email = $1', [email])
-    if (!user.rows[0]) throw new Error('user row missing snake_case columns')
-    const sess = await client.query('SELECT user_id, expires_at FROM session LIMIT 1')
-    if (!sess.rows[0]) throw new Error('session row missing snake_case columns')
-    await client.end()
     return body.user.id
   } finally {
     cap.restore()

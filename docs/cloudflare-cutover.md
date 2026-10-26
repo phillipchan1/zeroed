@@ -160,6 +160,12 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    create those tables. Columns are snake_case (`email_verified`, `user_id`,
    `expires_at`). `createAuth` in `worker/src/auth.ts` maps Better Auth's
    camelCase fields onto those names — do not regenerate camelCase tables.
+   `#17` copies `auth.users` into `"user"`; it does **not** mint signed
+   Better Auth session cookies. Those people must request a new OTP.
+   `Authorization: Bearer` must be the signed `token.signature` from
+   `set-auth-token` (or the session cookie), never the raw `session.token`
+   column. `bearer({ requireSignature: true })` and `/api/data` both 401
+   unsigned tokens. Rotating `BETTER_AUTH_SECRET` also forces re-sign-in.
 4. Point the Worker Hyperdrive config at the Neon connection string.
 5. Set the Worker `BETTER_AUTH_URL` var/secret to the public Worker origin
    (never leave it as `http://localhost:8787`, and do not set
@@ -177,9 +183,11 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
      hit `POST /api/data`, not Supabase PostgREST.
    - `node scripts/smoke-wrangler-data.mjs` while `wrangler dev` is up
      (`ENVIRONMENT=local` + `DATABASE_URL` in `.dev.vars`; `SMOKE_BEARER`
-     for load/save). iOS still needs an absolute `https://<worker>/api`.
+     must be the signed `set-auth-token` value, not `session.token`).
+     iOS still needs an absolute `https://<worker>/api` and the same
+     signed bearer (cookies are httpOnly).
    - One authenticated `POST /api/agent` (`probe` is pre-auth; use `coach_chat`
-     or `target` with a session cookie / bearer).
+     or `target` with a session cookie / signed bearer).
    - `POST /api/mcp` with `Accept: text/event-stream` and a minted token —
      response `Content-Type: text/event-stream`. A revoked token is 401.
      `tools/list` matches the retired edge function. `get_current_program`

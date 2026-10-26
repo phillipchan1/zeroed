@@ -11,6 +11,31 @@ export interface AuthSession {
 }
 
 const PERSIST_KEY = 'zeroed_auth_user'
+const BEARER_KEY = 'zeroed_auth_bearer'
+
+/** Better Auth bearer is `token.signature`. Reject leftover raw session tokens. */
+export function persistSignedBearer(token: string | null): void {
+  try {
+    if (!token || !token.includes('.')) localStorage.removeItem(BEARER_KEY)
+    else localStorage.setItem(BEARER_KEY, token)
+  } catch {
+    /* private mode */
+  }
+}
+
+export function persistedSignedBearer(): string | null {
+  try {
+    const raw = localStorage.getItem(BEARER_KEY)
+    return raw && raw.includes('.') ? raw : null
+  } catch {
+    return null
+  }
+}
+
+function captureSignedBearer(res: Response): void {
+  const signed = res.headers.get('set-auth-token')
+  if (signed) persistSignedBearer(signed)
+}
 
 export function persistAuthUser(user: AuthUser | null): void {
   try {
@@ -64,7 +89,14 @@ async function betterAuthClient(): Promise<BetterAuthClient> {
         baseURL: base,
         basePath: '/api/auth',
         plugins: [plugins.emailOTPClient()],
-        fetchOptions: { credentials: 'include' },
+        fetchOptions: {
+          credentials: 'include',
+          customFetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
+            const res = await fetch(input, { ...init, credentials: 'include' })
+            captureSignedBearer(res)
+            return res
+          },
+        },
       }) as unknown as BetterAuthClient
     })
   }
@@ -110,6 +142,7 @@ export async function verifySignInCode(
 
 export async function signOutLocal(): Promise<void> {
   persistAuthUser(null)
+  persistSignedBearer(null)
   if (!isCloudflareApi()) {
     await supabase.auth.signOut({ scope: 'local' })
     return
@@ -146,9 +179,10 @@ export async function getAccessToken(): Promise<string | null> {
     const { data: { session } } = await supabase.auth.getSession()
     return session?.access_token ?? null
   }
-  const { data } = await (await betterAuthClient()).getSession()
-  const token = data?.session?.token
-  return typeof token === 'string' ? token : null
+  const cached = persistedSignedBearer()
+  if (cached) return cached
+  await (await betterAuthClient()).getSession()
+  return persistedSignedBearer()
 }
 
 export function subscribeAuth(handler: (user: AuthUser | null, event: string) => void): () => void {

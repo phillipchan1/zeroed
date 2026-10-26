@@ -46,7 +46,7 @@ ok(bound.params[0] === '11111111-1111-1111-1111-111111111111', 'bindOwner: athle
 const qualified = bindOwner('phase', '11111111-1111-1111-1111-111111111111', 1, 'phase')
 ok(qualified.text.startsWith('phase.program_id IN'), 'bindOwner: qualify program_id for joins')
 ok(unsignedSessionToken('tok.signature') === 'tok', 'cookie token strips Better Auth signature')
-ok(unsignedSessionToken('tok') === 'tok', 'unsigned bearer is unchanged')
+ok(unsignedSessionToken('tok') === 'tok', 'token without a signature stays the token')
 ok(unsignedSessionToken('tok%2Esig') === 'tok', 'url-encoded cookie signature is stripped')
 ok(SESSION_LOOKUP_SQL.includes('s.user_id') && SESSION_LOOKUP_SQL.includes('s.expires_at'), 'session SQL matches better-auth.sql')
 ok(!SESSION_LOOKUP_SQL.includes('"userId"') && !SESSION_LOOKUP_SQL.includes('"expiresAt"'), 'session SQL is not camelCase')
@@ -66,21 +66,25 @@ ok(authSrc.includes('user: BETTER_AUTH_SNAKE_CASE.user'), 'auth.ts applies user 
 ok(authSrc.includes('session: BETTER_AUTH_SNAKE_CASE.session'), 'auth.ts applies session snake_case map')
 ok(authSrc.includes('account: BETTER_AUTH_SNAKE_CASE.account'), 'auth.ts applies account snake_case map')
 ok(authSrc.includes('verification: BETTER_AUTH_SNAKE_CASE.verification'), 'auth.ts applies verification snake_case map')
+ok(authSrc.includes('bearer({ requireSignature: true })'), 'auth.ts requires signed bearers')
 
 const schemaSql = readFileSync(join(here, '../schema/better-auth.sql'), 'utf8')
 ok(schemaSql.includes('email_verified') && schemaSql.includes('user_id') && schemaSql.includes('expires_at'), 'better-auth.sql is snake_case')
 ok(!schemaSql.includes('emailVerified') && !schemaSql.includes('"userId"'), 'better-auth.sql is not camelCase')
 const migrateSrc = readFileSync(join(here, '../../scripts/migrate-supabase-to-neon.mjs'), 'utf8')
 ok(migrateSrc.includes('email_verified BOOLEAN') && migrateSrc.includes('user_id TEXT'), 'migrate script Better Auth SQL is snake_case')
+const corsSrc = readFileSync(join(here, 'cors.ts'), 'utf8')
+ok(corsSrc.includes("'Access-Control-Expose-Headers': 'set-auth-token'"), 'CORS exposes set-auth-token')
+const dataSrc = readFileSync(join(here, 'data.ts'), 'utf8')
+ok(!dataSrc.includes('requireSignature: false'), 'data.ts has no unsigned-bearer fallback')
 
 const secret = 's'.repeat(32)
 const signed = await signSessionToken('tok', secret)
 const signature = signed.slice(signed.indexOf('.') + 1)
 ok(signature.length > 10, 'signSessionToken writes an HMAC')
-ok(await verifySessionSignature('tok', signature, secret, true), 'valid cookie HMAC is accepted')
-ok(!(await verifySessionSignature('tok', 'not-the-real-signature', secret, true)), 'tampered cookie HMAC is rejected')
-ok(await verifySessionSignature('tok', null, secret, false), 'unsigned bearer is allowed')
-ok(!(await verifySessionSignature('tok', null, secret, true)), 'cookie without signature is rejected')
+ok(await verifySessionSignature('tok', signature, secret), 'valid cookie HMAC is accepted')
+ok(!(await verifySessionSignature('tok', 'not-the-real-signature', secret)), 'tampered cookie HMAC is rejected')
+ok(!(await verifySessionSignature('tok', null, secret)), 'unsigned token is rejected')
 
 const cookieReq = new Request('http://local/api/data', {
   headers: { cookie: `better-auth.session_token=${signed}` },
@@ -90,10 +94,20 @@ const badCookie = new Request('http://local/api/data', {
   headers: { cookie: 'better-auth.session_token=tok.not-the-real-signature' },
 })
 ok(await sessionTokenFromRequest(badCookie, secret) === null, 'tampered cookie is rejected')
-const bearerReq = new Request('http://local/api/data', {
+const rawBearer = new Request('http://local/api/data', {
   headers: { authorization: 'Bearer tok' },
 })
-ok(await sessionTokenFromRequest(bearerReq, secret) === 'tok', 'unsigned bearer still works')
+ok(await sessionTokenFromRequest(rawBearer, secret) === null, 'raw DB bearer is rejected')
+const signedBearer = new Request('http://local/api/data', {
+  headers: { authorization: `Bearer ${signed}` },
+})
+ok(await sessionTokenFromRequest(signedBearer, secret) === 'tok', 'signed bearer authenticates')
+
+const authClientSrc = readFileSync(join(here, '../../src/lib/authClient.ts'), 'utf8')
+ok(authClientSrc.includes("res.headers.get('set-auth-token')"), 'auth client captures set-auth-token')
+ok(authClientSrc.includes("if (!token || !token.includes('.'))"), 'auth client refuses unsigned bearers')
+ok(!/return data\?\.session\?\.token/.test(authClientSrc), 'auth client does not send the raw session token')
+ok(authClientSrc.includes('return persistedSignedBearer()'), 'auth client sends the persisted signed bearer')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {
