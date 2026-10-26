@@ -6,6 +6,9 @@
 #   NEON_DIRECT_URL
 #   AUTH_USERS_MAPPING   base64 CSV of id,email,created_at
 #                        A live run (dry_run=false) without this secret exits 2.
+#   A live run also requires the confirm_drop input (target dbname). The
+#   script refuses a target that is not *.neon.tech, looks like Supabase,
+#   matches the source host+port+dbname, or fingerprints as the source.
 #
 # Recommended (repo settings, not created by this PR): pin this workflow
 # to a GitHub Environment with required reviewers so a live restore cannot
@@ -19,6 +22,11 @@ on:
         description: Dump source and compare row counts without writing Neon
         type: boolean
         default: true
+      confirm_drop:
+        description: Target database name; required when dry_run is false (--confirm-drop)
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -62,6 +70,7 @@ jobs:
           SUPABASE_READONLY_URL: ${{ secrets.SUPABASE_READONLY_URL }}
           NEON_DIRECT_URL: ${{ secrets.NEON_DIRECT_URL }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
+          CONFIRM_DROP: ${{ github.event.inputs.confirm_drop }}
         run: |
           set -euo pipefail
           if [ -z "${SUPABASE_READONLY_URL}" ]; then
@@ -80,6 +89,11 @@ jobs:
             echo "Mode: dry-run (no writes to Neon)"
           else
             echo "Mode: live data-only restore to Neon"
+            if [ -z "${CONFIRM_DROP}" ]; then
+              echo "::error::Live restore requires the confirm_drop input (target dbname)"
+              exit 1
+            fi
+            ARGS+=(--confirm-drop="${CONFIRM_DROP}")
           fi
 
           if [ -n "${AUTH_FILE:-}" ] && [ -f "${AUTH_FILE}" ] && [ -s "${AUTH_FILE}" ]; then

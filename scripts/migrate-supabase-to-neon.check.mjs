@@ -16,16 +16,24 @@ import {
   addMaskLines,
   argValue,
   authUsersToCopyCsv,
+  confirmDropMismatchReason,
+  fingerprintQuery,
   formatCountComparison,
+  isNeonHost,
+  isSupabaseHost,
   missingMappedAuthUserIds,
   orderRestoreList,
   orphanAthleteQuery,
   parseAuthUsersMapping,
   parseCounts,
+  parseFingerprint,
   parseIdList,
   parseOrphanIds,
   parseMigrateArgs,
+  postgresUrlParts,
   redactSecrets,
+  refuseSourceWipeReason,
+  refuseTargetFingerprintReason,
   requireCounts,
   resolveSourceUrl,
   resolveTargetUrl,
@@ -67,6 +75,10 @@ ok(fromEnv.skipAuthUsers, 'AUTH_USERS_FILE env implies skip')
 eq(fromEnv.authUsersFile, '/tmp/users.csv', 'AUTH_USERS_FILE env is read')
 
 ok(!parseMigrateArgs([]).skipAuthUsers, 'skip is off by default')
+eq(parseMigrateArgs(['--confirm-drop=neondb']).confirmDrop, 'neondb', '--confirm-drop=dbname is parsed')
+eq(parseMigrateArgs(['--confirm-drop', 'neondb']).confirmDrop, 'neondb', '--confirm-drop dbname is parsed')
+eq(parseMigrateArgs([], { CONFIRM_DROP: 'neondb' }).confirmDrop, 'neondb', 'CONFIRM_DROP env is read')
+ok(!parseMigrateArgs([]).confirmDrop, 'confirm-drop is empty by default')
 
 eq(
   resolveSourceUrl({ SUPABASE_READONLY_URL: 'postgres://ro' }),
@@ -226,6 +238,135 @@ ok(masks.includes('::add-mask::reader'), 'masks source user')
 ok(masks.includes('::add-mask::db.example.com'), 'masks source host')
 ok(!masks.join(' ').includes('s3cret'), 'mask lines do not include the password')
 
+// ---- source-wipe guards (B2) ------------------------------------------------
+
+const neonDirect = 'postgresql://reader@ep-foo.us-east-2.aws.neon.tech/neondb'
+const neonCased = 'postgresql://reader@EP-FOO.US-EAST-2.AWS.NEON.TECH/Neondb'
+const neonAppName = `${neonDirect}?application_name=neon`
+const neonOtherUser = 'postgresql://neondb_owner@ep-foo.us-east-2.aws.neon.tech/neondb'
+const neonOtherDb = 'postgresql://reader@ep-foo.us-east-2.aws.neon.tech/otherdb'
+const supabaseDirect = 'postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres'
+const supabasePooler = 'postgresql://postgres.abcdefghijkl@aws-0-us-east-1.pooler.supabase.com:6543/postgres'
+const supabaseCom = 'postgresql://postgres@db.abcdefghijkl.supabase.com:5432/postgres'
+
+const parsedAlias = postgresUrlParts(neonAppName)
+eq(parsedAlias.host, 'ep-foo.us-east-2.aws.neon.tech', 'postgresUrlParts lowercases host')
+eq(parsedAlias.port, '5432', 'postgresUrlParts defaults missing port to 5432')
+eq(parsedAlias.dbname, 'neondb', 'postgresUrlParts reads dbname')
+eq(postgresUrlParts(neonCased).host, parsedAlias.host, 'postgresUrlParts treats host case as equal')
+eq(postgresUrlParts(neonCased).dbname, parsedAlias.dbname, 'postgresUrlParts lowercases dbname')
+eq(postgresUrlParts(neonCased).port, parsedAlias.port, 'postgresUrlParts default port matches explicit-default')
+
+ok(isSupabaseHost('db.abcdefghijkl.supabase.co'), 'isSupabaseHost matches *.supabase.co')
+ok(isSupabaseHost('db.abcdefghijkl.supabase.com'), 'isSupabaseHost matches *.supabase.com')
+ok(isSupabaseHost('aws-0-us-east-1.pooler.supabase.com'), 'isSupabaseHost matches pooler.supabase')
+ok(!isSupabaseHost('ep-foo.us-east-2.aws.neon.tech'), 'isSupabaseHost rejects Neon')
+ok(isNeonHost('ep-foo.us-east-2.aws.neon.tech'), 'isNeonHost matches *.neon.tech')
+ok(!isNeonHost('neon.tech'), 'isNeonHost requires a subdomain')
+ok(!isNeonHost('ep-foo.neon.tech.evil.com'), 'isNeonHost rejects a suffix spoof')
+
+eq(
+  refuseSourceWipeReason(neonDirect, neonAppName),
+  'source and target resolve to the same host, port, and database',
+  'application_name alias is refused',
+)
+eq(
+  refuseSourceWipeReason(neonDirect, neonOtherUser),
+  'source and target resolve to the same host, port, and database',
+  'different user alias is refused',
+)
+eq(
+  refuseSourceWipeReason(neonDirect, neonCased),
+  'source and target resolve to the same host, port, and database',
+  'host/dbname case alias is refused',
+)
+eq(
+  refuseSourceWipeReason(supabaseDirect, supabasePooler),
+  'target host looks like Supabase',
+  'pooler.supabase target is refused',
+)
+eq(
+  refuseSourceWipeReason(supabaseDirect, supabaseCom),
+  'target host looks like Supabase',
+  'supabase.com target is refused',
+)
+eq(
+  refuseSourceWipeReason(supabaseDirect, supabaseDirect),
+  'target host looks like Supabase',
+  'supabase.co target is refused',
+)
+eq(
+  refuseSourceWipeReason(supabaseDirect, 'postgresql://postgres@localhost/neondb'),
+  'target host must end in .neon.tech',
+  'non-Neon target is refused',
+)
+eq(
+  refuseSourceWipeReason(supabaseDirect, neonDirect),
+  '',
+  'distinct Neon target is allowed at the URL layer',
+)
+eq(
+  refuseSourceWipeReason(neonDirect, neonOtherDb),
+  '',
+  'same Neon host with a different dbname is allowed at the URL layer',
+)
+
+eq(
+  confirmDropMismatchReason('', neonDirect),
+  'live restore requires --confirm-drop=<target dbname>',
+  'missing --confirm-drop is refused',
+)
+eq(
+  confirmDropMismatchReason('postgres', neonDirect),
+  '--confirm-drop=postgres does not match target database neondb',
+  'wrong --confirm-drop dbname is refused',
+)
+eq(confirmDropMismatchReason('neondb', neonDirect), '', '--confirm-drop matches target dbname')
+eq(confirmDropMismatchReason('NEONDB', neonDirect), '', '--confirm-drop matches dbname case-insensitively')
+
+ok(fingerprintQuery().includes('to_regnamespace'), 'fingerprint query checks storage schema')
+ok(fingerprintQuery().includes('pg_policies'), 'fingerprint query checks pg_policies')
+ok(fingerprintQuery().includes('pg_control_system'), 'fingerprint query reads system_identifier')
+ok(fingerprintQuery().includes('inet_server_addr'), 'fingerprint query reads inet_server_addr')
+
+const fp = parseFingerprint('{"db":"neondb","addr":"","sysid":"1","has_storage":false,"has_policies":false}\n')
+eq(fp.db, 'neondb', 'parseFingerprint reads db')
+ok(!fp.has_storage && !fp.has_policies, 'parseFingerprint reads false flags')
+eq(
+  refuseTargetFingerprintReason({ ...fp, has_storage: true }, null),
+  'target has a storage schema (Supabase)',
+  'storage schema on target is refused',
+)
+eq(
+  refuseTargetFingerprintReason({ ...fp, has_policies: true }, null),
+  'target has pg_policies rows (Supabase RLS)',
+  'pg_policies on target are refused',
+)
+eq(
+  refuseTargetFingerprintReason(
+    { db: 'postgres', addr: '1.2.3.4', sysid: '99', has_storage: false, has_policies: false },
+    { db: 'postgres', addr: '1.2.3.4', sysid: '88' },
+  ),
+  'target server identity matches the source',
+  'same current_database + inet_server_addr is refused',
+)
+eq(
+  refuseTargetFingerprintReason(
+    { db: 'postgres', addr: '', sysid: '99', has_storage: false, has_policies: false },
+    { db: 'postgres', addr: '', sysid: '99' },
+  ),
+  'target server identity matches the source',
+  'same current_database + system_identifier is refused',
+)
+eq(
+  refuseTargetFingerprintReason(
+    { db: 'neondb', addr: '9.9.9.9', sysid: '1', has_storage: false, has_policies: false },
+    { db: 'postgres', addr: '1.2.3.4', sysid: '2' },
+  ),
+  '',
+  'distinct db + server identity is allowed',
+)
+
 // ---- spawn --skip-auth-users dry-run ----------------------------------------
 
 function spawnMigrate(extraArgs, extraEnv = {}) {
@@ -239,9 +380,20 @@ function spawnMigrate(extraArgs, extraEnv = {}) {
       SUPABASE_DB_URL: '',
       NEON_DB_URL: '',
       AUTH_USERS_FILE: '',
+      CONFIRM_DROP: '',
       ...extraEnv,
     },
   })
+}
+
+function refusedBeforeWrite(res, label) {
+  const out = `${res.stdout}\n${res.stderr}`
+  ok(res.status !== 0, `${label} exits non-zero`)
+  eq(res.status, 2, `${label} exits 2`)
+  ok(!/dumping/i.test(out), `${label} does not dump`)
+  ok(!/resetting/i.test(out), `${label} does not reset`)
+  ok(!/probing target identity/i.test(out), `${label} does not connect for a fingerprint`)
+  ok(/Refusing to continue|confirm-drop|Source is read-only/i.test(out), `${label} prints a refuse reason`)
 }
 
 const drySkip = spawnMigrate(['--dry-run', '--skip-auth-users'])
@@ -257,9 +409,22 @@ ok(
 ok(/live restore without --auth-users-file exits 2/.test(drySkip.stdout), 'dry-run documents live exit 2')
 ok(/every source auth_user_id/.test(drySkip.stdout), 'dry-run documents id-match mapping guard')
 ok(/one transaction/.test(drySkip.stdout), 'dry-run documents a single restore transaction')
+ok(/--confirm-drop=<target dbname>/.test(drySkip.stdout), 'dry-run documents --confirm-drop')
+ok(/\.neon\.tech/.test(drySkip.stdout), 'dry-run documents a .neon.tech target')
 ok(!/would COPY auth\.users from source/.test(drySkip.stdout), 'skip path does not COPY auth.users')
 
-const liveNoMap = spawnMigrate(['--skip-auth-users'], {
+const liveNoConfirm = spawnMigrate(['--skip-auth-users'], {
+  SUPABASE_READONLY_URL: 'postgresql://reader@db.example.com/zeroed',
+  NEON_DIRECT_URL: 'postgresql://neondb_owner@ep-foo.neon.tech/neondb',
+})
+eq(liveNoConfirm.status, 2, 'live run without --confirm-drop exits 2')
+ok(
+  /--confirm-drop=<target dbname>/.test(`${liveNoConfirm.stdout}\n${liveNoConfirm.stderr}`),
+  'live run without --confirm-drop says it is required',
+)
+ok(!/dumping/i.test(`${liveNoConfirm.stdout}\n${liveNoConfirm.stderr}`), 'missing --confirm-drop does not dump')
+
+const liveNoMap = spawnMigrate(['--skip-auth-users', '--confirm-drop=neondb'], {
   SUPABASE_READONLY_URL: 'postgresql://reader@db.example.com/zeroed',
   NEON_DIRECT_URL: 'postgresql://neondb_owner@ep-foo.neon.tech/neondb',
 })
@@ -272,6 +437,28 @@ ok(
   /::add-mask::reader/.test(liveNoMap.stdout) && /::add-mask::neondb_owner/.test(liveNoMap.stdout),
   'live run masks DB users before exiting',
 )
+ok(!/dumping/i.test(`${liveNoMap.stdout}\n${liveNoMap.stderr}`), 'live run without a mapping does not dump')
+
+refusedBeforeWrite(spawnMigrate(['--skip-auth-users', '--confirm-drop=neondb'], {
+  SUPABASE_READONLY_URL: neonDirect,
+  NEON_DIRECT_URL: neonAppName,
+}), 'application_name alias')
+refusedBeforeWrite(spawnMigrate(['--skip-auth-users', '--confirm-drop=neondb'], {
+  SUPABASE_READONLY_URL: neonDirect,
+  NEON_DIRECT_URL: neonOtherUser,
+}), 'different user alias')
+refusedBeforeWrite(spawnMigrate(['--skip-auth-users', '--confirm-drop=neondb'], {
+  SUPABASE_READONLY_URL: neonDirect,
+  NEON_DIRECT_URL: neonCased,
+}), 'host/dbname case alias')
+refusedBeforeWrite(spawnMigrate(['--skip-auth-users', '--confirm-drop=postgres'], {
+  SUPABASE_READONLY_URL: supabaseDirect,
+  NEON_DIRECT_URL: supabasePooler,
+}), 'pooler vs direct')
+refusedBeforeWrite(spawnMigrate(['--skip-auth-users', '--confirm-drop=postgres'], {
+  SUPABASE_READONLY_URL: neonDirect,
+  NEON_DIRECT_URL: supabaseDirect,
+}), 'supabase host as target')
 
 const dryDefault = spawnMigrate(['--dry-run'])
 eq(dryDefault.status, 0, 'offline dry-run without skip exits 0')
@@ -326,6 +513,8 @@ ok(!/^\s+push:/m.test(workflow), 'migrate workflow is not on push')
 ok(!/^\s+pull_request:/m.test(workflow), 'migrate workflow is not on pull_request')
 ok(/dry_run:/.test(workflow), 'migrate workflow has a dry_run input')
 ok(/default: true/.test(workflow), 'migrate workflow dry_run defaults to true')
+ok(/confirm_drop:/.test(workflow), 'migrate workflow has a confirm_drop input')
+ok(/--confirm-drop=/.test(workflow), 'workflow passes --confirm-drop on a live run')
 ok(!/echo +["']?\$\{?SUPABASE_READONLY_URL/.test(workflow), 'workflow does not echo SUPABASE_READONLY_URL')
 ok(!/echo +["']?\$\{?NEON_DIRECT_URL/.test(workflow), 'workflow does not echo NEON_DIRECT_URL')
 ok(/--skip-auth-users/.test(workflow), 'workflow always skips auth.users export')
@@ -340,6 +529,10 @@ const migrateSrc = readFileSync(join(root, 'scripts/migrate-supabase-to-neon.mjs
 ok(!/disable-triggers/.test(migrateSrc), 'migrate script does not use --disable-triggers')
 ok(/DROP SCHEMA IF EXISTS public CASCADE/.test(migrateSrc), 'live restore drops public so a rerun starts empty')
 ok(/wrapRestoreTransaction/.test(migrateSrc), 'live restore wraps data in one transaction')
+ok(/refuseSourceWipeReason/.test(migrateSrc), 'live restore refuses source-wipe aliases before a write')
+ok(/refuseTargetFingerprintReason/.test(migrateSrc), 'live restore fingerprints the target before DROP')
+ok(/confirmDropMismatchReason/.test(migrateSrc), 'live restore requires --confirm-drop')
+ok(/probing target identity before drop/.test(migrateSrc), 'fingerprint probe is logged before DROP')
 
 const db = new PGlite()
 await db.exec(readFileSync(join(root, 'worker/schema/app.sql'), 'utf8'))

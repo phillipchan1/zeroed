@@ -143,11 +143,19 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --dry-run --skip-auth-users --auth-users-file=users.json`
    (read-only source is enough for dry-run). The migration role cannot read
    `auth.users` — provide a CSV/JSON of `(id, email, created_at)`. A live
-   restore without that mapping exits 2. Do not pass `--relax-target-rls`
-   unless you intend to drop leftover RLS on Neon.
+   restore without that mapping exits 2. A live restore also requires
+   `--confirm-drop=<target dbname>` and a `*.neon.tech` target. The script
+   refuses when source and target normalize to the same host+port+dbname
+   (user, password, and query are ignored), when the target host looks
+   like Supabase (`supabase.co` / `supabase.com` / `pooler.supabase`),
+   or when a pre-DROP probe finds a `storage` schema, any `pg_policies`
+   row, or a matching `current_database()` plus
+   `inet_server_addr()`/`system_identifier`. Do not pass
+   `--relax-target-rls` unless you intend to drop leftover RLS on Neon.
    Manual GitHub Action: `migrate-supabase-to-neon` (`workflow_dispatch` only,
    `dry_run` defaults to true). Secrets: `SUPABASE_READONLY_URL`,
-   `NEON_DIRECT_URL`, `AUTH_USERS_MAPPING` (base64 CSV). Recommended: pin
+   `NEON_DIRECT_URL`, `AUTH_USERS_MAPPING` (base64 CSV). Live dispatch
+   also needs the `confirm_drop` input (Neon dbname). Recommended: pin
    the workflow to a GitHub Environment with required reviewers (repo
    settings — not created by this PR).
 6. Worker deployed to `*.workers.dev` only (not the production hostname).
@@ -157,11 +165,12 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 ## Cutover (rehearsal — Zeroed is not live-critical)
 
 1. Write-freeze is optional here; run it anyway so the template is exercised.
-2. `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --skip-auth-users --auth-users-file=users.json`
+2. `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --confirm-drop=neondb --skip-auth-users --auth-users-file=users.json`
    — abort on a row-count mismatch, a mapping that is missing any
    source `athlete.auth_user_id` (ids, not counts), or an athlete
    whose `auth_user_id` has no Better Auth `"user"`. A live run
-   without `--auth-users-file` exits 2. A live run **drops and
+   without `--auth-users-file` exits 2. A live run without
+   `--confirm-drop=<target dbname>` exits 2. A live run **drops and
    recreates** Neon `public` + `auth` first (reruns start empty),
    applies `worker/schema/app.sql` + `better-auth.sql`, then loads
    mappings + data-only restore **in one transaction** so a failure

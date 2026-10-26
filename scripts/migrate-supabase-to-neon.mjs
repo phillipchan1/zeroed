@@ -27,6 +27,16 @@
  *
  *   node scripts/migrate-supabase-to-neon.mjs --dry-run
  *   node scripts/migrate-supabase-to-neon.mjs --relax-target-rls
+ *   node scripts/migrate-supabase-to-neon.mjs --confirm-drop=neondb \
+ *     --skip-auth-users --auth-users-file=users.csv
+ *
+ * Live-run guards (any one refuses before a write):
+ *   - source and target normalize to the same host (lowercased) + port + dbname
+ *   - target host matches supabase.co / supabase.com / pooler.supabase
+ *   - target host does not end in .neon.tech
+ *   - --confirm-drop is missing or is not the target dbname
+ *   - target has a storage schema, any pg_policies row, or the same
+ *     current_database() plus inet_server_addr()/system_identifier as source
  *
  * Env aliases: SUPABASE_DB_URL / SOURCE_DATABASE_URL,
  *              NEON_DB_URL / TARGET_DATABASE_URL,
@@ -49,10 +59,111 @@ export function redactSecrets(text) {
 
 export function postgresUrlParts(url) {
   const parsed = new URL(url)
+  let host = decodeURIComponent(parsed.hostname || '').toLowerCase()
+  if (!host) host = (parsed.searchParams.get('host') || '').toLowerCase()
+  let port = parsed.port || parsed.searchParams.get('port') || ''
+  if (!port && host && !host.startsWith('/')) port = '5432'
+  const dbname = decodeURIComponent((parsed.pathname || '').replace(/^\//, '').split('/')[0] || '').toLowerCase()
   return {
     user: decodeURIComponent(parsed.username || ''),
-    host: decodeURIComponent(parsed.hostname || ''),
+    host,
+    port,
+    dbname,
   }
+}
+
+export function isSupabaseHost(host) {
+  const h = String(host || '').toLowerCase()
+  return h === 'supabase.co'
+    || h === 'supabase.com'
+    || h.endsWith('.supabase.co')
+    || h.endsWith('.supabase.com')
+    || h.includes('pooler.supabase')
+}
+
+export function isNeonHost(host) {
+  return String(host || '').toLowerCase().endsWith('.neon.tech')
+}
+
+/** URL-only: same host+port+db, or a target that is not Neon / looks like Supabase. */
+export function refuseSourceWipeReason(source, target) {
+  let src
+  let dst
+  try {
+    src = postgresUrlParts(source)
+  } catch {
+    return 'source URL is not a valid postgres URL'
+  }
+  try {
+    dst = postgresUrlParts(target)
+  } catch {
+    return 'target URL is not a valid postgres URL'
+  }
+  if (isSupabaseHost(dst.host)) return 'target host looks like Supabase'
+  if (!isNeonHost(dst.host)) return 'target host must end in .neon.tech'
+  if (src.host && dst.host && src.host === dst.host && src.port === dst.port && src.dbname && src.dbname === dst.dbname) {
+    return 'source and target resolve to the same host, port, and database'
+  }
+  return ''
+}
+
+export function fingerprintQuery() {
+  return `
+    SELECT json_build_object(
+      'db', current_database(),
+      'addr', COALESCE(host(inet_server_addr()), ''),
+      'sysid', (SELECT system_identifier::text FROM pg_control_system()),
+      'has_storage', to_regnamespace('storage') IS NOT NULL,
+      'has_policies', EXISTS (SELECT 1 FROM pg_policies)
+    )
+  `
+}
+
+export function parseFingerprint(text) {
+  const raw = String(text ?? '').trim().split('\n').filter(Boolean).pop() || ''
+  const parsed = JSON.parse(raw)
+  return {
+    db: String(parsed.db ?? ''),
+    addr: String(parsed.addr ?? ''),
+    sysid: String(parsed.sysid ?? ''),
+    has_storage: Boolean(parsed.has_storage),
+    has_policies: Boolean(parsed.has_policies),
+  }
+}
+
+export function refuseTargetFingerprintReason(targetFp, sourceFp) {
+  if (targetFp?.has_storage) return 'target has a storage schema (Supabase)'
+  if (targetFp?.has_policies) return 'target has pg_policies rows (Supabase RLS)'
+  if (
+    sourceFp
+    && targetFp
+    && targetFp.db
+    && targetFp.db === sourceFp.db
+    && (
+      (targetFp.sysid && targetFp.sysid === sourceFp.sysid)
+      || (targetFp.addr && sourceFp.addr && targetFp.addr === sourceFp.addr)
+    )
+  ) {
+    return 'target server identity matches the source'
+  }
+  return ''
+}
+
+/** Live run only: --confirm-drop must equal the parsed target dbname. */
+export function confirmDropMismatchReason(confirmDrop, targetUrl) {
+  let expected
+  try {
+    expected = postgresUrlParts(targetUrl).dbname
+  } catch {
+    return 'target URL is not a valid postgres URL'
+  }
+  const got = String(confirmDrop ?? '').trim()
+  if (!got) return 'live restore requires --confirm-drop=<target dbname>'
+  if (!expected) return 'target URL is missing a database name'
+  if (got.toLowerCase() !== expected) {
+    return `--confirm-drop=${got} does not match target database ${expected}`
+  }
+  return ''
 }
 
 /** GitHub Actions masks. Call before any pg_dump / psql / pg_restore. */
@@ -89,7 +200,8 @@ export function parseMigrateArgs(argv = [], env = process.env) {
   const relaxTargetRls = argv.includes('--relax-target-rls')
   const authUsersFile = argValue(argv, '--auth-users-file') || env.AUTH_USERS_FILE || ''
   const skipAuthUsers = argv.includes('--skip-auth-users') || Boolean(authUsersFile)
-  return { dryRun, relaxTargetRls, skipAuthUsers, authUsersFile }
+  const confirmDrop = argValue(argv, '--confirm-drop') || env.CONFIRM_DROP || ''
+  return { dryRun, relaxTargetRls, skipAuthUsers, authUsersFile, confirmDrop }
 }
 
 export function resolveSourceUrl(env = process.env) {
@@ -454,6 +566,7 @@ function printOfflineDryRun(args) {
   console.log('dry-run: would require every source auth_user_id to appear in the mapping (ids, not counts)')
   console.log('dry-run: live restore drops and recreates public/auth, then restores in one transaction')
   console.log('dry-run: live restore without --auth-users-file exits 2')
+  console.log('dry-run: live restore requires --confirm-drop=<target dbname> and a .neon.tech target')
   console.log('tools required: pg_dump, pg_restore, psql')
 }
 
@@ -503,12 +616,21 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     return 2
   }
 
-  if (source === target) {
-    console.error('Source and target URLs must be different. Source is read-only.')
+  maskDatabaseUrls(source, target)
+
+  const wipeReason = refuseSourceWipeReason(source, target)
+  if (wipeReason) {
+    console.error(`Refusing to continue: ${wipeReason}. Source is read-only.`)
     return 2
   }
 
-  maskDatabaseUrls(source, target)
+  if (!args.dryRun) {
+    const confirmReason = confirmDropMismatchReason(args.confirmDrop, target)
+    if (confirmReason) {
+      console.error(`${confirmReason}.`)
+      return 2
+    }
+  }
 
   if (args.skipAuthUsers && !args.dryRun && !args.authUsersFile) {
     console.error('Live restore without --auth-users-file exits 2. Pass a CSV/JSON mapping; the migration role cannot read auth.users.')
@@ -589,6 +711,20 @@ export function main(argv = process.argv.slice(2), env = process.env) {
         ? 'dry-run: would apply worker/schema/app.sql + data-only restore + --relax-target-rls on Neon only'
         : 'dry-run: would apply worker/schema/app.sql + data-only restore (no Neon writes in this dry-run)')
       return 0
+    }
+
+    console.log('probing target identity before drop…')
+    const targetFp = parseFingerprint(psqlTuples(target, fingerprintQuery()))
+    let sourceFp = null
+    try {
+      sourceFp = parseFingerprint(psqlTuples(source, fingerprintQuery()))
+    } catch {
+      sourceFp = null
+    }
+    const fpReason = refuseTargetFingerprintReason(targetFp, sourceFp)
+    if (fpReason) {
+      console.error(`Refusing to drop target: ${fpReason}. Source is read-only.`)
+      return 2
     }
 
     console.log('resetting Neon public/auth schemas so a rerun starts empty…')
