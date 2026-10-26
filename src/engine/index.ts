@@ -70,7 +70,7 @@ import {
 // Logged sets are index-keyed against the session's exercise list as it was AT
 // LOG TIME. Every read of actual_weights goes through here so an edit to the
 // live routine can never reattribute work the athlete already did.
-import { readLoggedExercises, type LoggedWorkoutLike } from './loggedSets'
+import { readLoggedExercises, resolveLoggedExercises, type LoggedWorkoutLike } from './loggedSets'
 
 // The week-diff primitives live in weekDiff.ts so the phase designer and the
 // conversational program editor describe a change in exactly the same terms.
@@ -687,9 +687,12 @@ function formatSet(s: SetLog): string | null {
 // and quote — one line per exercise, only sets that carry data.
 function formatWorkoutSets(w: LoggedWorkoutLike): string[] {
   const lines: string[] = []
-  for (const { name, sets } of readLoggedExercises(w)) {
+  for (const { name, exercise, sets } of readLoggedExercises(w)) {
     const cells = sets.map(formatSet).filter((c): c is string => c != null)
-    if (cells.length) lines.push(`${name}: ${cells.join(', ')}`)
+    // A stand-in says what it stood in for, so the coach doesn't read a missing
+    // T-bar row as a skipped one.
+    const swapped = exercise?.swapped_from ? ` (swapped in for ${exercise.swapped_from})` : ''
+    if (cells.length) lines.push(`${name}${swapped}: ${cells.join(', ')}`)
   }
   return lines
 }
@@ -2342,6 +2345,13 @@ export interface SessionPrescription {
   // and how far along it is. Null when no cap is in effect. Absent on cached
   // copies written before this field existed — read with `?.`.
   clearance?: ClearanceView | null
+  /**
+   * The exercise each index was prescribed FOR. A swap mid-session changes what
+   * slot 3 is; the hint written for the T-bar row is not a hint for the dumbbell
+   * row that replaced it, and the screen checks this before showing one. Absent
+   * on caches written before this field existed — read with `?.`.
+   */
+  exerciseNames?: string[]
 }
 
 /** The clearance test, flattened for display. */
@@ -2442,9 +2452,16 @@ export async function gatherSessionPrescription(
     : null
 
   const { data: lastWorkout } = await supabase
-    .from('workout').select('actual_weights, performed_at')
+    .from('workout').select('actual_weights, performed_at, exercises_snapshot')
     .eq('routine_id', routineId).order('performed_at', { ascending: false }).limit(1).maybeSingle()
   const lastWeights = (lastWorkout?.actual_weights as Record<string, SetLog[]> | null) ?? null
+  // What each of those indices actually WAS. Last session's slot 3 is this
+  // session's slot 3 only if the same movement was done in it — a dumbbell row
+  // swapped in for the T-bar is not where the T-bar's next load comes from (and
+  // a T-bar's numbers are no base for today's stand-in either).
+  const lastSnapshot = (lastWorkout?.exercises_snapshot as ExerciseTemplate[] | null) ?? null
+  const sameSlot = (i: number, name: string) =>
+    !lastSnapshot?.length || lastSnapshot[i]?.name === name
   // Cross-phase fallback base: a just-(re)designed routine has no own history, but
   // its lifts (same names) do elsewhere in the program — read off that.
   const byName = prog?.id ? await gatherExerciseBases(prog.id) : new Map<string, SetLog>()
@@ -2459,7 +2476,8 @@ export async function gatherSessionPrescription(
   const phaseTarget = rpeContract(phaseName).target
 
   exercises.forEach((ex, i) => {
-    const top = (lastWeights ? topWorkingSet(lastWeights[String(i)]) : null) ?? byName.get(ex.name) ?? null
+    const top = (lastWeights && sameSlot(i, ex.name) ? topWorkingSet(lastWeights[String(i)]) : null)
+      ?? byName.get(ex.name) ?? null
     // Per-LIFT autoregulation against THIS exercise's own target RPE (falling
     // back to the block's target, then the week's): each lift's last RPE vs its
     // own target sets its load step — capped by phase — instead of one
@@ -2517,7 +2535,10 @@ export async function gatherSessionPrescription(
     }
   }
 
-  return { directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, pushTargets, rule, clearance, phaseName }
+  return {
+    directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, pushTargets, rule, clearance, phaseName,
+    exerciseNames: exercises.map((ex) => ex.name),
+  }
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -2549,12 +2570,18 @@ export interface SessionAdaptation {
  */
 export async function recordSessionAdaptation(athleteId: string, workoutId: string): Promise<SessionAdaptation | null> {
   const { data: workout } = await supabase
-    .from('workout').select('routine_id, performed_at').eq('id', workoutId).maybeSingle()
+    .from('workout').select('routine_id, performed_at, exercises_snapshot').eq('id', workoutId).maybeSingle()
   if (!workout) return null
 
   const { data: routine } = await supabase
     .from('routine').select('exercises').eq('id', workout.routine_id).maybeSingle()
-  const exercises = (routine?.exercises as ExerciseTemplate[] | null) ?? []
+  // As performed: a stand-in carries its slot's insight_id, so a felt "Solid" on
+  // the dumbbell press that replaced the bench is evidence about the same read.
+  const exercises = resolveLoggedExercises({
+    actual_weights: null,
+    exercises_snapshot: workout.exercises_snapshot as ExerciseTemplate[] | null,
+    routine: { exercises: (routine?.exercises as ExerciseTemplate[] | null) ?? [] },
+  })
 
   // P1 weak link — top-priority active insight.
   const { data: insightRows } = await supabase
@@ -2670,12 +2697,18 @@ export interface ClearanceOutcome {
  */
 export async function evaluateClearanceTest(athleteId: string, workoutId: string): Promise<ClearanceOutcome | null> {
   const { data: workout } = await supabase
-    .from('workout').select('routine_id, actual_weights').eq('id', workoutId).maybeSingle()
+    .from('workout').select('routine_id, actual_weights, exercises_snapshot').eq('id', workoutId).maybeSingle()
   if (!workout) return null
 
   const { data: routine } = await supabase
     .from('routine').select('exercises, phase_id').eq('id', workout.routine_id).maybeSingle()
-  const exercises = (routine?.exercises as ExerciseTemplate[] | null) ?? []
+  // The session as performed: a bench press swapped out for dumbbells that day
+  // didn't happen, and its slot's sets are not bench-press proof.
+  const exercises = resolveLoggedExercises({
+    actual_weights: workout.actual_weights as Record<string, SetLog[]> | null,
+    exercises_snapshot: workout.exercises_snapshot as ExerciseTemplate[] | null,
+    routine: { exercises: (routine?.exercises as ExerciseTemplate[] | null) ?? [] },
+  })
   if (!exercises.length) return null
 
   const { data: insightRows } = await supabase
@@ -2878,7 +2911,10 @@ async function gatherRecentLifts(programId: string, u: UnitContext): Promise<Arr
     .limit(40)
   const seen = new Map<string, { top_set: string; rpe: number | null }>()
   for (const w of (ws ?? []) as unknown as Array<LoggedWorkoutLike & { rpe: number | null }>) {
-    for (const { name, sets } of readLoggedExercises(w)) {
+    for (const { name, exercise, sets } of readLoggedExercises(w)) {
+      // A stand-in was the gym's call that day, not the program's — the next
+      // block is designed around the movements that were planned.
+      if (exercise?.swapped_from) continue
       if (seen.has(name)) continue   // newest wins
       const top = topWorkingSet(sets)
       if (!top) continue
@@ -4240,6 +4276,30 @@ export async function gatherExerciseBests(programId: string): Promise<Record<str
 }
 
 /**
+ * The most recent session's sets on every lift in the program, keyed by name —
+ * the "last time" for a movement that isn't in this routine's own history. A
+ * swap is exactly that case: the dumbbell row you did at the other gym last
+ * month is the number to beat today, wherever in the program it was logged.
+ * Weights are in STORAGE units.
+ */
+export async function gatherLastSetsByName(programId: string): Promise<Record<string, SetLog[]>> {
+  const { data: ws } = await supabase
+    .from('workout')
+    .select('performed_at, actual_weights, exercises_snapshot, routine!inner(exercises, program_id)')
+    .eq('routine.program_id', programId)
+    .order('performed_at', { ascending: false })
+    .limit(120)
+  const out: Record<string, SetLog[]> = {}
+  for (const w of (ws ?? []) as unknown as LoggedWorkoutLike[]) {
+    for (const { name, sets } of readLoggedExercises(w)) {
+      if (out[name]) continue   // newest wins (rows are desc)
+      if (sets.some(isSetLogged)) out[name] = sets
+    }
+  }
+  return out
+}
+
+/**
  * The athlete's strength balance — which chain is behind, read off their own log.
  *
  * Built on the same baseline the retest reads, so the two can never disagree
@@ -4554,6 +4614,10 @@ export interface PagerWeekView {
   weekEnd: string
   phaseName: string | null
   sessions: PagerSessionView[]
+  /** Coach call for this projected week (week+1 after close, or dry-run when the current week is logged out). */
+  directive?: WeeklyDirective | null
+  rationale?: string | null
+  provisional?: boolean
 }
 export interface WeekPagerData {
   past: PagerWeekView[]    // chronological (oldest first); excludes the current week
@@ -4604,6 +4668,37 @@ export async function gatherWeekPager(athleteId: string, u: UnitContext): Promis
   if (activePhase) {
     const phaseName = (activePhase as { name: PhaseName }).name
     const stepPct = PHASE_WEEKLY_STEP_PCT[phaseName] ?? 0
+    const [{ data: athRow }, { data: latestReview }] = await Promise.all([
+      supabase.from('athlete').select('sessions_per_week').eq('id', athleteId).maybeSingle(),
+      supabase.from('weekly_review').select('week_ending, next_week_prescription')
+        .eq('program_id', prog.id).order('week_ending', { ascending: false }).limit(1).maybeSingle(),
+    ])
+    const plannedPerWeek = (athRow?.sessions_per_week as number | null) ?? 3
+    const weekClosed = (latestReview?.week_ending as string | undefined) === thisWeekEnding
+    const closedPresc = weekClosed
+      ? ((latestReview?.next_week_prescription as WeeklyPrescription | null) ?? null)
+      : null
+
+    // Once the athlete has logged their planned sessions (or closed the week),
+    // week+1 in the pager reads like the coach's call — not a generic % ramp.
+    let previewPresc: WeeklyPrescription | null = closedPresc
+    if (!previewPresc) {
+      const [{ data: cwWorkouts }, { data: cwObs }] = await Promise.all([
+        supabase.from('workout').select('performed_at, rpe, actual_weights, routine!inner(program_id)')
+          .eq('routine.program_id', prog.id).gte('performed_at', thisMonday.toISOString()),
+        supabase.from('session_observation').select('severity, signal, logged_at, workout!inner(routine!inner(program_id))')
+          .eq('workout.routine.program_id', prog.id).gte('logged_at', thisMonday.toISOString()),
+      ])
+      const cw = (cwWorkouts ?? []) as unknown as WeekWorkout[]
+      const distinctDays = new Set(cw.map((w) => isoDate(new Date(w.performed_at)))).size
+      if (distinctDays >= plannedPerWeek) {
+        previewPresc = decidePrescription(
+          tallyWeek(plannedPerWeek, cw, (cwObs ?? []) as unknown as WeekObservation[]),
+          { phaseName },
+        )
+      }
+    }
+
     const { data: routineRows } = await supabase
       .from('routine').select('id, name, exercises, intent').eq('phase_id', (activePhase as { id: string }).id).order('name')
     const routines = (routineRows ?? []) as unknown as Array<{ id: string; name: string; exercises: ExerciseTemplate[]; intent: string | null }>
@@ -4639,6 +4734,7 @@ export async function gatherWeekPager(athleteId: string, u: UnitContext): Promis
     for (let k = 1; k <= MAX_FORWARD; k++) {
       const wkMonday = new Date(thisMonday); wkMonday.setDate(thisMonday.getDate() + 7 * k)
       if (wkMonday > phaseEnd) break
+      const coachPresc = k === 1 ? previewPresc : null
       const sessions: PagerSessionView[] = routines.map((r) => {
         const base = baseByRoutine.get(r.id) ?? []
         return {
@@ -4648,16 +4744,34 @@ export async function gatherWeekPager(athleteId: string, u: UnitContext): Promis
           tag: null,
           lines: r.exercises.map((ex, i) => {
             const b = base[i]
-            const detail = b != null && stepPct > 0
-              ? `≈${u.prescribe(b * Math.pow(1 + stepPct / 100, k))}${u.unit}×${ex.reps}`
-              : b != null
-                ? `${u.fmt(b)}${u.unit}×${ex.reps}`
+            let detail: string
+            if (b != null && coachPresc) {
+              const projected = recommendedLoad({ weight: b } as SetLog, coachPresc.load_delta_pct, u)
+              detail = projected != null
+                ? `${u.fmt(projected)}${u.unit}×${ex.reps}`
                 : `${ex.sets}×${ex.reps}${ex.load ? ` · ${ex.load}` : ''}`
+            } else if (b != null && stepPct > 0) {
+              detail = `≈${u.prescribe(b * Math.pow(1 + stepPct / 100, k))}${u.unit}×${ex.reps}`
+            } else if (b != null) {
+              detail = `${u.fmt(b)}${u.unit}×${ex.reps}`
+            } else {
+              detail = `${ex.sets}×${ex.reps}${ex.load ? ` · ${ex.load}` : ''}`
+            }
             return { name: ex.name, detail }
           }),
         }
       })
-      future.push({ weekStart: isoDate(wkMonday), weekEnd: weekEndingISO(wkMonday), phaseName, sessions })
+      future.push({
+        weekStart: isoDate(wkMonday),
+        weekEnd: weekEndingISO(wkMonday),
+        phaseName,
+        sessions,
+        ...(k === 1 && previewPresc ? {
+          directive: previewPresc.directive,
+          rationale: previewPresc.rationale,
+          provisional: !weekClosed,
+        } : {}),
+      })
     }
 
     // The phase boundary — the next stage, concept only (no routine rows yet).

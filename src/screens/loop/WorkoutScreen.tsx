@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, Check, Plus, Info, X, MessageCircle, Target } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Check, Plus, Info, X, MessageCircle, Target, ArrowLeftRight } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import {
   restoreDraft, loadDraftLocal, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
@@ -12,14 +12,18 @@ import {
   enqueueSession, commitPending, parsePendingRef, pendingSessionById, committedWorkoutIdFor,
 } from '../../lib/workoutOutbox'
 import {
-  gatherSessionPrescription, gatherExerciseBests, actualsFromPending,
+  gatherSessionPrescription, gatherExerciseBests, gatherLastSetsByName, actualsFromPending,
   coachStarterPrompts, runCoachChat,
   type SessionPrescription, type SessionActuals, type ClearanceView,
   type PendingSession, type PendingDebrief, type DebriefExerciseInput,
 } from '../../engine'
 import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
 import { isSetLogged, tallySession } from '../../engine/volume'
-import { resolveTrackingType } from '../../engine/exerciseLibrary'
+import {
+  effectiveTrackingType, suggestSwaps, searchLibrary, buildSwap,
+  EQUIPMENT_LABEL, PATTERN_LABEL, TRACKING_LABEL, type Equipment,
+} from '../../engine/exerciseLibrary'
+import { loadSwapGear, saveSwapGear, recentSwapsFor, rememberSwap } from '../../lib/swapMemory'
 import { restSecondsFor, adjustRest, formatRest } from '../../engine/restTimer'
 import { fireRestAlert, playSetClick, playRecord } from '../../lib/restAlert'
 import { tick, record } from '../../lib/haptics'
@@ -667,6 +671,215 @@ function ExerciseSheet({ name, note, cue, insight, reading, onClose }: ExerciseS
   )
 }
 
+// ---- Swap sheet (the equipment isn't there) --------------------------------
+// The T-bar is taken, this gym has no hack squat, the hotel has two dumbbells
+// and a bench. Ranked stand-ins that train the same pattern — deterministic, off
+// the library, instant and offline — filtered to the gear on hand, plus search
+// for anything else. A swap is for THIS session: the program isn't edited, the
+// work is logged under the movement actually done, and the slot remembers what
+// it replaced.
+
+interface SwapSheetProps {
+  programmed: ExerciseTemplate
+  current: ExerciseTemplate
+  loggedSets: number
+  exclude: string[]
+  hasHistory: (name: string) => boolean
+  screened: boolean
+  onPick: (name: string) => void
+  onRevert: () => void
+  onClose: () => void
+}
+
+const SWAP_FIRST_SCREEN = 6
+
+function SwapSheet({
+  programmed, current, loggedSets, exclude, hasHistory, screened, onPick, onRevert, onClose,
+}: SwapSheetProps) {
+  const [gear, setGear] = useState<Equipment[]>(() => loadSwapGear())
+  const [query, setQuery] = useState('')
+  const [showAll, setShowAll] = useState(false)
+  const isSwapped = current.name !== programmed.name
+
+  const recent = recentSwapsFor(programmed.name)
+  const opts = { recent, hasHistory, exclude, screened }
+  const all = suggestSwaps(programmed.name, opts)
+  const filtered = suggestSwaps(programmed.name, { ...opts, available: gear })
+    .filter((s) => s.exercise.name !== current.name)
+  // Offer only the chips that would change this list — a row has no use for a
+  // sled chip — plus any already on, so it can be turned off again.
+  const chipGear = EQUIPMENT_CHIPS.filter(
+    (e) => gear.includes(e) || all.some((s) => s.exercise.equipment === e),
+  )
+  const visible = showAll ? filtered : filtered.slice(0, SWAP_FIRST_SCREEN)
+
+  const q = query.trim()
+  const results = q ? searchLibrary(q).filter((e) => e.name !== current.name) : []
+  const exactHit = results.some((e) => e.name.toLowerCase() === q.toLowerCase())
+
+  function setGearPreset(next: Equipment[]) {
+    setGear(next)
+    saveSwapGear(next)
+  }
+
+  function toggleGear(e: Equipment) {
+    const next = gear.includes(e) ? gear.filter((g) => g !== e) : [...gear, e]
+    setGearPreset(next)
+  }
+
+  function gearPresetActive(preset: readonly Equipment[]): boolean {
+    return preset.length === gear.length && preset.every((e) => gear.includes(e))
+  }
+
+  const optionRow = (key: string, title: string, sub: string, onClick: () => void) => (
+    <button
+      key={key}
+      type="button"
+      onClick={onClick}
+      style={{
+        display: 'flex', alignItems: 'center', gap: 12, width: '100%', padding: '12px 0',
+        background: 'none', border: 0, borderBottom: '1px solid var(--line)',
+        color: 'var(--text)', textAlign: 'left', cursor: 'pointer',
+      }}
+    >
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span className="text-base" style={{ display: 'block', fontWeight: 600 }}>{title}</span>
+        <span className="text-xs text-dim" style={{ display: 'block', marginTop: 2, lineHeight: 1.4 }}>{sub}</span>
+      </span>
+      <ChevronRight size={16} strokeWidth={2} style={{ flexShrink: 0, color: 'var(--text-dim)' }} />
+    </button>
+  )
+
+  return (
+    <Sheet
+      title={isSwapped ? `Swap ${current.name}` : `Swap ${programmed.name}`}
+      subtitle={isSwapped ? `Programmed: ${programmed.name}` : 'Same work, with what this gym has'}
+      onClose={onClose}
+    >
+      {loggedSets > 0 && (
+        <p className="text-sm" style={{ color: 'var(--pending)', lineHeight: 1.5, marginBottom: 14 }}>
+          {loggedSets === 1 ? 'The set' : `The ${loggedSets} sets`} you logged on {current.name} will be cleared —
+          they don&apos;t carry over to a different movement.
+        </p>
+      )}
+
+      {isSwapped && optionRow('revert', `Back to ${programmed.name}`, 'The programmed movement', onRevert)}
+
+      {chipGear.length > 0 && (
+        <div style={{ marginTop: isSwapped ? 18 : 0, marginBottom: 6 }}>
+          <p className="section-header" style={{ marginBottom: 8 }}>What&apos;s here</p>
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+            <button
+              type="button"
+              className="howto-tag"
+              aria-pressed={gear.length === 0}
+              onClick={() => setGearPreset([])}
+              style={gear.length === 0 ? { borderColor: 'var(--signal)', color: 'var(--signal)' } : undefined}
+            >
+              Full gym
+            </button>
+            {SWAP_GEAR_PRESETS.map(({ id, label, gear: preset }) => (
+              <button
+                key={id}
+                type="button"
+                className="howto-tag"
+                aria-pressed={gearPresetActive(preset)}
+                onClick={() => setGearPreset([...preset])}
+                style={gearPresetActive(preset) ? { borderColor: 'var(--signal)', color: 'var(--signal)' } : undefined}
+              >
+                {label}
+              </button>
+            ))}
+            {chipGear.map((e) => {
+              const on = gear.includes(e)
+              return (
+                <button
+                  key={e}
+                  type="button"
+                  className="howto-tag"
+                  aria-pressed={on}
+                  onClick={() => toggleGear(e)}
+                  style={on ? { borderColor: 'var(--signal)', color: 'var(--signal)' } : undefined}
+                >
+                  {EQUIPMENT_LABEL[e]}
+                </button>
+              )
+            })}
+          </div>
+          {gear.length > 0 && (
+            <p className="text-xs text-dim" style={{ marginTop: 6 }}>Bodyweight options always included.</p>
+          )}
+        </div>
+      )}
+
+      <div style={{ marginTop: 10 }}>
+        {visible.map((s) => optionRow(
+          s.exercise.name,
+          s.exercise.name,
+          `${s.reason} · ${EQUIPMENT_LABEL[s.exercise.equipment]}`,
+          () => onPick(s.exercise.name),
+        ))}
+        {filtered.length === 0 && !q && (
+          <p className="text-sm text-dim" style={{ padding: '12px 0', lineHeight: 1.5 }}>
+            {all.length
+              ? 'Nothing in the library fits that gear. Turn a chip off, or search below.'
+              : 'No close match on file for this one — search below, or type what you used.'}
+          </p>
+        )}
+        {!showAll && filtered.length > SWAP_FIRST_SCREEN && (
+          <button
+            type="button"
+            className="btn btn--ghost"
+            style={{ marginTop: 8, padding: '0 8px', color: 'var(--text-dim)' }}
+            onClick={() => setShowAll(true)}
+          >
+            {filtered.length - SWAP_FIRST_SCREEN} more options
+          </button>
+        )}
+      </div>
+
+      <div style={{ marginTop: 20 }}>
+        <p className="section-header" style={{ marginBottom: 8 }}>Something else</p>
+        <input
+          type="search"
+          className="input"
+          placeholder="Search exercises"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          aria-label="Search exercises"
+          style={{ width: '100%' }}
+        />
+        {results.map((e) => optionRow(
+          `q:${e.name}`,
+          e.name,
+          `${PATTERN_LABEL[e.pattern]} · ${EQUIPMENT_LABEL[e.equipment]} · logs ${TRACKING_LABEL[e.tracking]}`,
+          () => onPick(e.name),
+        ))}
+        {q && !exactHit && optionRow(
+          'custom', `Use “${q.slice(0, 60)}”`, 'Log it under the name you typed', () => onPick(q.slice(0, 60)),
+        )}
+      </div>
+
+      <p className="text-xs text-dim" style={{ marginTop: 18, lineHeight: 1.5 }}>
+        Just for this session — your program stays as it is. The sets are logged under
+        what you actually did and still count toward the week.
+      </p>
+    </Sheet>
+  )
+}
+
+// Ordered by how likely a gym is to have it — the chips read left to right
+// the way you'd scan a room.
+const EQUIPMENT_CHIPS: Equipment[] = [
+  'dumbbell', 'barbell', 'cable', 'machine', 'kettlebell', 'band', 'bar', 'cardio', 'sled', 'other',
+]
+
+/** One-tap gear filters for common travel setups (bodyweight is always included in swaps). */
+const SWAP_GEAR_PRESETS: ReadonlyArray<{ id: string; label: string; gear: Equipment[] }> = [
+  { id: 'hotel', label: 'Hotel', gear: ['dumbbell', 'band'] },
+  { id: 'home', label: 'Home', gear: ['band'] },
+]
+
 // ---- Mid-workout coach chat (what/how/why, no program edits) ---------------
 // A quick-question surface the athlete can open without leaving the session —
 // today the only way to reach Coach mid-workout was to fully navigate off this
@@ -934,6 +1147,22 @@ function feedbackFromDebrief(debrief: PendingDebrief | null): Record<number, Exe
   return out
 }
 
+// A logged session's swaps back out of its snapshot, onto the feedback map the
+// screen keeps them in — so editing a session done at the other gym shows the
+// dumbbell row that was done, not the T-bar row that was planned.
+function withSnapshotSwaps(
+  fb: Record<number, ExerciseFeedback>,
+  snapshot: ExerciseTemplate[] | null | undefined,
+): Record<number, ExerciseFeedback> {
+  if (!snapshot?.some((ex) => ex?.swapped_from)) return fb
+  const out = { ...fb }
+  snapshot.forEach((ex, i) => {
+    if (!ex?.swapped_from) return
+    out[i] = { ...(out[i] ?? { name: ex.name, felt: null, note: '' }), swap: ex }
+  })
+  return out
+}
+
 export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}) {
   const { routineId } = useParams<{ routineId: string }>()
   const navigate      = useNavigate()
@@ -1045,9 +1274,14 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // Per-exercise felt signal (exIdx → feedback).
   const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>(
     () => (seedPending
-      ? feedbackFromDebrief(seedPending.debrief)
-      : (seedDraft?.feedback ?? {}) as Record<number, ExerciseFeedback>),
+      ? withSnapshotSwaps(feedbackFromDebrief(seedPending.debrief), seedPending.exercisesSnapshot)
+      : seedActuals
+        ? withSnapshotSwaps({}, seedActuals.exercisesSnapshot)
+        : (seedDraft?.feedback ?? {}) as Record<number, ExerciseFeedback>),
   )
+
+  // Which slot's swap sheet is open, if any.
+  const [swapIdx, setSwapIdx] = useState<number | null>(null)
 
   // Two-tap discard. A session started by mistake had NO exit: clearDraft only
   // ever ran on completion, Complete is disabled until something is logged, and
@@ -1100,6 +1334,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const [bestByExercise, setBestByExercise] = useState<Record<number, LiftBest>>(
     () => seedBoot?.bestByExercise ?? {},
   )
+  // The same, by NAME across the program — what a swapped-in movement is
+  // measured against, since this routine's slots hold no history for it.
+  const [bestsByName, setBestsByName] = useState<Record<string, LiftBest>>(() => seedBoot?.bestsByName ?? {})
+  const [prevByName, setPrevByName] = useState<Record<string, SetLog[]>>(() => seedBoot?.prevByName ?? {})
   // Which exercise is in focus — drives the "why" panel in the desktop rail.
   const [activeExIdx, setActiveExIdx] = useState(0)
 
@@ -1173,8 +1411,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     }
   }, [setLogs, feedback, elapsed])
 
+  // A swap counts: it's a decision made at the rack, often before the first set,
+  // and losing it to a phone call between sets would mean making it again.
   const hasDraftSignal = () =>
-    !!payloadRef.current && Object.values(payloadRef.current.setLogs).flat().some(isLogged)
+    !!payloadRef.current && (
+      Object.values(payloadRef.current.setLogs).flat().some(isLogged)
+      || Object.values(payloadRef.current.feedback).some((f) => !!f?.swap)
+    )
 
   const persistLocal = useCallback(() => {
     if (!routineId || !draftReady || completedRef.current || !hasDraftSignal()) return
@@ -1217,6 +1460,38 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       flush()
     }
   }, [persistLocal, persistRemote])
+
+  // ---- swaps ---------------------------------------------------------------
+
+  // The session as it's actually being trained: the routine, with any slot the
+  // athlete swapped replaced by its stand-in. Everything that reads "this
+  // session's exercises" — the list, the debrief, the snapshot the sets are
+  // filed against — reads this, never routine.exercises directly.
+  const sessionExercises = ((routine?.exercises ?? []) as ExerciseTemplate[])
+    .map((ex, i) => feedback[i]?.swap ?? ex)
+  const sessionKey = sessionExercises.map((ex) => ex.name).join('\n')
+
+  // Re-prescribe when the session's movements and the prescription's disagree —
+  // a swap just happened, or a resumed draft carried one. Until it lands, the
+  // stand-in shows no hint rather than the replaced lift's (see presFor). Online
+  // only by nature; offline the stand-in simply trains without a number.
+  const latestKeyRef = useRef(sessionKey)
+  latestKeyRef.current = sessionKey
+  const prescribingRef = useRef<string | null>(null)
+  useEffect(() => {
+    if (!routineId || !athleteId || !draftReady || !prescription) return
+    const names = prescription.exerciseNames
+    const stale = names ? names.join('\n') !== sessionKey : sessionExercises.some((ex) => ex.swapped_from)
+    if (!stale || prescribingRef.current === sessionKey) return
+    const key = sessionKey
+    prescribingRef.current = key
+    gatherSessionPrescription(athleteId, routineId, sessionExercises, u)
+      .then((next) => { if (latestKeyRef.current === key) setPrescription(next) })
+      .catch(() => { /* offline — the stand-in trains without a hint */ })
+      .finally(() => { if (prescribingRef.current === key) prescribingRef.current = null })
+    // sessionExercises and u are derived from state already in the deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionKey, athleteId, routineId, draftReady, prescription])
 
   // Background revalidation. On a warm (cached) open the screen is already
   // painted and interactive from the seed — this just refreshes the routine,
@@ -1295,18 +1570,29 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
     // Most recent prior session of this same routine → the Previous column.
     // Same routine_id means the exercise list (and ordering) matches, so the
-    // index keys line up with this session's exercises.
+    // index keys line up with this session's exercises — unless a slot was
+    // swapped that day, in which case its sets belong to the stand-in and are
+    // no "previous" for the programmed lift. The snapshot says which.
     let nextPrev: Record<number, SetLog[]> = {}
     const { data: prevWorkout } = await supabase
       .from('workout')
-      .select('actual_weights')
+      .select('actual_weights, exercises_snapshot')
       .eq('routine_id', routineId)
       .order('performed_at', { ascending: false })
       .limit(1)
       .maybeSingle()
-    const prevWeights = (prevWorkout as { actual_weights: Record<string, SetLog[]> | null } | null)?.actual_weights
+    const prevRow = prevWorkout as {
+      actual_weights: Record<string, SetLog[]> | null
+      exercises_snapshot: ExerciseTemplate[] | null
+    } | null
+    const prevWeights = prevRow?.actual_weights
     if (prevWeights) {
-      Object.entries(prevWeights).forEach(([k, v]) => { nextPrev[Number(k)] = v })
+      const snap = prevRow?.exercises_snapshot
+      Object.entries(prevWeights).forEach(([k, v]) => {
+        const i = Number(k)
+        if (snap?.length && snap[i]?.name !== exs[i]?.name) return
+        nextPrev[i] = v
+      })
       setPrevByExercise(nextPrev)
     }
 
@@ -1336,16 +1622,28 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     // costs a badge, and an over-eager one (empty map → every loaded set reads
     // as a first-ever PR) would be worse than none, so a failure keeps the seed.
     let nextBests: Record<number, LiftBest> = seedRef.current!.boot?.bestByExercise ?? {}
+    let nextBestsByName: Record<string, LiftBest> = seedRef.current!.boot?.bestsByName ?? {}
+    let nextPrevByName: Record<string, SetLog[]> = seedRef.current!.boot?.prevByName ?? {}
     if (r.program_id) {
-      try {
-        const byName = await gatherExerciseBests(r.program_id)
+      const [bestsRes, lastRes] = await Promise.allSettled([
+        gatherExerciseBests(r.program_id),
+        gatherLastSetsByName(r.program_id),
+      ])
+      if (bestsRes.status === 'fulfilled') {
+        const byName = bestsRes.value
         // A session being EDITED already contributed its own sets to these
         // records, so comparing against them would say "no PR" on the very set
         // that set the record. The badge is a live-logging signal; leave it off
         // an edit rather than show it wrong.
         nextBests = isEdit ? {} : Object.fromEntries(exs.map((ex, i) => [i, byName[ex.name] ?? NO_BEST]))
+        nextBestsByName = isEdit ? {} : byName
         setBestByExercise(nextBests)
-      } catch { /* non-fatal — the badge just doesn't fire this open */ }
+        setBestsByName(nextBestsByName)
+      } // else non-fatal — the badge just doesn't fire this open
+      if (lastRes.status === 'fulfilled') {
+        nextPrevByName = lastRes.value
+        setPrevByName(nextPrevByName)
+      }
     }
 
     // Re-cache the whole bootstrap so the next open is instant and offline-ready.
@@ -1358,6 +1656,8 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       insightMap: nextInsightMap,
       prescription: nextPresc,
       bestByExercise: nextBests,
+      bestsByName: nextBestsByName,
+      prevByName: nextPrevByName,
     })
 
     if (!isEdit && programData && routineId && !startedLoggingRef.current) {
@@ -1413,7 +1713,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       }
       if (!startedLoggingRef.current) {
         setSetLogs(overlayDraft(initial, p.actualWeights as Record<number, SetLog[]>))
-        setFeedback(feedbackFromDebrief(p.debrief))
+        setFeedback(withSnapshotSwaps(feedbackFromDebrief(p.debrief), p.exercisesSnapshot))
         setElapsed(p.durationMins * 60)
         startRef.current = Date.now() - p.durationMins * 60_000
         if (p.performedAt) setPerformedAt(toDateInput(new Date(p.performedAt)))
@@ -1440,6 +1740,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     Object.entries(w.actual_weights ?? {}).forEach(([k, v]) => { setLogsFromRow[Number(k)] = v })
     if (w.actual_weights && !startedLoggingRef.current) {
       setSetLogs(overlayDraft(initial, setLogsFromRow))
+      setFeedback((prev) => withSnapshotSwaps(prev, w.exercises_snapshot))
     }
     const dur = w.duration_mins ?? 0
     setElapsed(dur * 60)
@@ -1503,8 +1804,39 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     })
   }
 
+  // Put a stand-in in a slot (or, with null, the programmed movement back).
+  // The slot's logged sets are cleared — they were the other movement's, and
+  // filing them under this one would be the exact misattribution the snapshot
+  // exists to prevent. The sheet says so before it happens.
+  function applySwap(exIdx: number, name: string | null) {
+    if (!routine) return
+    const programmed = (routine.exercises as ExerciseTemplate[])[exIdx]
+    if (!programmed) return
+    const built = name ? buildSwap(programmed, name) : null
+    const stand = built && built.name !== programmed.name ? built : null
+    setSwapIdx(null)
+    setActiveExIdx(exIdx)
+    if ((stand?.name ?? programmed.name) === sessionExercises[exIdx]?.name) return
+
+    startedLoggingRef.current = true
+    if ((setLogs[exIdx] ?? []).some(isLogged)) {
+      setSetLogs((prev) => ({
+        ...prev,
+        [exIdx]: Array.from({ length: programmed.sets }, (_, j) => newSetLog(j + 1)),
+      }))
+    }
+    // A fresh entry: the felt chip and note were about the other movement.
+    setFeedback((prev) => {
+      const entry: ExerciseFeedback = { name: (stand ?? programmed).name, felt: null, note: '' }
+      if (stand) entry.swap = stand
+      return { ...prev, [exIdx]: entry }
+    })
+    if (stand) rememberSwap(programmed.name, stand.name)
+  }
+
   const allSetsFlat = Object.values(setLogs).flat()
   const hasAnyLog = allSetsFlat.some(isLogged)
+  const hasSwap = sessionExercises.some((ex) => !!ex.swapped_from)
 
   // "Complete" no longer writes — it freezes the clock and opens the debrief.
   // The actual server commit happens at finishSession (after debrief or skip), so
@@ -1582,18 +1914,24 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       // program editor rewrites routine.exercises in place, so a session read
       // back through the routine's LIVE list is one edit away from being
       // relabeled with movements the athlete never did.
-      exercisesSnapshot: (routine!.exercises as ExerciseTemplate[]) ?? null,
+      //
+      // And the session AS TRAINED, not as planned: a swapped slot is filed
+      // under the movement actually done (with swapped_from naming the plan), so
+      // its sets count toward the week and land in that movement's history.
+      exercisesSnapshot: sessionExercises.length ? sessionExercises : null,
     }
   }
 
   // What the finish moment on Train shows: the session's own numbers, and which
   // lifts set a record — judged the same way the set-row PR badge is.
   function finishedSummary(pendingId: string): FinishedSession {
-    const exercises = (routine!.exercises as ExerciseTemplate[]) ?? []
-    const prLifts = exercises
-      .filter((_, i) => (setLogs[i] ?? []).some(
-        (log) => isSetLogged(log) && displayPRs(log, bestByExercise[i] ?? NO_BEST).length > 0,
-      ))
+    // The session as trained — a swapped slot is named, and judged, as the
+    // stand-in, against that movement's own record (as its set rows are).
+    const prLifts = sessionExercises
+      .filter((ex, i) => (setLogs[i] ?? []).some((log) => {
+        const best = ex.swapped_from ? bestsByName[ex.name] ?? NO_BEST : bestByExercise[i] ?? NO_BEST
+        return isSetLogged(log) && displayPRs(log, best).length > 0
+      }))
       .map((ex) => ex.name)
     const tally = tallySession(setLogs)
     return {
@@ -1609,10 +1947,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   // Build the debrief payload from the per-exercise feedback + performed numbers.
   function buildDebrief(reflection: string, readingAnswer: string): PendingDebrief {
-    const exercises = (routine!.exercises as ExerciseTemplate[])
+    const exercises = sessionExercises
     const readingEx = exercises.find((e) => e.reading)
     const debriefExercises: DebriefExerciseInput[] = exercises.map((ex, i) => {
-      const t = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
+      const t = effectiveTrackingType(ex)
       const fb = feedback[i]
       return {
         name: ex.name,
@@ -1766,7 +2104,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     )
   }
 
-  const exercises = routine.exercises as ExerciseTemplate[]
+  const exercises = sessionExercises
   const readingEx = exercises.find((e) => e.reading)
 
   // The read this session is built around — the insight the most exercises point
@@ -1914,7 +2252,22 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
         {exercises.map((ex, exIdx) => {
           const logs = setLogs[exIdx] ?? []
-          const trackingType = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
+          const trackingType = effectiveTrackingType(ex)
+          // A prescription is only this slot's if it was written for this
+          // movement — after a swap, until the re-prescription lands, it was
+          // written for the lift that's no longer here.
+          const names = prescription?.exerciseNames
+          const presOk = names ? names[exIdx] === ex.name : !ex.swapped_from
+          const hint = presOk ? prescription?.hints[exIdx] : undefined
+          // The cap is the one thing that does carry: the stand-in answers to the
+          // same read, so a held slot stays held while its number is pending.
+          const isHeld = !!prescription?.held[exIdx]
+          const best = ex.swapped_from ? bestsByName[ex.name] ?? NO_BEST : bestByExercise[exIdx] ?? NO_BEST
+          // Last time: this slot's own history when it held this movement, else
+          // the movement's most recent session anywhere in the program.
+          const prevSets = ex.swapped_from
+            ? prevByName[ex.name] ?? []
+            : prevByExercise[exIdx] ?? prevByName[ex.name] ?? []
           const pReps = leadingInt(ex.reps)
           const pDur  = trackingType === 'time' ? leadingInt(ex.reps) : null
           // The number to hit is the engine's target for today — the same one
@@ -1922,7 +2275,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           // raw load text, which predates every progression since it was written.
           // A pushed lift aims at its uncapped number. Weight-and-reps only: a
           // bodyweight lift's "load" is added weight, which the engine doesn't set.
-          const rxTarget = trackingType === 'weight_reps'
+          // Gated like the hint: a swapped-in lift never inherits the replaced
+          // lift's number while its own prescription is still on the way.
+          const rxTarget = trackingType === 'weight_reps' && presOk
             ? (feedback[exIdx]?.pushed && prescription?.pushTargets?.[exIdx] != null
                 ? prescription.pushTargets[exIdx]
                 : prescription?.targets?.[exIdx] ?? null)
@@ -1940,9 +2295,25 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
             <div key={exIdx} style={{ paddingTop: 26, paddingBottom: 16, borderBottom: '1px solid var(--line)' }}>
               <div style={{ marginBottom: 14 }}>
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
-                  <h2 style={{ flex: 1, minWidth: 0, fontWeight: 700, fontSize: 'var(--fs-xl)', lineHeight: 1.25, letterSpacing: '-0.01em' }}>
-                    {ex.name}
-                  </h2>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <h2 style={{ fontWeight: 700, fontSize: 'var(--fs-xl)', lineHeight: 1.25, letterSpacing: '-0.01em' }}>
+                      {ex.name}
+                    </h2>
+                    {ex.swapped_from && (
+                      <p className="text-xs text-dim" style={{ marginTop: 3 }}>
+                        Swapped in for {ex.swapped_from}
+                      </p>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    className="howto-tag"
+                    style={{ flexShrink: 0 }}
+                    aria-label={`Swap ${ex.name}`}
+                    onClick={() => setSwapIdx(exIdx)}
+                  >
+                    <ArrowLeftRight size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Swap
+                  </button>
                   {/* One affordance, not three. Everything about this lift —
                       how-to, faults, your cue, the read it serves — is behind it. */}
                   {hasDetails && (
@@ -1963,24 +2334,24 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                     </button>
                   )}
                 </div>
-                {(ex.reading || prescription?.hints[exIdx]) && (
+                {(ex.reading || hint || isHeld) && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>
                     {ex.reading && <Chip tone="info">Reading</Chip>}
-                    {prescription?.hints[exIdx] && (
+                    {hint && (
                       isPushed
                         ? <Chip tone="doing">
-                            {prescription.pushTargets?.[exIdx] != null
+                            {presOk && prescription?.pushTargets?.[exIdx] != null
                               ? `Pushing — go for ${prescription.pushTargets[exIdx]}${u.unit}`
                               : 'Pushing — cap off, your call'}
                           </Chip>
-                        : <Chip tone={prescription.held[exIdx] ? 'pending' : 'doing'}>
-                            {prescription.hints[exIdx]}
+                        : <Chip tone={isHeld ? 'pending' : 'doing'}>
+                            {hint}
                           </Chip>
                     )}
                     {/* Push is offered only where a cap is actually suppressing
                         the load. Everywhere else the athlete can simply log a
                         heavier set — there is nothing to override. */}
-                    {prescription?.held[exIdx] && (
+                    {isHeld && (
                       <button
                         type="button"
                         className="howto-tag"
@@ -2008,7 +2379,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                 // last session's matching set as the fallback for set 1. RPE is
                 // in-session only — it's the read we're measuring, not a default.
                 const inSessionPrev = setIdx > 0 ? logs[setIdx - 1] : null
-                const lastSame = (prevByExercise[exIdx] ?? [])[setIdx]
+                const lastSame = prevSets[setIdx]
                 const carry: Partial<SetLog> = {
                   // Set 1 with a target for today logs the target, not last
                   // week's weight — otherwise a one-tap check quietly undoes
@@ -2026,12 +2397,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                     log={log}
                     trackingType={trackingType}
                     u={u}
-                    best={bestByExercise[exIdx] ?? NO_BEST}
+                    best={best}
                     prescribedReps={pReps}
                     prescribedDuration={pDur}
                     prescribedLoad={pLoad}
                     carry={carry}
-                    prevText={formatPrev(trackingType, (prevByExercise[exIdx] ?? [])[setIdx], u)}
+                    prevText={formatPrev(trackingType, prevSets[setIdx], u)}
                     onChange={(updated) => handleSetChange(exIdx, setIdx, updated)}
                     onComplete={() => {
                       const secs = restSecondsFor(ex, prescription?.phaseName, trackingType)
@@ -2201,7 +2572,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           </Button>
           {/* Only for a session that exists nowhere but this draft. An edit
               already has a row; backing out of one changes nothing. */}
-          {!isEdit && hasAnyLog && (
+          {!isEdit && (hasAnyLog || hasSwap) && (
             <button
               type="button"
               className="workout-discard"
@@ -2249,6 +2620,21 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           insight={openExercise.insight}
           reading={openExercise.reading}
           onClose={() => setOpenExercise(null)}
+        />
+      )}
+
+      {/* Swap a movement for this session */}
+      {swapIdx != null && routine && (routine.exercises as ExerciseTemplate[])[swapIdx] && (
+        <SwapSheet
+          programmed={(routine.exercises as ExerciseTemplate[])[swapIdx]}
+          current={exercises[swapIdx]}
+          loggedSets={(setLogs[swapIdx] ?? []).filter(isLogged).length}
+          exclude={exercises.filter((_, i) => i !== swapIdx).map((e) => e.name)}
+          hasHistory={(n) => bestsByName[n]?.weight != null || !!prevByName[n]}
+          screened={onboardingStep !== 'first_session_pending'}
+          onPick={(n) => applySwap(swapIdx, n)}
+          onRevert={() => applySwap(swapIdx, null)}
+          onClose={() => setSwapIdx(null)}
         />
       )}
 

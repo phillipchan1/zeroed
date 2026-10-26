@@ -320,6 +320,12 @@ export interface ExerciseTemplate {
   reading?: boolean
   pattern_key?: string   // MovementPatternKey this reading probes
   reading_why?: string   // info-gain rationale, shown on tap
+  // Set on a stand-in, never on the program itself: the movement the athlete was
+  // PROGRAMMED to do in this slot when they swapped it for this one (the T-bar
+  // was taken; the hotel gym had dumbbells). Lives in the session's own
+  // exercises_snapshot, so the sets are filed under what was actually lifted
+  // while the slot still remembers what the plan was.
+  swapped_from?: string
 }
 
 export interface SetLog {
@@ -362,6 +368,11 @@ export interface ExerciseFeedback {
   // cap, which is what makes the result EVIDENCE rather than noise. A pushed set
   // that lands pain-free argues against the limiter; one that hurts argues for it.
   pushed?: boolean
+  // The stand-in the athlete swapped into this slot for THIS session (equipment
+  // taken, a different gym, a hotel). Rides in feedback for the same reason
+  // `pushed` does: the draft already persists it, so a swap made before the
+  // first set is still there when the session is resumed.
+  swap?: ExerciseTemplate
 }
 
 // ---- The clearance test (how a limiter is allowed to end) ------------------

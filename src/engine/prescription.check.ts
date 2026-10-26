@@ -160,12 +160,12 @@ eq(addressesLimiter('Back Squat', 'Upper Chain'), false, 'a squat is not shoulde
 eq(addressesLimiter('Romanian Deadlift', 'Posterior Chain'), true, 'RDL is posterior')
 eq(addressesLimiter('Overhead Press', 'Upper Chain'), true, 'OHP is upper chain')
 eq(addressesLimiter('Zercher Yoke Carry', 'Upper Chain'), false, 'a carry reads as core, not shoulder work')
-eq(addressesLimiter('Jefferson Curl', 'Upper Chain'), null, 'a movement the library has never seen has no opinion')
+eq(addressesLimiter('Atlas Stone Load', 'Upper Chain'), null, 'a movement the library has never seen has no opinion')
 
 const shoulder = insight()
 const stampedBench = ex('Bench Press', { insight_id: 'i1' })
 const stampedSquat = ex('Back Squat', { insight_id: 'i1' })
-const unknownLift = ex('Jefferson Curl', { insight_id: 'i1' })
+const unknownLift = ex('Atlas Stone Load', { insight_id: 'i1' })
 
 ok(isLiftHeld(stampedBench, shoulder, true), 'bench is held under a shoulder limiter')
 ok(!isLiftHeld(stampedSquat, shoulder, true), 'squat is NOT held under a shoulder limiter')

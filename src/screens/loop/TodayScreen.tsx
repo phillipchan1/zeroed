@@ -9,7 +9,7 @@ import {
   gatherSessionActuals, actualsFromPending,
   type PagerWeekView, type WeekPagerData, type SessionActuals,
 } from '../../engine'
-import { resolveTrackingType } from '../../engine/exerciseLibrary'
+import { effectiveTrackingType } from '../../engine/exerciseLibrary'
 import { tallySession } from '../../engine/volume'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
@@ -22,7 +22,15 @@ import {
 } from '../../lib/workoutOutbox'
 import { setIntendedDay, orderByPlannedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
 import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, LockOn } from '../../components/ui'
-import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate } from '../../types/database'
+import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate, WeeklyDirective } from '../../types/database'
+
+const PAGER_DIRECTIVE_TONE: Record<WeeklyDirective, 'done' | 'todo' | 'pending'> = {
+  PROGRESS: 'done',
+  HOLD: 'todo',
+  'HOLD (missed)': 'pending',
+  DELOAD: 'pending',
+  RECOVERY: 'pending',
+}
 
 interface TodayScreenProps {
   athleteId: string
@@ -178,6 +186,16 @@ function markRecapSeen(id: string): void {
   } catch { /* non-fatal */ }
 }
 
+// Athlete swiped back to "This week" after we auto-opened next week's preview.
+function weekPreviewDismissed(weekEnding: string): boolean {
+  try { return localStorage.getItem(`zeroed:week-preview-dismiss:${weekEnding}`) === '1' }
+  catch { return false }
+}
+function dismissWeekPreview(weekEnding: string): void {
+  try { localStorage.setItem(`zeroed:week-preview-dismiss:${weekEnding}`, '1') }
+  catch { /* non-fatal */ }
+}
+
 // ---- one session row in the week list -------------------------------------
 
 type SessionState =
@@ -225,7 +243,7 @@ function PerformedRow({
   logs: SetLog[]
   u: UnitContext
 }) {
-  const t = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
+  const t = effectiveTrackingType(ex)
   const done = logs.filter(isSetLogged)
   const rpes = done.map((s) => s.rpe).filter((r): r is number => r != null)
   const avgRpe = rpes.length ? Math.round(rpes.reduce((a, b) => a + b, 0) / rpes.length) : null
@@ -235,7 +253,14 @@ function PerformedRow({
   return (
     <div style={{ padding: '14px 0', borderBottom: '1px solid var(--line)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-        <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
+        <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
+          {ex.name}
+          {ex.swapped_from && (
+            <span className="text-xs text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
+              Swapped in for {ex.swapped_from}
+            </span>
+          )}
+        </span>
         <span className="num text-xs" style={{ whiteSpace: 'nowrap', color: tone }}>
           {done.length}/{ex.sets} sets
         </span>
@@ -352,7 +377,14 @@ function SessionSheet({
                   gap: 14, padding: '12px 0', borderBottom: '1px solid var(--line)',
                 }}
               >
-                <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
+                <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
+          {ex.name}
+          {ex.swapped_from && (
+            <span className="text-xs text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
+              Swapped in for {ex.swapped_from}
+            </span>
+          )}
+        </span>
                 <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
                   {ex.sets}×{ex.reps}
                   {target != null ? ` · ${target}${u.unit}` : ex.load ? ` · ${ex.load}` : ''}
@@ -472,6 +504,17 @@ function PagerWeekBody({ week, mode, onTapSession }: {
   }
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
+      {mode === 'future' && week.directive && (
+        <div className="card">
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+            <Chip tone={PAGER_DIRECTIVE_TONE[week.directive] ?? 'todo'}>{week.directive}</Chip>
+            {week.provisional && <Chip tone="pending">Provisional</Chip>}
+          </div>
+          {week.rationale && (
+            <p className="text-sm text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>{week.rationale}</p>
+          )}
+        </div>
+      )}
       {week.sessions.map((s, i) => (
         <div
           key={`${s.routineId}-${i}`}
@@ -840,6 +883,18 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // the CTA so it reads "done" rather than inviting a second close.
   const currentWeekEnding = localIso(weekDays[6].date)
   const weekClosed = (latestReview?.weekEnding ?? null) === currentWeekEnding
+  const weekLoggedOut = doneCount >= plannedThisWeek
+  const canPreviewNextWeek = (pager?.future?.length ?? 0) > 0
+
+  // Finished the week (or closed it) → land on next week's preview unless they
+  // explicitly swiped back to this week.
+  useEffect(() => {
+    if (loading || !canPreviewNextWeek) return
+    if (!weekLoggedOut && !weekClosed) return
+    if (weekPreviewDismissed(currentWeekEnding)) return
+    if (weekOffset !== 0) return
+    setWeekOffset(1)
+  }, [loading, canPreviewNextWeek, weekLoggedOut, weekClosed, currentWeekEnding, weekOffset])
 
   async function handleCloseWeek(injury: boolean) {
     if (closing) return
@@ -947,7 +1002,10 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             type="button" aria-label="Previous week"
             className="pager__btn"
             disabled={wOffset <= minWeekOffset}
-            onClick={() => setWeekOffset(wOffset - 1)}
+            onClick={() => {
+              if (wOffset === 1 && (weekLoggedOut || weekClosed)) dismissWeekPreview(currentWeekEnding)
+              setWeekOffset(wOffset - 1)
+            }}
           >
             <ChevronLeft size={22} strokeWidth={2} />
           </button>
