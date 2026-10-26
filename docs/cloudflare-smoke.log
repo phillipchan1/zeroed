@@ -1,5 +1,6 @@
-# Local smoke — 2026-10-26
-# npm run type-check && npm run lint && npm run check && npm run build && npx wrangler dev --ip 127.0.0.1 --port 8787
+# Local smoke — 2026-10-26 (QA follow-up)
+# npm run type-check && npm run lint && npm run check && npm run check:isolation-mutation
+# npm run build && npx wrangler dev --ip 127.0.0.1 --port 8787
 
 ## type-check / lint / check
 npm run type-check   # pass (tsc client + worker)
@@ -16,49 +17,50 @@ npm run check
   ✓ all 50 strength-baseline checks passed
   ✓ all 85 unit checks passed
   weekOrder.check: ok
-  43 checks, 0 failed
-  access isolation: ok
+  55 checks, 0 failed
+  access isolation: ok   (PGlite, two athletes, store/edits query paths)
+
+npm run check:isolation-mutation
+=== M1 delete loadWorkout athlete_id filter ===
+55 checks, 4 failed
+  FAIL loadWorkout: A asking for B workout_id gets null
+  FAIL loadWorkout: B asking for A workout_id gets null
+  FAIL MCP get_workout: A asking for B is a miss
+  FAIL post-write: B workout still hidden from A
+M1 delete loadWorkout athlete_id filter: failed as expected (exit 1)
+
+=== M2 set athlete_id filters to TRUE ===
+55 checks, 23 failed
+  FAIL programIds: A sees only own program
+  FAIL loadInsights: A cannot read B claim
+  FAIL loadWorkouts: A cannot list B workout
+  FAIL loadWorkout: A asking for B workout_id gets null
+  FAIL loadLiftHistory: A cannot see B deadlifts
+  FAIL writeDraftInPlace: A cannot UPDATE B routine
+  FAIL writeDraftInPlace: A cannot INSERT onto B program
+  … (23 total)
+M2 set athlete_id filters to TRUE: failed as expected (exit 1)
+mutation proof: ok (M1 and M2 failed as expected)
 
 ## wrangler dev
-Your Worker has access to the following bindings:
-  env.HYPERDRIVE         Hyperdrive Config       local
-  env.ASSETS             Assets                  local
-[wrangler:info] ✨ Parsed 8 valid header rules.
-[wrangler:info] Ready on http://127.0.0.1:8787
+GET /                200 text/html   Cache-Control: max-age=0, must-revalidate
+                                     HSTS + Access-Control-Allow-Origin: *
+                                     (no XFO / XSS / Permissions / Referrer / nosniff)
+GET /app/today       200 text/html   same ETag as /  (SPA fallback)
+GET /api/health      200 {"ok":true,"service":"zeroed","runtime":"cloudflare-workers"}
+                                     HSTS + X-Content-Type-Options: nosniff
+POST /api/agent      500 {"ok":false,"error":"server not configured"}  (no OPENAI_API_KEY)
+POST /functions/v1/agent
+                     500 {"ok":false,"error":"server not configured"}  (worker, not assets 405)
+POST /functions/v1/mcp
+                     401 {"error":"Missing bearer token"}  Accept: text/event-stream
+GET /assets/*.js     200 Cache-Control: public, max-age=0, must-revalidate
+GET /assets/nope-missing.js
+                     404 text/plain  Cache-Control: max-age=0, must-revalidate
 
-GET /
-  HTTP/1.1 200 OK
-  Content-Type: text/html; charset=utf-8
-  Cache-Control: public, max-age=0, must-revalidate
-  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
-  x-content-type-options: nosniff
-  x-frame-options: DENY
-  referrer-policy: strict-origin-when-cross-origin
-  <title>Zeroed</title>
-
-GET /app/today
-  HTTP/1.1 200 OK
-  Content-Type: text/html; charset=utf-8
-  Cache-Control: public, max-age=0, must-revalidate
-  <title>Zeroed</title>
-  (SPA fallback — same ETag as /)
-
-GET /api/health
-  HTTP/1.1 200 OK
-  {"ok":true,"service":"zeroed","runtime":"cloudflare-workers"}
-
-POST /api/agent  (no OPENAI_API_KEY)
-  HTTP/1.1 500
-  {"ok":false,"error":"server not configured"}
-
-POST /api/mcp  Accept: text/event-stream  (no bearer)
-  HTTP/1.1 401
-  WWW-Authenticate: Bearer realm="zeroed"
-  {"error":"Missing bearer token"}
-
-GET /assets/index-*.js
-  HTTP/1.1 200 OK
-  Cache-Control: public, max-age=31536000, immutable
+Better Auth client is a dynamic Vite chunk (config-*.js + index-Z6*.js via
+__vite__mapDeps). index.html only loads the main app chunk — supabase-path
+does not execute better-auth.
 
 Not run (would need Neon + secrets; not part of this draft):
   Better Auth OTP send/verify, authenticated agent, MCP SSE body with a live token.
