@@ -40,7 +40,7 @@ if (pbx) {
   if (/MARKETING_VERSION = 0\.1\.0;/.test(pbx)) ok('pbxproj MARKETING_VERSION 0.1.0')
   else fail('pbxproj MARKETING_VERSION', 'expected 0.1.0 (package.json major.minor)')
 
-  if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (CI overrides for manual fallback)')
+  if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (CI uses cloud-managed ASC signing)')
   else fail('pbxproj CODE_SIGN_STYLE')
 }
 
@@ -121,17 +121,34 @@ if (workflow) {
   } else fail('workflow missing-secrets skip')
 
   for (const secret of [
-    'APPSTORE_KEY_ID',
-    'APPSTORE_ISSUER_ID',
-    'APPSTORE_PRIVATE_KEY',
+    'ASC_API_KEY_ID',
+    'ASC_API_ISSUER_ID',
+    'ASC_API_KEY_P8',
     'APPLE_TEAM_ID',
-    'IOS_CERTIFICATE',
-    'IOS_CERTIFICATE_PASSWORD',
-    'IOS_MOBILE_PROVISION',
   ]) {
     if (workflow.includes(secret)) ok(`workflow references ${secret}`)
     else fail(`workflow missing secret ${secret}`)
   }
+
+  for (const dropped of [
+    'IOS_CERTIFICATE',
+    'IOS_CERTIFICATE_PASSWORD',
+    'IOS_MOBILE_PROVISION',
+    'APPSTORE_KEY_ID',
+    'APPSTORE_ISSUER_ID',
+    'APPSTORE_PRIVATE_KEY',
+  ]) {
+    if (workflow.includes(dropped)) fail(`workflow still references dropped secret ${dropped}`)
+    else ok(`workflow dropped ${dropped}`)
+  }
+
+  if (workflow.includes('-allowProvisioningUpdates') && workflow.includes('-authenticationKeyPath')) {
+    ok('workflow uses automatic signing with ASC API key')
+  } else fail('workflow automatic signing / authenticationKey flags')
+
+  if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete App Store Connect API key')) {
+    ok('workflow deletes the .p8 in an always() step')
+  } else fail('workflow .p8 cleanup')
 }
 
 const exportScript = join(root, 'scripts/ios-write-export-options.sh')

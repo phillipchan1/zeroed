@@ -71,9 +71,12 @@ On every push to `master` (and **Run workflow**):
    the build bakes `VITE_SUPABASE_*` (today's path). When it is set to the
    Worker URL at cutover, those Supabase values are **not** baked. See
    [`cloudflare-cutover.md`](./cloudflare-cutover.md) § iOS TestFlight at cutover.
-5. `xcodebuild archive` + `-exportArchive` with
-   `method=app-store-connect` and **manual** signing
-   (`IOS_CERTIFICATE` + `IOS_MOBILE_PROVISION`).
+5. `xcodebuild archive` + `-exportArchive` with `method=app-store-connect`,
+   `CODE_SIGN_STYLE=Automatic`, `-allowProvisioningUpdates`, and the App
+   Store Connect API key (`-authenticationKeyPath` / `-authenticationKeyID`
+   / `-authenticationKeyIssuerID`). Cloud-managed distribution signing —
+   no `.p12`, no hand-made provisioning profile. The `.p8` is written to a
+   temp file and deleted in an `always()` step.
 6. `xcrun altool --upload-app` → App Store Connect → **Internal** TestFlight.
    The workflow does not submit for App Review and does not add external testers.
 
@@ -105,45 +108,34 @@ Already enrolled for Nuvo. Same team.
 
 Do **not** Submit for Review.
 
-### 4 · App Store Connect API key (reuse Nuvo's)
+### 4 · App Store Connect API key
 
-Same account-level key Nuvo already uses. If the zeroed repo does not inherit
-org/account secrets, copy these **names** from Nuvo:
+Create an App Store Connect API key (Users and Access → Integrations →
+App Store Connect API) with **Admin** or **App Manager** so
+`-allowProvisioningUpdates` can create the cloud-managed distribution
+profile and certificate. Download the `.p8` once.
 
 | Secret | Required | Value |
 |---|---|---|
-| `APPLE_TEAM_ID` | yes | 10-char Team ID (Membership page) |
-| `APPSTORE_KEY_ID` | yes | App Store Connect API Key ID |
-| `APPSTORE_ISSUER_ID` | yes | App Store Connect Issuer ID |
-| `APPSTORE_PRIVATE_KEY` | yes | Base64 of the `.p8` file |
-| `IOS_CERTIFICATE` | yes | Base64 of Apple Distribution `.p12` |
-| `IOS_CERTIFICATE_PASSWORD` | yes | `.p12` export password |
+| `ASC_API_KEY_ID` | yes | App Store Connect API Key ID |
+| `ASC_API_ISSUER_ID` | yes | App Store Connect Issuer ID |
+| `ASC_API_KEY_P8` | yes | Raw PEM of the `.p8`, **or** base64 of that file |
+| `APPLE_TEAM_ID` | yes | 10-char Team ID (Membership page) — passed as `DEVELOPMENT_TEAM` |
 
-`base64 -i AuthKey_XXXXXXXXXX.p8 | pbcopy` if you need to re-encode the key.
+`base64 -i AuthKey_XXXXXXXXXX.p8 | pbcopy` if you prefer to store it encoded.
+The workflow accepts either form and writes the PEM to `$RUNNER_TEMP`, then
+deletes it (and the altool copy) in an `always()` step.
 
-> **Do not reuse the macOS Developer ID cert.** App Store / TestFlight
-> requires **Apple Distribution** — Nuvo's iOS `IOS_CERTIFICATE` is the
-> right one; the desktop `release.yml` cert is not.
+No `.p12`. No hand-made `.mobileprovision`. Xcode's automatic signing
+creates the App Store Connect distribution profile against `app.zeroed.app`.
 
-### 5 · NEW secrets / profile / variable (Zeroed-only)
-
-Nuvo's App Store provisioning profile is bound to `day.nuvo.app` and
-**cannot** sign Zeroed. Create an App Store Connect **distribution**
-profile for `app.zeroed.app` and add the web build env:
+### 5 · NEW secrets / variable (Zeroed-only)
 
 | Name | Kind | Why it's new |
 |---|---|---|
 | `VITE_SUPABASE_URL` | secret | Zeroed's Supabase project (same value as Vercel Production). Used only while `VITE_API_BASE_URL` is empty. |
 | `VITE_SUPABASE_ANON_KEY` | secret | Zeroed's anon key (same value as Vercel Production). Used only while `VITE_API_BASE_URL` is empty. |
-| `IOS_MOBILE_PROVISION` | secret | Base64 of an **App Store Connect** distribution profile for `app.zeroed.app` |
 | `VITE_API_BASE_URL` | **variable** | Leave empty until Cloudflare cutover. Then set to `https://<worker>/api`. See [`cloudflare-cutover.md`](./cloudflare-cutover.md). |
-
-To make the distribution profile:
-
-1. Developer portal → **Profiles** → **+** → **App Store Connect**.
-2. App ID `app.zeroed.app` → link the **Apple Distribution** cert.
-3. Download `.mobileprovision`, then
-   `base64 -i Zeroed.mobileprovision | pbcopy`.
 
 Settings → Secrets and variables → Actions on **phillipchan1/zeroed**.
 This repo does not change secrets for you. Until they exist, the
@@ -164,7 +156,7 @@ App Review for personal dogfooding.
 
 ## Trigger the first build
 
-1. Finish steps 2–5 above (App ID, ASC app record, distribution profile, secrets).
+1. Finish steps 2–5 above (App ID, ASC app record, API key secrets).
 2. Merge to `master` (automatic) **or** GitHub → **phillipchan1/zeroed** →
    **Actions** → **iOS TestFlight** → **Run workflow**. Dispatch from this
    PR's branch to smoke-test the pipeline before merge.
@@ -204,8 +196,8 @@ python3 scripts/gen-icons.py
 | Symptom | Fix |
 |---|---|
 | Workflow skips (green) | Missing secrets listed in the **Check TestFlight secrets** notice |
-| Workflow fails at signing | Check `APPLE_TEAM_ID` and the three `IOS_*` secrets |
-| `No profiles for app.zeroed.app` | Create the App ID + wait a few minutes; or add `IOS_MOBILE_PROVISION` |
+| Workflow fails at signing | Check `ASC_API_KEY_*`, `APPLE_TEAM_ID`, and that the key is Admin / App Manager |
+| `No profiles for app.zeroed.app` | Register the App ID, then re-run — automatic signing creates the profile |
 | Upload rejected (SDK too old) | Bump `runs-on:` to a newer `macos-*` in `ios-release.yml` |
 | Build not in TestFlight | App Store Connect → Activity; check email for compliance questions |
 | Encryption export questionnaire | `ITSAppUsesNonExemptEncryption=false` is set in `ios/App/App/Info.plist` |
@@ -216,8 +208,6 @@ python3 scripts/gen-icons.py
 
 ## Rotating credentials
 
-Same as Nuvo: new ASC API key → update the three `APPSTORE_*` secrets and
-revoke the old key. Distribution cert renews yearly; re-export `.p12` and
-update `IOS_CERTIFICATE` / `IOS_CERTIFICATE_PASSWORD`. The Zeroed
-provisioning profile is independent of Nuvo's — regenerate it if the cert
-or App ID changes.
+New ASC API key → update `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`, and
+`ASC_API_KEY_P8`, then revoke the old key. Cloud-managed distribution
+certs and profiles are renewed by Apple; nothing in this repo stores them.
