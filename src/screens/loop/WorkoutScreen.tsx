@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, Check, Plus, Info, X, MessageCircle, Target, ArrowLeftRight } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Check, Plus, Info, X, MessageCircle, Target, ArrowLeftRight, PlayCircle } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import {
   restoreDraft, loadDraftLocal, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
@@ -28,6 +28,8 @@ import { restSecondsFor, adjustRest, formatRest } from '../../engine/restTimer'
 import { fireRestAlert, playSetClick, playRecord } from '../../lib/restAlert'
 import { tick, record } from '../../lib/haptics'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
+import { getMovementDemo, videoSearchUrl } from '../../engine/movementDemos'
+import { MovementDemo } from '../../components/MovementDemo'
 import { unitContext, convertWeight, type UnitContext } from '../../lib/units'
 import type { FinishedSession } from '../../components/SessionZeroed'
 import { fetchCoachView } from './CoachScreen'
@@ -592,7 +594,8 @@ function ClearanceSheet({ clearance, onClose }: { clearance: ClearanceView; onCl
 // The "I don't know how to do this" surface. Universal how-to/watch-for comes
 // from the hardcoded coaching library; the program-specific cue the coach wrote
 // for THIS lift is folded in underneath, so it reads as guidance for your plan,
-// not a generic wiki entry.
+// not a generic wiki entry. The main lifts open on an animated figure of the
+// rep; every lift gets a link out to video demos.
 
 interface ExerciseSheetProps {
   name: string
@@ -610,9 +613,15 @@ interface ExerciseSheetProps {
  * lift", so they're one surface now, sectioned.
  */
 function ExerciseSheet({ name, note, cue, insight, reading, onClose }: ExerciseSheetProps) {
+  const demo = getMovementDemo(name)
   const hasAnything = note || cue || insight || reading
   return (
     <Sheet title={name} onClose={onClose}>
+      {demo && <MovementDemo demo={demo} />}
+      <a className="video-link" href={videoSearchUrl(name)} target="_blank" rel="noopener noreferrer">
+        <PlayCircle size={16} strokeWidth={2} /> Watch video demos
+      </a>
+
       {note && (
         <div style={{ marginBottom: 24 }}>
           <p className="section-header" style={{ marginBottom: 12 }}>How to</p>
@@ -2295,12 +2304,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                 : prescription?.targets?.[exIdx] ?? null)
             : null
           const pLoad = rxTarget ?? leadingInt(ex.load ?? undefined)
-          // Details sheet: the hardcoded how-to library, the program-specific
-          // cue, the insight this lift serves, and the reading note. Show the
-          // affordance whenever any of them exists.
+          // Details sheet: the movement demo, the hardcoded how-to library, the
+          // program-specific cue, the insight this lift serves, and the reading
+          // note. Always offered — every lift at least links out to video demos.
           const coachNote = getCoachingNote(ex.name)
-          const hasDetails =
-            !!coachNote || !!ex.cue || !!(ex.insight_id && insightMap[ex.insight_id]) || !!ex.reading
           const isPushed = feedback[exIdx]?.pushed === true
 
           return (
@@ -2328,23 +2335,21 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                   </button>
                   {/* One affordance, not three. Everything about this lift —
                       how-to, faults, your cue, the read it serves — is behind it. */}
-                  {hasDetails && (
-                    <button
-                      type="button"
-                      className="howto-tag"
-                      style={{ flexShrink: 0 }}
-                      aria-label={`About ${ex.name}`}
-                      onClick={() => setOpenExercise({
-                        name: ex.name,
-                        note: coachNote,
-                        cue: ex.cue ?? null,
-                        insight: (ex.insight_id ? insightMap[ex.insight_id] : null) ?? null,
-                        reading: ex.reading ? (ex.reading_why ?? '') : null,
-                      })}
-                    >
-                      <Info size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Details
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    className="howto-tag"
+                    style={{ flexShrink: 0 }}
+                    aria-label={`About ${ex.name}`}
+                    onClick={() => setOpenExercise({
+                      name: ex.name,
+                      note: coachNote,
+                      cue: ex.cue ?? null,
+                      insight: (ex.insight_id ? insightMap[ex.insight_id] : null) ?? null,
+                      reading: ex.reading ? (ex.reading_why ?? '') : null,
+                    })}
+                  >
+                    <Info size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Details
+                  </button>
                 </div>
                 {(ex.reading || hint || isHeld) && (
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 10, flexWrap: 'wrap' }}>

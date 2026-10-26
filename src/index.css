@@ -3501,3 +3501,100 @@ textarea.input {
   ::view-transition-old(root),
   ::view-transition-new(root) { animation: none; }
 }
+
+/* --- Movement demo (exercise Details sheet) ------------------------------- */
+/* The side-view figure looping through a rep. Bone-white figure, the far-side
+   limbs ghosted behind it, the load in signal yellow with its path traced —
+   the bar path is the lesson. Colours live here, not in SVG attributes. */
+.demo {
+  display: block;
+  width: 100%;
+  padding: 0;
+  margin: 0 0 var(--sp-3);
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text);
+  font: inherit;
+  -webkit-tap-highlight-color: transparent;
+}
+.demo__svg {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 230px;
+}
+.demo__cue {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 10px 14px 12px;
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  min-height: 3.6em;
+}
+.demo__step {
+  flex-shrink: 0;
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  color: var(--signal);
+  letter-spacing: 0.06em;
+}
+.demo__paused {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: var(--fs-micro);
+  color: var(--text-dim);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.demo-grid line { stroke: #F5F5F5; stroke-opacity: 0.04; stroke-width: 0.4; }
+.demo-floor { stroke: var(--line); stroke-width: 1.2; }
+.demo-prop { stroke: #3A3A3A; stroke-width: 2.4; fill: var(--surface); stroke-linecap: round; }
+.demo-prop--rail { stroke: var(--text-dim); stroke-width: 3; }
+.demo-bone polyline, .demo-bone line {
+  fill: none;
+  stroke: var(--text);
+  stroke-width: 5.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.demo-bone--far polyline { stroke: var(--text-dim); stroke-opacity: 0.45; }
+.demo-head { fill: var(--text); }
+.demo-load circle, .demo-load line {
+  fill: rgba(10, 10, 10, 0.55);
+  stroke: var(--signal);
+  stroke-width: 2;
+}
+.demo-load .demo-load__hub { fill: var(--signal); stroke: none; }
+.demo-trace {
+  fill: none;
+  stroke: var(--signal);
+  stroke-opacity: 0.45;
+  stroke-width: 1;
+  stroke-dasharray: 2 2.5;
+}
+.demo-cable { stroke: var(--text-dim); stroke-width: 0.8; stroke-opacity: 0.7; }
+
+.video-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 14px;
+  margin-bottom: var(--sp-6);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  text-decoration: none;
+}
+.video-link:hover { border-color: var(--text-dim); }
