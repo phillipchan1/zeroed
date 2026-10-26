@@ -1,21 +1,27 @@
-// Standalone access-isolation check against a real Postgres (PGlite).
+// Standalone access-isolation check against throwaway Postgres
+// (ZEROED_TEST_DATABASE_URL) or PGlite when that URL is unset.
 // Run: node --experimental-strip-types worker/src/access.check.ts
 // Proves: athlete A cannot read, edit, or delete athlete B's rows on every
 // store / edits query path. Mutating those SQL filters must make this fail.
 
-import { PGlite } from '@electric-sql/pglite'
 import {
   applyEdits,
+  assertOwnedForeignKeys,
+  athleteOwnsPhase,
+  athleteOwnsProgram,
+  athleteOwnsRoutine,
+  insertOwnedRoutine,
   insertProgramRevision,
   liveToDraft,
   rollbackPhaseWeekEnd,
   scheduleDraftForNextWeek,
+  updateOwnedRoutineFks,
+  upsertOwnedRoutine,
   writeDraftInPlace,
   type EditInput,
 } from './edits.ts'
-import { applyIsolationSchema } from './isolationDb.ts'
-import { resolveMcpToken } from './mcpToken.ts'
-import { makePgliteSql } from './pgliteSql.ts'
+import { openIsolationHarness } from './isolationDb.ts'
+import { resolveMcpToken, sha256Hex } from './mcpToken.ts'
 import {
   loadAthlete,
   loadInsights,
@@ -56,6 +62,7 @@ const A = '11111111-1111-1111-1111-111111111111'
 const B = '22222222-2222-2222-2222-222222222222'
 const PROG_A = '33333333-3333-3333-3333-333333333333'
 const PROG_B = '44444444-4444-4444-4444-444444444444'
+const PHASE_A = '55555555-5555-5555-5555-555555555555'
 const PHASE_B = '66666666-6666-6666-6666-666666666666'
 const ROUTINE_A = '77777777-7777-7777-7777-777777777777'
 const ROUTINE_B = '88888888-8888-8888-8888-888888888888'
@@ -63,20 +70,19 @@ const WORKOUT_A = '99999999-9999-9999-9999-999999999999'
 const WORKOUT_B = 'bbbb9999-9999-4999-8999-999999999999'
 const INSIGHT_B = 'bbbb2222-0000-4000-8000-000000000001'
 
-const db = new PGlite()
-await applyIsolationSchema(db)
-const sql = makePgliteSql(db)
+const harness = await openIsolationHarness()
+const sql = harness.sql
 const storeA = makeStore(sql, A)
 const storeB = makeStore(sql, B)
 
 async function count(table: string, where: string, params: unknown[]): Promise<number> {
-  const result = await db.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ${table} WHERE ${where}`, params)
-  return Number(result.rows[0]?.n ?? 0)
+  const rows = await harness.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ${table} WHERE ${where}`, params)
+  return Number(rows[0]?.n ?? 0)
 }
 
 async function scalar<T>(text: string, params: unknown[] = []): Promise<T | undefined> {
-  const result = await db.query<Record<string, T>>(text, params)
-  const row = result.rows[0]
+  const rows = await harness.query<Record<string, T>>(text, params)
+  const row = rows[0]
   if (!row) return undefined
   return Object.values(row)[0]
 }
@@ -174,6 +180,20 @@ const [bTok] = await sql<{ athlete_id: string }[]>`
 `
 ok(bTok?.athlete_id === B, 'mcp_token lookup by hash does not leak A')
 
+const revokedPlain = 'zeroed-mcp-revoked-access-check'
+const expiredPlain = 'zeroed-mcp-expired-access-check'
+await sql`UPDATE mcp_token SET token_hash = ${await sha256Hex(revokedPlain)} WHERE name = ${'revoked-a'}`
+await sql`UPDATE mcp_token SET token_hash = ${await sha256Hex(expiredPlain)} WHERE name = ${'expired-a'}`
+ok(await resolveMcpToken(sql, revokedPlain) === null, 'resolveMcpToken: revoked token is null')
+ok(await resolveMcpToken(sql, expiredPlain) === null, 'resolveMcpToken: expired token is null')
+ok(await athleteOwnsProgram(storeA, PROG_A) && !(await athleteOwnsProgram(storeA, PROG_B)), 'athleteOwnsProgram: A cannot claim B program')
+ok(await athleteOwnsPhase(storeA, PHASE_A) && !(await athleteOwnsPhase(storeA, PHASE_B)), 'athleteOwnsPhase: A cannot claim B phase')
+ok(await athleteOwnsRoutine(storeA, ROUTINE_A) && !(await athleteOwnsRoutine(storeA, ROUTINE_B)), 'athleteOwnsRoutine: A cannot claim B routine')
+ok(await assertOwnedForeignKeys(storeA, { programId: PROG_A, phaseId: PHASE_A, routineId: ROUTINE_A }), 'assertOwnedForeignKeys: A own tree')
+ok(!(await assertOwnedForeignKeys(storeA, { programId: PROG_B })), 'assertOwnedForeignKeys: A cannot take B program')
+ok(!(await assertOwnedForeignKeys(storeA, { phaseId: PHASE_B })), 'assertOwnedForeignKeys: A cannot take B phase')
+ok(!(await assertOwnedForeignKeys(storeA, { routineId: ROUTINE_B })), 'assertOwnedForeignKeys: A cannot take B routine')
+
 // --- edits / writes ---
 if (!liveA || !liveB) throw new Error('expected both live programs')
 
@@ -213,6 +233,108 @@ const insertErrors: string[] = []
 const planted = await writeDraftInPlace(storeA, forgedLive, insertDraft, insertErrors)
 ok(planted === 0, 'writeDraftInPlace: A cannot INSERT onto B program')
 ok((await count('routine', 'program_id = $1', [PROG_B])) === 1, 'writeDraftInPlace: B still has one routine')
+
+const phasePlantErrors: string[] = []
+const plantedOnBPhase = await writeDraftInPlace(
+  storeA,
+  { ...liveA, phaseId: PHASE_B },
+  insertDraft,
+  phasePlantErrors,
+)
+ok(plantedOnBPhase === 0, 'writeDraftInPlace: A cannot INSERT routine onto B phase')
+ok((await count('routine', 'phase_id = $1', [PHASE_B])) === 1, 'writeDraftInPlace: B phase still has one routine')
+
+const NEW_ROUTINE = 'cccccccc-0000-4000-8000-000000000001'
+ok(
+  (await insertOwnedRoutine(storeA, {
+    programId: PROG_B,
+    phaseId: PHASE_A,
+    name: 'A on B program',
+    sessionType: 'strength',
+    exercises: [],
+    intent: 'steal',
+    intendedDow: 2,
+  })) === null,
+  'insertOwnedRoutine: A cannot insert onto B program + A phase',
+)
+ok(
+  (await insertOwnedRoutine(storeA, {
+    programId: PROG_A,
+    phaseId: PHASE_B,
+    name: 'A on B phase',
+    sessionType: 'strength',
+    exercises: [],
+    intent: 'steal',
+    intendedDow: 2,
+  })) === null,
+  'insertOwnedRoutine: A cannot insert onto A program + B phase',
+)
+ok((await count('routine', 'name = $1', ['A on B program'])) === 0, 'insertOwnedRoutine: B-program name absent')
+ok((await count('routine', 'name = $1', ['A on B phase'])) === 0, 'insertOwnedRoutine: B-phase name absent')
+
+const upsertStealId = await upsertOwnedRoutine(storeA, {
+  id: ROUTINE_B,
+  programId: PROG_A,
+  phaseId: PHASE_A,
+  name: 'stolen upsert',
+  sessionType: 'strength',
+  exercises: [],
+  intent: 'steal',
+  intendedDow: 1,
+})
+ok(upsertStealId === 0, 'upsertOwnedRoutine: A cannot take B routine id')
+ok((await scalar<string>('SELECT name FROM routine WHERE id = $1', [ROUTINE_B])) === 'B day', 'upsertOwnedRoutine: B name unchanged')
+
+const upsertBProgram = await upsertOwnedRoutine(storeA, {
+  id: NEW_ROUTINE,
+  programId: PROG_B,
+  phaseId: PHASE_A,
+  name: 'upsert B program',
+  sessionType: 'strength',
+  exercises: [],
+  intent: 'steal',
+  intendedDow: 2,
+})
+ok(upsertBProgram === 0, 'upsertOwnedRoutine: A cannot insert onto B program')
+ok((await count('routine', 'id = $1', [NEW_ROUTINE])) === 0, 'upsertOwnedRoutine: new id on B program absent')
+
+const upsertBPhase = await upsertOwnedRoutine(storeA, {
+  id: NEW_ROUTINE,
+  programId: PROG_A,
+  phaseId: PHASE_B,
+  name: 'upsert B phase',
+  sessionType: 'strength',
+  exercises: [],
+  intent: 'steal',
+  intendedDow: 2,
+})
+ok(upsertBPhase === 0, 'upsertOwnedRoutine: A cannot insert onto B phase')
+ok((await count('routine', 'name = $1', ['upsert B phase'])) === 0, 'upsertOwnedRoutine: B-phase upsert absent')
+
+ok(
+  (await updateOwnedRoutineFks(storeA, ROUTINE_A, { programId: PROG_B, phaseId: PHASE_A })) === 0,
+  'updateOwnedRoutineFks: A cannot repoint own routine to B program',
+)
+ok(
+  (await scalar<string>('SELECT program_id::text FROM routine WHERE id = $1', [ROUTINE_A])) === PROG_A,
+  'updateOwnedRoutineFks: A routine still on A program',
+)
+ok(
+  (await updateOwnedRoutineFks(storeA, ROUTINE_A, { programId: PROG_A, phaseId: PHASE_B })) === 0,
+  'updateOwnedRoutineFks: A cannot repoint own routine to B phase',
+)
+ok(
+  (await scalar<string>('SELECT phase_id::text FROM routine WHERE id = $1', [ROUTINE_A])) === PHASE_A,
+  'updateOwnedRoutineFks: A routine still on A phase',
+)
+ok(
+  (await updateOwnedRoutineFks(storeA, ROUTINE_B, { programId: PROG_A, phaseId: PHASE_A })) === 0,
+  'updateOwnedRoutineFks: A cannot steal B routine onto A program',
+)
+ok(
+  (await scalar<string>('SELECT program_id::text FROM routine WHERE id = $1', [ROUTINE_B])) === PROG_B,
+  'updateOwnedRoutineFks: B routine still on B program',
+)
 
 const rename: EditInput[] = [{
   type: 'update_session',
@@ -281,6 +403,28 @@ ok(
 )
 
 const bRevs = await count('program_revision', 'program_id = $1', [PROG_B])
+const stolenRevOnAPhase = await insertProgramRevision(storeA, { programId: PROG_B, phaseId: PHASE_A }, {
+  trigger: 'editor',
+  effectiveOn: '2026-10-26',
+  requests: ['steal-program'],
+  snapshot: [],
+  diff: {},
+  summary: 'stolen-program',
+})
+ok(stolenRevOnAPhase === 0, 'insertProgramRevision: A cannot write B program + A phase')
+ok((await count('program_revision', 'summary = $1', ['stolen-program'])) === 0, 'insertProgramRevision: stolen-program absent')
+
+const stolenRevOnBPhase = await insertProgramRevision(storeA, { programId: PROG_A, phaseId: PHASE_B }, {
+  trigger: 'editor',
+  effectiveOn: '2026-10-26',
+  requests: ['steal-phase'],
+  snapshot: [],
+  diff: {},
+  summary: 'stolen-phase',
+})
+ok(stolenRevOnBPhase === 0, 'insertProgramRevision: A cannot write A program + B phase')
+ok((await count('program_revision', 'summary = $1', ['stolen-phase'])) === 0, 'insertProgramRevision: stolen-phase absent')
+
 const stolenRev = await insertProgramRevision(storeA, { programId: PROG_B, phaseId: PHASE_B }, {
   trigger: 'editor',
   effectiveOn: '2026-10-26',
@@ -344,9 +488,11 @@ ok((await count('insight', 'athlete_id = $1', [B])) === 1, 'DELETE insight: B in
 ok((await loadWorkout(storeA, WORKOUT_A))?.workout.routine_id === ROUTINE_A, 'post-write: A workout still readable')
 ok((await loadWorkout(storeA, WORKOUT_B)) === null, 'post-write: B workout still hidden from A')
 
-console.log(`${checks} checks, ${fails.length} failed`)
+await harness.close()
+
+console.log(`${checks} checks, ${fails.length} failed (${harness.backend})`)
 if (fails.length) {
   for (const f of fails) console.error('  FAIL', f)
   process.exit(1)
 }
-console.log('access isolation: ok')
+console.log(`access isolation: ok (${harness.backend})`)

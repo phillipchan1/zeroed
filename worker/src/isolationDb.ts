@@ -1,11 +1,18 @@
 /**
- * Apply supabase/migrations onto PGlite, then the isolation seed.
+ * Apply supabase/migrations + isolation seed onto PGlite or throwaway Postgres.
  * Test-only (excluded from the Worker tsconfig).
+ *
+ * Real-PG wipes use ZEROED_TEST_DATABASE_URL only — never DATABASE_URL.
  */
 import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import type { PGlite } from '@electric-sql/pglite'
+import { PGlite } from '@electric-sql/pglite'
+import { Client } from 'pg'
+import postgres from 'postgres'
+import { isLoopbackHostname } from './authUrl.ts'
+import { sslForConnection, type Sql } from './db.ts'
+import { makePgliteSql } from './pgliteSql.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const migrationsDir = join(here, '../../supabase/migrations')
@@ -39,18 +46,125 @@ END
 $roles$;
 `
 
-export async function applyIsolationSchema(db: PGlite): Promise<void> {
-  await db.exec(BOOTSTRAP)
+const RESET = `
+DROP SCHEMA IF EXISTS public CASCADE;
+CREATE SCHEMA public;
+GRANT ALL ON SCHEMA public TO CURRENT_USER;
+GRANT ALL ON SCHEMA public TO public;
+DROP SCHEMA IF EXISTS auth CASCADE;
+`
+
+export type IsolationBackend = 'postgres' | 'pglite'
+
+export type IsolationHarness = {
+  sql: Sql
+  backend: IsolationBackend
+  query<T extends Record<string, unknown>>(text: string, params?: unknown[]): Promise<T[]>
+  exec(text: string): Promise<void>
+  close(): Promise<void>
+}
+
+export function testDatabaseUrl(): string | undefined {
+  const url = process.env.ZEROED_TEST_DATABASE_URL?.trim()
+  return url || undefined
+}
+
+export function assertCiUsesRealPostgres(): void {
+  if (!process.env.CI) return
+  if (testDatabaseUrl()) return
+  throw new Error(
+    'CI must set ZEROED_TEST_DATABASE_URL to a throwaway Postgres service (never DATABASE_URL)',
+  )
+}
+
+function refuseUnsafeTestUrl(url: string): void {
+  let parsed: URL
+  try {
+    parsed = new URL(url)
+  } catch {
+    throw new Error('ZEROED_TEST_DATABASE_URL is not a valid URL')
+  }
+  if (!isLoopbackHostname(parsed.hostname)) {
+    throw new Error(
+      `ZEROED_TEST_DATABASE_URL host "${parsed.hostname}" is not loopback — refusing to wipe`,
+    )
+  }
+}
+
+async function applySqlBundle(exec: (sql: string) => Promise<void>): Promise<void> {
+  await exec(BOOTSTRAP)
   const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort()
   if (!files.length) throw new Error(`no migrations in ${migrationsDir}`)
   for (const file of files) {
     const sql = readFileSync(join(migrationsDir, file), 'utf8')
     try {
-      await db.exec(sql)
+      await exec(sql)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(`${file}: ${message}`)
     }
   }
-  await db.exec(readFileSync(seedPath, 'utf8'))
+  await exec(readFileSync(seedPath, 'utf8'))
+}
+
+export async function applyIsolationSchema(db: PGlite): Promise<void> {
+  await applySqlBundle((sql) => db.exec(sql))
+}
+
+export async function openIsolationHarness(): Promise<IsolationHarness> {
+  assertCiUsesRealPostgres()
+  const url = testDatabaseUrl()
+  if (!url) {
+    const db = new PGlite()
+    await applyIsolationSchema(db)
+    const sql = makePgliteSql(db)
+    return {
+      sql,
+      backend: 'pglite',
+      async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {
+        const result = await db.query(text, params)
+        return result.rows as T[]
+      },
+      async exec(text) {
+        await db.exec(text)
+      },
+      async close() {
+        await db.close()
+      },
+    }
+  }
+
+  refuseUnsafeTestUrl(url)
+  const client = new Client({ connectionString: url, ssl: false })
+  await client.connect()
+  try {
+    await client.query(RESET)
+    await applySqlBundle(async (sql) => {
+      await client.query(sql)
+    })
+  } finally {
+    await client.end()
+  }
+
+  const sql = postgres(url, {
+    max: 1,
+    fetch_types: false,
+    prepare: false,
+    ssl: sslForConnection(url),
+  })
+
+  return {
+    sql,
+    backend: 'postgres',
+    async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {
+      const rows = await sql.unsafe(text, params as never)
+      return [...rows] as T[]
+    },
+    async exec(text) {
+      await sql.unsafe(text)
+    },
+    async close() {
+      await sql.end({ timeout: 5 })
+    },
+  }
 }

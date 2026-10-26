@@ -76,11 +76,25 @@ VALUES (
   '11111111-1111-1111-1111-111111111111',
   'coach', 'note', 'private A'
 );
+ALTER TABLE mcp_token ADD COLUMN IF NOT EXISTS expires_at timestamptz;
+
 INSERT INTO mcp_token (id, athlete_id, name, token_hash, last_four)
 VALUES (
   'aaaa6666-0000-4000-8000-000000000001',
   '11111111-1111-1111-1111-111111111111',
   'claude-a', 'hash-a', 'aaa1'
+);
+INSERT INTO mcp_token (id, athlete_id, name, token_hash, last_four, revoked_at)
+VALUES (
+  'aaaa7777-0000-4000-8000-000000000001',
+  '11111111-1111-1111-1111-111111111111',
+  'revoked-a', 'hash-revoked-a', 'rvaa', NOW()
+);
+INSERT INTO mcp_token (id, athlete_id, name, token_hash, last_four, expires_at)
+VALUES (
+  'aaaa8888-0000-4000-8000-000000000001',
+  '11111111-1111-1111-1111-111111111111',
+  'expired-a', 'hash-expired-a', 'exaa', NOW() - INTERVAL '1 hour'
 );
 
 INSERT INTO athlete (id, auth_user_id, name, sport, goals, obstacle, training_age, sessions_per_week, training_preferences)

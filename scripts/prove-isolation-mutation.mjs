@@ -7,6 +7,10 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 
+if (process.env.CI && !String(process.env.ZEROED_TEST_DATABASE_URL ?? '').trim()) {
+  throw new Error('CI must set ZEROED_TEST_DATABASE_URL so isolation mutations run on real Postgres (never DATABASE_URL)')
+}
+
 const storePath = 'worker/src/store.ts'
 const editsPath = 'worker/src/edits.ts'
 const originalStore = readFileSync(storePath, 'utf8')
