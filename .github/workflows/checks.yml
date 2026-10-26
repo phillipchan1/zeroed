@@ -146,6 +146,12 @@ jobs:
             sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client-17
           fi
-          pg_dump --version
+          # ubuntu-latest also ships a 16 client at /usr/bin; put 17 first so
+          # pg_dump/pg_restore match the postgres:17 service.
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/pg_dump --version
       - name: Better Auth + owner isolation on Postgres
-        run: npm run check:postgres
+        run: |
+          command -v pg_dump
+          pg_dump --version
+          npm run check:postgres

@@ -275,6 +275,7 @@ ok(migrateSrc.includes('assertSourceUsersReady'), 'migrate pre-checks source ema
 ok(migrateSrc.includes('formatNonEmptyTargetAbort'), 'migrate refuses a non-empty target')
 ok(migrateSrc.includes('dropCreatedSql'), 'migrate drops only objects this run created')
 ok(migrateSrc.includes('--exit-on-error'), 'migrate pg_restore is not error-tolerant')
+ok(migrateSrc.includes('resolvePgBin'), 'migrate picks a client matching the server major')
 ok(migrateSrc.includes("'-tA'"), 'migrate counts use psql -tA')
 ok(migrateSrc.includes('assertCountsMatch'), 'migrate fails when a row count is missing or differs')
 ok(migrateSrc.includes('loadStubAuthUsersSql'), 'migrate loads auth.users before pg_restore')
@@ -301,6 +302,7 @@ ok(!dataSrc.includes('bytesToBase64UrlNoPad'), 'session HMAC does not use unpadd
 const workflow = readFileSync(join(here, '../../.github/workflows/checks.yml'), 'utf8')
 ok(workflow.includes('postgres:17'), 'CI postgres service is 17')
 ok(!workflow.includes('postgres:16'), 'CI postgres service is not 16')
+ok(workflow.includes('/usr/lib/postgresql/17/bin'), 'CI puts the Postgres 17 client first on PATH')
 
 const secret = 's'.repeat(32)
 const official = await makeSignature('tok', secret)

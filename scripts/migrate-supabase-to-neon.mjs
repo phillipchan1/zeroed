@@ -24,7 +24,7 @@
  * Requires: pg_dump, psql, pg_restore (PostgreSQL client tools).
  */
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
@@ -58,6 +58,37 @@ function run(cmd, args, opts = {}) {
     throw new Error(`${cmd} ${args.join(' ')} failed (${res.status}): ${err}`)
   }
   return res.stdout
+}
+
+function toolMajor(bin) {
+  const res = spawnSync(bin, ['--version'], { encoding: 'utf8' })
+  if (res.status !== 0) return null
+  const m = `${res.stdout || ''}\n${res.stderr || ''}`.match(/(\d+)\./)
+  return m ? Number(m[1]) : null
+}
+
+function serverMajor(url) {
+  const out = run('psql', ['-v', 'ON_ERROR_STOP=1', '-tA', '-d', url, '-c', 'SHOW server_version_num'])
+  const n = Number(String(out).trim())
+  if (!Number.isFinite(n) || n < 10000) throw new Error(`unparsable server_version_num: ${out}`)
+  return Math.floor(n / 10000)
+}
+
+/** pg_dump refuses a newer server; prefer the matching major over a leftover PATH client. */
+function resolvePgBin(name, major) {
+  const candidates = [
+    process.env.PG_BIN ? join(process.env.PG_BIN, name) : null,
+    `/usr/lib/postgresql/${major}/bin/${name}`,
+    `/usr/pgsql-${major}/bin/${name}`,
+    name,
+  ].filter(Boolean)
+  for (const bin of candidates) {
+    if (bin !== name && !existsSync(bin)) continue
+    if (toolMajor(bin) === major) return bin
+  }
+  throw new Error(
+    `${name} matching Postgres ${major} not found. Install postgresql-client-${major} (or set PG_BIN).`,
+  )
 }
 
 function needBin(name) {
@@ -122,9 +153,11 @@ if (source === target) {
   process.exit(2)
 }
 
-needBin('pg_dump')
-needBin('pg_restore')
 needBin('psql')
+const srcMajor = serverMajor(source)
+const pgDump = resolvePgBin('pg_dump', srcMajor)
+const pgRestore = resolvePgBin('pg_restore', srcMajor)
+console.log(`using ${pgDump} / ${pgRestore} for Postgres ${srcMajor}`)
 
 const dir = mkdtempSync(join(tmpdir(), 'zeroed-migrate-'))
 const dumpPath = join(dir, 'public.dump')
@@ -138,7 +171,7 @@ try {
   writeFileSync(relaxPath, RELAX_TARGET_SQL)
 
   console.log('dumping public schema + data (no-owner, no-acl)…')
-  run('pg_dump', [
+  run(pgDump, [
     '--format=custom',
     '--no-owner',
     '--no-acl',
@@ -187,9 +220,9 @@ try {
     console.log('restoring into Neon…')
     const tocPath = join(dir, 'restore.toc')
     const filteredTocPath = join(dir, 'restore.filtered.toc')
-    writeFileSync(tocPath, run('pg_restore', ['-l', dumpPath]))
+    writeFileSync(tocPath, run(pgRestore, ['-l', dumpPath]))
     writeFileSync(filteredTocPath, filterRestoreToc(readFileSync(tocPath, 'utf8')))
-    run('pg_restore', [
+    run(pgRestore, [
       '--no-owner',
       '--no-acl',
       '--exit-on-error',
