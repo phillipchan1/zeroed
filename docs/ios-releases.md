@@ -71,17 +71,24 @@ On every push to `master` (and **Run workflow**):
    the build bakes `VITE_SUPABASE_*` (today's path). When it is set to the
    Worker URL at cutover, those Supabase values are **not** baked. See
    [`cloudflare-cutover.md`](./cloudflare-cutover.md) § iOS TestFlight at cutover.
-5. `xcodebuild archive` + `-exportArchive` with `method=app-store-connect`,
-   `CODE_SIGN_STYLE=Automatic`, `-allowProvisioningUpdates`, and the App
-   Store Connect API key (`-authenticationKeyPath` / `-authenticationKeyID`
-   / `-authenticationKeyIssuerID`). Cloud-managed distribution signing —
-   no `.p12`, no hand-made provisioning profile. The `.p8` is written to a
-   temp file and deleted in an `always()` step.
-6. `xcrun altool --upload-app` → App Store Connect → **Internal** TestFlight.
+5. After the web build, write the App Store Connect `.p8` under
+   `$RUNNER_TEMP/zeroed-asc.p8` with `umask 077` (raw PEM or base64). Copy
+   to `~/.appstoreconnect/private_keys/AuthKey_<id>.p8` for `altool`.
+6. Resolve the build number against App Store Connect, then
+   `xcodebuild archive` + `-exportArchive` with `method=app-store-connect`,
+   `CODE_SIGN_STYLE=Automatic`, `-allowProvisioningUpdates`, and the API
+   key (`-authenticationKeyPath` / `-authenticationKeyID` /
+   `-authenticationKeyIssuerID`). Cloud-managed distribution signing —
+   no `.p12`, no hand-made provisioning profile.
+7. `xcrun altool --upload-app` → App Store Connect → **Internal** TestFlight.
    The workflow does not submit for App Review and does not add external testers.
+8. An `always()` step deletes `${{ runner.temp }}/zeroed-asc.p8` and
+   `~/.appstoreconnect/private_keys/AuthKey_*.p8` — fixed path/glob, not
+   env set by an earlier step.
 
-~15–20 min on `macos-latest`. Concurrency group `ios-testflight` — newer
-runs cancel in-progress ones.
+~15–20 min on `macos-latest`. Concurrency group `ios-testflight` with
+`cancel-in-progress: false`, so a newer push queues instead of killing an
+upload mid-flight.
 
 ---
 
@@ -124,8 +131,10 @@ profile and certificate. Download the `.p8` once.
 | `APPLE_TEAM_ID` | yes | 10-char Team ID (Membership page) — passed as `DEVELOPMENT_TEAM` |
 
 `base64 -i AuthKey_XXXXXXXXXX.p8 | pbcopy` if you prefer to store it encoded.
-The workflow accepts either form and writes the PEM to `$RUNNER_TEMP`, then
-deletes it (and the altool copy) in an `always()` step.
+The workflow accepts either form, writes the PEM to
+`$RUNNER_TEMP/zeroed-asc.p8` with `umask 077` (after `cap sync`, just
+before `xcodebuild`), and deletes that path plus
+`~/.appstoreconnect/private_keys/AuthKey_*.p8` in an `always()` step.
 
 No `.p12`. No hand-made `.mobileprovision`. Xcode's automatic signing
 creates the App Store Connect distribution profile against `app.zeroed.app`.

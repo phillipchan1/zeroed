@@ -149,6 +149,34 @@ if (workflow) {
   if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete App Store Connect API key')) {
     ok('workflow deletes the .p8 in an always() step')
   } else fail('workflow .p8 cleanup')
+
+  if (workflow.includes('umask 077')) ok('workflow sets umask 077 before writing the .p8')
+  else fail('workflow umask 077')
+
+  if (
+    workflow.includes('${{ runner.temp }}/zeroed-asc.p8') &&
+    workflow.includes('AuthKey_"*.p8')
+  ) {
+    ok('workflow cleanup uses a fixed path/glob, not earlier-step env')
+  } else fail('workflow .p8 cleanup path')
+
+  if (/cancel-in-progress:\s*false/.test(workflow)) {
+    ok('workflow will not cancel an in-progress TestFlight upload')
+  } else fail('workflow cancel-in-progress should be false')
+
+  const writeAt = workflow.indexOf('- name: Write App Store Connect API key')
+  const syncAt = workflow.indexOf('- name: Build web assets and sync Capacitor iOS')
+  const archiveAt = workflow.indexOf('- name: Build signed IPA')
+  if (writeAt !== -1 && syncAt !== -1 && archiveAt !== -1 && syncAt < writeAt && writeAt < archiveAt) {
+    ok('workflow writes the .p8 after cap sync and before xcodebuild')
+  } else fail('workflow .p8 write timing')
+
+  if (
+    /uses:\s*actions\/checkout@[0-9a-f]{40}/.test(workflow) &&
+    /uses:\s*actions\/setup-node@[0-9a-f]{40}/.test(workflow)
+  ) {
+    ok('ios-release.yml pins checkout and setup-node to full SHAs')
+  } else fail('ios-release.yml floating action tags')
 }
 
 const exportScript = join(root, 'scripts/ios-write-export-options.sh')
