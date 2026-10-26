@@ -324,6 +324,14 @@ ok(migrateWf.includes('postgresql-client-17'), 'manual migrate installs postgres
 ok(migrateWf.includes('apt.postgresql.org'), 'manual migrate uses the PGDG apt repo')
 ok(migrateWf.includes('B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8'), 'manual migrate pins the PGDG signing key')
 ok(migrateWf.includes('server_version_num'), 'manual migrate matches client major to the source server')
+ok(
+  migrateWf.includes("PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql"),
+  'manual migrate version probe uses a clean read-only libpq env',
+)
+ok(
+  workflow.includes("PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql"),
+  'migrate-pg version probe uses a clean read-only libpq env',
+)
 ok(migrateWf.includes('GITHUB_PATH'), 'manual migrate puts the matching client first on PATH')
 
 const secret = 's'.repeat(32)

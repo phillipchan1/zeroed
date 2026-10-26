@@ -101,7 +101,7 @@ jobs:
           SOURCE_URL="${SUPABASE_READONLY_URL:-}"
           if [ -n "${SOURCE_URL}" ]; then
             export PATH="/usr/lib/postgresql/${MAJOR}/bin:${PATH}"
-            if ! NUM="$(psql -v ON_ERROR_STOP=1 -tA -d "${SOURCE_URL}" -c 'SHOW server_version_num' | tr -d '[:space:]')"; then
+            if ! NUM="$(PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql -v ON_ERROR_STOP=1 -tA -d "${SOURCE_URL}" -c 'SHOW server_version_num' | tr -d '[:space:]')"; then
               echo "::error::Could not read source server_version_num; cannot pick a matching pg_dump."
               exit 1
             fi
