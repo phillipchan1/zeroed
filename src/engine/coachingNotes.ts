@@ -457,6 +457,10 @@ for (const [name, note] of Object.entries(NOTES)) {
  */
 export function getCoachingNote(name: string): CoachingNote | null {
   const lib = findLibraryExercise(name)
-  const key = normalizeName(lib ? lib.name : name)
-  return NOTE_LOOKUP.get(key) ?? null
+  if (!lib) return NOTE_LOOKUP.get(normalizeName(name)) ?? null
+  // A split-off variant (Hammer Curl, DB RDL) borrows its parent's note until it
+  // has one of its own.
+  return NOTE_LOOKUP.get(normalizeName(lib.name))
+    ?? (lib.noteAs ? NOTE_LOOKUP.get(normalizeName(lib.noteAs)) : undefined)
+    ?? null
 }

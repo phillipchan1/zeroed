@@ -35,6 +35,13 @@ export interface WorkoutBootstrap {
    * bootstraps written before this field existed — read with `?.`.
    */
   bestByExercise?: Record<number, LiftBest>
+  /**
+   * The same records and last-session sets, keyed by NAME across the whole
+   * program — what a swapped-in movement is measured against, since it has no
+   * history in this routine's slots. Absent on older bootstraps — read with `?.`.
+   */
+  bestsByName?: Record<string, LiftBest>
+  prevByName?: Record<string, SetLog[]>
 }
 
 export const workoutBootKey = (routineId: string) => `workout:${routineId}`

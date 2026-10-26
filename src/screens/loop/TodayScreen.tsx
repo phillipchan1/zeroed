@@ -7,7 +7,7 @@ import {
   gatherSessionActuals, actualsFromPending,
   type PagerWeekView, type WeekPagerData, type SessionActuals,
 } from '../../engine'
-import { resolveTrackingType } from '../../engine/exerciseLibrary'
+import { effectiveTrackingType } from '../../engine/exerciseLibrary'
 import { tallySession } from '../../engine/volume'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
@@ -223,7 +223,7 @@ function PerformedRow({
   logs: SetLog[]
   u: UnitContext
 }) {
-  const t = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
+  const t = effectiveTrackingType(ex)
   const done = logs.filter(isSetLogged)
   const rpes = done.map((s) => s.rpe).filter((r): r is number => r != null)
   const avgRpe = rpes.length ? Math.round(rpes.reduce((a, b) => a + b, 0) / rpes.length) : null
@@ -233,7 +233,14 @@ function PerformedRow({
   return (
     <div style={{ padding: '14px 0', borderBottom: '1px solid var(--line)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-        <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
+        <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
+          {ex.name}
+          {ex.swapped_from && (
+            <span className="text-xs text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
+              Swapped in for {ex.swapped_from}
+            </span>
+          )}
+        </span>
         <span className="num text-xs" style={{ whiteSpace: 'nowrap', color: tone }}>
           {done.length}/{ex.sets} sets
         </span>
@@ -350,7 +357,14 @@ function SessionSheet({
                   gap: 14, padding: '12px 0', borderBottom: '1px solid var(--line)',
                 }}
               >
-                <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>{ex.name}</span>
+                <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
+          {ex.name}
+          {ex.swapped_from && (
+            <span className="text-xs text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
+              Swapped in for {ex.swapped_from}
+            </span>
+          )}
+        </span>
                 <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
                   {ex.sets}×{ex.reps}
                   {target != null ? ` · ${target}${u.unit}` : ex.load ? ` · ${ex.load}` : ''}

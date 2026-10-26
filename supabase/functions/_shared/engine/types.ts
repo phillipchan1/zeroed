@@ -12,6 +12,7 @@ export interface ExerciseTemplate {
   reading?: boolean
   pattern_key?: string
   reading_why?: string
+  swapped_from?: string   // a stand-in's programmed movement — see src/types/database.ts
 }
 
 export interface SetLog {
