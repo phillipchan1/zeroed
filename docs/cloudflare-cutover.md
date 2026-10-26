@@ -170,7 +170,9 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    - Request a sign-in code; verify the 6-digit OTP.
    - Load today's workout list and save (complete) one session — both must
      hit `POST /api/data`, not Supabase PostgREST.
-   - `node scripts/smoke-wrangler-data.mjs` while `wrangler dev` is up.
+   - `node scripts/smoke-wrangler-data.mjs` while `wrangler dev` is up
+     (`ENVIRONMENT=local` + `DATABASE_URL` in `.dev.vars`; `SMOKE_BEARER`
+     for load/save). iOS still needs an absolute `https://<worker>/api`.
    - One authenticated `POST /api/agent` (`probe` is pre-auth; use `coach_chat`
      or `target` with a session cookie / bearer).
    - `POST /api/mcp` with `Accept: text/event-stream` and a minted token —

@@ -7,7 +7,7 @@
  */
 import { sessionUser } from './auth.ts'
 import { beginAuthCors, json } from './cors.ts'
-import { getSql, type Sql } from './db.ts'
+import { withSql, type Sql } from './db.ts'
 import type { Env } from './env.ts'
 
 export type FilterOp = 'eq' | 'neq' | 'in' | 'gte' | 'gt' | 'lte' | 'lt' | 'ilike' | 'not_in'
@@ -44,6 +44,7 @@ export interface DataResult {
 export interface DataContext {
   userId: string
   athleteId: string | null
+  email?: string | null
 }
 
 const IDENT = /^[a-z_][a-z0-9_]*$/i
@@ -499,7 +500,10 @@ async function assertWritableRow(
   ctx: DataContext,
 ): Promise<DataResult | null> {
   if (!ctx.athleteId) {
-    if (table === 'athlete') return null
+    if (table === 'athlete') {
+      row.auth_user_id = ctx.userId
+      return null
+    }
     return fail('not signed in as an athlete', 401)
   }
   const athleteId = ctx.athleteId
@@ -623,6 +627,15 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
     }
 
     if (query.op === 'insert' || query.op === 'upsert') {
+      if (table === 'athlete' && query.op === 'insert') {
+        await runSql(
+          sql,
+          `INSERT INTO auth.users (id, email, created_at, updated_at)
+           VALUES ($1::uuid, $2, NOW(), NOW())
+           ON CONFLICT (id) DO NOTHING`,
+          [ctx.userId, ctx.email ?? null],
+        )
+      }
       const rawRows = rowsOf(query.values)
       if (rawRows.length === 0) return fail('insert requires values', 400)
       const prepared: Record<string, unknown>[] = []
@@ -732,14 +745,15 @@ export async function handleData(req: Request, env: Env): Promise<Response> {
   }
 
   try {
-    const sql = getSql(env)
-    const athleteId = await resolveAthleteId(sql, user.id)
-    const result = await executeDataQuery(sql, { userId: user.id, athleteId }, body)
-    return json(
-      { data: result.data, error: result.error, count: result.count },
-      result.status,
-      cors,
-    )
+    return await withSql(env, async (sql) => {
+      const athleteId = await resolveAthleteId(sql, user.id)
+      const result = await executeDataQuery(sql, { userId: user.id, athleteId, email: user.email }, body)
+      return json(
+        { data: result.data, error: result.error, count: result.count },
+        result.status,
+        cors,
+      )
+    })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     return json({ data: null, error: { message }, count: null }, 500, cors)

@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import app from './index.ts'
 import { authConfigErrorResponse, beginAuthCors } from './cors.ts'
+import { databaseUrl, useDatabaseSsl } from './env.ts'
 import {
   authCookieSecure,
   connectionHostname,
@@ -55,6 +56,18 @@ ok(!isLocalAuthRuntime({}), 'empty env is not local')
 ok(!isLocalAuthRuntime({ ENVIRONMENT: 'dev' }), 'ENVIRONMENT=dev is not local')
 ok(!isLocalAuthRuntime({ ENVIRONMENT: 'development' }), 'ENVIRONMENT=development is not local')
 ok(isLocalAuthRuntime({ ENVIRONMENT: 'local' }), 'ENVIRONMENT=local is local')
+ok(!useDatabaseSsl(neon, { ENVIRONMENT: 'local' }), 'local env disables postgres.js ssl')
+ok(useDatabaseSsl(neon), 'Neon URL uses ssl')
+ok(!useDatabaseSsl(loopbackPg), 'loopback postgres URL disables ssl')
+ok(!useDatabaseSsl('postgresql://u:p@hyperdrive.internal/db?sslmode=disable'), 'sslmode=disable is not require')
+ok(
+  databaseUrl({ ENVIRONMENT: 'local', DATABASE_URL: loopbackPg, HYPERDRIVE: { connectionString: neon } }) === loopbackPg,
+  'local DATABASE_URL beats Hyperdrive',
+)
+ok(
+  databaseUrl({ HYPERDRIVE: { connectionString: neon }, DATABASE_URL: loopbackPg }) === neon,
+  'prod Hyperdrive beats DATABASE_URL',
+)
 ok(isLocalAuthRuntime({ ENVIRONMENT: 'LOCAL' }), 'ENVIRONMENT=LOCAL is local')
 ok(isLocalAuthRuntime({ DATABASE_URL: loopbackPg }), 'hostname localhost is local')
 ok(isLocalAuthRuntime({ DATABASE_URL: loopbackV4 }), 'hostname 127.0.0.1 is local')

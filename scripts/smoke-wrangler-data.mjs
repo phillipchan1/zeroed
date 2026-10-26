@@ -4,8 +4,8 @@
  *
  * Always proves load+save against PGlite (same predicates as wrangler).
  * When wrangler is already on :8787, also hits /api/health, unauthenticated
- * /api/data (401), and — if RESEND is unset so OTPs are logged — a sign-in
- * plus load/save against the live Worker.
+ * /api/data (401), OTP send (sign-in), and — with SMOKE_BEARER — load/save
+ * of a workout against the live Worker.
  */
 import { spawnSync } from 'node:child_process'
 
@@ -22,6 +22,8 @@ function run(label, args, opts = {}) {
   }
   return out
 }
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 console.log('=== PGlite data-plane smoke (load + save workout) ===')
 const isolation = run('access.check', ['--experimental-strip-types', 'worker/src/access.check.ts'])
@@ -64,13 +66,7 @@ const unauth = await fetch(`${base}/api/data`, {
 if (unauth.status !== 401) throw new Error(`POST /api/data without session expected 401, got ${unauth.status}`)
 console.log('POST /api/data unauthenticated → 401')
 
-const email = process.env.SMOKE_EMAIL
-if (!email) {
-  console.log('wrangler sign-in + load/save skipped (set SMOKE_EMAIL to exercise OTP).')
-  console.log('PGlite already covered load + save of a workout under the same owner filters.')
-  process.exit(0)
-}
-
+const email = process.env.SMOKE_EMAIL || 'smoke@example.com'
 const send = await fetch(`${base}/api/auth/email-otp/send-verification-otp`, {
   method: 'POST',
   headers: { 'content-type': 'application/json' },
@@ -81,4 +77,153 @@ if (!send.ok) {
   throw new Error(`send otp failed ${send.status}: ${body.slice(0, 200)}`)
 }
 console.log(`OTP requested for ${email} — check wrangler logs (RESEND unset) or inbox`)
-console.log('wrangler smoke: health + unauthorized data gate ok')
+
+const bearer = process.env.SMOKE_BEARER
+if (!bearer) {
+  console.log('wrangler load/save skipped (set SMOKE_BEARER for a minted Better Auth session).')
+  console.log('PGlite already covered load + save of a workout under the same owner filters.')
+  console.log('wrangler smoke: health + sign-in OTP + unauthorized data gate ok')
+  process.exit(0)
+}
+
+const headers = {
+  authorization: `Bearer ${bearer}`,
+  'content-type': 'application/json',
+}
+
+async function call(label, path, opts = {}, tries = 4) {
+  let last
+  for (let i = 0; i < tries; i++) {
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), 12_000)
+    try {
+      const res = await fetch(`${base}${path}`, {
+        ...opts,
+        signal: controller.signal,
+        headers: { ...headers, ...(opts.headers || {}) },
+      })
+      const text = await res.text()
+      let body
+      try { body = JSON.parse(text) } catch { body = { raw: text.slice(0, 240) } }
+      last = { status: res.status, body }
+      if (res.status === 500 && i < tries - 1) {
+        await sleep(400)
+        continue
+      }
+      if (!res.ok) throw new Error(`${label} ${res.status}: ${text.slice(0, 240)}`)
+      return last
+    } catch (err) {
+      last = err
+      if (i === tries - 1) throw err
+      await sleep(400)
+    } finally {
+      clearTimeout(timer)
+    }
+  }
+  throw last instanceof Error ? last : new Error(`${label} failed`)
+}
+
+function data(body) {
+  return call('data', '/api/data', { method: 'POST', body: JSON.stringify(body) })
+}
+
+const session = await call('session', '/api/auth/get-session')
+if (!session.body?.user?.id) throw new Error('get-session did not return a user')
+console.log(`GET /api/auth/get-session ok (${session.body.user.id})`)
+
+const athlete = await data({ table: 'athlete', op: 'select', columns: 'id, name', single: 'maybe' })
+let athleteId = athlete.body?.data?.id
+if (!athleteId) {
+  const created = await data({
+    table: 'athlete',
+    op: 'insert',
+    values: { name: 'Smoke', sessions_per_week: 3 },
+    returning: '*',
+    single: 'one',
+  })
+  athleteId = created.body?.data?.id
+}
+if (!athleteId) throw new Error('could not load or create athlete')
+console.log(`athlete ${athleteId}`)
+
+const existingProg = await data({
+  table: 'program',
+  op: 'select',
+  columns: 'id',
+  filters: [{ column: 'status', op: 'eq', value: 'active' }],
+  single: 'maybe',
+})
+let programId = existingProg.body?.data?.id
+if (!programId) {
+  const prog = await data({
+    table: 'program',
+    op: 'insert',
+    values: { goal: 'smoke', status: 'active', start_date: '2026-10-20' },
+    returning: '*',
+    single: 'one',
+  })
+  programId = prog.body?.data?.id
+}
+if (!programId) throw new Error('could not load or create program')
+
+const phase = await data({
+  table: 'phase',
+  op: 'insert',
+  values: {
+    program_id: programId,
+    name: 'Strength',
+    week_start: '2026-10-20',
+    week_end: '2026-10-26',
+    status: 'active',
+  },
+  returning: '*',
+  single: 'one',
+})
+const phaseId = phase.body?.data?.id
+if (!phaseId) throw new Error(`phase insert failed: ${JSON.stringify(phase.body)}`)
+
+const routine = await data({
+  table: 'routine',
+  op: 'insert',
+  values: {
+    program_id: programId,
+    phase_id: phaseId,
+    name: 'Smoke A',
+    session_type: 'strength',
+    exercises: [],
+  },
+  returning: '*',
+  single: 'one',
+})
+const routineId = routine.body?.data?.id
+if (!routineId) throw new Error(`routine insert failed: ${JSON.stringify(routine.body)}`)
+
+const saved = await data({
+  table: 'workout',
+  op: 'insert',
+  values: {
+    routine_id: routineId,
+    performed_at: '2026-10-26T12:00:00Z',
+    rpe: 6,
+    duration_mins: 40,
+  },
+  returning: '*',
+  single: 'one',
+})
+const workoutId = saved.body?.data?.id
+if (!workoutId) throw new Error(`workout save failed: ${JSON.stringify(saved.body)}`)
+console.log(`saved workout ${workoutId}`)
+
+const loaded = await data({
+  table: 'workout',
+  op: 'select',
+  columns: 'id, rpe, routine!inner(program_id)',
+  filters: [{ column: 'id', op: 'eq', value: workoutId }],
+  single: 'maybe',
+})
+if (loaded.body?.data?.id !== workoutId) throw new Error(`load mismatch: ${JSON.stringify(loaded.body)}`)
+if (loaded.body?.data?.routine?.program_id !== programId) {
+  throw new Error(`embed mismatch: ${JSON.stringify(loaded.body)}`)
+}
+console.log('loaded workout with routine.program_id embed')
+console.log('SMOKE_OK wrangler sign-in + load + save workout')
