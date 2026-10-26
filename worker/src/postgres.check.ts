@@ -43,6 +43,20 @@ const GUARDED_SCRIPTS = [
   { file: 'scripts/prove-migrate-e2e.mjs', varName: 'adminUrl' },
 ] as const
 
+const migrateCheckSrc = readFileSync(join(root, 'scripts/migrate-supabase-to-neon.check.mjs'), 'utf8')
+ok(
+  migrateCheckSrc.includes("from '../worker/src/refuseTestUrl.ts'"),
+  'migrate-supabase-to-neon.check.mjs imports refuseUnsafeTestUrl from refuseTestUrl.ts',
+)
+ok(
+  /refuseUnsafeTestUrl\(\s*checkPsqlUrl,\s*'ZEROED_CHECK_PSQL_URL'\s*\)/.test(migrateCheckSrc),
+  'migrate check guards ZEROED_CHECK_PSQL_URL before live psql',
+)
+ok(
+  /refuseUnsafeTestUrl\(\s*sourceUrl,\s*'ZEROED_PG_SOURCE_URL'\s*\)/.test(migrateCheckSrc),
+  'migrate check guards ZEROED_PG_SOURCE_URL before live connect',
+)
+
 const CONNECT_MARKERS = [
   'sequential withSql',
   'access isolation:',

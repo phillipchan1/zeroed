@@ -4,7 +4,7 @@
  * auth-user mapping (CSV/JSON), secret redaction, and that the Neon app
  * schema has no Supabase RLS / GRANT / auth.uid() leftovers.
  *
- * Run: node scripts/migrate-supabase-to-neon.check.mjs
+ * Run: node --experimental-strip-types scripts/migrate-supabase-to-neon.check.mjs
  */
 import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
+import { refuseUnsafeTestUrl } from '../worker/src/refuseTestUrl.ts'
 import {
   addMaskLines,
   advisoryLockParts,
@@ -53,6 +54,10 @@ import {
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
+const checkPsqlUrl = process.env.ZEROED_CHECK_PSQL_URL?.trim() || ''
+if (checkPsqlUrl) refuseUnsafeTestUrl(checkPsqlUrl, 'ZEROED_CHECK_PSQL_URL')
+const sourceUrl = process.env.ZEROED_PG_SOURCE_URL?.trim() || ''
+if (sourceUrl) refuseUnsafeTestUrl(sourceUrl, 'ZEROED_PG_SOURCE_URL')
 const fails = []
 let checks = 0
 
@@ -715,7 +720,7 @@ const afterReset = await db.query(`SELECT onboarding_step, obstacle FROM public.
 eq(afterReset.rows[0]?.onboarding_step, 'hook', 'reset_athlete_orientation returns the athlete to hook')
 eq(Number((await db.query(`SELECT COUNT(*)::int AS n FROM public.workout`)).rows[0]?.n ?? -1), 0, 'reset_athlete_orientation clears workouts')
 
-const livePsqlUrl = process.env.ZEROED_CHECK_PSQL_URL || ''
+const livePsqlUrl = checkPsqlUrl
 const livePsql = livePsqlUrl
   ? spawnSync('psql', [
     '-d',
@@ -759,7 +764,6 @@ function sourceResidue(url) {
 }
 
 async function runLivePostgresChecks() {
-  const sourceUrl = process.env.ZEROED_PG_SOURCE_URL || ''
   const targetUrl = process.env.ZEROED_PG_TARGET_URL || ''
   const aliasUrl = process.env.ZEROED_PG_ALIAS_URL || ''
   if (process.env.ZEROED_REQUIRE_PG === '1' && (!sourceUrl || !targetUrl || !aliasUrl)) {

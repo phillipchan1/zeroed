@@ -17,7 +17,7 @@
     "mcp": "npm --prefix mcp start",
     "mcp:install": "npm --prefix mcp install",
     "mcp:check": "npm --prefix mcp run check",
-    "check": "for f in src/engine/*.check.ts src/lib/*.check.ts worker/src/*.check.ts; do node --experimental-strip-types \"$f\" || exit 1; done && node scripts/migrate-supabase-to-neon.check.mjs",
+    "check": "for f in src/engine/*.check.ts src/lib/*.check.ts worker/src/*.check.ts; do node --experimental-strip-types \"$f\" || exit 1; done && node --experimental-strip-types scripts/migrate-supabase-to-neon.check.mjs",
     "seed:preview": "node scripts/seed-preview.mjs --preview",
     "check:isolation-mutation": "node scripts/prove-isolation-mutation.mjs",
     "check:client-data-gate": "node scripts/prove-client-data-gate.mjs",

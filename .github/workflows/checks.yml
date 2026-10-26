@@ -210,4 +210,4 @@ jobs:
           ZEROED_PG_TARGET_URL: postgresql://dst:dummy@ep-dst.neon.tech:55419/dstdb
           ZEROED_PG_ALIAS_URL: postgresql://src:dummy@ep-src.neon.tech:55418/srcdb
           ZEROED_CHECK_PSQL_URL: postgresql://src:dummy@127.0.0.1:55418/srcdb
-        run: node scripts/migrate-supabase-to-neon.check.mjs
+        run: node --experimental-strip-types scripts/migrate-supabase-to-neon.check.mjs
