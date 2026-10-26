@@ -7,12 +7,14 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
+import { refuseUnsafeTestUrl } from '../worker/src/authUrl.ts'
 import { unstable_dev } from 'wrangler'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
 const url = process.env.DATABASE_URL?.trim()
 if (!url) throw new Error('DATABASE_URL is required for check:workerd-auth')
+refuseUnsafeTestUrl(url, 'DATABASE_URL')
 
 const secret = process.env.BETTER_AUTH_SECRET || 'ci-better-auth-secret-must-be-32b!!'
 const port = Number(process.env.WORKERD_AUTH_PORT || 8791)

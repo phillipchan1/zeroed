@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
+import { refuseUnsafeTestUrl } from '../worker/src/authUrl.ts'
 import { applyIsolationSchemaPg } from '../worker/src/isolationDb.ts'
 import {
   CHECKSUM_TABLES,
@@ -21,6 +22,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
 const adminUrl = process.env.DATABASE_URL?.trim()
 if (!adminUrl) throw new Error('DATABASE_URL is required for check:migrate-e2e')
+refuseUnsafeTestUrl(adminUrl, 'DATABASE_URL')
 
 const SRC = 'zeroed_mig_src'
 const DST = 'zeroed_mig_dst'

@@ -9,6 +9,7 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
+import { refuseUnsafeTestUrl } from '../worker/src/authUrl.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
@@ -17,6 +18,7 @@ const schemaPath = join(root, 'worker/schema/better-auth.sql')
 
 const url = process.env.DATABASE_URL?.trim()
 if (!url) throw new Error('DATABASE_URL is required for check:better-auth-schema')
+refuseUnsafeTestUrl(url, 'DATABASE_URL')
 
 const secret = process.env.BETTER_AUTH_SECRET || 'ci-better-auth-secret-must-be-32b!!'
 const origin = 'http://localhost:8787'

@@ -27,9 +27,11 @@ import {
   parseCounts,
   writeTargetOrCleanup,
 } from './migrate-users.lib.mjs'
+import { refuseUnsafeTestUrl } from '../worker/src/authUrl.ts'
 
 const url = process.env.DATABASE_URL?.trim()
 if (!url) throw new Error('DATABASE_URL is required for check:migrate-users')
+refuseUnsafeTestUrl(url, 'DATABASE_URL')
 
 const dupA = '11111111-1111-1111-1111-111111111111'
 const dupB = '22222222-2222-2222-2222-222222222222'
