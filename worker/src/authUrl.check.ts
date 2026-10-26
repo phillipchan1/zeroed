@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import app from './index.ts'
 import { authConfigErrorResponse, beginAuthCors } from './cors.ts'
 import {
   authCookieSecure,
@@ -38,6 +39,9 @@ ok(connectionHostname(loopbackV6) === '[::1]' || connectionHostname(loopbackV6) 
 
 ok(isLocalAuthHost('http://localhost:8787'), 'localhost is local')
 ok(isLocalAuthHost('http://127.0.0.1:5173'), '127.0.0.1 is local')
+ok(isLoopbackHostname('127.1'), '127.1 hostname is loopback')
+ok(isLocalAuthHost('http://127.1:8787'), '127.1 auth origin is local')
+ok(isLocalAuthRuntime({ DATABASE_URL: 'postgresql://postgres@127.1:5432/zeroed' }), '127.1 DB hostname is local')
 ok(!isLocalAuthHost('https://zeroed.example.workers.dev'), 'workers.dev is not local')
 ok(!authCookieSecure('http://localhost:8787'), 'localhost cookies are not Secure')
 ok(authCookieSecure('https://zeroed.example.workers.dev'), 'prod cookies are Secure')
@@ -111,7 +115,7 @@ ok(
   'cutover docs mention ENVIRONMENT',
 )
 
-// A4 — misconfig is JSON 500 + CORS, never a bare 500 / ACAO *
+// A4 / B1 — misconfig is JSON 500; echo ACAO only for loopback Origins
 const prodEnv = {
   DATABASE_URL: prodWithLocalUser,
   BETTER_AUTH_SECRET: 'x'.repeat(32),
@@ -125,16 +129,12 @@ if (!started.ok) {
     'misconfig is JSON',
   )
   ok(
-    started.response.headers.get('access-control-allow-origin') === 'https://zeroed.example',
-    'misconfig echoes request Origin',
+    started.response.headers.get('access-control-allow-origin') == null,
+    'non-loopback misconfig omits ACAO',
   )
   ok(
-    started.response.headers.get('access-control-allow-credentials') === 'true',
-    'misconfig keeps credentials',
-  )
-  ok(
-    started.response.headers.get('access-control-allow-origin') !== '*',
-    'misconfig never sends ACAO *',
+    started.response.headers.get('access-control-allow-credentials') == null,
+    'non-loopback misconfig omits credentials',
   )
   const body = await started.response.json() as { error?: string }
   ok(
@@ -143,13 +143,24 @@ if (!started.ok) {
   )
 }
 
+const loopbackErr = authConfigErrorResponse('http://localhost:5173', new Error('BETTER_AUTH_URL must be set'))
+ok(loopbackErr.headers.get('access-control-allow-origin') === 'http://localhost:5173', 'loopback misconfig echoes Origin')
+ok(loopbackErr.headers.get('access-control-allow-credentials') === 'true', 'loopback misconfig keeps credentials')
+
 const noOrigin = authConfigErrorResponse(null, new Error('BETTER_AUTH_URL must be set'))
 ok(noOrigin.status === 500, 'misconfig without Origin is 500')
-ok(noOrigin.headers.get('access-control-allow-origin') !== '*', 'no-Origin misconfig is not *')
-ok(
-  (noOrigin.headers.get('access-control-allow-origin') ?? '').startsWith('http://localhost'),
-  'no-Origin misconfig echoes a loopback origin',
-)
+ok(noOrigin.headers.get('access-control-allow-origin') == null, 'no-Origin misconfig omits ACAO')
+ok(noOrigin.headers.get('access-control-allow-credentials') == null, 'no-Origin misconfig omits credentials')
+
+for (const method of ['OPTIONS', 'GET', 'POST'] as const) {
+  const res = await app.request(`http://localhost/api/auth/ok`, {
+    method,
+    headers: { Origin: 'https://evil.example' },
+  }, prodEnv)
+  ok(res.status === 500, `${method} evil.example: JSON 500`)
+  ok(res.headers.get('access-control-allow-origin') == null, `${method} evil.example: no ACAO`)
+  ok(res.headers.get('access-control-allow-credentials') == null, `${method} evil.example: no credentials`)
+}
 
 const localOk = beginAuthCors('http://localhost:5173', { ENVIRONMENT: 'local' })
 ok(localOk.ok, 'beginAuthCors succeeds when ENVIRONMENT=local')

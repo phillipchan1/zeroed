@@ -2,9 +2,16 @@ import type { Env } from './env.ts'
 
 const LOCAL_FALLBACK = 'http://localhost:8787'
 
+/** 127.0.0.0/8, including short forms like 127.1. */
+function isIpv4Loopback(host: string): boolean {
+  if (!/^\d+(?:\.\d+){0,3}$/.test(host)) return false
+  const parts = host.split('.').map(Number)
+  return parts[0] === 127 && parts.every((n) => n <= 255)
+}
+
 export function isLoopbackHostname(hostname: string): boolean {
   const host = hostname.replace(/^\[|\]$/g, '').toLowerCase()
-  return host === 'localhost' || host === '127.0.0.1' || host === '::1'
+  return host === 'localhost' || host === '::1' || isIpv4Loopback(host)
 }
 
 export function isLocalAuthHost(url: string): boolean {

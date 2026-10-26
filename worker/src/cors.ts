@@ -60,22 +60,20 @@ export function authCors(origin: string | null | undefined, env: Env): Record<st
   return credentialedCors(echoed)
 }
 
-/** JSON 500 + CORS when auth config throws before allowlist is known. Never ACAO *. */
+/** JSON 500 when auth config throws. Echo ACAO+credentials only for loopback Origins. */
 export function authConfigErrorResponse(
   origin: string | null | undefined,
   err: unknown,
 ): Response {
-  const echoed = origin && origin !== '*' && origin !== 'null'
-    ? origin
-    : 'http://localhost:8787'
   const message = err instanceof Error ? err.message : String(err)
-  return new Response(JSON.stringify({ error: message }), {
-    status: 500,
-    headers: {
-      'Content-Type': 'application/json',
-      ...credentialedCors(echoed),
-    },
-  })
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...API_SECURITY,
+  }
+  if (origin && isLocalAuthHost(origin)) {
+    Object.assign(headers, credentialedCors(origin))
+  }
+  return new Response(JSON.stringify({ error: message }), { status: 500, headers })
 }
 
 export function beginAuthCors(
