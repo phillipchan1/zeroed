@@ -1,3 +1,4 @@
+import { isLocalAuthHost, resolveAuthBaseURL } from './authUrl.ts'
 import type { Env } from './env.ts'
 
 export const API_SECURITY = {
@@ -23,7 +24,8 @@ export const MCP_CORS = {
 }
 
 export function trustedAuthOrigins(env: Env): string[] {
-  const base = (env.BETTER_AUTH_URL || 'http://localhost:8787').replace(/\/+$/, '')
+  const base = resolveAuthBaseURL(env)
+  if (!isLocalAuthHost(base)) return [base]
   return [...new Set([
     base,
     'http://localhost:5173',

@@ -29,7 +29,7 @@ in the Vite bundle.
 | `HYPERDRIVE` | binding | Hyperdrive config id in `wrangler.jsonc`. Connection string is injected. |
 | `DATABASE_URL` | secret (optional locally) | Direct Neon URL when Hyperdrive is not configured (`wrangler dev` / `.dev.vars`). |
 | `BETTER_AUTH_SECRET` | secret | 32+ random bytes. Rotating it signs everyone out. |
-| `BETTER_AUTH_URL` | **prod var / secret** | Public origin of the Worker, e.g. `https://zeroed.<account>.workers.dev`. **Do not put localhost in `wrangler.jsonc` `vars`** — those ship to prod and would reject the real SPA origin. Local only: `.dev.vars` (`BETTER_AUTH_URL=http://localhost:8787`) or the `auth.ts` fallback when unset. |
+| `BETTER_AUTH_URL` | **prod var / secret** | Public origin of the Worker, e.g. `https://zeroed.<account>.workers.dev`. Required outside local wrangler/dev — `auth.ts` / `cors.ts` throw if it is unset (no localhost fallback, no non-Secure cookies). Local only: `.dev.vars` or a localhost `DATABASE_URL`. |
 | `OPENAI_API_KEY` | secret | Same key as today's `agent` function. |
 | `OPENAI_MODEL` | var | Default `gpt-5.4-nano`. |
 | `OPENAI_MODEL_HEAVY` | secret/var | Optional; `program_edit` only. |
@@ -76,7 +76,8 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    green on this branch. Isolation applies `supabase/migrations` onto
    PGlite, then seeds two athletes. The mutation script first asserts the
    unmutated check is green, then deletes each derived owner filter
-   (`athlete_id =` and `id =`) on its own and expects at least one failure.
+   (`athlete_id =` and `id =`, including the phase-rollback owner clause)
+   on its own and expects at least one failure.
 3. `npm run build && npx wrangler dev` serves `/` and `/api/health`.
    `POST /functions/v1/agent` reaches the Worker (not a 405 from assets).
    Missing `/assets/*` is 404 text/plain, not `index.html`.

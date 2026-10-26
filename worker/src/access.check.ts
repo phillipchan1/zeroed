@@ -3,13 +3,12 @@
 // Proves: athlete A cannot read, edit, or delete athlete B's rows on every
 // store / edits query path. Mutating those SQL filters must make this fail.
 
-import { readFileSync } from 'node:fs'
-import { fileURLToPath } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
 import {
   applyEdits,
   insertProgramRevision,
   liveToDraft,
+  rollbackPhaseWeekEnd,
   scheduleDraftForNextWeek,
   writeDraftInPlace,
   type EditInput,
@@ -26,6 +25,7 @@ import {
   loadNotes,
   loadWorkout,
   loadWorkouts,
+  hydrateOwnedWorkout,
   makeStore,
   programIds,
   selectOwnedWorkout,
@@ -130,10 +130,15 @@ ok((await selectOwnedWorkout(storeA, WORKOUT_A))?.id === WORKOUT_A, 'selectOwned
 ok(await workoutProgramOwned(storeA, PROG_A), 'loadWorkout second check: A owns A program')
 ok(!(await workoutProgramOwned(storeA, PROG_B)), 'loadWorkout second check: A does not own B program')
 ok(!(await workoutProgramOwned(storeB, PROG_A)), 'loadWorkout second check: B does not own A program')
+const bRowForA = await selectOwnedWorkout(storeB, WORKOUT_B)
+ok(bRowForA?.r_program_id === PROG_B, 'seed: B workout row has B program')
 ok(
-  readFileSync(fileURLToPath(new URL('./store.ts', import.meta.url)), 'utf8')
-    .includes('workoutProgramOwned(store, row.r_program_id)'),
-  'loadWorkout second check is applied after SQL',
+  await hydrateOwnedWorkout(storeA, bRowForA ?? null, WORKOUT_B) === null,
+  'loadWorkout second check: A cannot hydrate B row',
+)
+ok(
+  (await hydrateOwnedWorkout(storeB, bRowForA ?? null, WORKOUT_B))?.workout.id === WORKOUT_B,
+  'loadWorkout second check: B can hydrate own row',
 )
 
 const liftsA = await loadLiftHistory(storeA, 'Deadlift')
@@ -267,6 +272,13 @@ const plantedPhase = await scheduleDraftForNextWeek(
 ok(plantedPhase === 0, 'scheduleDraft: A cannot INSERT phase onto B program')
 ok(plantErrors.some((e) => e.includes("couldn't schedule") || e.includes("couldn't close")), 'scheduleDraft: B program insert refused')
 ok((await count('phase', 'program_id = $1', [PROG_B])) === bPhaseCount, 'scheduleDraft: B phase count unchanged')
+
+const bEndBeforeRollback = await scalar<string>('SELECT week_end::text FROM phase WHERE id = $1', [PHASE_B])
+await rollbackPhaseWeekEnd(storeA, PHASE_B, '2020-01-05')
+ok(
+  (await scalar<string>('SELECT week_end::text FROM phase WHERE id = $1', [PHASE_B])) === bEndBeforeRollback,
+  'rollbackPhase: A cannot rewrite B week_end',
+)
 
 const bRevs = await count('program_revision', 'program_id = $1', [PROG_B])
 const stolenRev = await insertProgramRevision(storeA, { programId: PROG_B, phaseId: PHASE_B }, {

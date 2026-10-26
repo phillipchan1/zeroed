@@ -1,6 +1,7 @@
 import { betterAuth } from 'better-auth'
 import { bearer, emailOTP } from 'better-auth/plugins'
 import { Pool } from 'pg'
+import { authCookieSecure, isLocalAuthHost, resolveAuthBaseURL } from './authUrl.ts'
 import { databaseUrl, type Env } from './env.ts'
 
 type AuthInstance = ReturnType<typeof createAuth>
@@ -40,18 +41,20 @@ export function createAuth(env: Env) {
   if (!url) throw new Error('database is not configured (HYPERDRIVE or DATABASE_URL)')
   const secret = env.BETTER_AUTH_SECRET
   if (!secret) throw new Error('BETTER_AUTH_SECRET is not set')
-  const baseURL = (env.BETTER_AUTH_URL || 'http://localhost:8787').replace(/\/+$/, '')
+  const baseURL = resolveAuthBaseURL(env)
   return betterAuth({
     secret,
     baseURL,
     basePath: '/api/auth',
     database: new Pool({ connectionString: url, max: 5 }),
     emailAndPassword: { enabled: false },
-    trustedOrigins: [baseURL, 'http://localhost:5173', 'http://localhost:8787'],
+    trustedOrigins: isLocalAuthHost(baseURL)
+      ? [baseURL, 'http://localhost:5173', 'http://localhost:8787']
+      : [baseURL],
     advanced: {
       defaultCookieAttributes: {
         sameSite: 'lax',
-        secure: !baseURL.startsWith('http://localhost'),
+        secure: authCookieSecure(baseURL),
         httpOnly: true,
         path: '/',
       },
