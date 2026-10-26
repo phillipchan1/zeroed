@@ -1,0 +1,64 @@
+# Local smoke — 2026-10-26
+# npm run type-check && npm run lint && npm run check && npm run build && npx wrangler dev --ip 127.0.0.1 --port 8787
+
+## type-check / lint / check
+npm run type-check   # pass (tsc client + worker)
+npm run lint         # pass
+npm run check
+  ✓ all 26 balance checks passed
+  ✓ all 182 demand-table checks passed
+  loggedSets.check: 24 checks passed
+  phaseBoundary.check: 32 checks passed
+  ✓ all 73 prescription checks passed
+  programDraft.check: 45 checks passed
+  ✓ all 46 PR/volume checks passed
+  ✓ all 38 rest-timer checks passed
+  ✓ all 50 strength-baseline checks passed
+  ✓ all 85 unit checks passed
+  weekOrder.check: ok
+  43 checks, 0 failed
+  access isolation: ok
+
+## wrangler dev
+Your Worker has access to the following bindings:
+  env.HYPERDRIVE         Hyperdrive Config       local
+  env.ASSETS             Assets                  local
+[wrangler:info] ✨ Parsed 8 valid header rules.
+[wrangler:info] Ready on http://127.0.0.1:8787
+
+GET /
+  HTTP/1.1 200 OK
+  Content-Type: text/html; charset=utf-8
+  Cache-Control: public, max-age=0, must-revalidate
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  x-content-type-options: nosniff
+  x-frame-options: DENY
+  referrer-policy: strict-origin-when-cross-origin
+  <title>Zeroed</title>
+
+GET /app/today
+  HTTP/1.1 200 OK
+  Content-Type: text/html; charset=utf-8
+  Cache-Control: public, max-age=0, must-revalidate
+  <title>Zeroed</title>
+  (SPA fallback — same ETag as /)
+
+GET /api/health
+  HTTP/1.1 200 OK
+  {"ok":true,"service":"zeroed","runtime":"cloudflare-workers"}
+
+POST /api/agent  (no OPENAI_API_KEY)
+  HTTP/1.1 500
+  {"ok":false,"error":"server not configured"}
+
+POST /api/mcp  Accept: text/event-stream  (no bearer)
+  HTTP/1.1 401
+  WWW-Authenticate: Bearer realm="zeroed"
+  {"error":"Missing bearer token"}
+
+GET /assets/index-*.js
+  HTTP/1.1 200 OK
+  Cache-Control: public, max-age=31536000, immutable
+
+Not run (would need Neon + secrets; not part of this draft):
+  Better Auth OTP send/verify, authenticated agent, MCP SSE body with a live token.
