@@ -373,10 +373,9 @@ export function Ring({ value, size = 72, stroke = 6, tone, label, children }: Ri
         <circle
           className="ring__fill"
           cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke}
-          stroke={tone}
           // The mount draw (ring-draw) starts from an empty ring, which is a
           // full-circumference offset — a value only this component knows.
-          style={{ '--ring-circ': circ } as React.CSSProperties}
+          style={{ '--ring-circ': circ, stroke: tone } as React.CSSProperties}
           strokeDasharray={circ}
           strokeDashoffset={circ * (1 - pct)}
         />
@@ -479,7 +478,7 @@ export function Banner({ title, sub, tone = 'signal', icon, onClick, trailing }:
         <span className="banner__title" style={{ display: 'block' }}>{title}</span>
         {sub && <span className="banner__sub" style={{ display: 'block' }}>{sub}</span>}
       </span>
-      {trailing ?? (onClick ? <ChevronRight size={20} strokeWidth={2} color="var(--text-dim)" /> : null)}
+      {trailing ?? (onClick ? <ChevronRight size={20} strokeWidth={2} style={{ color: 'var(--text-dim)' }} /> : null)}
     </Tag>
   )
 }

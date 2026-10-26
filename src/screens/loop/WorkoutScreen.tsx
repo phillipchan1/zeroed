@@ -261,7 +261,7 @@ function SetRow({
       onAnimationEnd={(e) => { if (e.animationName === 'done-ring') setSnap(false) }}
       aria-label={log.done ? 'Mark set not done' : 'Complete set'}
     >
-      {log.done && <Check size={22} strokeWidth={2.5} color="var(--signal)" />}
+      {log.done && <Check size={22} strokeWidth={2.5} style={{ color: 'var(--signal)' }} />}
     </button>
   )
 

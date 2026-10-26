@@ -30,7 +30,7 @@ export function Nav() {
               <Icon
                 size={24}
                 strokeWidth={isActive ? 2 : 1.75}
-                color={isActive ? 'var(--signal)' : 'var(--text-dim)'}
+                style={{ color: isActive ? 'var(--signal)' : 'var(--text-dim)' }}
               />
               <span className="nav__label">{label}</span>
             </>
@@ -65,7 +65,7 @@ export function Sidebar({ athleteId }: { athleteId: string }) {
                 <Icon
                   size={18}
                   strokeWidth={1.5}
-                  color={isActive ? 'var(--text)' : 'var(--text-dim)'}
+                  style={{ color: isActive ? 'var(--text)' : 'var(--text-dim)' }}
                 />
                 <span className="sidebar__label">{label}</span>
               </>

@@ -119,8 +119,8 @@ export function ConvergenceReticle({
         style={{ overflow: 'visible' }}
       >
         {/* crosshair — the reticle frame, faint */}
-        <line x1={cx} y1={cy - maxR * 1.05} x2={cx} y2={cy + maxR * 1.05} stroke="var(--line)" strokeWidth={1} />
-        <line x1={cx - maxR * 1.05} y1={cy} x2={cx + maxR * 1.05} y2={cy} stroke="var(--line)" strokeWidth={1} />
+        <line x1={cx} y1={cy - maxR * 1.05} x2={cx} y2={cy + maxR * 1.05} style={{ stroke: 'var(--line)' }} strokeWidth={1} />
+        <line x1={cx - maxR * 1.05} y1={cy} x2={cx + maxR * 1.05} y2={cy} style={{ stroke: 'var(--line)' }} strokeWidth={1} />
 
         {/* the lock ring — shrinks toward the core as confidence rises */}
         <circle
@@ -128,10 +128,10 @@ export function ConvergenceReticle({
           cy={cy}
           r={Math.max(coreR, ringR)}
           fill="none"
-          stroke={locked ? accent : 'var(--text-dim)'}
           strokeWidth={1}
           strokeDasharray={locked ? 'none' : '3 4'}
           style={{
+            stroke: locked ? accent : 'var(--text-dim)',
             opacity: 0.25 + brightness * 0.5,
             transition: 'r .9s var(--ease), stroke .6s var(--ease), opacity .9s var(--ease)',
           }}
@@ -149,8 +149,8 @@ export function ConvergenceReticle({
               cx={x}
               cy={y}
               r={1.7}
-              fill={dotLit ? accent : 'var(--text-dim)'}
               style={{
+                fill: dotLit ? accent : 'var(--text-dim)',
                 opacity: dotOpacity,
                 transition: 'cx .9s var(--ease), cy .9s var(--ease), fill .6s var(--ease), opacity .9s var(--ease)',
               }}
@@ -159,7 +159,7 @@ export function ConvergenceReticle({
         })}
 
         {/* the center — the zero point */}
-        <circle cx={cx} cy={cy} r={2.4} fill={accent} style={{ opacity: 0.4 + brightness * 0.6, transition: 'opacity .9s var(--ease), fill .6s var(--ease)' }} />
+        <circle cx={cx} cy={cy} r={2.4} style={{ fill: accent, opacity: 0.4 + brightness * 0.6, transition: 'opacity .9s var(--ease), fill .6s var(--ease)' }} />
       </svg>
 
       {showLabel && (

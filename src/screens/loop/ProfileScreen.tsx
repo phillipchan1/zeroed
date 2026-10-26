@@ -267,7 +267,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
               onClick={() => openEdit('target')}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-                <Target size={22} strokeWidth={1.75} color="var(--signal)" style={{ flexShrink: 0 }} />
+                <Target size={22} strokeWidth={1.75} style={{ flexShrink: 0, color: 'var(--signal)' }} />
                 <span style={{ flex: 1, minWidth: 0, fontSize: 'var(--fs-xl)', fontWeight: 700, lineHeight: 1.3 }}>
                   {target ?? <span className="text-dim" style={{ fontWeight: 400 }}>Set a target</span>}
                 </span>
@@ -281,25 +281,25 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
           <SectionHeader>Training</SectionHeader>
           <div style={{ marginTop: 4 }}>
             <Row
-              leading={<CalendarDays size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+              leading={<CalendarDays size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
               title="Sessions per week"
               value={sessions != null ? String(sessions) : '—'}
               onClick={() => openEdit('sessions')}
             />
             <Row
-              leading={<Activity size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+              leading={<Activity size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
               title="Training age"
               value={trainingAge != null ? `${trainingAge}y` : '—'}
               onClick={() => openEdit('trainingAge')}
             />
             <Row
-              leading={<Scale size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+              leading={<Scale size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
               title="Weight units"
               value={unit}
               onClick={() => openEdit('units')}
             />
             <Row
-              leading={<Bell size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+              leading={<Bell size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
               title="Rest timer sound"
               sub="A beep and a buzz when the rest is up"
               value={restAlert ? 'On' : 'Off'}
@@ -307,7 +307,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
               chevron={false}
             />
             <Row
-              leading={<Volume2 size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+              leading={<Volume2 size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
               title="Sound effects"
               sub="A click per set, a chime on a PR, a chord at the finish"
               value={setClick ? 'On' : 'Off'}
@@ -352,7 +352,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
             {mcpTokens.filter((t) => !t.revoked_at).map((t) => (
               <Row
                 key={t.id}
-                leading={<Link2 size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+                leading={<Link2 size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
                 title={t.name}
                 sub={`…${t.last_four}${t.last_used_at ? ` · used ${new Date(t.last_used_at).toLocaleDateString()}` : ' · unused'}`}
                 value="Revoke"

@@ -105,8 +105,8 @@ function Sparkline({ values }: { values: number[] }) {
   const last = pts[pts.length - 1].split(',')
   return (
     <svg viewBox={`0 0 ${w} ${h}`} width="100%" height={h} style={{ display: 'block' }} preserveAspectRatio="none">
-      <polyline points={pts.join(' ')} fill="none" stroke="var(--signal)" strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
-      <circle cx={last[0]} cy={last[1]} r={4} fill="var(--signal)" />
+      <polyline points={pts.join(' ')} fill="none" style={{ stroke: 'var(--signal)' }} strokeWidth={2} strokeLinejoin="round" strokeLinecap="round" vectorEffect="non-scaling-stroke" />
+      <circle cx={last[0]} cy={last[1]} r={4} style={{ fill: 'var(--signal)' }} />
     </svg>
   )
 }
