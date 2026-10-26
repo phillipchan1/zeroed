@@ -14,6 +14,9 @@
  *      must appear in the mapping (id match, not just counts)
  *   3. Load mappings + data-only restore in one transaction
  *      (failure rolls back to empty tables)
+ *   4. Source dump + count/hash share one REPEATABLE READ snapshot
+ *      (pg_export_snapshot + pg_dump --snapshot) so live writes cannot
+ *      cause a false mismatch. Dry-run exits non-zero on any mismatch.
  *
  * The migration role often cannot read auth.users. In that case:
  *   --skip-auth-users --auth-users-file=users.json
@@ -551,15 +554,125 @@ export const PUBLIC_RESTORE_ORDER = [
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]
 
+/** Better Auth public tables — excluded from coverage on purpose. */
+export const EXCLUDED_PUBLIC_TABLES = ['user', 'session', 'account', 'verification']
+
+export const SNAPSHOT_BEGIN_SQL = 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ'
+export const SNAPSHOT_EXPORT_SQL = 'SELECT pg_export_snapshot() AS snapshot'
+
+/**
+ * Per-table count + content md5. Rows are hashed as to_jsonb(t) (sorted keys)
+ * and aggregated in primary-key order (id on every covered table) so source
+ * and Neon compute the same digest.
+ */
 export function checksumQuery(tables = REQUIRED_COUNT_TABLES) {
   return tables
-    .map((table, i) => (
-      i === 0
-        ? `SELECT '${table}' AS t, COUNT(*)::bigint AS n FROM public.${table}`
-        : `UNION ALL SELECT '${table}', COUNT(*) FROM public.${table}`
-    ))
+    .map((table, i) => {
+      const hash = `md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ',' ORDER BY t.id), ''))`
+      return i === 0
+        ? `SELECT '${table}' AS t, COUNT(*)::bigint AS n, ${hash} AS h FROM public.${table} t`
+        : `UNION ALL SELECT '${table}', COUNT(*), ${hash} FROM public.${table} t`
+    })
     .join('\n')
     + '\nORDER BY 1;\n'
+}
+
+export function uncoveredPublicTablesQuery(
+  covered = REQUIRED_COUNT_TABLES,
+  excluded = EXCLUDED_PUBLIC_TABLES,
+) {
+  const listed = [...covered, ...excluded].map((t) => `'${t.replace(/'/g, "''")}'`).join(', ')
+  return `
+    SELECT tablename
+    FROM pg_tables
+    WHERE schemaname = 'public'
+      AND tablename NOT IN (${listed})
+    ORDER BY 1;
+  `
+}
+
+export function refuseUncoveredPublicTables(tables) {
+  const extra = [...new Set((tables ?? []).map((t) => String(t || '').trim()).filter(Boolean))]
+  if (extra.length) {
+    throw new Error(`public table(s) not in coverage list: ${extra.join(', ')} (Better Auth tables are excluded on purpose)`)
+  }
+  return extra
+}
+
+/** Fail if a covered table's primary key is not the single column `id`. */
+export function unexpectedPrimaryKeyQuery(tables = REQUIRED_COUNT_TABLES) {
+  const listed = tables.map((t) => `'${t.replace(/'/g, "''")}'`).join(', ')
+  return `
+    SELECT c.relname AS table_name,
+           string_agg(a.attname, ',' ORDER BY array_position(i.indkey, a.attnum)) AS pk
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    JOIN pg_index i ON i.indrelid = c.oid AND i.indisprimary
+    JOIN pg_attribute a ON a.attrelid = c.oid AND a.attnum = ANY(i.indkey)
+    WHERE n.nspname = 'public'
+      AND c.relkind = 'r'
+      AND c.relname IN (${listed})
+    GROUP BY c.relname
+    HAVING string_agg(a.attname, ',' ORDER BY array_position(i.indkey, a.attnum)) IS DISTINCT FROM 'id';
+  `
+}
+
+export function refuseUnexpectedPrimaryKeys(rows) {
+  const bad = (rows ?? []).filter((r) => r?.table_name)
+  if (bad.length) {
+    const detail = bad.map((r) => `${r.table_name}(${r.pk || '?'})`).join(', ')
+    throw new Error(`covered table primary key is not id: ${detail}`)
+  }
+  return bad
+}
+
+export function pgDumpSnapshotArgs(dumpPath, snapshotId, sourceUrl) {
+  return [
+    '--format=custom',
+    '--no-owner',
+    '--no-acl',
+    '--data-only',
+    '--schema=public',
+    `--snapshot=${snapshotId}`,
+    `--file=${dumpPath}`,
+    sourceUrl,
+  ]
+}
+
+export function checksumRowsToMaps(rows) {
+  const counts = {}
+  const hashes = {}
+  for (const row of rows ?? []) {
+    const table = String(row.t ?? '')
+    if (!table) continue
+    counts[table] = Number(row.n)
+    if (row.h != null && row.h !== '') hashes[table] = String(row.h)
+  }
+  return { counts, hashes }
+}
+
+export async function withSourceSnapshot(sourceUrl, work) {
+  const client = new pg.Client({
+    connectionString: sourceUrl,
+    connectionTimeoutMillis: 10000,
+  })
+  await client.connect()
+  try {
+    await client.query(SNAPSHOT_BEGIN_SQL)
+    const exported = await client.query(SNAPSHOT_EXPORT_SQL)
+    const snapshotId = String(exported.rows[0]?.snapshot || '')
+    if (!snapshotId) throw new Error('pg_export_snapshot returned an empty snapshot id')
+    try {
+      const result = await work({ client, snapshotId })
+      await client.query('COMMIT')
+      return result
+    } catch (err) {
+      try { await client.query('ROLLBACK') } catch { /* ignore */ }
+      throw err
+    }
+  } finally {
+    try { await client.end() } catch { /* ignore */ }
+  }
 }
 
 /** Public app tables that have created_at (Better Auth stays out via the allowlist). */
@@ -599,11 +712,28 @@ export function parseCounts(text) {
     const line = raw.trim()
     if (!line) continue
     if (line.startsWith('(') || line.startsWith('-') || line.startsWith('+')) continue
-    if (/^t\s*[,|]\s*n$/i.test(line)) continue
-    const m = line.match(/^(\w+)\s*[,|]\s*(\d+)\s*$/)
+    if (/^t\s*[,|]\s*n(?:\s*[,|]\s*h)?$/i.test(line)) continue
+    const m = line.match(/^(\w+)\s*[,|]\s*(\d+)(?:\s*[,|]\s*([0-9a-fA-F]{32}))?\s*$/)
     if (m) out[m[1]] = Number(m[2])
   }
   return out
+}
+
+export function parseHashes(text) {
+  const out = {}
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    if (line.startsWith('(') || line.startsWith('-') || line.startsWith('+')) continue
+    if (/^t\s*[,|]\s*n(?:\s*[,|]\s*h)?$/i.test(line)) continue
+    const m = line.match(/^(\w+)\s*[,|]\s*(\d+)\s*[,|]\s*([0-9a-fA-F]{32})\s*$/)
+    if (m) out[m[1]] = m[3].toLowerCase()
+  }
+  return out
+}
+
+export function parseChecksums(text) {
+  return { counts: parseCounts(text), hashes: parseHashes(text) }
 }
 
 export function requireCounts(counts, label) {
@@ -612,6 +742,14 @@ export function requireCounts(counts, label) {
     throw new Error(`${label}: missing row counts for ${missing.join(', ')} (refusing to continue)`)
   }
   return counts
+}
+
+export function requireHashes(hashes, label) {
+  const missing = REQUIRED_COUNT_TABLES.filter((t) => !/^[0-9a-f]{32}$/i.test(hashes?.[t] || ''))
+  if (missing.length) {
+    throw new Error(`${label}: missing content hashes for ${missing.join(', ')} (refusing to continue)`)
+  }
+  return hashes
 }
 
 export function parseOrphanIds(text) {
@@ -642,18 +780,26 @@ export function wrapRestoreTransaction(userSql, restoreSql) {
   return ['BEGIN;', userSql || '', restoreSql || '', 'COMMIT;'].join('\n')
 }
 
-export function formatCountComparison(srcCounts, dstCounts) {
+export function formatCountComparison(srcCounts, dstCounts, srcHashes = null, dstHashes = null) {
   const tables = REQUIRED_COUNT_TABLES
   const lines = []
   let mismatch = false
+  const compareHashes = srcHashes != null || dstHashes != null
   for (const table of tables) {
     const a = srcCounts?.[table]
     const b = dstCounts == null ? undefined : dstCounts[table]
     const aDisp = Number.isFinite(a) ? a : 'n/a'
     const bDisp = Number.isFinite(b) ? b : 'n/a'
-    const mark = a === b && Number.isFinite(a) ? 'ok' : 'MISMATCH'
+    const countOk = a === b && Number.isFinite(a)
+    const srcHash = srcHashes?.[table]
+    const dstHash = dstHashes == null ? undefined : dstHashes?.[table]
+    const hashOk = !compareHashes || (Boolean(srcHash) && srcHash === dstHash)
+    const mark = countOk && hashOk ? 'ok' : 'MISMATCH'
     if (mark !== 'ok') mismatch = true
-    lines.push(`  ${table}: source=${aDisp} neon=${bDisp} ${mark}`)
+    const hashDisp = compareHashes
+      ? ` src_md5=${srcHash || 'n/a'} neon_md5=${dstHash || 'n/a'}`
+      : ''
+    lines.push(`  ${table}: source=${aDisp} neon=${bDisp}${hashDisp} ${mark}`)
   }
   return { lines, mismatch }
 }
@@ -733,20 +879,25 @@ function printDryRunCreatedAt(sourceUrl, targetUrl) {
   }
 }
 
-function readCounts(url, label, { required = true } = {}) {
+function readChecksums(url, label, { required = true } = {}) {
   try {
-    const counts = parseCounts(psqlTuples(url, checksumQuery()))
-    if (required) return requireCounts(counts, label)
-    if (REQUIRED_COUNT_TABLES.some((t) => !Number.isFinite(counts[t]))) {
-      console.log(`${label}: incomplete row counts`)
-      return counts
+    const parsed = parseChecksums(psqlTuples(url, checksumQuery()))
+    if (required) {
+      return {
+        counts: requireCounts(parsed.counts, label),
+        hashes: requireHashes(parsed.hashes, label),
+      }
     }
-    return counts
+    if (REQUIRED_COUNT_TABLES.some((t) => !Number.isFinite(parsed.counts[t]))) {
+      console.log(`${label}: incomplete row counts`)
+      return parsed
+    }
+    return parsed
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     if (!required && /does not exist|undefined_table/i.test(message)) {
       console.log(`${label}: tables not present yet`)
-      return null
+      return { counts: null, hashes: null }
     }
     throw err
   }
@@ -801,7 +952,9 @@ function printOfflineDryRun(args) {
   console.log(args.relaxTargetRls
     ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
     : 'dry-run: would leave any leftover RLS artifacts on Neon (pass --relax-target-rls to drop them on the target)')
-  console.log('dry-run: would compare row counts per table and abort on mismatch')
+  console.log('dry-run: would dump under REPEATABLE READ (pg_export_snapshot + pg_dump --snapshot) so counts/hashes match the dump')
+  console.log('dry-run: would compare row counts and per-table content md5 (PK-ordered) and exit non-zero on mismatch')
+  console.log('dry-run: would refuse if a public table is missing from the coverage list (Better Auth excluded on purpose)')
   console.log('dry-run: would require every source auth_user_id to appear in the mapping (ids, not counts)')
   console.log('dry-run: live restore drops and recreates public/auth, then restores in one transaction')
   console.log('dry-run: live restore without --auth-users-file exits 2')
@@ -927,16 +1080,23 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   try {
     writeFileSync(relaxPath, RELAX_TARGET_SQL)
 
-    console.log('dumping public data only (no-owner, no-acl, no schema/RLS)…')
-    run('pg_dump', [
-      '--format=custom',
-      '--no-owner',
-      '--no-acl',
-      '--data-only',
-      '--schema=public',
-      `--file=${dumpPath}`,
-      source,
-    ])
+    console.log('opening REPEATABLE READ snapshot for dump + counts/hashes…')
+    const snap = await withSourceSnapshot(source, async ({ client, snapshotId }) => {
+      console.log(`dumping public data only (no-owner, no-acl, no schema/RLS, snapshot ${snapshotId})…`)
+      run('pg_dump', pgDumpSnapshotArgs(dumpPath, snapshotId, source))
+
+      refuseUncoveredPublicTables(
+        (await client.query(uncoveredPublicTablesQuery())).rows.map((r) => r.tablename),
+      )
+      refuseUnexpectedPrimaryKeys((await client.query(unexpectedPrimaryKeyQuery())).rows)
+
+      const mapped = checksumRowsToMaps((await client.query(checksumQuery())).rows)
+      const srcCounts = requireCounts(mapped.counts, 'source')
+      const srcHashes = requireHashes(mapped.hashes, 'source')
+      const sourceAuthIds = (await client.query(distinctAuthUserIdQuery())).rows
+        .map((r) => String(r.auth_user_id ?? ''))
+      return { srcCounts, srcHashes, sourceAuthIds, snapshotId }
+    })
 
     let mappedUsers = 0
     let mappingRows = []
@@ -967,15 +1127,13 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       console.log(`exported ${mappedUsers} auth.users rows`)
     }
 
-    const srcCounts = readCounts(source, 'source', { required: true })
-    const dstCounts = readCounts(target, 'neon', { required: false })
-    const before = formatCountComparison(srcCounts, dstCounts)
-    console.log('row counts before restore:')
+    const dest = readChecksums(target, 'neon', { required: false })
+    const before = formatCountComparison(snap.srcCounts, dest.counts, snap.srcHashes, dest.hashes)
+    console.log('row counts and content hashes (source snapshot vs neon):')
     for (const line of before.lines) console.log(line)
 
     if (args.skipAuthUsers && args.authUsersFile) {
-      const sourceIds = parseIdList(psqlTuples(source, distinctAuthUserIdQuery()))
-      const missing = missingMappedAuthUserIds(sourceIds, mappingRows)
+      const missing = missingMappedAuthUserIds(snap.sourceAuthIds, mappingRows)
       if (missing.length) {
         console.error(`--auth-users-file is missing ${missing.length} source auth_user_id(s) (id match, not counts)`)
         return 1
@@ -983,12 +1141,17 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     }
 
     if (args.dryRun) {
-      console.log(`dry-run: dump at ${dumpPath} (${readFileSync(dumpPath).length} bytes)`)
+      console.log(`dry-run: snapshot ${snap.snapshotId}; dump discarded after compare (${readFileSync(dumpPath).length} bytes, not uploaded)`)
       console.log(`dry-run: ${mappedUsers} auth users to map`)
       console.log(args.relaxTargetRls
         ? 'dry-run: would apply worker/schema/app.sql + data-only restore + --relax-target-rls on Neon only'
         : 'dry-run: would apply worker/schema/app.sql + data-only restore (no Neon writes in this dry-run)')
       printDryRunCreatedAt(source, target)
+      if (before.mismatch) {
+        console.error('dry-run: count/hash mismatch — abort (no Neon writes)')
+        return 1
+      }
+      console.log('dry-run: counts and hashes match')
       return 0
     }
 
@@ -1030,13 +1193,12 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', relaxPath])
     }
 
-    const afterSrc = readCounts(source, 'source', { required: true })
-    const afterDst = readCounts(target, 'neon', { required: true })
-    const after = formatCountComparison(afterSrc, afterDst)
-    console.log('row counts after restore:')
+    const afterDst = readChecksums(target, 'neon', { required: true })
+    const after = formatCountComparison(snap.srcCounts, afterDst.counts, snap.srcHashes, afterDst.hashes)
+    console.log('row counts and content hashes after restore (source snapshot vs neon):')
     for (const line of after.lines) console.log(line)
     if (after.mismatch) {
-      console.error('Row-count mismatch — abort. Neon was written but is not trusted.')
+      console.error('Row-count or content-hash mismatch — abort. Neon was written but is not trusted.')
       return 1
     }
 

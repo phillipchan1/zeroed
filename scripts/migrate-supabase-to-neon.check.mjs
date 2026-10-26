@@ -22,8 +22,10 @@ import {
   canExecutePgControlSystemQuery,
   checkSourceLockAbsentOnTarget,
   checksumQuery,
+  checksumRowsToMaps,
   confirmDropMismatchReason,
   createdAtTablesQuery,
+  EXCLUDED_PUBLIC_TABLES,
   fingerprintQuery,
   formatCountComparison,
   isNeonHost,
@@ -37,8 +39,11 @@ import {
   orderRestoreList,
   orphanAthleteQuery,
   parseAuthUsersMapping,
+  parseChecksums,
   parseCounts,
   parseFingerprint,
+  parseHashes,
+  pgDumpSnapshotArgs,
   parseIdList,
   parseOrphanIds,
   parseMigrateArgs,
@@ -46,13 +51,20 @@ import {
   readFingerprint,
   redactSecrets,
   refuseSourceWipeReason,
+  refuseUncoveredPublicTables,
+  refuseUnexpectedPrimaryKeys,
   releaseHeldAdvisoryLocks,
   refuseTargetFingerprintReason,
   REQUIRED_COUNT_TABLES,
   requireCounts,
+  requireHashes,
   resolveSourceUrl,
   resolveTargetUrl,
+  SNAPSHOT_BEGIN_SQL,
+  SNAPSHOT_EXPORT_SQL,
   systemIdentifierQuery,
+  uncoveredPublicTablesQuery,
+  unexpectedPrimaryKeyQuery,
   wrapRestoreTransaction,
 } from './migrate-supabase-to-neon.mjs'
 import { previewTargetRefuseReason } from './seed-preview.mjs'
@@ -227,6 +239,34 @@ for (const table of REQUIRED_COUNT_TABLES) {
 }
 ok(!/FROM public\."?user"?/.test(checksumSql), 'checksumQuery excludes Better Auth user')
 ok(!/FROM public\.session(?:\s|;|$)/.test(checksumSql), 'checksumQuery excludes Better Auth session')
+ok(/to_jsonb\(t\)/.test(checksumSql), 'checksumQuery hashes to_jsonb(t) so column order does not matter')
+ok(/ORDER BY t\.id/.test(checksumSql), 'checksumQuery aggregates hashes in primary-key order')
+ok(/AS h /.test(checksumSql), 'checksumQuery selects a content hash column')
+eq(EXCLUDED_PUBLIC_TABLES.join(','), 'user,session,account,verification', 'Better Auth tables are excluded on purpose')
+ok(uncoveredPublicTablesQuery().includes('pg_tables'), 'coverage guard lists public tables')
+ok(uncoveredPublicTablesQuery().includes("'user'"), 'coverage guard excludes Better Auth user')
+ok(unexpectedPrimaryKeyQuery().includes('indisprimary'), 'pk guard inspects primary keys')
+ok(SNAPSHOT_BEGIN_SQL.includes('REPEATABLE READ'), 'snapshot opens REPEATABLE READ')
+ok(SNAPSHOT_EXPORT_SQL.includes('pg_export_snapshot()'), 'snapshot exports pg_export_snapshot()')
+const dumpArgs = pgDumpSnapshotArgs('/tmp/public.dump', '00000003-0000001A-1', 'postgresql://example')
+ok(dumpArgs.includes('--snapshot=00000003-0000001A-1'), 'pg_dump receives --snapshot')
+ok(dumpArgs.includes('--data-only'), 'snapshot dump stays data-only')
+ok(dumpArgs.includes('--schema=public'), 'snapshot dump is public-only')
+let uncoveredFailed = false
+try {
+  refuseUncoveredPublicTables(['new_public_table'])
+} catch (err) {
+  uncoveredFailed = /not in coverage list/.test(err instanceof Error ? err.message : '')
+}
+ok(uncoveredFailed, 'coverage guard fails when a public table is missing from the list')
+eq(refuseUncoveredPublicTables([]).length, 0, 'coverage guard accepts an empty extra list')
+let pkFailed = false
+try {
+  refuseUnexpectedPrimaryKeys([{ table_name: 'athlete', pk: 'athlete_id' }])
+} catch (err) {
+  pkFailed = /primary key is not id/.test(err instanceof Error ? err.message : '')
+}
+ok(pkFailed, 'pk guard fails when a covered table is not keyed by id')
 ok(createdAtTablesQuery().includes("column_name = 'created_at'"), 'createdAtTablesQuery finds created_at columns')
 ok(maxCreatedAtQuery('athlete').includes('MAX(created_at)'), 'maxCreatedAtQuery reads athlete.created_at')
 let refusedAuthTable = false
@@ -268,6 +308,34 @@ ok(!formatCountComparison(full, full).mismatch, 'matching required tables are ok
 ok(formatCountComparison(full, { ...full, athlete: 2 }).mismatch, 'mismatch is flagged')
 ok(formatCountComparison(full, null).mismatch, 'missing dest counts are a mismatch')
 ok(formatCountComparison({}, {}).mismatch, 'empty vs empty is a mismatch, not ok')
+
+const EMPTY_MD5 = 'd41d8cd98f00b204e9800998ecf8427e'
+const hashCsv = REQUIRED_COUNT_TABLES.map((t, i) => `${t},${i},${EMPTY_MD5}`).join('\n')
+const parsedHashCounts = parseCounts(hashCsv)
+const parsedHashes = parseHashes(hashCsv)
+eq(parsedHashCounts.athlete, 0, 'parseCounts reads counts when a hash column is present')
+eq(parsedHashes.athlete, EMPTY_MD5, 'parseHashes reads a 32-hex content md5')
+eq(parseChecksums(`t,n,h\n${hashCsv}`).hashes.workout, EMPTY_MD5, 'parseChecksums skips the t,n,h header')
+requireHashes(parsedHashes, 'hash-csv')
+ok(true, 'requireHashes accepts a complete hash parse')
+let hashFailed = false
+try {
+  requireHashes({}, 'empty-hash')
+} catch (err) {
+  hashFailed = /missing content hashes/.test(err instanceof Error ? err.message : '')
+}
+ok(hashFailed, 'requireHashes fails hard when hashes are missing')
+const fullHashes = Object.fromEntries(REQUIRED_COUNT_TABLES.map((t) => [t, EMPTY_MD5]))
+ok(!formatCountComparison(full, full, fullHashes, fullHashes).mismatch, 'matching counts and hashes are ok')
+ok(
+  formatCountComparison(full, full, fullHashes, { ...fullHashes, athlete: 'a'.repeat(32) }).mismatch,
+  'hash mismatch is flagged even when counts match',
+)
+eq(
+  checksumRowsToMaps([{ t: 'athlete', n: '3', h: EMPTY_MD5 }]).hashes.athlete,
+  EMPTY_MD5,
+  'checksumRowsToMaps keeps the content hash',
+)
 
 eq(parseOrphanIds('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n').length, 1, 'parseOrphanIds counts a uuid')
 ok(orphanAthleteQuery().includes('"user"'), 'orphan query joins Better Auth user')
@@ -582,6 +650,10 @@ ok(/--confirm-drop=<target dbname>/.test(drySkip.stdout), 'dry-run documents --c
 ok(/\.neon\.tech/.test(drySkip.stdout), 'dry-run documents a .neon.tech target')
 ok(/unreadable fingerprint/.test(drySkip.stdout), 'dry-run documents fail-closed fingerprints')
 ok(/advisory lock/.test(drySkip.stdout), 'dry-run documents the advisory-lock same-server check')
+ok(/pg_export_snapshot/.test(drySkip.stdout), 'offline dry-run documents the snapshot dump')
+ok(/content md5/.test(drySkip.stdout), 'offline dry-run documents per-table content md5')
+ok(/exit non-zero on mismatch/.test(drySkip.stdout), 'offline dry-run documents mismatch abort')
+ok(/coverage list/.test(drySkip.stdout), 'offline dry-run documents the public-table coverage guard')
 ok(!/would COPY auth\.users from source/.test(drySkip.stdout), 'skip path does not COPY auth.users')
 
 const liveNoConfirm = spawnMigrate(['--skip-auth-users'], {
@@ -761,6 +833,17 @@ ok(!/CREATE TABLE IF NOT EXISTS "user"[\s\S]*emailVerified/.test(readFileSync(jo
 ok(migrateSrc.includes('weekly_review') && migrateSrc.includes('coach_message'), 'migrate counts weekly_review and coach_message')
 ok(migrateSrc.includes('createdAtTablesQuery') || migrateSrc.includes("column_name = 'created_at'"), 'migrate looks up created_at columns')
 ok(/max\(created_at\)/.test(migrateSrc), 'dry-run prints max(created_at)')
+ok(/pg_export_snapshot/.test(migrateSrc), 'migrate exports a REPEATABLE READ snapshot')
+ok(/--snapshot=/.test(migrateSrc), 'migrate passes --snapshot to pg_dump')
+ok(/to_jsonb\(t\)/.test(migrateSrc), 'migrate hashes row content as to_jsonb')
+ok(/uncoveredPublicTablesQuery/.test(migrateSrc), 'migrate refuses uncovered public tables')
+ok(/count\/hash mismatch/.test(migrateSrc), 'dry-run aborts on a count/hash mismatch')
+ok(!/upload-artifact/.test(workflow), 'manual migrate does not upload dump artifacts')
+const runbook = readFileSync(join(root, 'docs/cloudflare-cutover.md'), 'utf8')
+ok(/pg_export_snapshot/.test(runbook), 'RUNBOOK documents pg_export_snapshot')
+ok(/pg_dump --snapshot/.test(runbook), 'RUNBOOK documents pg_dump --snapshot')
+ok(/REPEATABLE READ/.test(runbook), 'RUNBOOK documents the REPEATABLE READ snapshot')
+ok(/exits non-zero on any/.test(runbook), 'RUNBOOK documents dry-run mismatch abort')
 ok(/PGPASSFILE=\/dev\/null/.test(workflow), 'migrate workflow version-check nulls PGPASSFILE')
 ok(/-u PGSSLMODE|-u PGHOSTADDR|PGHOSTADDR/.test(workflow), 'migrate workflow version-check unsets inherited PGHOSTADDR/PGSSLMODE')
 ok(/PGPASSFILE=\/dev\/null/.test(checksYml), 'migrate-pg version-check nulls PGPASSFILE')
@@ -777,6 +860,10 @@ const tables = await db.query(`
     AND tablename IN (${REQUIRED_COUNT_TABLES.map((t) => `'${t}'`).join(',')})
 `)
 eq(tables.rows.length, 16, 'PGlite app.sql creates the counted public tables')
+const uncovered = await db.query(uncoveredPublicTablesQuery())
+eq(uncovered.rows.length, 0, 'PGlite public tables are covered or Better Auth excluded')
+const badPk = await db.query(unexpectedPrimaryKeyQuery())
+eq(badPk.rows.length, 0, 'PGlite covered tables have a single-column id primary key')
 
 const policies = await db.query(`SELECT COUNT(*)::int AS n FROM pg_policy`)
 eq(Number(policies.rows[0]?.n ?? -1), 0, 'PGlite app.sql created no RLS policies')
@@ -897,8 +984,11 @@ async function runLivePostgresChecks() {
     NEON_DIRECT_URL: targetUrl,
   })
   const dryLiveOut = `${dryLive.stdout}\n${dryLive.stderr}`
-  if (dryLive.status !== 0) console.error(redactSecrets(dryLiveOut))
-  eq(dryLive.status, 0, 'connected dry-run exits 0')
+  if (dryLive.status !== 1) console.error(redactSecrets(dryLiveOut))
+  eq(dryLive.status, 1, 'connected dry-run exits 1 when neon counts/hashes mismatch')
+  ok(/MISMATCH/.test(dryLiveOut), 'connected dry-run reports a mismatch')
+  ok(/src_md5=/.test(dryLiveOut), 'connected dry-run prints source content hashes')
+  ok(/pg_export_snapshot|snapshot /.test(dryLiveOut), 'connected dry-run uses a source snapshot')
   ok(/max\(created_at\)/.test(dryLiveOut), 'connected dry-run prints max(created_at)')
   ok(/athlete: source=/.test(dryLiveOut), 'connected dry-run prints athlete max(created_at)')
   eq(
@@ -926,11 +1016,21 @@ async function runLivePostgresChecks() {
   if (proceed.status !== 0) console.error(redactSecrets(proceedOut))
   eq(proceed.status, 0, 'different server live restore proceeds')
   ok(/migration ok/.test(proceedOut), 'different server prints migration ok')
+  ok(/src_md5=/.test(proceedOut) && /neon_md5=/.test(proceedOut), 'live restore prints source and neon content hashes')
   eq(
     Number(pinnedPsql(sourceUrl, 'SELECT COUNT(*) FROM public.athlete').trim()),
     athletesBefore,
     'different-server restore leaves source athlete rows unchanged',
   )
+
+  const dryAfter = spawnMigrate(['--dry-run', '--skip-auth-users', '--auth-users-file', mapPath], {
+    SUPABASE_READONLY_URL: sourceUrl,
+    NEON_DIRECT_URL: targetUrl,
+  })
+  const dryAfterOut = `${dryAfter.stdout}\n${dryAfter.stderr}`
+  if (dryAfter.status !== 0) console.error(redactSecrets(dryAfterOut))
+  eq(dryAfter.status, 0, 'connected dry-run exits 0 when neon matches the source snapshot')
+  ok(/counts and hashes match/.test(dryAfterOut), 'matching dry-run says counts and hashes match')
 
   const alias = spawnMigrate([
     '--skip-auth-users',
