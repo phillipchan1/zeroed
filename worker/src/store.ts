@@ -1,7 +1,7 @@
 import type { ExerciseTemplate } from '../../supabase/functions/_shared/engine/types.ts'
 import { readLoggedExercises, type LoggedWorkoutLike } from '../../supabase/functions/_shared/engine/loggedSets.ts'
 import { formatSet, isoDay, shortDate, topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
-import { asJson, type Sql } from './db.ts'
+import { asJson, pgArrayLiteral, type Sql } from './db.ts'
 
 export interface ConnectedStore {
   sql: Sql
@@ -470,7 +470,7 @@ export async function loadNotes(store: ConnectedStore, limit = 12): Promise<{
     ? await store.sql<{ week_ending: string; coach_notes: string | null }[]>`
         SELECT week_ending::text, coach_notes
         FROM weekly_review
-        WHERE program_id = ANY(${ids})
+        WHERE program_id = ANY(${pgArrayLiteral(ids)}::uuid[])
         ORDER BY week_ending DESC
         LIMIT ${cap}
       `

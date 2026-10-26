@@ -69,6 +69,153 @@ export function toProgramEdit(e: EditInput): ProgramEdit {
   }
 }
 
+export async function athleteOwnsProgram(store: ConnectedStore, programId: string): Promise<boolean> {
+  const [row] = await store.sql<{ id: string }[]>`
+    SELECT id FROM program
+    WHERE id = ${programId} AND athlete_id = ${store.athleteId}
+    LIMIT 1
+  `
+  return Boolean(row)
+}
+
+export async function athleteOwnsPhase(store: ConnectedStore, phaseId: string): Promise<boolean> {
+  const [row] = await store.sql<{ id: string }[]>`
+    SELECT ph.id
+    FROM phase ph
+    JOIN program p ON p.id = ph.program_id
+    WHERE ph.id = ${phaseId}
+      AND p.athlete_id = ${store.athleteId}
+    LIMIT 1
+  `
+  return Boolean(row)
+}
+
+export async function athleteOwnsRoutine(store: ConnectedStore, routineId: string): Promise<boolean> {
+  const [row] = await store.sql<{ id: string }[]>`
+    SELECT r.id
+    FROM routine r
+    JOIN program p ON p.id = r.program_id
+    WHERE r.id = ${routineId}
+      AND p.athlete_id = ${store.athleteId}
+    LIMIT 1
+  `
+  return Boolean(row)
+}
+
+/** Re-check every FK the write would land on. Missing ids are ignored. */
+export async function assertOwnedForeignKeys(
+  store: ConnectedStore,
+  refs: { programId?: string | null; phaseId?: string | null; routineId?: string | null },
+): Promise<boolean> {
+  if (refs.programId && !(await athleteOwnsProgram(store, refs.programId))) return false
+  if (refs.phaseId && !(await athleteOwnsPhase(store, refs.phaseId))) return false
+  if (refs.routineId && !(await athleteOwnsRoutine(store, refs.routineId))) return false
+  return true
+}
+
+export async function insertOwnedRoutine(
+  store: ConnectedStore,
+  row: {
+    programId: string
+    phaseId: string
+    name: string
+    sessionType: string
+    exercises: unknown
+    intent: string
+    intendedDow: number | null
+  },
+): Promise<string | null> {
+  const inserted = await store.sql<{ id: string }[]>`
+    INSERT INTO routine (program_id, phase_id, name, session_type, exercises, intent, intended_dow)
+    SELECT ${row.programId}, ${row.phaseId}, ${row.name}, ${row.sessionType},
+           ${jsonParam(store.sql, row.exercises)}, ${row.intent}, ${row.intendedDow}
+    WHERE EXISTS (
+      SELECT 1 FROM program p WHERE p.id = ${row.programId} AND p.athlete_id = ${store.athleteId}
+    )
+    AND EXISTS (
+      SELECT 1 FROM phase ph
+      JOIN program p ON p.id = ph.program_id
+      WHERE ph.id = ${row.phaseId}
+        AND p.athlete_id = ${store.athleteId}
+    )
+    RETURNING id
+  `
+  return inserted[0]?.id ?? null
+}
+
+/**
+ * Upsert a routine by id. ON CONFLICT only updates a row the caller already owns.
+ * A cannot take B's id (QA #15).
+ */
+export async function upsertOwnedRoutine(
+  store: ConnectedStore,
+  row: {
+    id: string
+    programId: string
+    phaseId: string
+    name: string
+    sessionType: string
+    exercises: unknown
+    intent: string
+    intendedDow: number | null
+  },
+): Promise<number> {
+  const written = await store.sql<{ id: string }[]>`
+    INSERT INTO routine (id, program_id, phase_id, name, session_type, exercises, intent, intended_dow)
+    SELECT ${row.id}::uuid, ${row.programId}::uuid, ${row.phaseId}::uuid, ${row.name},
+           ${row.sessionType}, ${jsonParam(store.sql, row.exercises)}, ${row.intent}, ${row.intendedDow}
+    WHERE EXISTS (
+      SELECT 1 FROM program p WHERE p.id = ${row.programId} AND p.athlete_id = ${store.athleteId}
+    )
+    AND EXISTS (
+      SELECT 1 FROM phase ph
+      JOIN program p ON p.id = ph.program_id
+      WHERE ph.id = ${row.phaseId}
+        AND p.athlete_id = ${store.athleteId}
+    )
+    ON CONFLICT (id) DO UPDATE SET
+      name = EXCLUDED.name,
+      session_type = EXCLUDED.session_type,
+      exercises = EXCLUDED.exercises,
+      intent = EXCLUDED.intent,
+      intended_dow = EXCLUDED.intended_dow
+    WHERE routine.program_id IN (
+      SELECT id FROM program WHERE athlete_id = ${store.athleteId}
+    )
+    RETURNING id
+  `
+  return written.length
+}
+
+/** Move a routine's program/phase FKs only when the caller owns the row and both targets. */
+export async function updateOwnedRoutineFks(
+  store: ConnectedStore,
+  routineId: string,
+  refs: { programId: string; phaseId: string },
+): Promise<number> {
+  const updated = await store.sql<{ id: string }[]>`
+    UPDATE routine r
+    SET program_id = ${refs.programId},
+        phase_id = ${refs.phaseId}
+    FROM program p
+    WHERE r.id = ${routineId}
+      AND r.program_id = p.id
+      AND p.athlete_id = ${store.athleteId}
+      AND EXISTS (
+        SELECT 1 FROM program p2
+        WHERE p2.id = ${refs.programId} AND p2.athlete_id = ${store.athleteId}
+      )
+      AND EXISTS (
+        SELECT 1 FROM phase ph
+        JOIN program p3 ON p3.id = ph.program_id
+        WHERE ph.id = ${refs.phaseId}
+          AND p3.athlete_id = ${store.athleteId}
+      )
+    RETURNING r.id
+  `
+  return updated.length
+}
+
 export function liveToDraft(live: LiveProgram): ProgramDraft {
   return {
     sessionsPerWeek: live.sessionsPerWeek,
@@ -186,16 +333,16 @@ export async function writeDraftInPlace(
       if (!updated.length) errors.push(`${s.name}: not found or not owned`)
       else written++
     } else {
-      const inserted = await store.sql<{ id: string }[]>`
-        INSERT INTO routine (program_id, phase_id, name, session_type, exercises, intent, intended_dow)
-        SELECT ${live.programId}, ${live.phaseId}, ${payload.name}, ${payload.session_type},
-               ${jsonParam(store.sql, payload.exercises)}, ${payload.intent}, ${payload.intended_dow}
-        WHERE EXISTS (
-          SELECT 1 FROM program p WHERE p.id = ${live.programId} AND p.athlete_id = ${store.athleteId}
-        )
-        RETURNING id
-      `
-      if (!inserted.length) errors.push(`${s.name}: insert refused`)
+      const inserted = await insertOwnedRoutine(store, {
+        programId: live.programId,
+        phaseId: live.phaseId,
+        name: payload.name,
+        sessionType: payload.session_type,
+        exercises: payload.exercises,
+        intent: payload.intent,
+        intendedDow: payload.intended_dow,
+      })
+      if (!inserted) errors.push(`${s.name}: insert refused`)
       else written++
     }
   }
@@ -257,13 +404,16 @@ export async function scheduleDraftForNextWeek(
     return 0
   }
   for (const s of draft.sessions) {
-    await store.sql`
-      INSERT INTO routine (program_id, phase_id, name, session_type, exercises, intent, intended_dow)
-      VALUES (
-        ${live.programId}, ${newPhase.id}, ${s.name}, ${s.sessionType},
-        ${jsonParam(store.sql, s.exercises)}, ${s.intent}, ${s.intendedDow}
-      )
-    `
+    const inserted = await insertOwnedRoutine(store, {
+      programId: live.programId,
+      phaseId: newPhase.id,
+      name: s.name,
+      sessionType: s.sessionType,
+      exercises: s.exercises,
+      intent: s.intent,
+      intendedDow: s.intendedDow,
+    })
+    if (!inserted) errors.push(`${s.name}: insert refused`)
   }
   return draft.sessions.length
 }
@@ -291,6 +441,12 @@ export async function insertProgramRevision(
            ${payload.summary}
     WHERE EXISTS (
       SELECT 1 FROM program p WHERE p.id = ${live.programId} AND p.athlete_id = ${store.athleteId}
+    )
+    AND EXISTS (
+      SELECT 1 FROM phase ph
+      JOIN program p ON p.id = ph.program_id
+      WHERE ph.id = ${live.phaseId}
+        AND p.athlete_id = ${store.athleteId}
     )
     RETURNING id
   `

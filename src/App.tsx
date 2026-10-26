@@ -141,7 +141,7 @@ function AppRoutes() {
         }
       >
         <Route index element={<Navigate to="today" replace />} />
-        <Route path="today"   element={<TodayScreen   athleteId={athleteId} todayRoutine={todayRoutine} routines={routines} onboardingStep={onboardingStep} />} />
+        <Route path="today"   element={<TodayScreen   athleteId={athleteId} routines={routines} onboardingStep={onboardingStep} />} />
         <Route path="profile" element={<ProfileScreen athleteId={athleteId} athleteName={athleteName} />} />
         <Route path="program" element={<ProgramScreen athleteId={athleteId} />} />
         <Route path="program/edit" element={<ProgramEditScreen athleteId={athleteId} />} />

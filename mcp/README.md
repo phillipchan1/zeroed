@@ -32,7 +32,9 @@ Program writes follow the app:
 
 ## Remote (Claude web / mobile)
 
-Edge function: `supabase/functions/mcp`. Auth is an opaque `mcp_token` bearer minted in the app — **not** a Supabase JWT.
+**Today (flag off):** Edge function `supabase/functions/mcp`. Auth is an opaque `mcp_token` bearer minted in the app — **not** a Supabase JWT.
+
+**At cutover (`VITE_API_BASE_URL=/api` or the Worker origin + `/api`):** the same tools live on the Hono Worker at `/api/mcp` (Profile already uses `mcpUrl()`). The edge function is retired then; existing hashed tokens keep working because the Neon copy of `mcp_token` is the same rows. Do not leave a connector pointed at `functions/v1/mcp` after cutover — it would keep reading the old Supabase store.
 
 ### Wire it once
 

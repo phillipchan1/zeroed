@@ -36,7 +36,6 @@ const PAGER_DIRECTIVE_TONE: Record<WeeklyDirective, 'done' | 'todo' | 'pending'>
 
 interface TodayScreenProps {
   athleteId: string
-  todayRoutine: RoutineRow | null
   routines: RoutineRow[]
   onboardingStep?: OnboardingStep
 }
@@ -736,7 +735,7 @@ function StuckSessionsSheet({
  * summary instrument, at most one attention banner, then the session list.
  * Detail lives in sheets, never inline.
  */
-export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep }: TodayScreenProps) {
+export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
   const location   = useLocation()
   // A session finished a moment ago rides in on router state. Cleared on dismiss
@@ -922,9 +921,12 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const startWeek = viewingUpcoming ? displayWindow.weekStart : null
   const startHref = (id: string) => startWeek ? `/app/workout/${id}?week=${startWeek}` : `/app/workout/${id}`
 
+  // Exactly one session gets the primary Start. It follows the list on screen
+  // (this week, or the upcoming week when that's what's showing): the open
+  // draft if there is one, otherwise the earliest session still to do. The list
+  // is already in calendar order, so the button lands on Monday before Friday.
   const primaryRoutineId =
-    (!viewingUpcoming && todayRoutine && statusFor(todayRoutine.id).kind === 'todo' ? todayRoutine.id : null)
-    ?? liveList.find((r) => statusFor(r.id).kind === 'in_progress')?.id
+    liveList.find((r) => statusFor(r.id).kind === 'in_progress')?.id
     ?? liveList.find((r) => statusFor(r.id).kind === 'todo')?.id
     ?? null
 

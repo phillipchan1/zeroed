@@ -1,7 +1,7 @@
 import { TASKS, type TaskName } from '../../supabase/functions/agent/schemas.ts'
 import { sessionUser } from './auth.ts'
 import { AGENT_CORS, json } from './cors.ts'
-import { getSql } from './db.ts'
+import { withSql, type WaitUntilCtx } from './db.ts'
 import type { Env } from './env.ts'
 import { checkProbeQuota } from './quota.ts'
 
@@ -142,7 +142,7 @@ async function callOpenAI(
   return { ok: true, data: raw }
 }
 
-export async function handleAgent(req: Request, env: Env): Promise<Response> {
+export async function handleAgent(req: Request, env: Env, ctx?: WaitUntilCtx): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: AGENT_CORS })
   if (req.method !== 'POST') return json({ ok: false, error: 'method not allowed' }, 405, AGENT_CORS)
   if (!env.OPENAI_API_KEY) return json({ ok: false, error: 'server not configured' }, 500, AGENT_CORS)
@@ -168,8 +168,7 @@ export async function handleAgent(req: Request, env: Env): Promise<Response> {
       null
     const deviceId = body.device_id ?? null
     try {
-      const sql = getSql(env)
-      const allowed = await checkProbeQuota(sql, deviceId, ip)
+      const allowed = await withSql(env, (sql) => checkProbeQuota(sql, deviceId, ip), ctx)
       if (!allowed) return json({ ok: false, error: 'rate_limited' }, 429, AGENT_CORS)
     } catch (err) {
       console.error('check_probe_quota failed:', err)
