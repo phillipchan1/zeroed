@@ -136,6 +136,16 @@ const excl = suggestSwaps('T-Bar Row', { exclude: ['DB Row'] })
 ok(!excl.some((s) => s.exercise.name === 'DB Row'), 'a lift already in the session is left out')
 eq(suggestSwaps('Gym-Specific Contraption').length, 0, 'no pattern, no guesses')
 
+const hotelGear = ['dumbbell', 'bodyweight', 'band'] as const
+const medBallHotel = suggestSwaps('Med Ball Slam', { available: hotelGear })
+ok(medBallHotel.length >= 3, `med ball slam at a hotel gym (${medBallHotel.length})`)
+ok(medBallHotel.some((s) => s.exercise.pattern === 'cardio'), 'med ball → cardio cousins when no med ball')
+ok(!medBallHotel.some((s) => s.exercise.contra), 'med ball swaps stay non-ballistic')
+
+const thrusterDb = suggestSwaps('Thruster', { available: ['dumbbell'] })
+ok(thrusterDb.length > 0, 'thruster with dumbbells only')
+eq(thrusterDb[0]?.exercise.name, 'DB Thruster', 'db thruster leads when dumbbells are on')
+
 // ---- 5. building the stand-in ---------------------------------------------
 
 const slot: ExerciseTemplate = {

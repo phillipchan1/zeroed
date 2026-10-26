@@ -707,10 +707,18 @@ function SwapSheet({
   const results = q ? searchLibrary(q).filter((e) => e.name !== current.name) : []
   const exactHit = results.some((e) => e.name.toLowerCase() === q.toLowerCase())
 
-  function toggleGear(e: Equipment) {
-    const next = gear.includes(e) ? gear.filter((g) => g !== e) : [...gear, e]
+  function setGearPreset(next: Equipment[]) {
     setGear(next)
     saveSwapGear(next)
+  }
+
+  function toggleGear(e: Equipment) {
+    const next = gear.includes(e) ? gear.filter((g) => g !== e) : [...gear, e]
+    setGearPreset(next)
+  }
+
+  function gearPresetActive(preset: readonly Equipment[]): boolean {
+    return preset.length === gear.length && preset.every((e) => gear.includes(e))
   }
 
   const optionRow = (key: string, title: string, sub: string, onClick: () => void) => (
@@ -755,11 +763,23 @@ function SwapSheet({
               type="button"
               className="howto-tag"
               aria-pressed={gear.length === 0}
-              onClick={() => { setGear([]); saveSwapGear([]) }}
+              onClick={() => setGearPreset([])}
               style={gear.length === 0 ? { borderColor: 'var(--signal)', color: 'var(--signal)' } : undefined}
             >
               Full gym
             </button>
+            {SWAP_GEAR_PRESETS.map(({ id, label, gear: preset }) => (
+              <button
+                key={id}
+                type="button"
+                className="howto-tag"
+                aria-pressed={gearPresetActive(preset)}
+                onClick={() => setGearPreset([...preset])}
+                style={gearPresetActive(preset) ? { borderColor: 'var(--signal)', color: 'var(--signal)' } : undefined}
+              >
+                {label}
+              </button>
+            ))}
             {chipGear.map((e) => {
               const on = gear.includes(e)
               return (
@@ -842,6 +862,12 @@ function SwapSheet({
 // the way you'd scan a room.
 const EQUIPMENT_CHIPS: Equipment[] = [
   'dumbbell', 'barbell', 'cable', 'machine', 'kettlebell', 'band', 'bar', 'cardio', 'sled', 'other',
+]
+
+/** One-tap gear filters for common travel setups (bodyweight is always included in swaps). */
+const SWAP_GEAR_PRESETS: ReadonlyArray<{ id: string; label: string; gear: Equipment[] }> = [
+  { id: 'hotel', label: 'Hotel', gear: ['dumbbell', 'band'] },
+  { id: 'home', label: 'Home', gear: ['band'] },
 ]
 
 // ---- Mid-workout coach chat (what/how/why, no program edits) ---------------

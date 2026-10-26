@@ -133,6 +133,7 @@ const LIBRARY: LibraryExercise[] = [
   { name: 'DB Calf Raise',         tracking: 'weight_reps', category: 'Lower Chain', pattern: 'calf', equipment: 'dumbbell', aliases: ['single leg db calf raise'], noteAs: 'Calf Raise' },
   { name: 'Single-Leg Calf Raise', tracking: 'bodyweight_reps', category: 'Lower Chain', pattern: 'calf', equipment: 'bodyweight', unilateral: true, aliases: ['bodyweight calf raise', 'step calf raise'], noteAs: 'Calf Raise' },
   { name: 'Tibialis Raise',        tracking: 'bodyweight_reps', category: 'Lower Chain', pattern: 'calf', equipment: 'bodyweight', aliases: ['tib raise', 'tibia raise', 'wall tib raise'] },
+  { name: 'Band Calf Raise',       tracking: 'bodyweight_reps', category: 'Lower Chain', pattern: 'calf', equipment: 'band', aliases: ['banded calf raise', 'resistance band calf raise'], noteAs: 'Calf Raise' },
 
   // ── Posterior chain — hinge ───────────────────────────────────────────────
   { name: 'Deadlift',              tracking: 'weight_reps', category: 'Posterior Chain', pattern: 'hinge', equipment: 'barbell', aliases: ['conventional deadlift', 'sumo deadlift', 'barbell deadlift', 'deficit deadlift', 'paused deadlift'], contra: true },
@@ -161,6 +162,7 @@ const LIBRARY: LibraryExercise[] = [
   { name: 'Frog Pump',             tracking: 'bodyweight_reps', category: 'Posterior Chain', pattern: 'hip_extension', equipment: 'bodyweight' },
   { name: 'Supine Hip Extension',  tracking: 'bodyweight_reps', category: 'Posterior Chain', pattern: 'hip_extension', equipment: 'bodyweight' },
   { name: 'Cable Kickback',        tracking: 'weight_reps', category: 'Posterior Chain', pattern: 'hip_extension', equipment: 'cable', unilateral: true, aliases: ['glute kickback', 'cable glute kickback'] },
+  { name: 'Donkey Kick',           tracking: 'bodyweight_reps', category: 'Posterior Chain', pattern: 'hip_extension', equipment: 'bodyweight', unilateral: true, aliases: ['quadruped hip extension', 'fire hydrant kick'], noteAs: 'Cable Kickback' },
 
   // ── Posterior chain — knee flexion / hamstrings ───────────────────────────
   { name: 'Leg Curl',              tracking: 'weight_reps', category: 'Posterior Chain', pattern: 'knee_flexion', equipment: 'machine', aliases: ['hamstring curl', 'lying leg curl', 'seated leg curl', 'machine leg curl'] },
@@ -184,6 +186,9 @@ const LIBRARY: LibraryExercise[] = [
   { name: 'Cable Hip Abduction',   tracking: 'weight_reps', category: 'Lower Chain', pattern: 'hip_abduction', equipment: 'cable', unilateral: true, aliases: ['standing cable abduction'] },
   { name: 'Hip Adduction Machine', tracking: 'weight_reps', category: 'Lower Chain', pattern: 'hip_adduction', equipment: 'machine', aliases: ['hip adduction', 'adductor machine', 'seated hip adduction'] },
   { name: 'Adductor Squeeze',      tracking: 'time', category: 'Lower Chain', pattern: 'hip_adduction', equipment: 'bodyweight', aliases: ['ball squeeze', 'adductor ball squeeze'] },
+  { name: 'Band Hip Adduction',    tracking: 'bodyweight_reps', category: 'Lower Chain', pattern: 'hip_adduction', equipment: 'band', unilateral: true, aliases: ['banded hip adduction', 'standing band adduction'] },
+  { name: 'Cable Hip Adduction',   tracking: 'weight_reps', category: 'Lower Chain', pattern: 'hip_adduction', equipment: 'cable', unilateral: true, aliases: ['standing cable adduction', 'cable adductor'] },
+  { name: 'Side-Lying Hip Adduction', tracking: 'bodyweight_reps', category: 'Lower Chain', pattern: 'hip_adduction', equipment: 'bodyweight', unilateral: true, aliases: ['side lying adduction', 'side lying leg squeeze'] },
 
   // ── Upper chain — horizontal press ────────────────────────────────────────
   { name: 'Bench Press',           tracking: 'weight_reps', category: 'Upper Chain', pattern: 'horizontal_push', equipment: 'barbell', aliases: ['barbell bench press', 'flat bench', 'paused bench press', 'flat barbell bench'] },
@@ -262,6 +267,7 @@ const LIBRARY: LibraryExercise[] = [
   { name: 'Concentration Curl',    tracking: 'weight_reps', category: 'Upper Chain', pattern: 'elbow_flexion', equipment: 'dumbbell', unilateral: true, noteAs: 'Bicep Curl' },
   { name: 'Cable Curl',            tracking: 'weight_reps', category: 'Upper Chain', pattern: 'elbow_flexion', equipment: 'cable', aliases: ['cable bicep curl', 'rope hammer curl', 'bayesian curl'], noteAs: 'Bicep Curl' },
   { name: 'Band Curl',             tracking: 'bodyweight_reps', category: 'Upper Chain', pattern: 'elbow_flexion', equipment: 'band', aliases: ['banded curl', 'resistance band curl', 'band bicep curl'], noteAs: 'Bicep Curl' },
+  { name: 'Wrist Curl',            tracking: 'weight_reps', category: 'Upper Chain', pattern: 'elbow_flexion', equipment: 'dumbbell', aliases: ['db wrist curl', 'reverse wrist curl', 'wrist curls'], noteAs: 'Bicep Curl' },
   { name: 'Tricep Extension',      tracking: 'weight_reps', category: 'Upper Chain', pattern: 'elbow_extension', equipment: 'dumbbell', aliases: ['triceps extension', 'db tricep extension'] },
   { name: 'Tricep Pushdown',       tracking: 'weight_reps', category: 'Upper Chain', pattern: 'elbow_extension', equipment: 'cable', aliases: ['triceps pushdown', 'rope pushdown', 'cable pushdown', 'pushdown', 'rope tricep pushdown', 'v bar pushdown'], noteAs: 'Tricep Extension' },
   { name: 'Skull Crusher',         tracking: 'weight_reps', category: 'Upper Chain', pattern: 'elbow_extension', equipment: 'barbell', aliases: ['skullcrusher', 'lying tricep extension', 'ez bar skull crusher', 'db skull crusher'], noteAs: 'Tricep Extension' },
@@ -285,8 +291,11 @@ const LIBRARY: LibraryExercise[] = [
   { name: 'Face Pull',             tracking: 'weight_reps', category: 'Upper Chain', pattern: 'rear_delt', equipment: 'cable', aliases: ['cable face pull', 'rope face pull'] },
   { name: 'Band Face Pull',        tracking: 'bodyweight_reps', category: 'Upper Chain', pattern: 'rear_delt', equipment: 'band', aliases: ['banded face pull'], noteAs: 'Face Pull' },
   { name: 'Band Pull-Apart',       tracking: 'bodyweight_reps', category: 'Upper Chain', pattern: 'rear_delt', equipment: 'band', aliases: ['band pull-apart (light)', 'pull apart', 'banded pull apart'] },
-  { name: 'Barbell Shrug',         tracking: 'weight_reps', category: 'Upper Chain', pattern: 'shrug', equipment: 'barbell', aliases: ['shrug', 'bb shrug', 'trap bar shrug'] },
+  { name: 'Barbell Shrug',         tracking: 'weight_reps', category: 'Upper Chain', pattern: 'shrug', equipment: 'barbell', aliases: ['shrug', 'bb shrug'] },
+  { name: 'Trap Bar Shrug',        tracking: 'weight_reps', category: 'Upper Chain', pattern: 'shrug', equipment: 'barbell', aliases: ['hex bar shrug', 'trap shrug'], noteAs: 'Barbell Shrug' },
   { name: 'DB Shrug',              tracking: 'weight_reps', category: 'Upper Chain', pattern: 'shrug', equipment: 'dumbbell' },
+  { name: 'KB Shrug',              tracking: 'weight_reps', category: 'Upper Chain', pattern: 'shrug', equipment: 'kettlebell', noteAs: 'DB Shrug' },
+  { name: 'Band Shrug',            tracking: 'bodyweight_reps', category: 'Upper Chain', pattern: 'shrug', equipment: 'band', aliases: ['banded shrug', 'resistance band shrug'], noteAs: 'DB Shrug' },
 
   // ── Upper chain — scapular / rotator cuff / serratus ──────────────────────
   { name: 'DB External Rotation',  tracking: 'weight_reps', category: 'Upper Chain', pattern: 'scapular', equipment: 'dumbbell', aliases: ['external rotation', 'cuff external rotation', 'side lying external rotation', 'side lying db external rotation'] },
@@ -366,6 +375,7 @@ const LIBRARY: LibraryExercise[] = [
   { name: 'Hamstring Stretch',     tracking: 'time', category: 'Posterior Chain', pattern: 'hamstring_mobility', equipment: 'bodyweight', aliases: ['hamstring stretch (90/90)', 'standing hamstring stretch', 'supine hamstring stretch'] },
   { name: 'Active Straight-Leg Raise', tracking: 'bodyweight_reps', category: 'Posterior Chain', pattern: 'hamstring_mobility', equipment: 'bodyweight', aliases: ['aslr', 'active straight leg raise drill'] },
   { name: 'Inchworm',              tracking: 'bodyweight_reps', category: 'Posterior Chain', pattern: 'hamstring_mobility', equipment: 'bodyweight', aliases: ['inch worm', 'walkout'] },
+  { name: 'Jefferson Curl',        tracking: 'bodyweight_reps', category: 'Posterior Chain', pattern: 'hamstring_mobility', equipment: 'bodyweight', aliases: ['jefferson curl stretch', 'slow jefferson curl'] },
   { name: 'Foam Roll',             tracking: 'time', category: 'Core', pattern: 'recovery', equipment: 'other', aliases: ['foam rolling', 'foam roller', 'smr', 'self myofascial release'] },
 
   // ── Carries ───────────────────────────────────────────────────────────────
@@ -387,12 +397,16 @@ const LIBRARY: LibraryExercise[] = [
   { name: 'Med Ball Slam',         tracking: 'weight_reps', category: 'Conditioning', pattern: 'throw', equipment: 'other', aliases: ['ball slam', 'slam ball', 'medicine ball slam'] },
   { name: 'Med Ball Chest Pass',   tracking: 'weight_reps', category: 'Conditioning', pattern: 'throw', equipment: 'other', aliases: ['chest pass', 'med ball chest throw'] },
   { name: 'Med Ball Rotational Throw', tracking: 'weight_reps', category: 'Conditioning', pattern: 'throw', equipment: 'other', unilateral: true, aliases: ['rotational med ball throw', 'med ball scoop toss', 'scoop toss'] },
+  { name: 'Wall Ball',             tracking: 'weight_reps', category: 'Conditioning', pattern: 'throw', equipment: 'other', aliases: ['wall ball shot', 'wall balls', 'medicine ball wall ball'] },
   { name: 'Power Clean',           tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'barbell', aliases: ['clean', 'squat clean'], contra: true },
   { name: 'Hang Power Clean',      tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'barbell', aliases: ['hang clean'], contra: true },
   { name: 'Kettlebell Clean',      tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'kettlebell', unilateral: true, aliases: ['kb clean'], contra: true },
   { name: 'Kettlebell Snatch',     tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'kettlebell', unilateral: true, aliases: ['kb snatch'], contra: true },
   { name: 'DB Snatch',             tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'dumbbell', unilateral: true, aliases: ['single arm db snatch'], contra: true },
-  { name: 'Thruster',              tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'barbell', aliases: ['db thruster', 'barbell thruster'] },
+  { name: 'Barbell Snatch',        tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'barbell', aliases: ['snatch', 'full snatch', 'squat snatch'], contra: true },
+  { name: 'Thruster',              tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'barbell', aliases: ['barbell thruster'] },
+  { name: 'DB Thruster',           tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'dumbbell', aliases: ['dumbbell thruster', 'db thruster'], noteAs: 'Thruster' },
+  { name: 'KB Thruster',           tracking: 'weight_reps', category: 'Conditioning', pattern: 'power', equipment: 'kettlebell', aliases: ['kettlebell thruster', 'kb thruster'], noteAs: 'Thruster' },
 
   // ── Conditioning — sprint / sled / machines ───────────────────────────────
   { name: 'Sprint',                tracking: 'distance', category: 'Conditioning', pattern: 'sprint', equipment: 'bodyweight', alt: 'time', aliases: ['sprints', 'dash', '40 yard dash', 'court sprint', 'flying sprint'], contra: true },
@@ -450,7 +464,7 @@ const RELATED: Partial<Record<MovementPattern, MovementPattern[]>> = {
   hip_flexion: ['trunk_flexion'],
   carry: ['lateral_core'],
   jump: ['throw', 'power'],
-  throw: ['jump', 'power'],
+  throw: ['jump', 'power', 'cardio'],
   power: ['jump', 'throw', 'hinge'],
   sprint: ['cardio', 'sled'],
   sled: ['cardio', 'carry'],
