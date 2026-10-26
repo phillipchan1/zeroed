@@ -11,8 +11,9 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
-  BONE, FLOOR, DEFAULT_VIEW, frameAt, loadPath, solvePose,
-  type MovementDemo as Demo, type Pt, type Prop, type Load, type Figure,
+  BONE, FLOOR, DEFAULT_VIEW, frameAt, frontFrameAt, beatAt, loadPath, solvePose, solveFront,
+  type AnyDemo, type MovementDemo as Demo, type FrontDemo, type FrontFigure,
+  type Pt, type Prop, type Load, type Figure,
 } from '../engine/movementDemos'
 
 function line(points: Pt[]): string {
@@ -33,6 +34,8 @@ function PropShape({ prop }: { prop: Prop }) {
       return <line className="demo-prop demo-prop--thick" x1={prop.from[0]} y1={prop.from[1]} x2={prop.to[0]} y2={prop.to[1]} />
     case 'rail':
       return <line className="demo-prop demo-prop--rail" x1={prop.x} y1={prop.y} x2={prop.x + prop.w} y2={prop.y} />
+    case 'box':
+      return <rect className="demo-prop" x={prop.x} y={prop.top} width={prop.w} height={FLOOR - prop.top} rx={1.5} />
     case 'pad':
       return <rect className="demo-prop" x={prop.at[0] - 6} y={prop.at[1] - 3.5} width={12} height={7} rx={3.5} />
     case 'cable':
@@ -181,7 +184,79 @@ function Limbs({ fig, side, part }: { fig: Figure; side: 0 | 1; part: 'legs' | '
   )
 }
 
-export function DemoFigure({ demo, seconds, trace }: { demo: Demo; seconds: number; trace: Pt[] }) {
+// Facing the viewer: the same build seen from the front — shoulders wider than
+// the hips, lats flaring under the arms. Mirrored about the torso's axis.
+const FRONT_TORSO_HALF: Pt[] = [[-0.08, 7.8], [0.15, 7.4], [0.38, 6.6], [0.62, 8.8], [0.82, 10.8], [0.95, 9.4], [1.03, 4.6]]
+const FRONT_TORSO: Pt[] = [
+  [-0.14, 0],
+  ...FRONT_TORSO_HALF,
+  ...FRONT_TORSO_HALF.slice().reverse().map(([u, v]): Pt => [u, -v]),
+]
+const FOOT_FRONT: Profile = [[0, 2], [1, 2]]
+
+function FrontBody({ fig }: { fig: FrontFigure }) {
+  const L = BONE.torso
+  const torso = smoothClosed(FRONT_TORSO.map(([u, v]) => [
+    fig.pelvis[0] + fig.up[0] * u * L + fig.side[0] * v,
+    fig.pelvis[1] + fig.up[1] * u * L + fig.side[1] * v,
+  ]))
+  return (
+    <g className="demo-body">
+      {fig.legs.map(([hip, knee, ankle], i) => (
+        <g key={`l${i}`}>
+          <path d={taper([ankle[0] - 2.4, ankle[1] + 1.4], [ankle[0] + 2.4, ankle[1] + 1.4], FOOT_FRONT)} />
+          <path d={taper(knee, ankle, SHIN)} />
+          <path d={taper(hip, knee, THIGH)} />
+        </g>
+      ))}
+      <path d={taper(fig.neck, fig.head, NECK)} />
+      <path d={torso} />
+      <circle cx={fig.head[0]} cy={fig.head[1]} r={BONE.head - 0.3} />
+      {fig.arms.map(([shoulder, elbow, hand], i) => (
+        <g key={`a${i}`}>
+          <path d={taper(elbow, hand, FOREARM)} />
+          <path d={taper(shoulder, elbow, UPPER_ARM)} />
+        </g>
+      ))}
+    </g>
+  )
+}
+
+function Ground({ demo }: { demo: AnyDemo }) {
+  const [vx, vy, vw, vh] = demo.view ?? DEFAULT_VIEW
+  return (
+    <>
+      {/* Faint measurement grid — the instrument the figure is drawn on. */}
+      <g className="demo-grid">
+        {Array.from({ length: Math.floor(vw / 20) + 1 }, (_, i) => (
+          <line key={`v${i}`} x1={vx + i * 20} y1={vy} x2={vx + i * 20} y2={vy + vh} />
+        ))}
+        {Array.from({ length: Math.floor(vh / 20) + 1 }, (_, i) => (
+          <line key={`h${i}`} x1={vx} y1={vy + i * 20} x2={vx + vw} y2={vy + i * 20} />
+        ))}
+      </g>
+      {demo.floor !== false && <line className="demo-floor" x1={vx} y1={FLOOR} x2={vx + vw} y2={FLOOR} />}
+    </>
+  )
+}
+
+function FrontFigureSvg({ demo, seconds }: { demo: FrontDemo; seconds: number }) {
+  const [vx, vy, vw, vh] = demo.view ?? DEFAULT_VIEW
+  const fig = solveFront(frontFrameAt(demo, seconds).pose)
+  return (
+    <svg className="demo__svg" viewBox={`${vx} ${vy} ${vw} ${vh}`} aria-hidden="true">
+      <Ground demo={demo} />
+      <FrontBody fig={fig} />
+    </svg>
+  )
+}
+
+export function DemoFigure({ demo, seconds, trace }: { demo: AnyDemo; seconds: number; trace: Pt[] }) {
+  if (demo.facing === 'front') return <FrontFigureSvg demo={demo} seconds={seconds} />
+  return <SideFigureSvg demo={demo} seconds={seconds} trace={trace} />
+}
+
+function SideFigureSvg({ demo, seconds, trace }: { demo: Demo; seconds: number; trace: Pt[] }) {
   const { pose } = frameAt(demo, seconds)
   const fig = solvePose(pose, demo.load)
   const [vx, vy, vw, vh] = demo.view ?? DEFAULT_VIEW
@@ -193,17 +268,7 @@ export function DemoFigure({ demo, seconds, trace }: { demo: Demo; seconds: numb
       viewBox={`${vx} ${vy} ${vw} ${vh}`}
       aria-hidden="true"
     >
-      {/* Faint measurement grid — the instrument the figure is drawn on. */}
-      <g className="demo-grid">
-        {Array.from({ length: Math.floor(vw / 20) + 1 }, (_, i) => (
-          <line key={`v${i}`} x1={vx + i * 20} y1={vy} x2={vx + i * 20} y2={vy + vh} />
-        ))}
-        {Array.from({ length: Math.floor(vh / 20) + 1 }, (_, i) => (
-          <line key={`h${i}`} x1={vx} y1={vy + i * 20} x2={vx + vw} y2={vy + i * 20} />
-        ))}
-      </g>
-
-      {demo.floor !== false && <line className="demo-floor" x1={vx} y1={FLOOR} x2={vx + vw} y2={FLOOR} />}
+      <Ground demo={demo} />
       {demo.props?.map((p, i) => <PropShape key={i} prop={p} />)}
       {trace.length > 1 && <polyline className="demo-trace" points={line(trace)} />}
       {cable && fig.load && (
@@ -229,7 +294,7 @@ function prefersReducedMotion(): boolean {
     && !!window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 }
 
-export function MovementDemo({ demo }: { demo: Demo }) {
+export function MovementDemo({ demo }: { demo: AnyDemo }) {
   const still = useMemo(prefersReducedMotion, [])
   // The still frame is the first beat's hold run out — the bottom of the rep
   // for every demo, which is the position worth looking at.
@@ -237,7 +302,7 @@ export function MovementDemo({ demo }: { demo: Demo }) {
   const [seconds, setSeconds] = useState(still ? stillAt : 0)
   const [paused, setPaused] = useState(false)
   const clock = useRef({ last: 0, t: still ? stillAt : 0 })
-  const trace = useMemo(() => (demo.trace ? loadPath(demo) : []), [demo])
+  const trace = useMemo(() => (demo.facing !== 'front' && demo.trace ? loadPath(demo) : []), [demo])
 
   useEffect(() => {
     if (still || paused) return
@@ -253,7 +318,7 @@ export function MovementDemo({ demo }: { demo: Demo }) {
     return () => cancelAnimationFrame(raf)
   }, [still, paused])
 
-  const { beat } = frameAt(demo, seconds)
+  const beat = beatAt(demo, seconds)
 
   return (
     <button

@@ -17,7 +17,7 @@
 // agent actually programs.
 // =============================================================================
 
-import { findLibraryExercise, normalizeName } from './exerciseLibrary'
+import { findLibraryExercise, normalizeName } from './exerciseLibrary.ts'
 
 export interface CoachingNote {
   howTo: string[]     // ordered setup / execution steps
@@ -441,6 +441,91 @@ const NOTES: Record<string, CoachingNote> = {
       'Keep the weights from swinging and breathe.',
     ],
     watchFor: ['Leaning to one side', 'Shrugging or letting the shoulders round forward', 'Rushing / short choppy steps'],
+  },
+
+  // ── Jumps / plyometrics ──────────────────────────────────────────────────
+  // Every rep is max intent and fully reset; the landing is as much the skill
+  // as the takeoff — quiet, hips back, knees over the toes.
+  'Vertical Jump': {
+    howTo: [
+      'Stand tall, feet hip-width. Swing the arms back as you dip fast into a quarter squat.',
+      'Without pausing, swing the arms up hard and drive through the floor — hips, knees and ankles extend together.',
+      'Reach as high as you can at the top.',
+      'Land softly on the balls of the feet, rolling to the whole foot, hips back and knees out.',
+    ],
+    watchFor: ['A slow, deep dip that bleeds the stretch', 'Knees caving in on takeoff or landing', 'Stiff, loud landings'],
+  },
+  'Squat Jump': {
+    howTo: [
+      'Sit into a half squat and hold it for a full second — that kills the bounce, so the jump is pure leg drive.',
+      'Explode straight up from the pause with no extra dip.',
+      'Land soft and sink straight back into the squat to reset.',
+    ],
+    watchFor: ['Dipping before you jump (it should be from a dead stop)', 'Knees caving in', 'Landing stiff-legged'],
+  },
+  'Box Jump': {
+    howTo: [
+      'Stand a short step from the box. Swing the arms back and dip.',
+      'Swing up and jump, pulling the knees up so the feet clear the edge.',
+      'Land softly on the whole foot in the same quarter squat you jumped from, then stand tall.',
+      'Step down — never jump down. Reset fully before the next rep.',
+    ],
+    watchFor: ['A box so high you land in a deep squat (go lower)', 'Landing on the toes or the box edge', 'Jumping down off the box', 'Rushing reps'],
+  },
+  'Broad Jump': {
+    howTo: [
+      'Feet hip-width at the line. Swing the arms back and hinge the hips back.',
+      'Swing through and drive out at about 45° — up and out, not just out.',
+      'Pull the knees through and reach the feet forward.',
+      'Stick the landing in a quarter squat without stepping. Measure to the back of the heels.',
+    ],
+    watchFor: ['Jumping flat (too low an angle)', 'Falling backward or stepping on landing', 'Knees caving in on landing'],
+  },
+  'Depth Jump': {
+    howTo: [
+      'Stand on a low box (12–18"). Step off — don\'t jump off.',
+      'Land on both feet and rebound straight up as fast as you can.',
+      'Spend as little time on the ground as possible; land the second jump soft.',
+      'Reset fully between reps — every one is maximal.',
+    ],
+    watchFor: ['A box so high the landing collapses into a deep squat', 'A long, sinking ground contact', 'Heels slamming down'],
+  },
+  'Pogo Jump': {
+    howTo: [
+      'Stand tall with nearly straight knees.',
+      'Bounce off the balls of the feet using the ankles like springs — quick and low.',
+      'Keep ground contact as short as you can, like the floor is hot.',
+    ],
+    watchFor: ['Bending the knees to make it a squat jump', 'Heels touching down', 'Slow, high, heavy hops'],
+  },
+  'Lateral Bound': {
+    howTo: [
+      'Stand on your outside leg, hips back, knee over the toes.',
+      'Drive sideways off that leg, swinging the arms for momentum.',
+      'Land on the opposite leg and stick it for a beat — balanced, knee tracking over the toes.',
+      'Load that leg and bound back.',
+    ],
+    watchFor: ['Landing knee caving in', 'Not sticking the landing before the next bound', 'Torso leaning way outside the landing foot'],
+  },
+
+  // ── Speed / court ────────────────────────────────────────────────────────
+  'Sprint': {
+    howTo: [
+      'Lean slightly forward from the ankles, not the waist.',
+      'Drive the knees up and punch the ground down and back under your hips.',
+      'Arms at about 90°, swinging cheek to hip pocket — opposite arm to leg.',
+      'Stay tall and relaxed through the face and shoulders. Walk back to recover fully.',
+    ],
+    watchFor: ['Reaching out in front and braking with each step', 'Arms swinging across the body', 'Tensing the neck and shoulders'],
+  },
+  'Defensive Slide': {
+    howTo: [
+      'Athletic stance: feet wider than shoulders, hips low, chest up, hands active.',
+      'Push off the trail leg and step the lead foot in the direction you\'re going.',
+      'Slide the trail foot in behind it without the feet touching.',
+      'Stay at one height the whole way — no bobbing up between steps.',
+    ],
+    watchFor: ['Crossing the feet or clicking the heels together', 'Standing up tall between steps', 'Reaching with the lead foot so far you lose balance'],
   },
 }
 

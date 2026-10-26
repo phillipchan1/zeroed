@@ -47,11 +47,27 @@ export interface Pose {
   feet?: [Angle, Angle]  // absolute foot angles; default flat, toes forward
 }
 
-export interface Beat {
-  pose: Pose
+export interface Beat<P = Pose> {
+  pose: P
   hold: number   // seconds held at this pose
-  move: number   // seconds travelling to the next pose
+  move: number   // seconds travelling to the next pose; 0 cuts straight to it
   cue: string    // what's happening from this pose to the next
+  // How the move is timed. Lifts start and finish under control (the default);
+  // a jump decelerates to its peak ('out') and accelerates back down ('in').
+  ease?: 'out' | 'in' | 'linear'
+}
+
+/**
+ * Facing the viewer — for movement that travels sideways (a defensive slide, a
+ * lateral bound), which a side view would show as nothing. Legs reach their
+ * feet like planted limbs do; a bent knee comes toward the viewer, so it's
+ * drawn on the hip–ankle line, pushed a little out over the toes.
+ */
+export interface FrontPose {
+  pelvis: Pt
+  lean: Angle                          // off vertical; positive leans toward +x
+  feet: [Pt, Pt]                       // ankles: the viewer's left, then right
+  arms: [[Angle, Angle], [Angle, Angle]]
 }
 
 export type LoadKind = 'barbell' | 'dumbbell' | 'kettlebell' | 'handle'
@@ -69,8 +85,10 @@ export type Prop =
   | { kind: 'rail'; x: number; w: number; y: number }   // parallel-bar or pull-up bar, side on
   | { kind: 'pad'; at: Pt }                             // pulldown thigh pad
   | { kind: 'cable'; from: Pt }                         // cable runs from here to the load
+  | { kind: 'box'; x: number; w: number; top: number }  // plyo box, solid to the floor
 
 export interface MovementDemo {
+  facing?: undefined
   beats: Beat[]
   load?: Load
   props?: Prop[]
@@ -78,6 +96,15 @@ export interface MovementDemo {
   trace?: boolean         // draw the load's path — the bar path is the lesson
   view?: [number, number, number, number]
 }
+
+export interface FrontDemo {
+  facing: 'front'
+  beats: Beat<FrontPose>[]
+  floor?: boolean
+  view?: [number, number, number, number]
+}
+
+export type AnyDemo = MovementDemo | FrontDemo
 
 // ---- body ------------------------------------------------------------------
 // Rough adult proportions in view units. The floor is at y = 110 and a standing
@@ -485,6 +512,201 @@ const DIP: MovementDemo = {
   ],
 }
 
+// ---- jumps, sprints, court work ---------------------------------------------
+// A jump is a lift with a flight in it: the dip and arm swing load it, the rise
+// decelerates into the peak and the fall accelerates out of it (ease 'out' then
+// 'in'), and the landing absorbs. Feet in the air are reached to where they fly;
+// a foot pushing off rides its toes (ankle up, foot pointed).
+
+const ARMS = (upper: Angle, fore: Angle): [Limb, Limb] => [{ rel: [upper, fore] }, { rel: [upper, fore] }]
+const FEET = (at: Pt): [Limb, Limb] => [{ reach: at, bend: 'fwd' }, { reach: at, bend: 'fwd' }]
+const TALL = { torso: 180, arms: ARMS(0, 0) }
+const JUMP_VIEW: [number, number, number, number] = [14, -20, 132, 136]
+
+const VERTICAL_TAKEOFF: Pose = { hip: [80, 61], torso: 178, legs: FEET([82, 104]), arms: ARMS(150, 165), feet: [45, 45] }
+const VERTICAL_PEAK: Pose = { hip: [80, 42], torso: 180, legs: FEET([81, 86]), arms: ARMS(165, 170), feet: [20, 20] }
+const VERTICAL_LAND: Pose = { hip: [71, 81], torso: 145, head: -8, legs: [PLANTED, PLANTED], arms: ARMS(50, 80) }
+
+const VERTICAL_JUMP: MovementDemo = {
+  view: JUMP_VIEW,
+  beats: [
+    { pose: { hip: [79, 66], ...TALL, legs: [PLANTED, PLANTED] }, hold: 0.5, move: 0.5, cue: 'Arms back, quick dip' },
+    {
+      pose: { hip: [70, 82], torso: 140, head: -10, legs: [PLANTED, PLANTED], arms: ARMS(-60, -50) },
+      hold: 0.02, move: 0.22, cue: 'Explode — swing the arms up',
+    },
+    { pose: VERTICAL_TAKEOFF, hold: 0, move: 0.32, ease: 'out', cue: 'Reach for the rim' },
+    { pose: VERTICAL_PEAK, hold: 0.06, move: 0.3, ease: 'in', cue: 'Land soft — hips back, knees out' },
+    { pose: VERTICAL_LAND, hold: 0.35, move: 0.6, cue: 'Stand tall and reset' },
+  ],
+}
+
+const SQUAT_JUMP: MovementDemo = {
+  view: JUMP_VIEW,
+  beats: [
+    {
+      pose: { hip: [70, 84], torso: 145, head: -8, legs: [PLANTED, PLANTED], arms: ARMS(70, 80) },
+      hold: 0.8, move: 0.25, cue: 'Hold the bottom — then explode, no dip',
+    },
+    { pose: VERTICAL_TAKEOFF, hold: 0, move: 0.32, ease: 'out', cue: 'Full extension through the toes' },
+    { pose: VERTICAL_PEAK, hold: 0.06, move: 0.3, ease: 'in', cue: 'Land soft — hips back, knees out' },
+    { pose: VERTICAL_LAND, hold: 0.3, move: 0.5, cue: 'Sink back into the squat' },
+  ],
+}
+
+const BOX_JUMP: MovementDemo = {
+  view: JUMP_VIEW,
+  props: [{ kind: 'box', x: 100, w: 26, top: 84 }],
+  beats: [
+    { pose: { hip: [65, 66], ...TALL, legs: FEET([66, FLOOR]) }, hold: 0.5, move: 0.5, cue: 'Arms back, quick dip' },
+    {
+      pose: { hip: [56, 82], torso: 140, head: -10, legs: FEET([66, FLOOR]), arms: ARMS(-60, -50) },
+      hold: 0.02, move: 0.2, cue: 'Swing up and jump',
+    },
+    {
+      pose: { hip: [72, 61], torso: 172, legs: FEET([70, 104]), arms: ARMS(150, 165), feet: [45, 45] },
+      hold: 0, move: 0.28, ease: 'out', cue: 'Pull the knees up',
+    },
+    {
+      pose: { hip: [93, 50], torso: 160, legs: FEET([101, 68]), arms: ARMS(100, 120), feet: [80, 80] },
+      hold: 0, move: 0.22, ease: 'in', cue: 'Land soft on the whole foot',
+    },
+    { pose: { hip: [102, 58], torso: 145, head: -6, legs: FEET([111, 84]), arms: ARMS(60, 90) }, hold: 0.3, move: 0.5, cue: 'Stand tall on the box' },
+    { pose: { hip: [110, 40], ...TALL, legs: FEET([111, 84]) }, hold: 0.8, move: 0, cue: "Step down — don't jump down" },
+  ],
+}
+
+const BROAD_JUMP: MovementDemo = {
+  beats: [
+    { pose: { hip: [39, 66], ...TALL, legs: FEET([40, FLOOR]) }, hold: 0.5, move: 0.5, cue: 'Arms back, hips back' },
+    {
+      pose: { hip: [30, 82], torso: 128, head: -12, legs: FEET([40, FLOOR]), arms: ARMS(-65, -55) },
+      hold: 0.02, move: 0.25, cue: 'Swing and drive out at 45°',
+    },
+    {
+      pose: { hip: [57, 70], torso: 140, legs: FEET([45, 104]), arms: ARMS(140, 150), feet: [45, 45] },
+      hold: 0, move: 0.3, ease: 'out', cue: 'Pull the knees through',
+    },
+    {
+      pose: { hip: [82, 60], torso: 150, legs: FEET([97, 80]), arms: ARMS(110, 120), feet: [80, 80] },
+      hold: 0, move: 0.3, ease: 'in', cue: 'Stick the landing — hips back',
+    },
+    {
+      pose: { hip: [101, 84], torso: 135, head: -8, legs: FEET([112, FLOOR]), arms: ARMS(70, 95) },
+      hold: 0.9, move: 0, cue: 'Hold it — measure to your heels',
+    },
+  ],
+}
+
+// Off a box, a short ground contact, straight back up — the rebound is the rep.
+const DEPTH_JUMP: MovementDemo = {
+  view: JUMP_VIEW,
+  props: [{ kind: 'box', x: 30, w: 24, top: 84 }],
+  beats: [
+    { pose: { hip: [43, 40], ...TALL, legs: FEET([44, 84]) }, hold: 0.6, move: 0.3, cue: "Step off — don't jump off" },
+    {
+      pose: { hip: [62, 56], torso: 178, legs: FEET([64, 100]), arms: ARMS(-25, -15), feet: [30, 30] },
+      hold: 0, move: 0.18, ease: 'in', cue: 'Land and rebound instantly',
+    },
+    {
+      pose: { hip: [61, 82], torso: 150, head: -6, legs: FEET([66, FLOOR]), arms: ARMS(-55, -45) },
+      hold: 0, move: 0.3, ease: 'out', cue: 'Minimal ground time — explode up',
+    },
+    {
+      pose: { hip: [66, 40], torso: 180, legs: FEET([67, 84]), arms: ARMS(165, 170), feet: [20, 20] },
+      hold: 0.05, move: 0.3, ease: 'in', cue: 'Land soft',
+    },
+    { pose: { hip: [59, 82], torso: 145, head: -6, legs: FEET([66, FLOOR]), arms: ARMS(50, 80) }, hold: 0.7, move: 0, cue: 'Full reset between reps' },
+  ],
+}
+
+const POGO_JUMP: MovementDemo = {
+  view: [14, -6, 132, 120],
+  beats: [
+    {
+      pose: { hip: [80, 62], torso: 180, legs: FEET([80, 106]), arms: ARMS(15, 95), feet: [60, 60] },
+      hold: 0.02, move: 0.35, ease: 'out', cue: 'Stiff ankles — bounce off the balls of the feet',
+    },
+    {
+      pose: { hip: [80, 52], torso: 180, legs: FEET([80, 96]), arms: ARMS(10, 100), feet: [30, 30] },
+      hold: 0.02, move: 0.35, ease: 'in', cue: "Quick off the ground — like it's hot",
+    },
+  ],
+}
+
+// Running in place, one stride: stance, toe-off, the other leg's stance, its
+// toe-off. Arms swing opposite the legs, elbows near 90°.
+const SPRINT: MovementDemo = {
+  beats: [
+    {
+      pose: { hip: [80, 64], torso: 168, head: -6, legs: [[8, -8], [70, -10]], arms: [[50, 150], [-50, 40]] },
+      hold: 0, move: 0.2, ease: 'linear', cue: 'Drive the knee, toe up',
+    },
+    {
+      pose: { hip: [80, 61], torso: 168, head: -6, legs: [[-30, -75], [45, -5]], arms: [[20, 110], [-20, 60]] },
+      hold: 0, move: 0.2, ease: 'linear', cue: 'Punch the ground under your hips',
+    },
+    {
+      pose: { hip: [80, 64], torso: 168, head: -6, legs: [[70, -10], [8, -8]], arms: [[-50, 40], [50, 150]] },
+      hold: 0, move: 0.2, ease: 'linear', cue: 'Drive the knee, toe up',
+    },
+    {
+      pose: { hip: [80, 61], torso: 168, head: -6, legs: [[45, -5], [-30, -75]], arms: [[-20, 60], [20, 110]] },
+      hold: 0, move: 0.2, ease: 'linear', cue: 'Punch the ground under your hips',
+    },
+  ],
+}
+
+// Facing the viewer, stepping right then back left. The trail foot slides in;
+// the feet never come together, never cross, and the hips never rise.
+const SLIDE_ARMS: [[Angle, Angle], [Angle, Angle]] = [[-35, -10], [35, 10]]
+const slide = (x: number, left: number, right: number, y = 80): FrontPose =>
+  ({ pelvis: [x, y], lean: 0, feet: [[left, FLOOR], [right, FLOOR]], arms: SLIDE_ARMS })
+const DEFENSIVE_SLIDE: FrontDemo = {
+  facing: 'front',
+  beats: [
+    { pose: slide(60, 44, 76), hold: 0.25, move: 0.28, cue: 'Stay low — push off the trail leg' },
+    { pose: slide(68, 44, 92, 81), hold: 0.05, move: 0.28, cue: "Slide the trail foot in — don't cross" },
+    { pose: slide(76, 60, 92), hold: 0.05, move: 0.28, cue: 'Stay low — push off the trail leg' },
+    { pose: slide(84, 60, 108, 81), hold: 0.05, move: 0.28, cue: "Slide the trail foot in — don't cross" },
+    { pose: slide(92, 76, 108), hold: 0.25, move: 0.28, cue: 'Change direction — push back' },
+    { pose: slide(84, 60, 108, 81), hold: 0.05, move: 0.28, cue: "Slide the trail foot in — don't cross" },
+    { pose: slide(76, 60, 92), hold: 0.05, move: 0.28, cue: 'Stay low — push off the trail leg' },
+    { pose: slide(68, 44, 92, 81), hold: 0.05, move: 0.28, cue: "Slide the trail foot in — don't cross" },
+  ],
+}
+
+// Facing the viewer: off one leg, across, onto the other — and stick it.
+const LATERAL_BOUND: FrontDemo = {
+  facing: 'front',
+  beats: [
+    {
+      pose: { pelvis: [50, 80], lean: 6, feet: [[47, FLOOR], [60, 97]], arms: [[-40, -20], [40, 20]] },
+      hold: 0.5, move: 0.3, cue: 'Load the outside leg',
+    },
+    {
+      pose: { pelvis: [46, 85], lean: 12, feet: [[47, FLOOR], [58, 99]], arms: [[-15, -5], [15, 5]] },
+      hold: 0.02, move: 0.32, ease: 'out', cue: 'Drive sideways — reach with the arms',
+    },
+    {
+      pose: { pelvis: [80, 62], lean: 15, feet: [[66, 92], [90, 90]], arms: [[-70, -95], [70, 95]] },
+      hold: 0, move: 0.3, ease: 'in', cue: 'Land on one leg and stick it',
+    },
+    {
+      pose: { pelvis: [110, 80], lean: -6, feet: [[100, 97], [113, FLOOR]], arms: [[-40, -20], [40, 20]] },
+      hold: 0.5, move: 0.3, cue: 'Load the outside leg',
+    },
+    {
+      pose: { pelvis: [114, 85], lean: -12, feet: [[102, 99], [113, FLOOR]], arms: [[-15, -5], [15, 5]] },
+      hold: 0.02, move: 0.32, ease: 'out', cue: 'Drive sideways — reach with the arms',
+    },
+    {
+      pose: { pelvis: [80, 62], lean: -15, feet: [[70, 90], [94, 92]], arms: [[-70, -95], [70, 95]] },
+      hold: 0, move: 0.3, ease: 'in', cue: 'Land on one leg and stick it',
+    },
+  ],
+}
+
 /** Swap the load on a demo — same movement, different implement. */
 function withLoad(demo: MovementDemo, kind: LoadKind): MovementDemo {
   return { ...demo, load: demo.load && { ...demo.load, kind }, trace: kind === 'barbell' && demo.trace }
@@ -493,7 +715,7 @@ function withLoad(demo: MovementDemo, kind: LoadKind): MovementDemo {
 // Keyed by canonical library name. Variants that move the same way (Chin-Up,
 // Trap Bar Deadlift) point at the parent here; split-off entries also inherit
 // through the library's noteAs, the same way coaching notes do.
-const DEMOS: Record<string, MovementDemo> = {
+const DEMOS: Record<string, AnyDemo> = {
   'Back Squat': BACK_SQUAT,
   'Front Squat': FRONT_SQUAT,
   'Goblet Squat': GOBLET_SQUAT,
@@ -516,15 +738,24 @@ const DEMOS: Record<string, MovementDemo> = {
   'Kettlebell Swing': KETTLEBELL_SWING,
   'Lat Pulldown': LAT_PULLDOWN,
   'Dip': DIP,
+  'Vertical Jump': VERTICAL_JUMP,
+  'Squat Jump': SQUAT_JUMP,
+  'Box Jump': BOX_JUMP,
+  'Broad Jump': BROAD_JUMP,
+  'Depth Jump': DEPTH_JUMP,
+  'Pogo Jump': POGO_JUMP,
+  'Sprint': SPRINT,
+  'Defensive Slide': DEFENSIVE_SLIDE,
+  'Lateral Bound': LATERAL_BOUND,
 }
 
-const DEMO_LOOKUP = new Map<string, MovementDemo>()
+const DEMO_LOOKUP = new Map<string, AnyDemo>()
 for (const [name, demo] of Object.entries(DEMOS)) DEMO_LOOKUP.set(normalizeName(name), demo)
 
 export const DEMO_NAMES = Object.keys(DEMOS)
 
 /** The animated demo for an exercise, or null when there isn't one yet. */
-export function getMovementDemo(name: string): MovementDemo | null {
+export function getMovementDemo(name: string): AnyDemo | null {
   const lib = findLibraryExercise(name)
   if (!lib) return DEMO_LOOKUP.get(normalizeName(name)) ?? null
   return DEMO_LOOKUP.get(normalizeName(lib.name))
@@ -632,8 +863,8 @@ export function solvePose(pose: Pose, load?: Load): Figure {
 
 // ---- timeline --------------------------------------------------------------
 
-export function cycleLength(demo: MovementDemo): number {
-  return demo.beats.reduce((s, b) => s + b.hold + b.move, 0)
+export function cycleLength(demo: AnyDemo): number {
+  return (demo.beats as Beat<unknown>[]).reduce((s, b) => s + b.hold + b.move, 0)
 }
 
 // Ease in and out so every movement starts and finishes under control.
@@ -673,27 +904,98 @@ export function lerpPose(a: Pose, b: Pose, t: number): Pose {
   }
 }
 
-export interface Frame {
-  pose: Pose
+export interface Frame<P = Pose> {
+  pose: P
   beat: number   // which cue is showing
+}
+
+const EASE = {
+  inOut: ease,
+  out: (t: number) => 1 - (1 - t) * (1 - t),
+  in: (t: number) => t * t,
+  linear: (t: number) => t,
+}
+
+function timeline<P>(beats: Beat<P>[], seconds: number, blend: (a: P, b: P, t: number) => P): Frame<P> {
+  const total = beats.reduce((s, b) => s + b.hold + b.move, 0)
+  let t = ((seconds % total) + total) % total
+  const n = beats.length
+  for (let i = 0; i < n; i++) {
+    const beat = beats[i]
+    if (t < beat.hold) return { pose: beat.pose, beat: i }
+    t -= beat.hold
+    if (t < beat.move) {
+      const next = beats[(i + 1) % n]
+      return { pose: blend(beat.pose, next.pose, EASE[beat.ease ?? 'inOut'](t / beat.move)), beat: i }
+    }
+    t -= beat.move
+  }
+  return { pose: beats[0].pose, beat: 0 }
 }
 
 /** Where the demo is `seconds` into its loop. */
 export function frameAt(demo: MovementDemo, seconds: number): Frame {
-  const total = cycleLength(demo)
-  let t = ((seconds % total) + total) % total
-  const n = demo.beats.length
-  for (let i = 0; i < n; i++) {
-    const beat = demo.beats[i]
-    if (t < beat.hold) return { pose: beat.pose, beat: i }
-    t -= beat.hold
-    if (t < beat.move) {
-      const next = demo.beats[(i + 1) % n]
-      return { pose: lerpPose(beat.pose, next.pose, ease(t / beat.move)), beat: i }
-    }
-    t -= beat.move
+  return timeline(demo.beats, seconds, lerpPose)
+}
+
+export function lerpFrontPose(a: FrontPose, b: FrontPose, t: number): FrontPose {
+  return {
+    pelvis: lerpPt(a.pelvis, b.pelvis, t),
+    lean: lerp(a.lean, b.lean, t),
+    feet: [lerpPt(a.feet[0], b.feet[0], t), lerpPt(a.feet[1], b.feet[1], t)],
+    arms: [
+      [lerp(a.arms[0][0], b.arms[0][0], t), lerp(a.arms[0][1], b.arms[0][1], t)],
+      [lerp(a.arms[1][0], b.arms[1][0], t), lerp(a.arms[1][1], b.arms[1][1], t)],
+    ],
   }
-  return { pose: demo.beats[0].pose, beat: 0 }
+}
+
+export function frontFrameAt(demo: FrontDemo, seconds: number): Frame<FrontPose> {
+  return timeline(demo.beats, seconds, lerpFrontPose)
+}
+
+/** The cue showing `seconds` into either kind of demo. */
+export function beatAt(demo: AnyDemo, seconds: number): number {
+  return demo.facing === 'front' ? frontFrameAt(demo, seconds).beat : frameAt(demo, seconds).beat
+}
+
+// ---- facing the viewer -----------------------------------------------------
+
+export const FRONT = { hip: 5.5, shoulder: 11.5, shoulderAt: 27 } as const
+
+export interface FrontFigure {
+  pelvis: Pt
+  up: Pt          // the torso's axis, pelvis → neck
+  side: Pt        // across the torso, toward +x
+  neck: Pt
+  head: Pt
+  legs: [Pt[], Pt[]]   // hip, knee, ankle
+  arms: [Pt[], Pt[]]   // shoulder, elbow, hand
+}
+
+export function solveFront(pose: FrontPose): FrontFigure {
+  const up = dir(180 - pose.lean)
+  const side: Pt = [-up[1], up[0]]
+  const { pelvis } = pose
+  const neck = add(pelvis, up, BONE.torso)
+  const head = add(neck, up, BONE.neck + BONE.head)
+  const reach = BONE.thigh + BONE.shin
+  const legs = pose.feet.map((foot, i) => {
+    const out = i === 0 ? -1 : 1
+    const hip = add(pelvis, side, out * FRONT.hip)
+    const d = Math.hypot(foot[0] - hip[0], foot[1] - hip[1])
+    const ankle = d > reach ? add(hip, [(foot[0] - hip[0]) / d, (foot[1] - hip[1]) / d], reach) : foot
+    // The bent knee comes toward the viewer; what shows is it riding out over
+    // the toes a touch, more the deeper the bend.
+    const knee = add(lerpPt(hip, ankle, BONE.thigh / reach), side, out * Math.min(3, (reach - Math.min(d, reach)) * 0.2))
+    return [hip, knee, ankle]
+  }) as [Pt[], Pt[]]
+  const arms = pose.arms.map(([a1, a2], i) => {
+    const shoulder = add(add(pelvis, up, FRONT.shoulderAt), side, (i === 0 ? -1 : 1) * FRONT.shoulder)
+    const elbow = add(shoulder, dir(a1), BONE.upper)
+    return [shoulder, elbow, add(elbow, dir(a2), BONE.fore)]
+  }) as [Pt[], Pt[]]
+  return { pelvis, up, side, neck, head, legs, arms }
 }
 
 /** The load's path over one rep, sampled — the line a good rep draws. */
