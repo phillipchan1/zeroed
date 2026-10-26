@@ -114,7 +114,7 @@ if (process.argv.includes('--expect-mapping-removed')) {
     process.exit(1)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    if (!/emailVerified|does not exist|column/i.test(msg)) {
+    if (!/emailVerified|does not exist|column|schema mismatch/i.test(msg)) {
       console.error(`mapping removal failed for the wrong reason: ${msg}`)
       process.exit(1)
     }

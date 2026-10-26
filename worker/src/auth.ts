@@ -127,8 +127,9 @@ export function createAuth(env: Env, pool?: Pool) {
     ],
     advanced: {
       database: {
-        // athlete.auth_user_id is UUID (auth.users). Default nanoid breaks inserts.
-        generateId: 'uuid',
+        // athlete.auth_user_id is UUID. The pg adapter treats generateId:'uuid'
+        // as "let the DB default it", but better-auth.sql has no DEFAULT on id.
+        generateId: () => crypto.randomUUID(),
       },
       defaultCookieAttributes: {
         sameSite: 'lax',
