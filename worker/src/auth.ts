@@ -49,7 +49,7 @@ export function createAuth(env: Env) {
     database: new Pool({ connectionString: url, max: 5 }),
     emailAndPassword: { enabled: false },
     trustedOrigins: isLocalAuthHost(baseURL)
-      ? [baseURL, 'http://localhost:5173', 'http://localhost:8787']
+      ? [baseURL, 'http://localhost:5173', 'http://localhost:8787', 'http://[::1]:5173', 'http://[::1]:8787']
       : [baseURL],
     advanced: {
       defaultCookieAttributes: {

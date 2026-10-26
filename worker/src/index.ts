@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { handleAgent } from './agent.ts'
-import { API_SECURITY, authCors } from './cors.ts'
+import { API_SECURITY, beginAuthCors } from './cors.ts'
 import { getAuth } from './auth.ts'
 import type { Env } from './env.ts'
 import { handleMcp } from './mcp.ts'
@@ -37,7 +37,9 @@ app.get('/api/health', (c) =>
 )
 
 app.all('/api/auth/*', async (c) => {
-  const cors = authCors(c.req.header('Origin'), c.env)
+  const started = beginAuthCors(c.req.header('Origin'), c.env)
+  if (!started.ok) return started.response
+  const cors = started.cors
   if (c.req.method === 'OPTIONS') return new Response('ok', { headers: cors })
   try {
     const auth = getAuth(c.env)
