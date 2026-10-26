@@ -171,9 +171,13 @@ if (workflow) {
     ok('workflow uses automatic signing with ASC API key')
   } else fail('workflow automatic signing / authenticationKey flags')
 
-  if (!/CODE_SIGN_STYLE=Automatic/.test(workflow) && !/CODE_SIGN_IDENTITY=/.test(workflow)) {
+  if (!/CODE_SIGN_STYLE=Automatic/.test(workflow) && !/CODE_SIGN_IDENTITY=/.test(workflow) && !/DEVELOPMENT_TEAM="\$APPLE_DEVELOPMENT_TEAM"/.test(workflow)) {
     ok('workflow does not force development signing on the xcodebuild command line')
-  } else fail('workflow signing overrides', 'do not pass CODE_SIGN_STYLE or CODE_SIGN_IDENTITY to xcodebuild')
+  } else fail('workflow signing overrides', 'do not pass CODE_SIGN_STYLE, CODE_SIGN_IDENTITY, or DEVELOPMENT_TEAM to xcodebuild')
+
+  if (workflow.includes('ios-set-development-team.mjs') && workflow.includes('asc-revoke-api-dev-certs.mjs')) {
+    ok('workflow installs the team in the project and drops stale API development certs')
+  } else fail('workflow signing prep', 'expected ios-set-development-team.mjs and asc-revoke-api-dev-certs.mjs')
 
   if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete App Store Connect API key')) {
     ok('workflow deletes the .p8 in an always() step')
@@ -226,6 +230,14 @@ try {
   })
 } catch {
   fail('ios-check-ipa-bundle-ids --self-test')
+}
+
+for (const script of ['ios-set-development-team.mjs', 'asc-revoke-api-dev-certs.mjs']) {
+  try {
+    execFileSync(process.execPath, [join(root, 'scripts', script), '--self-test'], { stdio: 'inherit' })
+  } catch {
+    fail(`${script} --self-test`)
+  }
 }
 
 if (failed) {

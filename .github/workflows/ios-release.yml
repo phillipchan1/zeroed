@@ -5,11 +5,12 @@ name: iOS TestFlight
 # One-time Apple + GitHub secrets setup: docs/ios-releases.md
 #
 # Signing is automatic + cloud-managed via an App Store Connect API key
-# (no .p12, no hand-made provisioning profile). Release does not set
-# CODE_SIGN_IDENTITY, and the archive command does not pass
-# CODE_SIGN_STYLE — a command-line Automatic style forces development
-# signing, which mints a new Apple Development cert on every runner
-# until the account cap blocks the upload.
+# (no .p12, no hand-made provisioning profile). DEVELOPMENT_TEAM is
+# written into the project on the runner. Passing it (or CODE_SIGN_STYLE)
+# as an xcodebuild argument forces development signing, and each runner
+# then mints an Apple Development cert until the account cap blocks
+# the upload. Stale "Created via API" development certs are revoked
+# first; distribution certs are left in place.
 #   xcodebuild archive / -exportArchive
 #     -allowProvisioningUpdates
 #     -authenticationKeyPath / -authenticationKeyID / -authenticationKeyIssuerID
@@ -166,6 +167,13 @@ jobs:
           echo "BUILD_NUMBER=$RESOLVED" >> "$GITHUB_ENV"
           echo "Resolved iOS build number: $RESOLVED"
 
+      - name: Drop stale API development certificates
+        run: |
+          node scripts/asc-revoke-api-dev-certs.mjs \
+            --key-id "$APPLE_API_KEY" \
+            --issuer-id "$APPLE_API_ISSUER" \
+            --key-path "${{ runner.temp }}/zeroed-asc.p8"
+
       - name: Build signed IPA
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
@@ -175,6 +183,9 @@ jobs:
           EXPORT_PATH="$RUNNER_TEMP/Zeroed-export"
           EXPORT_PLIST="$RUNNER_TEMP/ExportOptions.plist"
           SIGNING_STYLE=automatic bash scripts/ios-write-export-options.sh "$EXPORT_PLIST"
+          # Team goes in the project. An xcodebuild DEVELOPMENT_TEAM= argument
+          # signs the archive for development and burns a certificate slot.
+          node scripts/ios-set-development-team.mjs "$APPLE_DEVELOPMENT_TEAM" ios/App/App.xcodeproj/project.pbxproj
 
           cd ios/App
           AUTH=(
@@ -187,10 +198,7 @@ jobs:
           # it to every target, so Capacitor.framework / CapacitorCordova.framework
           # inherit app.zeroed.app and App Store rejects the IPA (ITMS-90685).
           # The App target already has PRODUCT_BUNDLE_IDENTIFIER in pbxproj.
-          # Do not pass CODE_SIGN_STYLE or CODE_SIGN_IDENTITY. Command-line
-          # Automatic signing forces an iOS Development identity, and naming
-          # Apple Distribution on top of that conflicts. Release leaves the
-          # identity unset so archive selects the App Store certificate.
+          # Do not pass DEVELOPMENT_TEAM, CODE_SIGN_STYLE, or CODE_SIGN_IDENTITY.
           COMMON=(
             -workspace App.xcworkspace
             -scheme App
@@ -198,7 +206,6 @@ jobs:
             -destination 'generic/platform=iOS'
             MARKETING_VERSION="$APP_VERSION"
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
-            DEVELOPMENT_TEAM="$APPLE_DEVELOPMENT_TEAM"
           )
 
           xcodebuild archive \
