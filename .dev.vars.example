@@ -5,6 +5,9 @@ OPENAI_API_KEY=sk-replace-me
 OPENAI_MODEL=gpt-5.4-nano
 # OPENAI_MODEL_HEAVY=gpt-5.4
 BETTER_AUTH_SECRET=replace-with-32-plus-random-bytes
+# Dev-only. Marks this wrangler session as local so an unset BETTER_AUTH_URL
+# may fall back to http://localhost:8787. Never set ENVIRONMENT=local in prod.
+ENVIRONMENT=local
 # Dev-only. Production must set this as a Worker var/secret to the public origin.
 BETTER_AUTH_URL=http://localhost:8787
 # RESEND_API_KEY=

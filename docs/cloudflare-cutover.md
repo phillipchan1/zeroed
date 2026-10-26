@@ -29,7 +29,8 @@ in the Vite bundle.
 | `HYPERDRIVE` | binding | Hyperdrive config id in `wrangler.jsonc`. Connection string is injected. |
 | `DATABASE_URL` | secret (optional locally) | Direct Neon URL when Hyperdrive is not configured (`wrangler dev` / `.dev.vars`). |
 | `BETTER_AUTH_SECRET` | secret | 32+ random bytes. Rotating it signs everyone out. |
-| `BETTER_AUTH_URL` | **prod var / secret** | Public origin of the Worker, e.g. `https://zeroed.<account>.workers.dev`. Required outside local wrangler/dev — `auth.ts` / `cors.ts` throw if it is unset (no localhost fallback, no non-Secure cookies). Local only: `.dev.vars` or a localhost `DATABASE_URL`. |
+| `BETTER_AUTH_URL` | **prod var / secret** | Public origin of the Worker, e.g. `https://zeroed.<account>.workers.dev`. Required unless the runtime is local — unset throws (JSON 500 + CORS on `/api/auth`, no non-Secure cookies). |
+| `ENVIRONMENT` | local `.dev.vars` only | Set to `local` for `wrangler dev` so an unset `BETTER_AUTH_URL` may fall back to `http://localhost:8787`. Must **not** be `local` in prod. A `DATABASE_URL` / Hyperdrive connection is treated as local only when its **hostname** is exactly `localhost`, `127.0.0.1`, or `[::1]` — never a substring of the user, db name, or query. |
 | `OPENAI_API_KEY` | secret | Same key as today's `agent` function. |
 | `OPENAI_MODEL` | var | Default `gpt-5.4-nano`. |
 | `OPENAI_MODEL_HEAVY` | secret/var | Optional; `program_edit` only. |
@@ -105,7 +106,8 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    create those tables.
 4. Point the Worker Hyperdrive config at the Neon connection string.
 5. Set the Worker `BETTER_AUTH_URL` var/secret to the public Worker origin
-   (never leave it as `http://localhost:8787`). Rebuild the SPA with
+   (never leave it as `http://localhost:8787`, and do not set
+   `ENVIRONMENT=local` in prod). Rebuild the SPA with
    `VITE_API_BASE_URL=/api` (or the workers.dev origin + `/api`) and
    `wrangler deploy`. Do **not** flip the production hostname until smoke
    passes on workers.dev.
