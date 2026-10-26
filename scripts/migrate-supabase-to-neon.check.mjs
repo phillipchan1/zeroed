@@ -806,6 +806,7 @@ async function runLivePostgresChecks() {
     NEON_DIRECT_URL: targetUrl,
   })
   const proceedOut = `${proceed.stdout}\n${proceed.stderr}`
+  if (proceed.status !== 0) console.error(redactSecrets(proceedOut))
   eq(proceed.status, 0, 'different server live restore proceeds')
   ok(/migration ok/.test(proceedOut), 'different server prints migration ok')
   eq(

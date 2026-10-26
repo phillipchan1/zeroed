@@ -162,7 +162,7 @@ jobs:
     runs-on: ubuntu-latest
     services:
       pg-source:
-        image: postgres:17
+        image: postgres:16
         env:
           POSTGRES_USER: src
           POSTGRES_PASSWORD: dummy
@@ -175,7 +175,7 @@ jobs:
           --health-timeout 5s
           --health-retries 10
       pg-target:
-        image: postgres:17
+        image: postgres:16
         env:
           POSTGRES_USER: dst
           POSTGRES_PASSWORD: dummy
