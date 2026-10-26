@@ -1,66 +1,85 @@
-# Local smoke — 2026-10-26 (QA follow-up)
+# Local smoke — 2026-10-26 (QA round 2)
 # npm run type-check && npm run lint && npm run check && npm run check:isolation-mutation
-# npm run build && npx wrangler dev --ip 127.0.0.1 --port 8787
+# npm run build && npx wrangler dev --ip 127.0.0.1 --port 8788
 
 ## type-check / lint / check
-npm run type-check   # pass (tsc client + worker)
+npm run type-check   # pass
 npm run lint         # pass
 npm run check
-  ✓ all 26 balance checks passed
-  ✓ all 182 demand-table checks passed
-  loggedSets.check: 24 checks passed
-  phaseBoundary.check: 32 checks passed
-  ✓ all 73 prescription checks passed
-  programDraft.check: 45 checks passed
-  ✓ all 46 PR/volume checks passed
-  ✓ all 38 rest-timer checks passed
-  ✓ all 50 strength-baseline checks passed
-  ✓ all 85 unit checks passed
-  weekOrder.check: ok
-  55 checks, 0 failed
-  access isolation: ok   (PGlite, two athletes, store/edits query paths)
+  73 checks, 0 failed
+  access isolation: ok   (supabase/migrations applied on PGlite + two-athlete seed)
 
+## isolation mutation (every filter)
 npm run check:isolation-mutation
-=== M1 delete loadWorkout athlete_id filter ===
-55 checks, 4 failed
-  FAIL loadWorkout: A asking for B workout_id gets null
-  FAIL loadWorkout: B asking for A workout_id gets null
-  FAIL MCP get_workout: A asking for B is a miss
-  FAIL post-write: B workout still hidden from A
-M1 delete loadWorkout athlete_id filter: failed as expected (exit 1)
+M1 delete loadWorkout athlete_id filter          → 1 failed (selectOwnedWorkout)
+M2 set athlete_id filters to TRUE                → 35 failed
+edits.ts:183 UPDATE routine                      → 5 failed
+edits.ts:194 INSERT routine EXISTS               → 2 failed
+edits.ts:221 UPDATE phase                        → 1 failed
+edits.ts:236 INSERT phase EXISTS                 → 3 failed
+edits.ts:282 INSERT program_revision EXISTS      → 3 failed
+store.ts:74  programIds                          → 3 failed
+store.ts:86  loadAthlete row                     → 1 failed
+store.ts:92  athlete_profile                     → 1 failed
+store.ts:105 loadLiveProgram program             → 9 failed
+store.ts:162 loadLiveProgram prefs               → 1 failed
+store.ts:195 loadInsights includeSettled         → 2 failed
+store.ts:201 loadInsights open                   → 3 failed
+store.ts:234 loadWorkouts join                   → 4 failed
+store.ts:295 selectOwnedWorkout                  → 1 failed
+store.ts:382 loadJourney                         → 1 failed
+store.ts:431 loadNotes coach                     → 1 failed
+mutation proof: ok (M1, M2, and 16 single-filter mutations failed as expected)
 
-=== M2 set athlete_id filters to TRUE ===
-55 checks, 23 failed
-  FAIL programIds: A sees only own program
-  FAIL loadInsights: A cannot read B claim
-  FAIL loadWorkouts: A cannot list B workout
-  FAIL loadWorkout: A asking for B workout_id gets null
-  FAIL loadLiftHistory: A cannot see B deadlifts
-  FAIL writeDraftInPlace: A cannot UPDATE B routine
-  FAIL writeDraftInPlace: A cannot INSERT onto B program
-  … (23 total)
-M2 set athlete_id filters to TRUE: failed as expected (exit 1)
-mutation proof: ok (M1 and M2 failed as expected)
+## live Vercel headers (2026-10-26)
+
+$ curl -sI https://zeroed-two.vercel.app/
+HTTP/2 200
+accept-ranges: bytes
+access-control-allow-origin: *
+age: 3028
+cache-control: public, max-age=0, must-revalidate
+content-disposition: inline
+content-type: text/html; charset=utf-8
+date: Mon, 26 Oct 2026 01:22:23 GMT
+etag: "4ed557c2192a86a2ac05b3b91caf8e5d"
+last-modified: Mon, 26 Oct 2026 00:31:55 GMT
+server: Vercel
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+x-vercel-cache: HIT
+x-vercel-id: pdx1::ptfp7-1792977743655-8f5baecce494
+content-length: 1663
+
+$ curl -sI https://zeroed-two.vercel.app/assets/index-C5_rVfg7.js
+HTTP/2 200
+accept-ranges: bytes
+access-control-allow-origin: *
+age: 2977
+cache-control: public, max-age=0, must-revalidate
+content-disposition: inline; filename="index-C5_rVfg7.js"
+content-type: application/javascript; charset=utf-8
+date: Mon, 26 Oct 2026 01:22:23 GMT
+etag: "82c0d41780f15053cc72d0bd34c3ed33"
+last-modified: Mon, 26 Oct 2026 00:32:45 GMT
+server: Vercel
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+x-vercel-cache: HIT
+x-vercel-id: pdx1::ptfp7-1792977743731-a33946e62b3f
+content-length: 786083
+
+This hostname currently sends max-age=0 on the hashed JS (no nosniff).
+Workers /assets/* is restored to public, max-age=31536000, immutable (Vite
+hashed assets) and keeps nosniff. ACAO * is on static paths because live
+sends it on both / and the hashed JS file.
 
 ## wrangler dev
-GET /                200 text/html   Cache-Control: max-age=0, must-revalidate
-                                     HSTS + Access-Control-Allow-Origin: *
-                                     (no XFO / XSS / Permissions / Referrer / nosniff)
-GET /app/today       200 text/html   same ETag as /  (SPA fallback)
-GET /api/health      200 {"ok":true,"service":"zeroed","runtime":"cloudflare-workers"}
-                                     HSTS + X-Content-Type-Options: nosniff
-POST /api/agent      500 {"ok":false,"error":"server not configured"}  (no OPENAI_API_KEY)
-POST /functions/v1/agent
-                     500 {"ok":false,"error":"server not configured"}  (worker, not assets 405)
-POST /functions/v1/mcp
-                     401 {"error":"Missing bearer token"}  Accept: text/event-stream
-GET /assets/*.js     200 Cache-Control: public, max-age=0, must-revalidate
-GET /assets/nope-missing.js
-                     404 text/plain  Cache-Control: max-age=0, must-revalidate
-
-Better Auth client is a dynamic Vite chunk (config-*.js + index-Z6*.js via
-__vite__mapDeps). index.html only loads the main app chunk — supabase-path
-does not execute better-auth.
-
-Not run (would need Neon + secrets; not part of this draft):
-  Better Auth OTP send/verify, authenticated agent, MCP SSE body with a live token.
+GET /                         200 text/html   HSTS + nosniff + ACAO * + max-age=0
+GET /app/today                200 text/html   SPA fallback (same ETag)
+GET /api/health               200 HSTS + nosniff
+POST /functions/v1/agent      400 worker JSON (not assets 405)
+GET /assets/index-*.js        200 max-age=31536000, immutable + nosniff
+GET /assets/nope-missing.js   404 text/plain
+GET /nope.png                 404 text/plain
+GET /missing.json             404 text/plain
+OPTIONS /api/auth/* Origin=http://localhost:5173
+                              ACAO http://localhost:5173 + credentials (never *)
