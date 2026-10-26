@@ -9,15 +9,20 @@ Supabase until that night.
 | Piece | Today | After cutover | Rollback |
 |---|---|---|---|
 | Static SPA | Vercel (Vite) | Workers Static Assets | DNS / Vercel project still live |
-| `agent` / `mcp` | Supabase Edge Functions | Hono Worker `/api/agent`, `/api/mcp` | Point `VITE_API_BASE_URL` back at `https://<project>.supabase.co/functions/v1` |
+| `agent` | Supabase Edge Function | Hono Worker `/api/agent` | Point `VITE_API_BASE_URL` back at `https://<project>.supabase.co/functions/v1` |
+| `mcp` | Supabase Edge Function `functions/v1/mcp` | Hono Worker `/api/mcp` (and `/mcp`). **Edge MCP is retired at cutover** — tokens keep working because `#17` copies `mcp_token` and the Worker hashes the same way. | Last Vercel build (empty `VITE_API_BASE_URL`) or set the API base back at `https://<project>.supabase.co/functions/v1`. The edge function stays in the repo; it is not the cutover target. |
 | Auth | Supabase email OTP | Better Auth email OTP (no passwords) on `/api/auth` | Same API-URL flip; existing Vercel build still uses Supabase auth |
 | Database | Supabase Postgres + RLS | Neon Postgres via Hyperdrive; access checks in the Worker | Leave Neon in place; app no longer writes it |
 
 The SPA still talks to Supabase PostgREST for row reads/writes when
 `VITE_API_BASE_URL` is unset (today's Vercel build). After the Worker hosts the
-SPA, set `VITE_API_BASE_URL=/api` so agent / MCP / auth hit the Worker. A later
-change can move client PostgREST calls onto Neon; it is **not** required to roll
-the functions and auth first.
+SPA, set `VITE_API_BASE_URL=/api` so agent / MCP / auth hit the Worker. Profile
+already uses `mcpUrl()` (`${base}/mcp` → `/api/mcp`). While the flag is off,
+Claude connectors keep using `functions/v1/mcp`. At cutover they must be
+re-pointed at the Worker URL — the edge function is retired then and would
+keep reading the old Supabase store if left in front. A later change can move
+client PostgREST calls onto Neon; it is **not** required to roll the functions
+and auth first.
 
 ## Secrets and bindings
 
@@ -97,7 +102,9 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    PGlite, then seeds two athletes. The mutation script first asserts the
    unmutated check is green, then deletes each derived owner filter
    (`athlete_id =` and `id =`, including the phase-rollback owner clause)
-   on its own and expects at least one failure.
+   on its own and expects at least one failure. `worker/src/mcp.check.ts`
+   (picked up by `npm run check`) is the MCP parity + token isolation +
+   revoked 401 + load-a-full-program gate.
 3. `npm run build && npx wrangler dev` serves `/` and `/api/health`.
    `POST /functions/v1/agent` reaches the Worker (not a 405 from assets).
    Missing `/assets/*` is 404 text/plain, not `index.html`.
@@ -138,7 +145,9 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    - One authenticated `POST /api/agent` (`probe` is pre-auth; use `coach_chat`
      or `target` with a session cookie / bearer).
    - `POST /api/mcp` with `Accept: text/event-stream` and a minted token —
-     response `Content-Type: text/event-stream`.
+     response `Content-Type: text/event-stream`. A revoked token is 401.
+     `tools/list` matches the retired edge function. `get_current_program`
+     returns that athlete's phase, routines, and exercises only.
 7. Forced rollback rehearsal (below), then cutover again if this is still a drill.
 
 ## Rollback (target: back on Vercel + Supabase)
@@ -153,7 +162,11 @@ Rollback is an API-URL / DNS flip. Nothing is deleted.
    put DNS / the Vercel project back in front. The last Vercel production build
    still has an empty `VITE_API_BASE_URL` and talks to Supabase auth + functions
    exactly as today.
-3. Confirm `agent` and `mcp` on Supabase still serve. They were not removed.
+3. Confirm `agent` on Supabase still serves. It was not removed. **MCP
+   on the edge is retired at cutover** — do not keep sending Claude
+   connectors at `functions/v1/mcp` after the Worker is in front. The
+   function remains in the repo (and on Supabase) so a rollback API-URL
+   flip still works; it is not the live path.
 4. If any writes landed on Neon after unfreeze, they are **not** in Supabase.
    Replay from the Worker logs / a Neon dump of the affected tables. Zeroed
    traffic is low; the rehearsal should include a dummy write so this path is

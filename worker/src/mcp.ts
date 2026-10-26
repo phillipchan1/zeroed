@@ -4,10 +4,21 @@ import {
   type JsonRpcResponse,
 } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import { MCP_CORS, json } from './cors.ts'
-import { getSql } from './db.ts'
+import { getSql, type Sql } from './db.ts'
 import type { Env } from './env.ts'
 import { resolveMcpToken, tokenFrom, touchMcpToken } from './mcpToken.ts'
 import { executeZeroedTool, ZEROED_TOOLS } from './tools.ts'
+
+/** HTTP 500 and SQL-looking tool failures stay generic — no relation/column leak. */
+export function publicMcpError(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (
+    /relation |column |syntax |permission denied|duplicate key|violates |failed to parse|ECONN|timeout|HYPERDRIVE|DATABASE|not configured/i.test(msg)
+  ) {
+    return 'request failed'
+  }
+  return msg
+}
 
 const RATE_LIMIT_PER_MIN = 120
 const hits = new Map<string, number[]>()
@@ -61,13 +72,13 @@ function sessionHeaders(req: Request): Record<string, string> {
   }
 }
 
-export async function handleMcp(req: Request, env: Env): Promise<Response> {
+export async function handleMcp(req: Request, env: Env, injected?: Sql): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: MCP_CORS })
 
   try {
     const token = tokenFrom(req)
     if (!token) return unauthorized('Missing bearer token')
-    const sql = getSql(env)
+    const sql = injected ?? getSql(env)
     const conn = await resolveMcpToken(sql, token)
     if (!conn) return unauthorized()
 
@@ -94,7 +105,11 @@ export async function handleMcp(req: Request, env: Env): Promise<Response> {
     const run = async (msg: JsonRpcRequest): Promise<JsonRpcResponse | null> => {
       return await handleMcpMethod(msg, ZEROED_TOOLS, async (name, args) => {
         await touchMcpToken(sql, conn.id)
-        return await executeZeroedTool(sql, conn.athlete_id, name, args)
+        try {
+          return await executeZeroedTool(sql, conn.athlete_id, name, args)
+        } catch (err) {
+          throw new Error(publicMcpError(err))
+        }
       }, athleteLabel)
     }
 
@@ -114,8 +129,7 @@ export async function handleMcp(req: Request, env: Env): Promise<Response> {
     if (!reply) return new Response(null, { status: 202, headers: { ...MCP_CORS, ...extra } })
     return wantsSse(req) ? sse(reply, extra) : json(reply, 200, { ...MCP_CORS, ...extra })
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e)
-    console.error('[mcp]', msg)
-    return json({ error: msg }, 500, MCP_CORS)
+    console.error('[mcp]', e instanceof Error ? e.message : String(e))
+    return json({ error: 'request failed' }, 500, MCP_CORS)
   }
 }

@@ -67,6 +67,7 @@ app.all('/api/auth/*', async (c) => {
 
 app.all('/api/agent', (c) => handleAgent(c.req.raw, c.env))
 app.all('/api/mcp', (c) => handleMcp(c.req.raw, c.env))
+app.all('/mcp', (c) => handleMcp(c.req.raw, c.env))
 
 // Compatibility aliases so VITE_API_BASE_URL can point at either
 // `https://<worker>/api` or the old `/functions/v1` prefix.
