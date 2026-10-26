@@ -61,22 +61,25 @@ function throwsRefuse(url: string, label?: string): string | false {
   }
 }
 
+const REFUSE_ENV_KEYS = ['PGHOST', 'PGHOSTADDR', 'PGSERVICE', 'PGSERVICEFILE', 'PGSYSCONFDIR'] as const
+
 function throwsRefuseEnv(
   url: string,
-  env: { PGHOST?: string; PGHOSTADDR?: string },
+  env: Partial<Record<(typeof REFUSE_ENV_KEYS)[number], string>>,
 ): string | false {
-  const prev = { PGHOST: process.env.PGHOST, PGHOSTADDR: process.env.PGHOSTADDR }
+  const prev: Partial<Record<(typeof REFUSE_ENV_KEYS)[number], string | undefined>> = {}
   try {
-    if (env.PGHOST === undefined) delete process.env.PGHOST
-    else process.env.PGHOST = env.PGHOST
-    if (env.PGHOSTADDR === undefined) delete process.env.PGHOSTADDR
-    else process.env.PGHOSTADDR = env.PGHOSTADDR
+    for (const key of REFUSE_ENV_KEYS) {
+      prev[key] = process.env[key]
+      if (env[key] === undefined) delete process.env[key]
+      else process.env[key] = env[key]
+    }
     return throwsRefuse(url)
   } finally {
-    if (prev.PGHOST === undefined) delete process.env.PGHOST
-    else process.env.PGHOST = prev.PGHOST
-    if (prev.PGHOSTADDR === undefined) delete process.env.PGHOSTADDR
-    else process.env.PGHOSTADDR = prev.PGHOSTADDR
+    for (const key of REFUSE_ENV_KEYS) {
+      if (prev[key] === undefined) delete process.env[key]
+      else process.env[key] = prev[key]
+    }
   }
 }
 
@@ -116,6 +119,18 @@ ok(
   'refuseUnsafeTestUrl: PGHOSTADDR override is refused',
 )
 ok(throwsRefuseEnv(loopbackV4, { PGHOST: '127.0.0.1' }) === false, 'refuseUnsafeTestUrl: loopback PGHOST is allowed')
+ok(
+  String(throwsRefuseEnv(loopbackV4, { PGSERVICE: 'neon' })).includes('PGSERVICE is set'),
+  'refuseUnsafeTestUrl: PGSERVICE override is refused',
+)
+ok(
+  String(throwsRefuseEnv(loopbackV4, { PGSERVICEFILE: '/tmp/pg_service.conf' })).includes('PGSERVICEFILE is set'),
+  'refuseUnsafeTestUrl: PGSERVICEFILE override is refused',
+)
+ok(
+  String(throwsRefuseEnv(loopbackV4, { PGSYSCONFDIR: '/tmp' })).includes('PGSYSCONFDIR is set'),
+  'refuseUnsafeTestUrl: PGSYSCONFDIR override is refused',
+)
 ok(throwsRefuse('/var/run/postgresql zeroed') !== false, 'refuseUnsafeTestUrl: unix socket path is not a URL / not loopback')
 
 ok(!isLocalAuthRuntime({ DATABASE_URL: neon }), 'Neon URL is not local')

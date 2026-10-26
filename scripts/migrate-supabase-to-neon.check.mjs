@@ -51,6 +51,7 @@ import {
   systemIdentifierQuery,
   wrapRestoreTransaction,
 } from './migrate-supabase-to-neon.mjs'
+import { previewTargetRefuseReason } from './seed-preview.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
@@ -298,6 +299,48 @@ ok(!isSupabaseHost('ep-foo.us-east-2.aws.neon.tech'), 'isSupabaseHost rejects Ne
 ok(isNeonHost('ep-foo.us-east-2.aws.neon.tech'), 'isNeonHost matches *.neon.tech')
 ok(!isNeonHost('neon.tech'), 'isNeonHost requires a subdomain')
 ok(!isNeonHost('ep-foo.neon.tech.evil.com'), 'isNeonHost rejects a suffix spoof')
+
+const cleaned = libpqCleanEnv({
+  PATH: '/usr/bin',
+  HOME: '/home/ci',
+  PGHOST: 'ep-x.neon.tech',
+  PGHOSTADDR: '1.2.3.4',
+  PGSERVICE: 'neon',
+  PGSERVICEFILE: '/tmp/pg_service.conf',
+  PGSYSCONFDIR: '/tmp',
+  PGPASSWORD: 'secret',
+})
+ok(!cleaned.PGHOST && !cleaned.PGHOSTADDR, 'libpqCleanEnv strips PGHOST/PGHOSTADDR')
+ok(!cleaned.PGSERVICE && !cleaned.PGSERVICEFILE && !cleaned.PGSYSCONFDIR, 'libpqCleanEnv strips PGSERVICE*')
+ok(!cleaned.PGPASSWORD, 'libpqCleanEnv strips PGPASSWORD')
+eq(cleaned.PATH, '/usr/bin', 'libpqCleanEnv keeps PATH')
+eq(cleaned.HOME, '/home/ci', 'libpqCleanEnv keeps HOME')
+
+eq(previewTargetRefuseReason(neonDirect), '', 'preview seed allows a Neon host')
+eq(
+  previewTargetRefuseReason('postgresql://postgres@127.0.0.1:5432/zeroed'),
+  'target host must end in .neon.tech',
+  'preview seed refuses loopback',
+)
+eq(
+  previewTargetRefuseReason(supabaseDirect),
+  'target host looks like Supabase',
+  'preview seed refuses Supabase',
+)
+eq(
+  previewTargetRefuseReason(`${neonDirect}?host=/tmp/pg`),
+  'target host is a socket path',
+  'preview seed refuses a socket override',
+)
+eq(
+  previewTargetRefuseReason(`${neonDirect}?host=db.example.com`),
+  'target host override must end in .neon.tech',
+  'preview seed refuses a non-Neon host override',
+)
+
+const seedSrc = readFileSync(join(root, 'scripts/seed-preview.mjs'), 'utf8')
+ok(/libpqCleanEnv/.test(seedSrc), 'seed-preview uses libpqCleanEnv')
+ok(/previewTargetRefuseReason/.test(seedSrc), 'seed-preview calls the Neon allowlist before psql')
 
 eq(
   refuseSourceWipeReason(neonDirect, neonAppName),
@@ -729,7 +772,7 @@ const livePsql = livePsqlUrl
     `SELECT 'athlete' AS t, 3::bigint AS n UNION ALL SELECT 'insight', 0 UNION ALL SELECT 'mcp_token', 1 UNION ALL SELECT 'phase', 1 UNION ALL SELECT 'program', 1 UNION ALL SELECT 'routine', 1 UNION ALL SELECT 'workout', 1 ORDER BY 1;`,
   ], {
     encoding: 'utf8',
-    env: { PATH: process.env.PATH || '/usr/bin', HOME: process.env.HOME || '', LANG: 'C' },
+    env: libpqCleanEnv({ PATH: process.env.PATH || '/usr/bin', HOME: process.env.HOME || '', LANG: 'C' }),
   })
   : { status: 1, stdout: '' }
 if (livePsqlUrl && livePsql.status === 0 && livePsql.stdout) {

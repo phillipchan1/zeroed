@@ -219,7 +219,7 @@ export function refuseTargetFingerprintReason(targetFp, sourceFp) {
 export function libpqCleanEnv(base = process.env) {
   const env = { ...base }
   for (const key of Object.keys(env)) {
-    if (key === 'PGPASSWORD' || (key.startsWith('PG') && key !== 'PATH')) delete env[key]
+    if (key.startsWith('PG')) delete env[key]
   }
   return env
 }

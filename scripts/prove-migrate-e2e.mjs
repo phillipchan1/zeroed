@@ -13,6 +13,7 @@ import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
 import { refuseUnsafeTestUrl } from '../worker/src/refuseTestUrl.ts'
 import { applyIsolationSchemaPg } from '../worker/src/isolationDb.ts'
+import { libpqCleanEnv } from './migrate-supabase-to-neon.mjs'
 import {
   LIST_USER_OBJECTS_TEXT_SQL,
   objectHash,
@@ -38,7 +39,7 @@ function run(cmd, args, extraEnv = {}) {
   const res = spawnSync(cmd, args, {
     cwd: root,
     encoding: 'utf8',
-    env: { ...process.env, NODE_NO_WARNINGS: '1', ...extraEnv },
+    env: libpqCleanEnv({ ...process.env, NODE_NO_WARNINGS: '1', ...extraEnv }),
   })
   const out = `${res.stdout || ''}\n${res.stderr || ''}`.trim()
   if (res.status !== 0) {
@@ -51,7 +52,7 @@ function migrate(args, extraEnv) {
   const res = spawnSync(process.execPath, [join(here, 'migrate-supabase-to-neon.mjs'), ...args], {
     cwd: root,
     encoding: 'utf8',
-    env: { ...process.env, NODE_NO_WARNINGS: '1', ...extraEnv },
+    env: libpqCleanEnv({ ...process.env, NODE_NO_WARNINGS: '1', ...extraEnv }),
   })
   return {
     status: res.status,

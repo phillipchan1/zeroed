@@ -26,6 +26,9 @@ ok(
 ok(refuseSrc.includes('pg-connection-string'), 'refuseUnsafeTestUrl runs pg-connection-string')
 ok(refuseSrc.includes('PGHOST'), 'refuseUnsafeTestUrl checks PGHOST')
 ok(refuseSrc.includes('PGHOSTADDR'), 'refuseUnsafeTestUrl checks PGHOSTADDR')
+ok(refuseSrc.includes('PGSERVICE'), 'refuseUnsafeTestUrl refuses PGSERVICE')
+ok(refuseSrc.includes('PGSERVICEFILE'), 'refuseUnsafeTestUrl refuses PGSERVICEFILE')
+ok(refuseSrc.includes('PGSYSCONFDIR'), 'refuseUnsafeTestUrl refuses PGSYSCONFDIR')
 ok(refuseSrc.includes('hostaddr'), 'refuseUnsafeTestUrl rejects hostaddr')
 ok(refuseSrc.includes('service'), 'refuseUnsafeTestUrl rejects service')
 ok(refuseSrc.includes('multi-host'), 'refuseUnsafeTestUrl rejects multi-host lists')
@@ -55,6 +58,26 @@ ok(
 ok(
   /refuseUnsafeTestUrl\(\s*sourceUrl,\s*'ZEROED_PG_SOURCE_URL'\s*\)/.test(migrateCheckSrc),
   'migrate check guards ZEROED_PG_SOURCE_URL before live connect',
+)
+ok(
+  (migrateCheckSrc.match(/libpqCleanEnv\(/g) || []).length >= 2,
+  'migrate check uses libpqCleanEnv on live psql spawns',
+)
+
+const e2eSrc = readFileSync(join(root, 'scripts/prove-migrate-e2e.mjs'), 'utf8')
+ok(e2eSrc.includes('libpqCleanEnv'), 'prove-migrate-e2e strips inherited PG* before psql')
+ok(
+  /env:\s*libpqCleanEnv\(/.test(e2eSrc),
+  'prove-migrate-e2e run/migrate pass libpqCleanEnv to spawnSync',
+)
+
+const seedSrc = readFileSync(join(root, 'scripts/seed-preview.mjs'), 'utf8')
+ok(seedSrc.includes('libpqCleanEnv'), 'seed-preview strips inherited PG* before psql')
+ok(seedSrc.includes('isNeonHost'), 'seed-preview allowlists Neon hosts')
+ok(seedSrc.includes('previewTargetRefuseReason'), 'seed-preview refuses non-Neon targets')
+ok(
+  /env:\s*libpqCleanEnv\(/.test(seedSrc),
+  'seed-preview psql spawn uses libpqCleanEnv',
 )
 
 const CONNECT_MARKERS = [
@@ -94,6 +117,9 @@ const URL_CASES = [
   { label: '&hostaddr=', url: hostaddrBypass, evidence: 'query param "hostaddr"', env: {} },
   { label: 'multi-host', url: multiHost, evidence: 'multi-host', env: {} },
   { label: 'PGHOST', url: loopback, evidence: 'PGHOST host "ep-x.neon.tech"', env: { PGHOST: 'ep-x.neon.tech' } },
+  { label: 'PGSERVICE', url: loopback, evidence: 'PGSERVICE is set', env: { PGSERVICE: 'neon' } },
+  { label: 'PGSERVICEFILE', url: loopback, evidence: 'PGSERVICEFILE is set', env: { PGSERVICEFILE: '/tmp/pg_service.conf' } },
+  { label: 'PGSYSCONFDIR', url: loopback, evidence: 'PGSYSCONFDIR is set', env: { PGSYSCONFDIR: '/tmp' } },
 ] as const
 
 for (const { file, varName } of GUARDED_SCRIPTS) {
@@ -122,6 +148,9 @@ for (const name of readdirSync(scriptsDir).filter((f) => f.endsWith('.mjs'))) {
     /refuseUnsafeTestUrl\((?:url|adminUrl), 'DATABASE_URL'\)/.test(src),
     `${name} is a wipe script and is loopback-guarded`,
   )
+  if (/spawnSync\(\s*['"]psql['"]|spawnSync\(\s*['"]pg_dump['"]|run\(\s*['"]psql['"]|run\(\s*['"]pg_dump['"]/.test(src)) {
+    ok(src.includes('libpqCleanEnv'), `${name} strips PG* before psql/pg_dump`)
+  }
 }
 
 const preloadPath = join(tmpdir(), `zeroed-no-connect-${process.pid}.mjs`)
@@ -183,6 +212,9 @@ function spawnNode(script: string, extraEnv: NodeJS.ProcessEnv) {
         NODE_NO_WARNINGS: '1',
         PGHOST: '',
         PGHOSTADDR: '',
+        PGSERVICE: '',
+        PGSERVICEFILE: '',
+        PGSYSCONFDIR: '',
         ...extraEnv,
       },
     },
