@@ -17,7 +17,9 @@ Same tools either way. The model proposes. The existing engine (`src/engine/prog
 | `get_athlete` / `get_insights` | Profile and weak-link map. |
 | `get_current_program` | The week you will actually train. |
 | `list_workouts` / `get_workout` | Full history, filterable by date or lift. |
-| `search_lifts` | One movement's top sets + e1RM trend. |
+| `search_lifts` | One movement's top sets + RPE-chart e1RM trend. Main lifts match by identity ("squat" never pulls a Cossack). |
+| `get_lift_model` | Squat / bench / deadlift / OHP (or `all`): working max, training max, 4/8-week trend, all-time best, last qualifying sets, and this week's prescription with its reason line. Pass today's sleep / readiness / knee pain to apply the modifiers. |
+| `set_training_max` | Hand-set one lift's TM (or clear it with `null`). Previews unless `confirm=true`. |
 | `get_program_journey` / `get_coach_notes` | Blocks, revisions, weekly reviews. |
 | `preview_program_edits` | In-memory surgical edits + deterministic diff. Writes nothing. |
 | `apply_program_edits` | Write the preview. Requires `confirm=true`. |
@@ -94,6 +96,13 @@ Sanity check (does not need Claude):
 
 ```bash
 npm --prefix mcp run check
+```
+
+The lift model straight off your live log (same text `get_lift_model` returns):
+
+```bash
+npm run lift-model            # all four main lifts
+npm run lift-model -- ohp     # one
 ```
 
 The server itself stays quiet until a client connects over stdin:

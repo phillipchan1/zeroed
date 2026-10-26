@@ -14,9 +14,13 @@ import {
 import {
   gatherSessionPrescription, gatherExerciseBests, gatherLastSetsByName, actualsFromPending,
   coachStarterPrompts, runCoachChat, logTimestampForWeek, addDaysISO,
+  gatherSessionCheckin, checkinDayOf, hasCheckin, EMPTY_CHECKIN,
+  canonicalLiftId, backoffLoad, liftIncrement,
   type SessionPrescription, type SessionActuals, type ClearanceView,
-  type PendingSession, type PendingDebrief, type DebriefExerciseInput,
+  type PendingSession, type PendingDebrief, type DebriefExerciseInput, type SessionCheckinInput,
 } from '../../engine'
+import { isUpperBody } from '../../engine/liftModel'
+import { rpeContract } from '../../engine/prescription'
 import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
 import { isSetLogged, tallySession } from '../../engine/volume'
 import {
@@ -53,6 +57,12 @@ function leadingInt(s: string | undefined): number | null {
 }
 
 const RPE_SCALE = [6, 7, 8, 9, 10]
+
+// "285lb", "127.5lb" — a load as the athlete reads it.
+function fmtLoadUnit(x: number, unit: string): string {
+  const r = Math.round(x * 10) / 10
+  return `${Number.isInteger(r) ? r : r.toFixed(1)}${unit}`
+}
 
 // Column layout per tracking type, as a CSS class so the grid template can be
 // overridden by media query (desktop slots in an extra "Previous" column that
@@ -167,6 +177,8 @@ interface SetRowProps {
   prescribedLoad: number | null   // parsed prescribed weight, e.g. "225 lbs" → 225
   carry: Partial<SetLog>          // values to carry forward (prev set this/last session)
   prevText: string | null  // last session's result for this set (desktop column)
+  /** Reps attempted and missed — a load-bearing lift only. */
+  showMissed: boolean
   onChange: (updated: SetLog) => void
   onComplete: () => void   // fires when a set is newly marked done (→ rest timer)
   onActivate: () => void   // a field here was focused → drives the desktop rail
@@ -175,7 +187,7 @@ interface SetRowProps {
 function SetRow({
   setNum, log, trackingType, u, best,
   prescribedReps, prescribedDuration, prescribedLoad, carry,
-  prevText, onChange, onComplete, onActivate,
+  prevText, showMissed, onChange, onComplete, onActivate,
 }: SetRowProps) {
   const [rpeOpen, setRpeOpen] = useState(false)
   const rpeRef = useRef<HTMLDivElement>(null)
@@ -268,14 +280,20 @@ function SetRow({
   )
 
   // RPE cell — a tap-scale, not a keyboard (JuggernautAI). Shared by the loaded types.
+  // Missed reps live behind the same tap: it's the same question ("how close to
+  // failure was that?") answered past the end of the scale. `reps` stays what
+  // was completed; one miss repeats the load next time, two take 5% off.
+  const missed = log.missed_reps ?? 0
   const rpeCell = (
     <div style={{ position: 'relative' }} ref={rpeRef}>
       <button
         type="button"
-        className={`set-row__rpe${log.rpe == null ? ' set-row__rpe--empty' : ''}`}
+        className={`set-row__rpe${log.rpe == null && !missed ? ' set-row__rpe--empty' : ''}`}
         onClick={() => setRpeOpen((o) => !o)}
+        aria-label={`Set ${setNum} RPE${missed ? `, ${missed} missed` : ''}`}
       >
-        {log.rpe ?? 'RPE'}
+        {log.rpe ?? (missed ? '' : 'RPE')}
+        {missed > 0 && <span className="set-row__missed">−{missed}</span>}
       </button>
       {rpeOpen && (
         <div className="rpe-pop">
@@ -299,6 +317,23 @@ function SetRow({
               –
             </button>
           </div>
+          {showMissed && (
+            <>
+              <span className="rpe-pop__label">Missed reps</span>
+              <div className="rpe-pop__scale">
+                {[0, 1, 2, 3].map((v) => (
+                  <button
+                    key={v}
+                    type="button"
+                    className={`rpe-pop__btn${missed === v ? ' rpe-pop__btn--on' : ''}`}
+                    onClick={() => onChange({ ...log, missed_reps: v || null })}
+                  >
+                    {v === 3 ? '3+' : v}
+                  </button>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       )}
     </div>
@@ -408,6 +443,111 @@ function SetRow({
       <span className="set-row__prev num">{prevText ?? '·'}</span>
       {cells}
       {doneBtn}
+    </div>
+  )
+}
+
+// ---- Session check-in -------------------------------------------------------
+// Four numbers that move today's loads (engine/liftModel.ts): under 6 h of sleep
+// or readiness under 5 takes 5% off and caps RPE at 7; a knee at 4/10 or worse
+// takes 10% off squat, lunge and jump work and skips the jumps. Bodyweight rides
+// along for the record. Folded to one line until it's wanted, and entirely
+// optional — a session logged without it is still a session.
+
+const CHECKIN_FIELDS: Array<{ key: keyof SessionCheckinInput; label: string; min: number; max: number; step: number }> = [
+  { key: 'sleepHours', label: 'Sleep h', min: 0, max: 24, step: 0.5 },
+  { key: 'readiness', label: 'Ready 1–10', min: 1, max: 10, step: 1 },
+  { key: 'kneePainL', label: 'Knee L 0–10', min: 0, max: 10, step: 1 },
+  { key: 'kneePainR', label: 'Knee R 0–10', min: 0, max: 10, step: 1 },
+  { key: 'bodyweight', label: 'Bodyweight', min: 1, max: 1000, step: 0.1 },
+]
+
+function checkinSummary(c: SessionCheckinInput, u: UnitContext): string {
+  const bits = [
+    c.sleepHours != null ? `${c.sleepHours}h sleep` : null,
+    c.readiness != null ? `ready ${c.readiness}` : null,
+    c.kneePainL != null || c.kneePainR != null ? `knees ${c.kneePainL ?? '–'}/${c.kneePainR ?? '–'}` : null,
+    c.bodyweight != null ? `${u.fmt(c.bodyweight)}${u.unit}` : null,
+  ].filter(Boolean)
+  return bits.join(' · ')
+}
+
+function SessionCheckinCard({
+  value, u, onChange,
+}: { value: SessionCheckinInput; u: UnitContext; onChange: (c: SessionCheckinInput) => void }) {
+  const [open, setOpen] = useState(false)
+  const filled = hasCheckin(value)
+  const set = (key: keyof SessionCheckinInput, raw: string, min: number, max: number) => {
+    const n = raw === '' ? null : Number(raw)
+    const clean = n == null || !Number.isFinite(n) ? null : Math.min(max, Math.max(min, n))
+    // Bodyweight is typed in the display unit and kept in the storage unit, like a set's weight.
+    onChange({ ...value, [key]: key === 'bodyweight' && clean != null ? u.store(clean) : clean })
+  }
+  return (
+    <div className="checkin">
+      <button
+        type="button"
+        className="checkin__toggle"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-label={`Session check-in: ${filled ? checkinSummary(value, u) : 'not given'}`}
+      >
+        <span className="checkin__label">Check-in</span>
+        <span className="checkin__summary">{filled ? checkinSummary(value, u) : 'sleep, readiness, knees'}</span>
+        <ChevronRight size={14} strokeWidth={2} style={{ transform: open ? 'rotate(90deg)' : undefined, color: 'var(--text-dim)' }} />
+      </button>
+      {open && (
+        <>
+          <div className="checkin__grid">
+            {CHECKIN_FIELDS.map((f) => (
+              <label key={f.key} className="checkin__field">
+                <span>{f.key === 'bodyweight' ? `Bodyweight ${u.unit}` : f.label}</span>
+                <input
+                  className="input"
+                  type="number"
+                  inputMode="decimal"
+                  aria-label={f.key === 'bodyweight' ? `Bodyweight in ${u.unit}` : f.label}
+                  min={f.min}
+                  max={f.max}
+                  step={f.step}
+                  value={value[f.key] == null ? '' : f.key === 'bodyweight' ? u.show(value[f.key]!) : value[f.key]!}
+                  onChange={(e) => set(f.key, e.target.value, f.min, f.max)}
+                />
+              </label>
+            ))}
+          </div>
+          <p className="text-xs text-dim" style={{ marginTop: 8, lineHeight: 1.5 }}>
+            Under 6h or readiness under 5: −5%, RPE capped at 7. A knee at 4+: squat, lunge and jump work −10%, jumps skipped.
+          </p>
+        </>
+      )}
+    </div>
+  )
+}
+
+/**
+ * Offline, the engine still answers — from the program's load text alone, with
+ * no log to read. A prescription that lost the lift model's numbers is worse
+ * than the one already on screen, so a re-prescribe never trades down to it.
+ */
+function keepsLiftModel(prev: SessionPrescription | null, next: SessionPrescription): boolean {
+  const had = prev?.reasons ?? {}
+  return Object.entries(had).every(([i, lines]) => !lines?.length || (next.reasons?.[Number(i)]?.length ?? 0) > 0)
+}
+
+/** A lift's reason line, with the arithmetic behind it a tap away. */
+function ReasonLines({ lines }: { lines: string[] }) {
+  const [open, setOpen] = useState(false)
+  if (!lines.length) return null
+  const [head, ...rest] = lines
+  return (
+    <div className="lift-reason">
+      <p className="num text-xs">{head}</p>
+      {rest.length > 0 && (
+        open
+          ? <ul>{rest.map((l, i) => <li key={i} className="text-xs text-dim">{l}</li>)}</ul>
+          : <button type="button" className="lift-reason__more" onClick={() => setOpen(true)}>Why</button>
+      )}
     </div>
   )
 }
@@ -1288,6 +1428,21 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // session. No program-edit path exists from here (see WorkoutCoachSheet).
   const [coachOpen, setCoachOpen] = useState(false)
 
+  // The session check-in. An edit of a committed session reads it back from the
+  // row (see loadRoutine); until then, or if that read fails, it is left alone
+  // on save rather than overwritten with blanks.
+  const [checkin, setCheckinState] = useState<SessionCheckinInput>(
+    () => seedPending?.checkin ?? seedActuals?.checkin ?? seedDraft?.checkin ?? EMPTY_CHECKIN,
+  )
+  const checkinKnownRef = useRef(!isEdit || !!seedPending || seedActuals?.checkin != null)
+  const checkinRef = useRef(checkin)
+  checkinRef.current = checkin
+  const setCheckin = (c: SessionCheckinInput) => {
+    checkinKnownRef.current = true
+    startedLoggingRef.current = true
+    setCheckinState(c)
+  }
+
   // Per-exercise felt signal (exIdx → feedback).
   const [feedback, setFeedback] = useState<Record<number, ExerciseFeedback>>(
     () => (seedPending
@@ -1425,8 +1580,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   useEffect(() => {
     payloadRef.current = {
       setLogs, feedback, elapsedSeconds: elapsed, startedAt: sessionStartRef.current,
+      checkin: hasCheckin(checkin) ? checkin : null,
     }
-  }, [setLogs, feedback, elapsed])
+  }, [setLogs, feedback, elapsed, checkin])
 
   // A swap counts: it's a decision made at the rack, often before the first set,
   // and losing it to a phone call between sets would mean making it again.
@@ -1434,6 +1590,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     !!payloadRef.current && (
       Object.values(payloadRef.current.setLogs).flat().some(isLogged)
       || Object.values(payloadRef.current.feedback).some((f) => !!f?.swap)
+      || hasCheckin(payloadRef.current.checkin)
     )
 
   const persistLocal = useCallback(() => {
@@ -1453,7 +1610,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     persistLocal()
     const t = setTimeout(persistRemote, 2500)
     return () => clearTimeout(t)
-  }, [setLogs, feedback, draftReady, persistLocal, persistRemote])
+  }, [setLogs, feedback, checkin, draftReady, persistLocal, persistRemote])
 
   // A periodic mirror so the elapsed clock (and anything mid-debounce) reaches the
   // server even during a long, edit-free stretch.
@@ -1502,13 +1659,32 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     if (!stale || prescribingRef.current === sessionKey) return
     const key = sessionKey
     prescribingRef.current = key
-    gatherSessionPrescription(athleteId, routineId, sessionExercises, u)
+    gatherSessionPrescription(athleteId, routineId, sessionExercises, u, { dayOf: checkinDayOf(checkinRef.current) })
       .then((next) => { if (latestKeyRef.current === key) setPrescription(next) })
       .catch(() => { /* offline — the stand-in trains without a hint */ })
       .finally(() => { if (prescribingRef.current === key) prescribingRef.current = null })
     // sessionExercises and u are derived from state already in the deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sessionKey, athleteId, routineId, draftReady, prescription])
+
+  // A check-in changes today's numbers, so it re-prescribes — debounced, since
+  // the athlete is typing four fields in a row. Not on the first render: the
+  // load below already prescribed with whatever check-in was seeded.
+  const dayOfKey = JSON.stringify(checkinDayOf(checkin))
+  const prescribedDayOfRef = useRef(dayOfKey)
+  useEffect(() => {
+    if (!routineId || !athleteId || !draftReady || prescribedDayOfRef.current === dayOfKey) return
+    const key = sessionKey
+    const t = setTimeout(() => {
+      prescribedDayOfRef.current = dayOfKey
+      gatherSessionPrescription(athleteId, routineId, sessionExercises, u, { dayOf: checkinDayOf(checkinRef.current) })
+        .then((next) => { if (latestKeyRef.current === key) setPrescription((prev) => (keepsLiftModel(prev, next) ? next : prev)) })
+        .catch(() => { /* offline — the numbers on screen stand */ })
+    }, 600)
+    return () => clearTimeout(t)
+    // sessionExercises and u are derived from state already in the deps.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [dayOfKey, athleteId, routineId, draftReady])
 
   // Background revalidation. On a warm (cached) open the screen is already
   // painted and interactive from the seed — this just refreshes the routine,
@@ -1564,6 +1740,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       return
     }
     setEditHydrating(false)
+    if (editWorkoutId && !checkinKnownRef.current) {
+      void gatherSessionCheckin(editWorkoutId).then((c) => {
+        if (checkinKnownRef.current) return
+        checkinKnownRef.current = true
+        if (c) setCheckinState(c)
+      })
+    }
 
     let nextAthleteId: string | null = null
     let nextAthleteName: string | null = null
@@ -1629,7 +1812,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     let nextPresc: SessionPrescription | null = seedRef.current!.boot?.prescription ?? null
     if (programData && routineId) {
       try {
-        nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, u)
+        nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, u, { dayOf: checkinDayOf(checkinRef.current) })
         setPrescription(nextPresc)
       } catch { /* non-fatal */ }
     }
@@ -1686,6 +1869,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       if (draft && !startedLoggingRef.current) {
         setSetLogs(overlayDraft(initial, draft.setLogs))
         setFeedback((draft.feedback ?? {}) as Record<number, ExerciseFeedback>)
+        // The remote copy carries no check-in; the local one does if it was given here.
+        const local = draft.checkin ?? loadDraftLocal(routineId)?.checkin ?? null
+        if (local) setCheckinState(local)
         setElapsed(draft.elapsedSeconds)
         startRef.current = Date.now() - draft.elapsedSeconds * 1000
         sessionStartRef.current = draft.startedAt
@@ -1940,6 +2126,9 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       // under the movement actually done (with swapped_from naming the plan), so
       // its sets count toward the week and land in that movement's history.
       exercisesSnapshot: sessionExercises.length ? sessionExercises : null,
+      // Unknown (an edit whose check-in never loaded) → null, which leaves the
+      // row's columns alone instead of blanking them.
+      checkin: checkinKnownRef.current ? checkin : null,
     }
   }
 
@@ -2237,6 +2426,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       <div className="workout-panes">
        <div className="workout-list">
         <div className="workout-col">
+        <SessionCheckinCard value={checkin} u={u} onChange={setCheckin} />
         {/* Intelligence Rule in effect — stated out loud (the felt difference),
             with the way OUT of it directly underneath. A cap the athlete can't
             see an exit from reads as the app being timid; naming the exit turns
@@ -2310,6 +2500,19 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           const coachNote = getCoachingNote(ex.name)
           const isPushed = feedback[exIdx]?.pushed === true
 
+          // In-session autoregulation: once the top set is in with an RPE, the
+          // back-offs follow it — a point heavy takes 5% off, a point light adds
+          // 2.5% (upper) or 5% (lower). Only offered when it changes the number.
+          const top = logs[0]
+          const backoff = (() => {
+            if (trackingType !== 'weight_reps' || logs.length < 2 || !top?.done || top.weight == null || top.rpe == null) return null
+            const target = ex.target_rpe ?? rpeContract(prescription?.phaseName).target
+            const b = backoffLoad(u.show(top.weight), top.rpe, target, isUpperBody(ex.name))
+            if (b.deltaPct === 0) return null
+            const inc = liftIncrement(canonicalLiftId(ex.name), u.unit)
+            return { weight: u.store(Math.round(b.load / inc) * inc), why: b.why }
+          })()
+
           return (
             <div key={exIdx} style={{ paddingTop: 26, paddingBottom: 16, borderBottom: '1px solid var(--line)' }}>
               <div style={{ marginBottom: 14 }}>
@@ -2381,6 +2584,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                     )}
                   </div>
                 )}
+                {presOk && !isPushed && <ReasonLines lines={prescription?.reasons?.[exIdx] ?? []} />}
               </div>
 
               <SetHeader
@@ -2397,11 +2601,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                 // in-session only — it's the read we're measuring, not a default.
                 const inSessionPrev = setIdx > 0 ? logs[setIdx - 1] : null
                 const lastSame = prevSets[setIdx]
+                const backoffWeight = setIdx === 1 ? backoff?.weight ?? null : null
                 const carry: Partial<SetLog> = {
                   // Set 1 with a target for today logs the target, not last
                   // week's weight — otherwise a one-tap check quietly undoes
-                  // the progression the preview just promised.
-                  weight:   inSessionPrev?.weight   ?? (rxTarget != null ? null : lastSame?.weight) ?? null,
+                  // the progression the preview just promised. Set 2 carries the
+                  // back-off the top set's RPE just called for.
+                  weight:   backoffWeight ?? inSessionPrev?.weight ?? (rxTarget != null ? null : lastSame?.weight) ?? null,
                   reps:     inSessionPrev?.reps     ?? lastSame?.reps     ?? null,
                   rpe:      inSessionPrev?.rpe      ?? null,
                   duration: inSessionPrev?.duration ?? lastSame?.duration ?? null,
@@ -2410,6 +2616,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                 return (
                   <SetRow
                     key={setIdx}
+                    showMissed={trackingType === 'weight_reps' || trackingType === 'bodyweight_reps'}
                     setNum={setIdx + 1}
                     log={log}
                     trackingType={trackingType}
@@ -2431,6 +2638,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                   />
                 )
               })}
+
+              {backoff && (
+                <p className="backoff-note text-xs">
+                  {backoff.why}: {fmtLoadUnit(u.show(backoff.weight), u.unit)}
+                </p>
+              )}
 
               <button
                 type="button"

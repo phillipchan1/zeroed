@@ -1,6 +1,10 @@
 import type { ExerciseTemplate } from '../../supabase/functions/_shared/engine/types.ts'
 import { readLoggedExercises, type LoggedWorkoutLike } from '../../supabase/functions/_shared/engine/loggedSets.ts'
 import { formatSet, isoDay, shortDate, topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
+import {
+  addDays, e1rmFromSet, liftNameMatcher, localDay, mondayOf, parseLiftId,
+  type LiftModelSources, type MainLiftId, type ModelWorkout,
+} from '../../supabase/functions/_shared/engine/liftModel.ts'
 import { asJson, type Sql } from './db.ts'
 
 export interface ConnectedStore {
@@ -294,8 +298,8 @@ export async function loadWorkouts(
     },
   }))
   if (opts.exercise) {
-    const want = opts.exercise.trim().toLowerCase()
-    mapped = mapped.filter((w) => readLoggedExercises(w).some((e) => e.name.toLowerCase().includes(want)))
+    const matches = liftNameMatcher(opts.exercise)
+    mapped = mapped.filter((w) => readLoggedExercises(w).some((e) => matches(e.name)))
   }
   return mapped
 }
@@ -382,34 +386,33 @@ export async function loadWorkout(store: ConnectedStore, workoutId: string): Pro
   return hydrateOwnedWorkout(store, await selectOwnedWorkout(store, workoutId), workoutId)
 }
 
-export function epley1rm(weight: number, reps: number): number {
-  return Math.round(weight * (1 + reps / 30))
-}
-
 export async function loadLiftHistory(store: ConnectedStore, exerciseName: string): Promise<{
   name: string
   matches: string[]
+  canonical: MainLiftId | null
   points: Array<{ date: string; top: string; e1rm: number | null; rpe: number | null }>
   bestWeight: number | null
   bestE1rm: number | null
 }> {
   const rows = await loadWorkouts(store, { limit: 120 })
-  const want = exerciseName.trim().toLowerCase()
+  const matches = liftNameMatcher(exerciseName)
   const names = new Set<string>()
   const points: Array<{ date: string; top: string; e1rm: number | null; rpe: number | null; weight: number | null }> = []
   for (const w of [...rows].reverse()) {
     for (const { name, sets } of readLoggedExercises(w)) {
-      if (!name.toLowerCase().includes(want)) continue
+      if (!matches(name)) continue
       names.add(name)
       const top = topWorkingSet(sets)
       if (!top) continue
-      const e1rm = top.weight != null && top.reps != null ? epley1rm(top.weight, top.reps) : null
+      // Off the RPE chart, not Epley: the same 115×5 is a different max at @6
+      // than at @9. A set with no RPE reads at 10 — the floor it proves.
+      const e1rm = top.weight != null && top.reps != null ? e1rmFromSet(top.weight, top.reps, top.rpe ?? null) : null
       const cell = formatSet(top, store.unit)
       if (!cell) continue
       points.push({
         date: isoDay(w.performed_at),
         top: cell,
-        e1rm,
+        e1rm: e1rm != null ? Math.round(e1rm) : null,
         rpe: top.rpe ?? w.rpe,
         weight: top.weight ?? null,
       })
@@ -418,10 +421,106 @@ export async function loadLiftHistory(store: ConnectedStore, exerciseName: strin
   return {
     name: exerciseName,
     matches: [...names],
+    canonical: parseLiftId(exerciseName),
     points: points.map(({ date, top, e1rm, rpe }) => ({ date, top, e1rm, rpe })),
     bestWeight: points.reduce<number | null>((m, p) => (p.weight != null && (m == null || p.weight > m) ? p.weight : m), null),
     bestE1rm: points.reduce<number | null>((m, p) => (p.e1rm != null && (m == null || p.e1rm > m) ? p.e1rm : m), null),
   }
+}
+
+/**
+ * Everything the lift model reads, in one pass: the whole log (every program —
+ * the all-time best has to see all of it), recent pain reports, hand-set TMs,
+ * and the live week the recommendation is for.
+ */
+export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftModelSources> {
+  const rows = await store.sql<{
+    id: string
+    performed_at: string
+    actual_weights: unknown
+    exercises_snapshot: unknown
+    r_exercises: unknown
+    knee_pain_l: number | null
+    knee_pain_r: number | null
+    sleep_hours: string | number | null
+    readiness: number | null
+    bodyweight: string | number | null
+  }[]>`
+    SELECT w.id, w.performed_at::text, w.actual_weights, w.exercises_snapshot,
+           w.knee_pain_l, w.knee_pain_r, w.sleep_hours, w.readiness, w.bodyweight,
+           r.exercises AS r_exercises
+    FROM workout w
+    JOIN routine r ON r.id = w.routine_id
+    JOIN program p ON p.id = r.program_id
+    WHERE p.athlete_id = ${store.athleteId}
+    ORDER BY w.performed_at ASC
+    LIMIT 5000
+  `
+  const workouts: ModelWorkout[] = rows.map((w) => ({
+    id: w.id,
+    performed_at: w.performed_at,
+    actual_weights: asJson(w.actual_weights, null),
+    exercises_snapshot: asJson(w.exercises_snapshot, null),
+    routine: { exercises: asJson<ExerciseTemplate[]>(w.r_exercises, []) },
+    knee_pain_l: w.knee_pain_l,
+    knee_pain_r: w.knee_pain_r,
+    sleep_hours: w.sleep_hours,
+    readiness: w.readiness,
+    bodyweight: w.bodyweight,
+  }))
+  const today = localDay(new Date().toISOString())
+  const weekStart = mondayOf(today)
+  const recentIds = workouts.filter((w) => localDay(w.performed_at) >= addDays(weekStart, -14)).map((w) => w.id as string)
+  const observations = recentIds.length
+    ? await store.sql<{ signal: string; severity: number; logged_at: string }[]>`
+        SELECT signal, severity, logged_at::text
+        FROM session_observation
+        WHERE workout_id = ANY(${store.sql.array(recentIds)}) AND severity >= 4
+      `
+    : []
+  const [athlete] = await store.sql<{ training_max_overrides: unknown }[]>`
+    SELECT training_max_overrides FROM athlete WHERE id = ${store.athleteId} LIMIT 1
+  `
+  const ids = await programIds(store)
+  const [review] = ids.length
+    ? await store.sql<{ week_ending: string; next_week_prescription: unknown }[]>`
+        SELECT week_ending::text, next_week_prescription
+        FROM weekly_review
+        WHERE program_id = ANY(${store.sql.array(ids)})
+        ORDER BY week_ending DESC
+        LIMIT 1
+      `
+    : []
+  const live = await loadLiveProgram(store)
+  const presc = review ? asJson<{ directive?: string } | null>(review.next_week_prescription, null) : null
+  return {
+    workouts,
+    observations,
+    overrides: asJson<Record<string, number> | null>(athlete?.training_max_overrides, null),
+    sessions: (live?.sessions ?? []).slice().sort((a, b) => (a.intendedDow ?? 7) - (b.intendedDow ?? 7) || a.name.localeCompare(b.name)),
+    phaseName: live?.phaseName ?? null,
+    directive: review && review.week_ending === addDays(weekStart, -1) ? presc?.directive ?? null : null,
+    today,
+    unit: store.unit === 'kg' ? 'kg' : 'lb',
+  }
+}
+
+/**
+ * Write (or clear, with null) one lift's hand-set training max. One UPDATE that
+ * merges in SQL: no read-modify-write window for a second writer to fall into,
+ * and a single owner filter on the row it touches.
+ */
+export async function saveTrainingMax(store: ConnectedStore, lift: MainLiftId, value: number | null): Promise<Record<string, number>> {
+  const [row] = await store.sql<{ training_max_overrides: unknown }[]>`
+    UPDATE athlete SET training_max_overrides = CASE
+      WHEN ${value}::numeric IS NULL THEN COALESCE(training_max_overrides, '{}'::jsonb) - ${lift}::text
+      ELSE COALESCE(training_max_overrides, '{}'::jsonb) || jsonb_build_object(${lift}::text, ${value}::numeric)
+    END
+    WHERE id = ${store.athleteId}
+    RETURNING training_max_overrides
+  `
+  if (!row) throw new Error('Athlete row missing')
+  return asJson<Record<string, number>>(row.training_max_overrides, {})
 }
 
 export async function loadJourney(store: ConnectedStore): Promise<{
@@ -545,7 +644,8 @@ export function renderLift(h: Awaited<ReturnType<typeof loadLiftHistory>>, unit:
   const lines = [
     `# ${h.matches.join(', ') || h.name}`,
     h.bestWeight != null ? `Best load: ${h.bestWeight}${unit}` : null,
-    h.bestE1rm != null ? `Best e1RM (Epley): ${h.bestE1rm}${unit}` : null,
+    h.bestE1rm != null ? `Best e1RM (RPE chart; no RPE reads as @10): ${h.bestE1rm}${unit}` : null,
+    h.canonical ? `Matched by lift identity (${h.canonical}) — variations like Cossack, split, close-grip or push press are excluded. get_lift_model has the working max and this week's number.` : null,
     '',
     ...h.points.map((p) => `- ${p.date}: ${p.top}${p.e1rm != null ? ` (e1RM ${p.e1rm})` : ''}`),
   ]

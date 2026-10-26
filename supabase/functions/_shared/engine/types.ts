@@ -23,6 +23,7 @@ export interface SetLog {
   done: boolean
   duration?: number | null
   distance?: number | null
+  missed_reps?: number | null   // see src/types/database.ts
 }
 
 export interface ProgramEditExercise {

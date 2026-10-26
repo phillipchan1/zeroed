@@ -1,5 +1,9 @@
 import type { SupabaseClient } from 'npm:@supabase/supabase-js@2'
 import { readLoggedExercises, type LoggedWorkoutLike } from './engine/loggedSets.ts'
+import {
+  e1rmFromSet, liftNameMatcher, localDay, mondayOf, addDays, parseLiftId,
+  type LiftModelSources, type MainLiftId, type ModelWorkout,
+} from './engine/liftModel.ts'
 import type { ExerciseTemplate } from './engine/types.ts'
 import { formatSet, isoDay, shortDate, topWorkingSet } from './zeroedFormat.ts'
 
@@ -204,8 +208,8 @@ export async function loadWorkouts(
   if (error) throw new Error(error.message)
   let rows = (data ?? []) as unknown as WorkoutRowView[]
   if (opts.exercise) {
-    const want = opts.exercise.trim().toLowerCase()
-    rows = rows.filter((w) => readLoggedExercises(w).some((e) => e.name.toLowerCase().includes(want)))
+    const matches = liftNameMatcher(opts.exercise)
+    rows = rows.filter((w) => readLoggedExercises(w).some((e) => matches(e.name)))
   }
   return rows
 }
@@ -236,34 +240,33 @@ export async function loadWorkout(store: ConnectedStore, workoutId: string): Pro
   }
 }
 
-export function epley1rm(weight: number, reps: number): number {
-  return Math.round(weight * (1 + reps / 30))
-}
-
 export async function loadLiftHistory(store: ConnectedStore, exerciseName: string): Promise<{
   name: string
   matches: string[]
+  canonical: MainLiftId | null
   points: Array<{ date: string; top: string; e1rm: number | null; rpe: number | null }>
   bestWeight: number | null
   bestE1rm: number | null
 }> {
   const rows = await loadWorkouts(store, { limit: 120 })
-  const want = exerciseName.trim().toLowerCase()
+  const matches = liftNameMatcher(exerciseName)
   const names = new Set<string>()
   const points: Array<{ date: string; top: string; e1rm: number | null; rpe: number | null; weight: number | null }> = []
   for (const w of [...rows].reverse()) {
     for (const { name, sets } of readLoggedExercises(w)) {
-      if (!name.toLowerCase().includes(want)) continue
+      if (!matches(name)) continue
       names.add(name)
       const top = topWorkingSet(sets)
       if (!top) continue
-      const e1rm = top.weight != null && top.reps != null ? epley1rm(top.weight, top.reps) : null
+      // Off the RPE chart, not Epley: the same 115×5 is a different max at @6
+      // than at @9. A set with no RPE reads at 10 — the floor it proves.
+      const e1rm = top.weight != null && top.reps != null ? e1rmFromSet(top.weight, top.reps, top.rpe ?? null) : null
       const cell = formatSet(top, store.unit)
       if (!cell) continue
       points.push({
         date: isoDay(w.performed_at),
         top: cell,
-        e1rm,
+        e1rm: e1rm != null ? Math.round(e1rm) : null,
         rpe: top.rpe ?? w.rpe,
         weight: top.weight ?? null,
       })
@@ -272,10 +275,70 @@ export async function loadLiftHistory(store: ConnectedStore, exerciseName: strin
   return {
     name: exerciseName,
     matches: [...names],
+    canonical: parseLiftId(exerciseName),
     points: points.map(({ date, top, e1rm, rpe }) => ({ date, top, e1rm, rpe })),
     bestWeight: points.reduce<number | null>((m, p) => (p.weight != null && (m == null || p.weight > m) ? p.weight : m), null),
     bestE1rm: points.reduce<number | null>((m, p) => (p.e1rm != null && (m == null || p.e1rm > m) ? p.e1rm : m), null),
   }
+}
+
+/**
+ * Everything the lift model reads, in one pass: the whole log (every program —
+ * the all-time best has to see all of it), recent pain reports, hand-set TMs,
+ * and the live week the recommendation is for.
+ */
+export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftModelSources> {
+  const ids = await programIds(store)
+  const workouts: ModelWorkout[] = []
+  for (let from = 0; ids.length && from < 5000; from += 1000) {
+    const { data, error } = await store.supabase
+      .from('workout')
+      .select('id, performed_at, actual_weights, exercises_snapshot, knee_pain_l, knee_pain_r, sleep_hours, readiness, bodyweight, routine!inner(exercises, program_id)')
+      .in('routine.program_id', ids)
+      .order('performed_at', { ascending: true })
+      .range(from, from + 999)
+    if (error) throw new Error(error.message)
+    workouts.push(...((data ?? []) as unknown as ModelWorkout[]))
+    if ((data ?? []).length < 1000) break
+  }
+  const today = localDay(new Date().toISOString())
+  const weekStart = mondayOf(today)
+  const recentIds = workouts.filter((w) => localDay(w.performed_at) >= addDays(weekStart, -14)).map((w) => w.id).filter((id): id is string => !!id)
+  const [athleteRes, live, obsRes, reviewRes] = await Promise.all([
+    store.supabase.from('athlete').select('training_max_overrides').eq('id', store.athleteId).maybeSingle(),
+    loadLiveProgram(store),
+    recentIds.length
+      ? store.supabase.from('session_observation').select('signal, severity, logged_at').in('workout_id', recentIds).gte('severity', 4)
+      : Promise.resolve({ data: [], error: null }),
+    ids.length
+      ? store.supabase.from('weekly_review').select('week_ending, next_week_prescription').in('program_id', ids).order('week_ending', { ascending: false }).limit(1).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+  ])
+  if (athleteRes.error) throw new Error(athleteRes.error.message)
+  if (obsRes.error) throw new Error(obsRes.error.message)
+  const review = reviewRes.data as { week_ending: string; next_week_prescription: { directive?: string } | null } | null
+  return {
+    workouts,
+    observations: (obsRes.data ?? []) as Array<{ signal: string; severity: number; logged_at: string }>,
+    overrides: (athleteRes.data?.training_max_overrides as Record<string, number> | null) ?? null,
+    sessions: (live?.sessions ?? []).slice().sort((a, b) => (a.intendedDow ?? 7) - (b.intendedDow ?? 7) || a.name.localeCompare(b.name)),
+    phaseName: live?.phaseName ?? null,
+    directive: review && review.week_ending === addDays(weekStart, -1) ? review.next_week_prescription?.directive ?? null : null,
+    today,
+    unit: store.unit === 'kg' ? 'kg' : 'lb',
+  }
+}
+
+/** Write (or clear, with null) one lift's hand-set training max. */
+export async function saveTrainingMax(store: ConnectedStore, lift: MainLiftId, value: number | null): Promise<Record<string, number>> {
+  const { data, error } = await store.supabase.from('athlete').select('training_max_overrides').eq('id', store.athleteId).maybeSingle()
+  if (error) throw new Error(error.message)
+  const next: Record<string, number> = { ...((data?.training_max_overrides as Record<string, number> | null) ?? {}) }
+  if (value == null) delete next[lift]
+  else next[lift] = value
+  const { error: upErr } = await store.supabase.from('athlete').update({ training_max_overrides: next }).eq('id', store.athleteId)
+  if (upErr) throw new Error(upErr.message)
+  return next
 }
 
 export async function loadJourney(store: ConnectedStore): Promise<{
@@ -384,7 +447,8 @@ export function renderLift(h: Awaited<ReturnType<typeof loadLiftHistory>>, unit:
   const lines = [
     `# ${h.matches.join(', ') || h.name}`,
     h.bestWeight != null ? `Best load: ${h.bestWeight}${unit}` : null,
-    h.bestE1rm != null ? `Best e1RM (Epley): ${h.bestE1rm}${unit}` : null,
+    h.bestE1rm != null ? `Best e1RM (RPE chart; no RPE reads as @10): ${h.bestE1rm}${unit}` : null,
+    h.canonical ? `Matched by lift identity (${h.canonical}) — variations like Cossack, split, close-grip or push press are excluded. get_lift_model has the working max and this week's number.` : null,
     '',
     ...h.points.map((p) => `- ${p.date}: ${p.top}${p.e1rm != null ? ` (e1RM ${p.e1rm})` : ''}`),
   ]

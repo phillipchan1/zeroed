@@ -14,6 +14,7 @@
 
 import { supabase } from './supabaseClient'
 import type { SetLog, ExerciseFeedback, WorkoutDraftRow } from '../types/database'
+import type { SessionCheckinInput } from '../engine'
 import { weekWindowInZone, upcomingWeekWindow, isoInWeek } from '../engine/weekDates'
 
 export interface DraftPayload {
@@ -21,6 +22,9 @@ export interface DraftPayload {
   feedback: Record<number, ExerciseFeedback>
   elapsedSeconds: number
   startedAt: string   // ISO — the real session start (for the week-window check)
+  // The session check-in. Local tier only: workout_draft has no column for it,
+  // so a draft resumed on another device starts without one.
+  checkin?: SessionCheckinInput | null
 }
 
 // What we actually persist locally: the payload plus the routine it belongs to

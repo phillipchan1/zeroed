@@ -65,6 +65,9 @@ export interface AthleteRow {
   // newest first. Written by the program editor on Apply and fed to phase design
   // as the emphasis, so a preference outlives the block it was stated in.
   training_preferences: string | null
+  // Hand-set training maxes by main lift ({"bench": 275, "ohp": 140}), in the
+  // storage weight unit. A lift with no entry uses 90% of its working max.
+  training_max_overrides?: Record<string, number> | null
 }
 
 export interface DiagnosticRow {
@@ -154,6 +157,13 @@ export interface WorkoutRow {
    * the routine for those.
    */
   exercises_snapshot: ExerciseTemplate[] | null
+  // The session check-in (migration 20261026000001). Each is optional and null
+  // when not given; engine/liftModel.ts reads them as load modifiers.
+  knee_pain_l?: number | null   // 0–10
+  knee_pain_r?: number | null   // 0–10
+  sleep_hours?: number | null
+  readiness?: number | null     // 1–10
+  bodyweight?: number | null    // storage weight unit
 }
 
 /** How a reprogramming event came about. */
@@ -338,6 +348,10 @@ export interface SetLog {
   // ever populated. JSONB-backed (workout.actual_weights), so additive & safe.
   duration?: number | null   // seconds, for tracking_type 'time'
   distance?: number | null   // in the athlete's distance unit, for 'distance'
+  // Reps attempted and not completed on this set (`reps` is what was completed).
+  // 1 repeats the load next time; 2+ takes 5% off and recomputes the working
+  // max (engine/liftModel.ts). Absent on sets logged before it existed.
+  missed_reps?: number | null
 }
 
 // ---- Per-session feedback (the loop's fuel) --------------------------------

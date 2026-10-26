@@ -6,7 +6,7 @@ import type { ProgramEdit } from '../../src/engine/agentClient.ts'
 import { previewEdits, toProgramEdit, type EditInput } from './edits.ts'
 import { formatDiff, formatDraft, formatLoggedWorkout, formatQueuedBlock, formatSet } from './format.ts'
 import { createZeroedServer, SERVER_INSTRUCTIONS } from './server.ts'
-import { epley1rm } from './store.ts'
+import { e1rmFromSet, liftNameMatcher } from '../../src/engine/liftModel.ts'
 import type { LiveProgram } from './store.ts'
 import type { SetLog } from '../../src/types/database.ts'
 
@@ -124,7 +124,13 @@ ok(queuedText.includes('Queued: Power starts 2026-11-02'), 'queued header names 
 ok(queuedText.includes('Speed Bench'), 'queued block lists its sessions, not just the start date')
 ok(queuedText.includes('about 170 lb'), 'queued session keeps the prescribed load')
 ok(formatDiff(jumpDiff).includes('Box Jump'), 'diff formatter names additions')
-ok(epley1rm(315, 5) === 368, `epley 315x5 should be 368, got ${epley1rm(315, 5)}`)
+// search_lifts reads the RPE chart now, not Epley: the same 315×5 is a different max at @6 than @9.
+ok(Math.round(e1rmFromSet(315, 5, 8)!) === 388, `315x5 @8 should be e1RM 388, got ${e1rmFromSet(315, 5, 8)}`)
+ok(e1rmFromSet(315, 5, 6)! > e1rmFromSet(315, 5, 9)!, 'an easier five says more about the max')
+// …and matches a main lift by identity: "squat" never pulls a Cossack, "press" never the bench.
+ok(liftNameMatcher('squat')('Squat (no belt)') && !liftNameMatcher('squat')('Cossack Squat'), 'squat matches by identity')
+ok(liftNameMatcher('press')('Strict OHP') && !liftNameMatcher('press')('Bench press'), 'press is the overhead press')
+ok(liftNameMatcher('row')('Chest-supported DB row'), 'anything else still matches by substring')
 
 const logged = formatLoggedWorkout({
   performed_at: '2026-08-24T17:00:00Z',

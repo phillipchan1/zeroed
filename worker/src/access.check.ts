@@ -27,6 +27,7 @@ import {
   loadInsights,
   loadJourney,
   loadLiftHistory,
+  loadLiftModelSources,
   loadLiveProgram,
   loadNotes,
   loadWorkout,
@@ -34,6 +35,7 @@ import {
   hydrateOwnedWorkout,
   makeStore,
   programIds,
+  saveTrainingMax,
   selectOwnedWorkout,
   workoutProgramOwned,
 } from './store.ts'
@@ -628,6 +630,33 @@ const deletedOwnInsight = await sql<{ id: string }[]>`
 `
 ok(deletedOwnInsight.length === 1, 'DELETE insight: A can delete own row')
 ok((await count('insight', 'athlete_id = $1', [B])) === 1, 'DELETE insight: B insight survived A own delete')
+
+// ---- lift model: the whole-log read and the hand-set TM ---------------------
+// Distinct overrides on each side, so a read or write that drops its owner
+// filter lands on the other athlete's row and shows up here.
+// jsonb keeps its own key order, so compare as sorted entries.
+const tmOf = async (id: string) => {
+  const raw = await scalar<unknown>('SELECT training_max_overrides FROM athlete WHERE id = $1', [id])
+  const obj = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Record<string, number> | null
+  return obj ? Object.fromEntries(Object.entries(obj).sort(([a], [b]) => a.localeCompare(b))) : null
+}
+await harness.query('UPDATE athlete SET training_max_overrides = $1::jsonb WHERE id = $2', [JSON.stringify({ squat: 111 }), A])
+await harness.query('UPDATE athlete SET training_max_overrides = $1::jsonb WHERE id = $2', [JSON.stringify({ deadlift: 222 }), B])
+const liftA = await loadLiftModelSources(storeA)
+const liftB = await loadLiftModelSources(storeB)
+ok(liftA.workouts.some((w) => w.id === WORKOUT_A) && !liftA.workouts.some((w) => w.id === WORKOUT_B), 'loadLiftModelSources: A reads only A workouts')
+ok(liftB.workouts.some((w) => w.id === WORKOUT_B) && !liftB.workouts.some((w) => w.id === WORKOUT_A), 'loadLiftModelSources: B reads only B workouts')
+ok(liftA.overrides?.squat === 111 && liftA.overrides?.deadlift == null, 'loadLiftModelSources: A reads A TM overrides')
+ok(liftB.overrides?.deadlift === 222 && liftB.overrides?.squat == null, 'loadLiftModelSources: B reads B TM overrides')
+
+await saveTrainingMax(storeA, 'bench', 200)
+ok(JSON.stringify(await tmOf(A)) === JSON.stringify({ bench: 200, squat: 111 }), 'saveTrainingMax: A merges into A overrides only')
+ok(JSON.stringify(await tmOf(B)) === JSON.stringify({ deadlift: 222 }), 'saveTrainingMax: B row untouched by A write')
+await saveTrainingMax(storeB, 'ohp', 140)
+ok(JSON.stringify(await tmOf(B)) === JSON.stringify({ deadlift: 222, ohp: 140 }), 'saveTrainingMax: B merges into B overrides only')
+ok(JSON.stringify(await tmOf(A)) === JSON.stringify({ bench: 200, squat: 111 }), 'saveTrainingMax: A row untouched by B write')
+await saveTrainingMax(storeA, 'squat', null)
+ok(JSON.stringify(await tmOf(A)) === JSON.stringify({ bench: 200 }), 'saveTrainingMax: null clears one lift on A')
 
 ok((await loadWorkout(storeA, WORKOUT_A))?.workout.routine_id === ROUTINE_A, 'post-write: A workout still readable')
 ok((await loadWorkout(storeA, WORKOUT_B)) === null, 'post-write: B workout still hidden from A')

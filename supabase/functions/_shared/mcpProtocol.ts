@@ -46,6 +46,8 @@ function ok(id: JsonRpcId, result: unknown): JsonRpcResult {
 export const SERVER_INSTRUCTIONS = [
   "Zeroed is the athlete's live training log and program.",
   'Start almost every conversation with get_training_brief so you have the current week, open insights, and recent sessions.',
+  'For what a main lift (squat, bench, deadlift, ohp) should be this week, call get_lift_model — working max, training max, trend, all-time best, last qualifying sets, and the next prescription with its reason line. Quote its numbers; never compute a load yourself.',
+  'If the athlete tells you how they slept, how ready they feel, or how their knees are today, pass it to get_lift_model so the modifiers apply. A training-max change goes through set_training_max: preview first, confirm=true only after the athlete agrees.',
   'Chat against the record: list_workouts, get_workout, search_lifts, get_program_journey, get_coach_notes.',
   'To change the program: propose surgical edits (add/update/remove exercise or session), call preview_program_edits, show the diff, then apply_program_edits with confirm=true only after the athlete agrees.',
   'Never dump a whole new week. Code — not you — clamps sets, loads, and tracking types. Sessions cannot be deleted; drop work by removing exercises.',

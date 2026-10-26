@@ -6,7 +6,8 @@
   "description": "MCP server that lets Claude read Zeroed workout history and apply surgical program edits.",
   "scripts": {
     "start": "tsx src/index.ts",
-    "check": "tsx src/check.ts"
+    "check": "tsx src/check.ts",
+    "lift-model": "tsx src/liftReport.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.25.1",

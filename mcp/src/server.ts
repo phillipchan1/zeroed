@@ -4,11 +4,15 @@ import { applyEdits, previewEdits, type EditInput } from './edits.ts'
 import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from './format.ts'
 import { liveToDraft } from './edits.ts'
 import {
+  MAIN_LIFTS, modelFromSources, parseLiftId, previewTrainingMax, renderLiftModel, type MainLiftId,
+} from '../../src/engine/liftModel.ts'
+import {
   connectStore,
   loadAthlete,
   loadInsights,
   loadJourney,
   loadLiftHistory,
+  loadLiftModelSources,
   loadLiveProgram,
   loadNotes,
   loadWorkout,
@@ -19,6 +23,7 @@ import {
   renderJourney,
   renderLift,
   renderNotes,
+  saveTrainingMax,
 } from './store.ts'
 
 const editExercise = z.object({
@@ -70,6 +75,8 @@ export const SERVER_INSTRUCTIONS = [
   'Zeroed is the athlete\'s live training log and program.',
   'Start almost every conversation with get_training_brief so you have the current week, open insights, and recent sessions.',
   'Chat against the record: list_workouts, get_workout, search_lifts, get_program_journey, get_coach_notes.',
+  'For what a main lift (squat, bench, deadlift, ohp) should be this week, call get_lift_model — it returns the working max, training max, trend, all-time best, last qualifying sets and the next prescription with its reason line. Quote its numbers; never compute a load yourself.',
+  'If the athlete tells you how they slept, how ready they feel, or how their knees are today, pass it to get_lift_model so the modifiers apply. A training-max change goes through set_training_max: preview first, confirm=true only after the athlete agrees.',
   'To change the program: propose surgical edits (add/update/remove exercise or session), call preview_program_edits, show the diff, then apply_program_edits with confirm=true only after the athlete agrees.',
   'Never dump a whole new week. Code — not you — clamps sets, loads, and tracking types. Sessions cannot be deleted; drop work by removing exercises.',
   'Use timing=next_week when sessions this week have already been logged and should stay as written.',
@@ -197,7 +204,7 @@ export function createZeroedServer(): McpServer {
       limit: z.number().int().min(1).max(120).optional(),
       since: z.string().optional().describe('ISO date or timestamp, inclusive'),
       until: z.string().optional().describe('ISO date or timestamp, inclusive'),
-      exercise: z.string().optional().describe('Substring match on a logged lift name'),
+      exercise: z.string().optional().describe('A main lift matches by identity; anything else by substring'),
     },
     async ({ limit, since, until, exercise }) => safe(async () => {
       const store = await connectStore()
@@ -224,11 +231,56 @@ export function createZeroedServer(): McpServer {
 
   server.tool(
     'search_lifts',
-    'Per-lift history: every matched top set, best load, and Epley e1RM trend.',
-    { exercise: z.string().describe('Lift name or substring, e.g. "squat" or "bench"') },
+    'Per-lift history: every matched top set, best load, and RPE-chart e1RM trend. A main lift (squat, bench, deadlift, ohp/press) matches by identity, not substring.',
+    { exercise: z.string().describe('A main lift ("squat", "bench", "deadlift", "ohp") or any name substring, e.g. "row"') },
     async ({ exercise }) => safe(async () => {
       const store = await connectStore()
       return renderLift(await loadLiftHistory(store, exercise), store.env.unit)
+    }),
+  )
+
+  server.tool(
+    'get_lift_model',
+    'One main lift\'s model from the whole log: working max (RPE-chart e1RM, qualifying sets, last 6 weeks, recency-weighted), training max, 4/8-week trend, all-time best, last qualifying sets, and this week\'s prescription with its reason line. lift: squat | bench | deadlift | ohp, or "all".',
+    {
+      lift: z.string().describe('squat | bench | deadlift | ohp | all'),
+      sleep_hours: z.number().min(0).max(24).optional().describe('Last night\'s sleep, if the athlete said'),
+      readiness: z.number().min(1).max(10).optional().describe('Readiness 1–10 today, if the athlete said'),
+      knee_pain_l: z.number().min(0).max(10).optional(),
+      knee_pain_r: z.number().min(0).max(10).optional(),
+      test_day: z.boolean().optional().describe('Lift the all-time-best ceiling for a planned max test'),
+      deload: z.boolean().optional().describe('Treat this as a deload week (65% TM, RPE ≤ 6)'),
+    },
+    async ({ lift, sleep_hours, readiness, knee_pain_l, knee_pain_r, test_day, deload }) => safe(async () => {
+      const lifts: MainLiftId[] = lift.trim().toLowerCase() === 'all' ? [...MAIN_LIFTS] : [parseLiftId(lift)].filter((l): l is MainLiftId => !!l)
+      if (!lifts.length) return `"${lift}" is not a main lift. Use squat, bench, deadlift, ohp, or all.`
+      const store = await connectStore()
+      const src = await loadLiftModelSources(store)
+      const told = [sleep_hours, readiness, knee_pain_l, knee_pain_r].some((v) => v != null)
+      const dayOf = told
+        ? { sleepHours: sleep_hours ?? null, readiness: readiness ?? null, kneePainL: knee_pain_l ?? null, kneePainR: knee_pain_r ?? null }
+        : null
+      return lifts.map((l) => renderLiftModel(modelFromSources(l, { ...src, dayOf, testDay: test_day, deload }))).join('\n\n---\n\n')
+    }),
+  )
+
+  server.tool(
+    'set_training_max',
+    'Set (or clear, with training_max null) one lift\'s hand-set training max. Without confirm=true it only previews what this week\'s number becomes.',
+    {
+      lift: z.string().describe('squat | bench | deadlift | ohp'),
+      training_max: z.number().positive().nullable().describe('The TM in the athlete\'s unit, or null to go back to 90% of the working max'),
+      confirm: z.boolean().optional().describe('true writes it; anything else previews'),
+    },
+    async ({ lift, training_max, confirm }) => safe(async () => {
+      const id = parseLiftId(lift)
+      if (!id) return `"${lift}" is not a main lift. Use squat, bench, deadlift or ohp.`
+      const store = await connectStore()
+      const src = await loadLiftModelSources(store)
+      const preview = previewTrainingMax(id, training_max, src)
+      if (confirm !== true) return `${preview}\n\nPreview only — call again with confirm=true to save it.`
+      await saveTrainingMax(store, id, training_max)
+      return `${preview}\n\nSaved.`
     }),
   )
 

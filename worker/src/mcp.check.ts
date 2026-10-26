@@ -10,6 +10,7 @@ import { openIsolationHarness } from './isolationDb.ts'
 import { handleMcp, publicMcpError } from './mcp.ts'
 import { resolveMcpToken, sha256Hex, timingSafeEqualHex } from './mcpToken.ts'
 import { ZEROED_TOOLS } from './tools.ts'
+import { LIFT_MODEL_TOOLS } from '../../supabase/functions/_shared/liftModelTools.ts'
 import { McpUserError } from './userError.ts'
 
 const fails: string[] = []
@@ -44,7 +45,12 @@ const edgeSrc = readFileSync(join(here, '../../supabase/functions/_shared/zeroed
 const workerSrc = readFileSync(join(here, 'tools.ts'), 'utf8')
 ok(toolsBlock(edgeSrc) === toolsBlock(workerSrc), 'parity: ZEROED_TOOLS matches the edge function source')
 
-const edgeNames = [...toolsBlock(edgeSrc).matchAll(/name: '([a-z_]+)'/g)].map((m) => m[1])
+// The lift-model tools are one shared list spread into both, so they are only
+// counted when the edge block actually spreads it.
+const edgeNames = [
+  ...[...toolsBlock(edgeSrc).matchAll(/name: '([a-z_]+)'/g)].map((m) => m[1]),
+  ...(toolsBlock(edgeSrc).includes('...LIFT_MODEL_TOOLS') ? LIFT_MODEL_TOOLS.map((t) => t.name) : []),
+]
 const workerNames = ZEROED_TOOLS.map((t) => t.name)
 ok(workerNames.join() === edgeNames.join(), `parity: tool names ${workerNames.join(',')}`)
 ok(workerNames.includes('get_current_program'), 'parity: get_current_program is advertised')
@@ -53,6 +59,7 @@ for (const need of [
   'get_training_brief', 'get_athlete', 'get_insights', 'get_current_program',
   'list_workouts', 'get_workout', 'search_lifts', 'get_program_journey',
   'get_coach_notes', 'preview_program_edits', 'apply_program_edits',
+  'get_lift_model', 'set_training_max',
 ]) {
   const tool = ZEROED_TOOLS.find((t) => t.name === need)
   ok(Boolean(tool), `parity: ${need} exists`)
@@ -207,6 +214,36 @@ ok(
   'e2e: get_coach_notes returns A notes without array-bind error',
 )
 ok(!notesText.includes('B weekly note') && !notesText.includes('private B'), 'isolation: get_coach_notes hides B')
+
+const liftModel = await rpc(TOKEN_A, 'tools/call', { name: 'get_lift_model', arguments: { lift: 'squat' } })
+const liftText = toolText(liftModel.body)
+ok(liftModel.status === 200 && liftText.includes('# Squat'), 'e2e: get_lift_model returns the squat model')
+ok(liftText.includes('225x5 @8') && liftText.includes('Reason: '), 'e2e: get_lift_model reads A\'s log and carries a reason line')
+const liftB = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'get_lift_model', arguments: { lift: 'deadlift' } })).body)
+ok(liftB.includes('nothing to recommend') && !liftB.includes('315'), 'isolation: A get_lift_model never sees B\'s deadlift')
+const notALift = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'get_lift_model', arguments: { lift: 'cossack squat' } })).body)
+ok(notALift.includes('not a main lift'), 'e2e: get_lift_model refuses a variation')
+
+const tmPreview = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'set_training_max', arguments: { lift: 'squat', training_max: 200 },
+})).body)
+ok(tmPreview.includes('Preview only'), 'e2e: set_training_max without confirm only previews')
+const [beforeTm] = await sql<{ training_max_overrides: unknown }[]>`SELECT training_max_overrides FROM athlete WHERE id = ${A}`
+ok(beforeTm?.training_max_overrides == null, 'e2e: a preview writes nothing')
+const tmSaved = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'set_training_max', arguments: { lift: 'squat', training_max: 200, confirm: true, athlete_id: B },
+})).body)
+ok(tmSaved.includes('Saved.'), 'e2e: set_training_max with confirm saves')
+const [aTm] = await sql<{ training_max_overrides: unknown }[]>`SELECT training_max_overrides FROM athlete WHERE id = ${A}`
+const aTmValue = typeof aTm?.training_max_overrides === 'string' ? JSON.parse(aTm.training_max_overrides) : aTm?.training_max_overrides
+ok((aTmValue as Record<string, number> | null)?.squat === 200, 'e2e: A\'s squat TM is 200')
+const [bTm] = await sql<{ training_max_overrides: unknown }[]>`SELECT training_max_overrides FROM athlete WHERE id = ${B}`
+ok(bTm?.training_max_overrides == null, 'isolation: an athlete_id arg cannot write B\'s TM')
+const afterTm = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'get_lift_model', arguments: { lift: 'squat' } })).body)
+ok(afterTm.includes('Training max: 200lb (set by hand'), 'e2e: the hand-set TM is what the model reads next')
+
+const search = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'search_lifts', arguments: { exercise: 'squat' } })).body)
+ok(search.includes('RPE chart') && search.includes('lift identity'), 'e2e: search_lifts uses the RPE chart and lift identity')
 
 const nul = await mcp(TOKEN_A, {
   jsonrpc: '2.0',

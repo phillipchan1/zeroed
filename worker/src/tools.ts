@@ -1,4 +1,5 @@
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
+import { LIFT_MODEL_TOOLS, LIFT_MODEL_TOOL_NAMES, runLiftModelTool } from '../../supabase/functions/_shared/liftModelTools.ts'
 import { applyEdits, liveToDraft, previewEdits, type EditInput } from './edits.ts'
 import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import {
@@ -6,6 +7,7 @@ import {
   loadInsights,
   loadJourney,
   loadLiftHistory,
+  loadLiftModelSources,
   loadLiveProgram,
   loadNotes,
   loadWorkout,
@@ -16,6 +18,7 @@ import {
   renderJourney,
   renderLift,
   renderNotes,
+  saveTrainingMax,
   type ConnectedStore,
 } from './store.ts'
 import type { Sql } from './db.ts'
@@ -101,7 +104,7 @@ export const ZEROED_TOOLS: McpTool[] = [
         limit: { type: 'integer', minimum: 1, maximum: 120 },
         since: { type: 'string', description: 'ISO date or timestamp, inclusive' },
         until: { type: 'string', description: 'ISO date or timestamp, inclusive' },
-        exercise: { type: 'string', description: 'Substring match on a logged lift name' },
+        exercise: { type: 'string', description: 'A main lift matches by identity; anything else by substring' },
       },
       additionalProperties: false,
     },
@@ -120,11 +123,11 @@ export const ZEROED_TOOLS: McpTool[] = [
   },
   {
     name: 'search_lifts',
-    description: 'Per-lift history: every matched top set, best load, and Epley e1RM trend.',
+    description: 'Per-lift history: every matched top set, best load, and RPE-chart e1RM trend. A main lift (squat, bench, deadlift, ohp/press) matches by identity, not substring.',
     inputSchema: {
       type: 'object',
       properties: {
-        exercise: { type: 'string', description: 'Lift name or substring, e.g. "squat" or "bench"' },
+        exercise: { type: 'string', description: 'A main lift ("squat", "bench", "deadlift", "ohp") or any name substring, e.g. "row"' },
       },
       required: ['exercise'],
       additionalProperties: false,
@@ -180,6 +183,7 @@ export const ZEROED_TOOLS: McpTool[] = [
       additionalProperties: false,
     },
   },
+  ...LIFT_MODEL_TOOLS,
 ]
 
 function asString(v: unknown): string | undefined {
@@ -205,6 +209,13 @@ export async function executeZeroedTool(
   args: Record<string, unknown>,
 ): Promise<string> {
   const store = storeForAthlete(sql, athleteId)
+
+  if (LIFT_MODEL_TOOL_NAMES.has(name)) {
+    return runLiftModelTool(name, args, {
+      load: () => loadLiftModelSources(store),
+      saveTrainingMax: (lift, value) => saveTrainingMax(store, lift, value),
+    })
+  }
 
   switch (name) {
     case 'get_training_brief': {

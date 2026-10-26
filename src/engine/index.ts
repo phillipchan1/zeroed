@@ -69,6 +69,17 @@ import {
   type WeeklyTally, type WeekWorkout, type WeekObservation, type LiftAttempt,
 } from './prescription'
 import { planPagerFutureWeeks, weekWindowInZone } from './weekDates'
+// Per-lift loads for the main lifts — working max, training max, push / hold /
+// drop, modifiers, the all-time-best ceiling and the reason line — are decided
+// in liftModel.ts. This file only reads the rows it needs.
+import {
+  canonicalLiftId, modelFromSources, dayOfModifiers, exerciseCall, readModelLog, localDay,
+  fmtLoad, addDays as addDaysIso, mondayOf,
+  type DayOf, type LiftModelSources, type ModelWorkout, type Recommendation,
+} from './liftModel'
+export {
+  canonicalLiftId, backoffLoad, liftIncrement, type DayOf, type MainLiftId,
+} from './liftModel'
 export {
   ATHLETE_TIME_ZONE, weekWindowInZone, upcomingWeekWindow, isSundayInZone,
   logTimestampForWeek, isoInWeek, isoDateInZone, planPagerFutureWeeks, addDaysISO,
@@ -2367,6 +2378,15 @@ export interface SessionPrescription {
    * on caches written before this field existed — read with `?.`.
    */
   exerciseNames?: string[]
+  /**
+   * The lift model's reason line and its why-lines, per exercise index — the
+   * "245 = 65% of TM 377 (from 365x1 @8, Oct 6)" a main lift's number carries.
+   * Accessories carry their call and any day-of modifier. Absent on caches
+   * written before this field existed — read with `?.`.
+   */
+  reasons?: Record<number, string[]>
+  /** A movement today's check-in says to skip (a jump on a sore knee). */
+  skip?: Record<number, boolean>
 }
 
 /** The clearance test, flattened for display. */
@@ -2401,6 +2421,69 @@ function buildHint(top: SetLog | null, u: UnitContext, directive: WeeklyDirectiv
 }
 
 /**
+ * Everything the lift model reads for one athlete: the whole log across every
+ * program (the all-time best has to see all of it), recent pain chips, and any
+ * hand-set training maxes. Weights come back in the athlete's DISPLAY unit, so
+ * the model rounds to plates they actually have.
+ *
+ * Each read degrades on its own. A database missing the check-in or TM columns
+ * (the migration ships by hand, behind the web deploy) still yields the log.
+ */
+export async function gatherLiftSources(athleteId: string, u: UnitContext): Promise<LiftModelSources | null> {
+  const { data: progs } = await supabase.from('program').select('id').eq('athlete_id', athleteId)
+  const ids = ((progs ?? []) as Array<{ id: string }>).map((p) => p.id)
+  if (!ids.length) return null
+  const base = 'id, performed_at, actual_weights, exercises_snapshot, routine!inner(exercises, program_id)'
+  const withCheckin = `${base}, knee_pain_l, knee_pain_r, sleep_hours, readiness, bodyweight`
+  const page = (cols: string, from: number) => supabase
+    .from('workout').select(cols).in('routine.program_id', ids)
+    .order('performed_at', { ascending: true }).range(from, from + 999)
+  const workouts: ModelWorkout[] = []
+  let cols = withCheckin
+  for (let from = 0; from < 5000; from += 1000) {
+    let res = await page(cols, from)
+    if (res.error && cols === withCheckin) { cols = base; res = await page(cols, from) }
+    if (res.error) throw res.error
+    const rows = (res.data ?? []) as unknown as ModelWorkout[]
+    workouts.push(...rows)
+    if (rows.length < 1000) break
+  }
+  const weekStart = mondayOf(localDay(new Date().toISOString()))
+  const recentIds = workouts
+    .filter((w) => localDay(w.performed_at) >= addDaysIso(weekStart, -14))
+    .map((w) => w.id).filter((id): id is string => !!id)
+  const [{ data: ath }, { data: obs }] = await Promise.all([
+    supabase.from('athlete').select('training_max_overrides').eq('id', athleteId).maybeSingle(),
+    recentIds.length
+      ? supabase.from('session_observation').select('signal, severity, logged_at').in('workout_id', recentIds).gte('severity', 4)
+      : Promise.resolve({ data: [] }),
+  ])
+  const stored = ((ath as { training_max_overrides?: Record<string, number> | null } | null)?.training_max_overrides) ?? null
+  const overrides = stored
+    ? Object.fromEntries(Object.entries(stored).map(([k, v]) => [k, u.show(Number(v))]))
+    : null
+  return {
+    workouts,
+    observations: (obs ?? []) as Array<{ signal: string; severity: number; logged_at: string }>,
+    overrides,
+    unit: u.unit,
+    convert: (w) => u.show(w),
+  }
+}
+
+const CALL_LABEL: Record<Recommendation['call'], string> = {
+  push: 'Push', hold: 'Hold', drop: 'Drop', repeat: 'Repeat', miss: 'Missed',
+  deload: 'Deload', program_pct: 'Program', establish: 'Re-establish',
+}
+
+/** The chip on a main lift: the call and the number, e.g. "Push · 340lb × 5 @8". */
+function liftHint(rec: Recommendation, unit: string): string {
+  if (rec.skip) return 'Skip today'
+  const capped = rec.capped ? ' · capped' : ''
+  return `${CALL_LABEL[rec.call]} · ${fmtLoad(rec.load)}${unit} × ${rec.reps} @${fmtLoad(rec.targetRpe)}${capped}`
+}
+
+/**
  * Per-exercise prescription for a session: the active week's directive applied
  * to each exercise's last logged top set (index-aligned to THIS routine).
  *
@@ -2413,6 +2496,8 @@ export async function gatherSessionPrescription(
   routineId: string,
   exercises: ExerciseTemplate[],
   u: UnitContext,
+  // Today's check-in. Sleep, readiness and the knees move today's loads.
+  opts: { dayOf?: DayOf | null } = {},
 ): Promise<SessionPrescription> {
   const { data: prog } = await supabase
     .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
@@ -2490,12 +2575,41 @@ export async function gatherSessionPrescription(
   const held: Record<number, boolean> = {}
   const targets: Record<number, number | null> = {}
   const pushTargets: Record<number, number | null> = {}
+  const reasons: Record<number, string[]> = {}
+  const skip: Record<number, boolean> = {}
   // The block's own RPE target is the floor for per-lift autoregulation. Without
   // it a Strength lift with no stamped target autoregulates against the weekly
   // number (7) and gets marked down for the RPE 8 the block asked for.
   const phaseTarget = rpeContract(phaseName).target
+  const dayOf = opts.dayOf ?? null
+
+  // The whole log, read once. Best-effort: without it every lift falls back to
+  // the per-session path below, exactly as before the lift model existed.
+  const liftSrc = await gatherLiftSources(athleteId, u).catch(() => null)
+  const today = localDay(new Date().toISOString())
+  const loggedSets = liftSrc ? readModelLog(liftSrc.workouts, { convert: liftSrc.convert }).sets : []
 
   exercises.forEach((ex, i) => {
+    // The four main lifts: the lift model decides, from the whole log.
+    const lift = canonicalLiftId(ex.name)
+    if (lift && liftSrc) {
+      const isHeld = isLiftHeld(ex, p1, capActive)
+      const src = {
+        ...liftSrc, phaseName, directive, dayOf,
+        sessions: [{ name: routineName ?? undefined, intent: routineIntent, exercises: [ex] }],
+      }
+      const model = modelFromSources(lift, { ...src, noPush: isHeld ? `${p1!.category} cap holds until it clears` : null })
+      const rec = model.recommendation
+      if (rec) {
+        held[i] = isHeld
+        targets[i] = rec.skip ? null : rec.load
+        skip[i] = rec.skip
+        pushTargets[i] = isHeld ? modelFromSources(lift, src).recommendation?.load ?? null : null
+        hints[i] = liftHint(rec, u.unit)
+        reasons[i] = [rec.reason, ...rec.why, ...rec.conditional]
+        return
+      }
+    }
     const top = (lastWeights && sameSlot(i, ex.name) ? topWorkingSet(lastWeights[String(i)]) : null)
       ?? byName.get(ex.name) ?? null
     // Per-LIFT autoregulation against THIS exercise's own target RPE (falling
@@ -2517,14 +2631,30 @@ export async function gatherSessionPrescription(
     const canProgress = allowsAutoProgress({
       exercise: ex, sessionIntent: routineIntent, sessionName: routineName, directive,
     })
+    // Per-lift push / hold / drop off this movement's own last two weeks when it
+    // has RPE to read (+2.5% upper, +5% lower). With none there is nothing
+    // per-lift to read, and the old autoregulation stands.
+    const call = top?.rpe != null && directive !== 'DELOAD' && directive !== 'RECOVERY'
+      ? exerciseCall(loggedSets, ex.name, today, exTarget ?? 8)
+      : null
     const exDelta = prescribed.source === 'explicit' || !canProgress
       ? 0
-      : autoregulateDelta(top?.rpe, exTarget, loadDeltaPct, directive, maxUp)
-    const uncapped = prescribed.source === 'explicit'
+      : call
+        ? call.deltaPct
+        : autoregulateDelta(top?.rpe, exTarget, loadDeltaPct, directive, maxUp)
+    if (call && canProgress && prescribed.source !== 'explicit') reasons[i] = [call.why]
+    let uncapped = prescribed.source === 'explicit'
       ? prescribed.weight
       : canProgress
         ? recommendedLoad(top, exDelta, u)
         : prescribed.weight
+    // Today's check-in reaches accessories too: a sore knee takes 10% off lunges
+    // and skips the jumps; a short night takes 5% off everything.
+    for (const m of dayOfModifiers(ex.name, dayOf)) {
+      reasons[i] = [...(reasons[i] ?? []), m.note]
+      if (m.skip) { skip[i] = true; uncapped = null; continue }
+      if (uncapped != null) uncapped = u.prescribe(u.store(uncapped) * m.factor)
+    }
 
     // Held when the cap is live AND this lift genuinely trains the limiter's
     // chain. `addressesLimiter` returning null means the library has no opinion
@@ -2537,8 +2667,11 @@ export async function gatherSessionPrescription(
     // just shrugs and leaves the athlete to guess.
     pushTargets[i] = isHeld ? uncapped : null
 
-    if (isHeld && directive === 'PROGRESS') {
-      // Suppress the +5%: state the hold and why, grounded in the last load.
+    if (skip[i]) {
+      targets[i] = null
+      hints[i] = 'Skip today'
+    } else if (isHeld && (exDelta > 0 || directive === 'PROGRESS')) {
+      // Suppress the push: state the hold and why, grounded in the last load.
       // The recommendation under a held cap is the last load itself.
       targets[i] = top?.weight != null ? u.show(top.weight) : null
       hints[i] = top && top.weight != null
@@ -2578,6 +2711,7 @@ export async function gatherSessionPrescription(
   return {
     directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, pushTargets, rule, clearance, phaseName,
     exerciseNames: exercises.map((ex) => ex.name),
+    reasons, skip,
   }
 }
 
@@ -3618,6 +3752,51 @@ export interface PendingSession {
    * offline would silently relabel it on commit.
    */
   exercisesSnapshot: ExerciseTemplate[] | null
+  /**
+   * The session check-in, when the athlete gave one. Absent on entries queued
+   * before it existed — those leave the row's check-in columns alone.
+   */
+  checkin?: SessionCheckinInput | null
+}
+
+/** What the athlete said about themselves at the start of a session. All optional. */
+export interface SessionCheckinInput {
+  sleepHours: number | null
+  readiness: number | null
+  kneePainL: number | null
+  kneePainR: number | null
+  bodyweight: number | null   // storage weight unit
+}
+
+export const EMPTY_CHECKIN: SessionCheckinInput = {
+  sleepHours: null, readiness: null, kneePainL: null, kneePainR: null, bodyweight: null,
+}
+
+export function hasCheckin(c: SessionCheckinInput | null | undefined): boolean {
+  return !!c && Object.values(c).some((v) => v != null)
+}
+
+/** The check-in as the lift model's day-of modifiers read it. */
+export function checkinDayOf(c: SessionCheckinInput | null | undefined): DayOf | null {
+  return hasCheckin(c) ? { sleepHours: c!.sleepHours, readiness: c!.readiness, kneePainL: c!.kneePainL, kneePainR: c!.kneePainR } : null
+}
+
+function checkinColumns(c: SessionCheckinInput | null | undefined): Record<string, number | null> | null {
+  if (c == null) return null
+  return {
+    knee_pain_l: c.kneePainL, knee_pain_r: c.kneePainR,
+    sleep_hours: c.sleepHours, readiness: c.readiness, bodyweight: c.bodyweight,
+  }
+}
+
+// The check-in columns arrive with migration 20261026000001, and the database
+// ships by hand, behind the web deploy. A backend without them rejects the write
+// as an unknown column — so the session commits without its check-in rather than
+// sitting in the outbox forever over four optional numbers.
+function isMissingColumn(err: { code?: string; message?: string } | null | undefined): boolean {
+  if (!err) return false
+  return err.code === 'PGRST204' || err.code === '42703'
+    || /column .*(does not exist|could not find)|could not find the .* column/i.test(err.message ?? '')
 }
 
 export interface CommitResult {
@@ -3654,8 +3833,13 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     // now mean. Absent (an older queued entry), leave the stored one alone.
     if (p.exercisesSnapshot?.length) patch.exercises_snapshot = p.exercisesSnapshot
     if (p.performedAt) patch.performed_at = p.performedAt
-    const { data: updated, error: updErr } = await supabase
-      .from('workout').update(patch).eq('id', p.editWorkoutId).select().single()
+    const checkin = checkinColumns(p.checkin)
+    let { data: updated, error: updErr } = await supabase
+      .from('workout').update(checkin ? { ...patch, ...checkin } : patch).eq('id', p.editWorkoutId).select().single()
+    if (checkin && isMissingColumn(updErr)) {
+      ({ data: updated, error: updErr } = await supabase
+        .from('workout').update(patch).eq('id', p.editWorkoutId).select().single())
+    }
     if (updErr || !updated) throw updErr ?? new Error('workout update failed')
     workoutId = (updated as { id: string }).id
     // Clear prior observations so the re-run doesn't stack duplicates.
@@ -3673,8 +3857,12 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     // the athlete's history as a side effect.
     if (p.exercisesSnapshot?.length) insert.exercises_snapshot = p.exercisesSnapshot
     if (p.performedAt) insert.performed_at = p.performedAt
-    const { data: workout, error } = await supabase
-      .from('workout').insert(insert).select().single()
+    const checkin = hasCheckin(p.checkin) ? checkinColumns(p.checkin) : null
+    let { data: workout, error } = await supabase
+      .from('workout').insert(checkin ? { ...insert, ...checkin } : insert).select().single()
+    if (checkin && isMissingColumn(error)) {
+      ({ data: workout, error } = await supabase.from('workout').insert(insert).select().single())
+    }
     if (error || !workout) throw error ?? new Error('workout insert failed')
     workoutId = (workout as { id: string }).id
   }
@@ -4056,6 +4244,8 @@ export interface SessionActuals {
    * Null for sessions logged before snapshots shipped; render the routine then.
    */
   exercisesSnapshot: ExerciseTemplate[] | null
+  /** The session's check-in. Absent on caches written before it existed. */
+  checkin?: SessionCheckinInput | null
 }
 
 /** Count the sets in an actuals grid that carry real signal. */
@@ -4075,7 +4265,26 @@ export function actualsFromPending(p: PendingSession | null): SessionActuals | n
     rpe: p.rpe,
     setLogs,
     exercisesSnapshot: p.exercisesSnapshot ?? null,
+    checkin: p.checkin ?? null,
   }
+}
+
+/**
+ * A logged session's check-in, read on its own so a database still missing the
+ * columns costs the check-in and nothing else.
+ */
+export async function gatherSessionCheckin(workoutId: string): Promise<SessionCheckinInput | null> {
+  const { data, error } = await supabase
+    .from('workout').select('knee_pain_l, knee_pain_r, sleep_hours, readiness, bodyweight')
+    .eq('id', workoutId).maybeSingle()
+  if (error || !data) return null
+  const r = data as Record<string, number | string | null>
+  const n = (v: number | string | null) => (v == null || v === '' ? null : Number(v))
+  const c: SessionCheckinInput = {
+    kneePainL: n(r.knee_pain_l), kneePainR: n(r.knee_pain_r),
+    sleepHours: n(r.sleep_hours), readiness: n(r.readiness), bodyweight: n(r.bodyweight),
+  }
+  return hasCheckin(c) ? c : null
 }
 
 /** The as-performed view of a committed session. */
