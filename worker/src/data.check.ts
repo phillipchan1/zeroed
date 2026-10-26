@@ -1,11 +1,18 @@
 // Run: node --experimental-strip-types worker/src/data.check.ts
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { BETTER_AUTH_SNAKE_CASE } from './auth.ts'
 import {
   bindOwner,
   ownerPredicate,
   parseSelectList,
   SESSION_LOOKUP_SQL,
   safeClientMessage,
+  sessionTokenFromRequest,
+  signSessionToken,
   unsignedSessionToken,
+  verifySessionSignature,
 } from './data.ts'
 
 const fails: string[] = []
@@ -45,6 +52,48 @@ ok(SESSION_LOOKUP_SQL.includes('s.user_id') && SESSION_LOOKUP_SQL.includes('s.ex
 ok(!SESSION_LOOKUP_SQL.includes('"userId"') && !SESSION_LOOKUP_SQL.includes('"expiresAt"'), 'session SQL is not camelCase')
 ok(safeClientMessage(new Error('column xmin does not exist')) === 'request failed', 'raw DB errors are generic')
 ok(safeClientMessage(new Error('unknown column routine.xmin')) === 'unknown column routine.xmin', 'allowlist errors stay specific')
+
+ok(BETTER_AUTH_SNAKE_CASE.user.fields.emailVerified === 'email_verified', 'auth map: user.emailVerified')
+ok(BETTER_AUTH_SNAKE_CASE.session.fields.userId === 'user_id', 'auth map: session.userId')
+ok(BETTER_AUTH_SNAKE_CASE.session.fields.expiresAt === 'expires_at', 'auth map: session.expiresAt')
+ok(BETTER_AUTH_SNAKE_CASE.account.fields.userId === 'user_id', 'auth map: account.userId')
+ok(BETTER_AUTH_SNAKE_CASE.account.fields.accountId === 'account_id', 'auth map: account.accountId')
+ok(BETTER_AUTH_SNAKE_CASE.verification.fields.expiresAt === 'expires_at', 'auth map: verification.expiresAt')
+
+const here = dirname(fileURLToPath(import.meta.url))
+const authSrc = readFileSync(join(here, 'auth.ts'), 'utf8')
+ok(authSrc.includes('user: BETTER_AUTH_SNAKE_CASE.user'), 'auth.ts applies user snake_case map')
+ok(authSrc.includes('session: BETTER_AUTH_SNAKE_CASE.session'), 'auth.ts applies session snake_case map')
+ok(authSrc.includes('account: BETTER_AUTH_SNAKE_CASE.account'), 'auth.ts applies account snake_case map')
+ok(authSrc.includes('verification: BETTER_AUTH_SNAKE_CASE.verification'), 'auth.ts applies verification snake_case map')
+
+const schemaSql = readFileSync(join(here, '../schema/better-auth.sql'), 'utf8')
+ok(schemaSql.includes('email_verified') && schemaSql.includes('user_id') && schemaSql.includes('expires_at'), 'better-auth.sql is snake_case')
+ok(!schemaSql.includes('emailVerified') && !schemaSql.includes('"userId"'), 'better-auth.sql is not camelCase')
+const migrateSrc = readFileSync(join(here, '../../scripts/migrate-supabase-to-neon.mjs'), 'utf8')
+ok(migrateSrc.includes('email_verified BOOLEAN') && migrateSrc.includes('user_id TEXT'), 'migrate script Better Auth SQL is snake_case')
+
+const secret = 's'.repeat(32)
+const signed = await signSessionToken('tok', secret)
+const signature = signed.slice(signed.indexOf('.') + 1)
+ok(signature.length > 10, 'signSessionToken writes an HMAC')
+ok(await verifySessionSignature('tok', signature, secret, true), 'valid cookie HMAC is accepted')
+ok(!(await verifySessionSignature('tok', 'not-the-real-signature', secret, true)), 'tampered cookie HMAC is rejected')
+ok(await verifySessionSignature('tok', null, secret, false), 'unsigned bearer is allowed')
+ok(!(await verifySessionSignature('tok', null, secret, true)), 'cookie without signature is rejected')
+
+const cookieReq = new Request('http://local/api/data', {
+  headers: { cookie: `better-auth.session_token=${signed}` },
+})
+ok(await sessionTokenFromRequest(cookieReq, secret) === 'tok', 'signed cookie authenticates')
+const badCookie = new Request('http://local/api/data', {
+  headers: { cookie: 'better-auth.session_token=tok.not-the-real-signature' },
+})
+ok(await sessionTokenFromRequest(badCookie, secret) === null, 'tampered cookie is rejected')
+const bearerReq = new Request('http://local/api/data', {
+  headers: { authorization: 'Bearer tok' },
+})
+ok(await sessionTokenFromRequest(bearerReq, secret) === 'tok', 'unsigned bearer still works')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {

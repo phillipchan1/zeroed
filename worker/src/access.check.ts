@@ -641,6 +641,7 @@ const stealProgram = await executeDataQuery(sql, ctxA, {
   returning: '*',
   single: 'maybe',
 })
+ok(stealProgram.status === 404, 'data upsert: stealing B program is 404')
 ok(
   Boolean(stealProgram.error) || stealProgram.data == null || (stealProgram.data as { id?: string }).id !== PROG_B,
   'data upsert: A cannot take B program id',
@@ -656,6 +657,7 @@ const stealWorkout = await executeDataQuery(sql, ctxA, {
   returning: '*',
   single: 'maybe',
 })
+ok(stealWorkout.status === 404, 'data upsert: stealing B workout is 404')
 ok(Boolean(stealWorkout.error) || stealWorkout.data == null, 'data upsert: A cannot take B workout id')
 ok((await scalar<string>('SELECT routine_id::text FROM workout WHERE id = $1', [WORKOUT_B])) === ROUTINE_B, 'data upsert: B workout routine unchanged')
 
@@ -748,6 +750,44 @@ const deleteProgram = await executeDataQuery(sql, ctxA, {
 ok(Boolean(deleteProgram.error), 'data delete: program is not deletable')
 ok((await count('program', 'id = $1', [PROG_A])) === 1, 'data delete: A program still present')
 ok((await count('program', 'id = $1', [PROG_B])) === 1, 'data delete: B program still present')
+
+const NOTE_A = 'aaaa5555-0000-4000-8000-000000000001'
+const deleteOwnNote = await executeDataQuery(sql, ctxA, {
+  table: 'coach_message',
+  op: 'delete',
+  filters: [{ column: 'id', op: 'eq', value: NOTE_A }],
+})
+ok(deleteOwnNote.status === 404, 'data delete: coach_message is not deletable')
+ok((await count('coach_message', 'id = $1', [NOTE_A])) === 1, 'data delete: A coach_message still present')
+
+const PLANTED_DRAFT = 'aaaa7777-0000-4000-8000-000000000001'
+await sql.unsafe(
+  `INSERT INTO workout_draft (id, athlete_id, routine_id, set_logs, feedback, elapsed_seconds, started_at, updated_at)
+   VALUES ($1, $2, $3, '{}'::jsonb, '{}'::jsonb, 1, '2026-10-21T12:00:00Z', '2026-10-21T12:00:00Z')`,
+  [PLANTED_DRAFT, A, ROUTINE_B],
+)
+const plantedEmbed = await executeDataQuery(sql, ctxA, {
+  table: 'workout_draft',
+  op: 'select',
+  columns: 'id, routine:routine_id(name,program_id)',
+  filters: [{ column: 'id', op: 'eq', value: PLANTED_DRAFT }],
+  single: 'maybe',
+})
+const plantedRoutine = (plantedEmbed.data as { routine?: { name?: string; program_id?: string } } | null)?.routine
+ok(plantedRoutine?.name !== 'B day', 'data embed: planted A draft does not leak B routine name')
+ok(plantedRoutine?.program_id !== PROG_B, 'data embed: planted A draft does not leak B program_id')
+
+const inFilter = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'select',
+  columns: 'id',
+  filters: [{ column: 'id', op: 'in', value: [WORKOUT_A, WORKOUT_B] }],
+})
+const inIds = Array.isArray(inFilter.data) ? (inFilter.data as { id: string }[]).map((r) => r.id) : []
+ok(inFilter.error == null, 'data in: uuid[] filter succeeds')
+ok(inIds.includes(WORKOUT_A) && !inIds.includes(WORKOUT_B), 'data in: A sees own id only from mixed list')
+
+ok((await loadNotes(storeA)).weekly.length >= 1, 'loadNotes: ANY(uuid[]) returns A weekly reviews')
 
 await harness.close()
 

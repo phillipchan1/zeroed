@@ -4,7 +4,7 @@ import {
   type JsonRpcResponse,
 } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import { MCP_CORS, json } from './cors.ts'
-import { withSql, type Sql, type WaitUntilCtx } from './db.ts'
+import { withSql, type Sql, type WaitUntilArg } from './db.ts'
 import type { Env } from './env.ts'
 import { resolveMcpToken, tokenFrom, touchMcpToken } from './mcpToken.ts'
 import { executeZeroedTool, ZEROED_TOOLS } from './tools.ts'
@@ -79,7 +79,16 @@ function sessionHeaders(req: Request): Record<string, string> {
 
 export type McpHandleOpts = {
   sql?: Sql
-  ctx?: WaitUntilCtx
+  ctx?: WaitUntilArg
+}
+
+function mcpWaitUntil(opts?: McpHandleOpts | WaitUntilArg): WaitUntilArg | undefined {
+  if (!opts) return undefined
+  if (typeof opts === 'function') return opts
+  if ('waitUntil' in opts && typeof opts.waitUntil === 'function' && !('sql' in opts) && !('ctx' in opts)) {
+    return opts as WaitUntilArg
+  }
+  return opts.ctx
 }
 
 async function serveMcp(req: Request, sql: Sql): Promise<Response> {
@@ -138,12 +147,16 @@ async function serveMcp(req: Request, sql: Sql): Promise<Response> {
   return wantsSse(req) ? sse(reply, extra) : json(reply, 200, { ...MCP_CORS, ...extra })
 }
 
-export async function handleMcp(req: Request, env: Env, opts?: McpHandleOpts): Promise<Response> {
+export async function handleMcp(
+  req: Request,
+  env: Env,
+  opts?: McpHandleOpts | WaitUntilArg,
+): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: MCP_CORS })
 
   try {
-    if (opts?.sql) return await serveMcp(req, opts.sql)
-    return await withSql(env, (sql) => serveMcp(req, sql), opts?.ctx)
+    if (opts && typeof opts === 'object' && 'sql' in opts && opts.sql) return await serveMcp(req, opts.sql)
+    return await withSql(env, (sql) => serveMcp(req, sql), mcpWaitUntil(opts))
   } catch (e) {
     console.error('[mcp]', e instanceof Error ? e.message : String(e))
     return json({ error: 'request failed' }, 500, MCP_CORS)

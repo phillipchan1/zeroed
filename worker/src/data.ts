@@ -6,7 +6,7 @@
  * small: Free-plan CPU is 10ms/request.
  */
 import { beginAuthCors, json } from './cors.ts'
-import { withSql, type Sql } from './db.ts'
+import { withSql, type Sql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 
 export type FilterOp = 'eq' | 'neq' | 'in' | 'gte' | 'gt' | 'lte' | 'lt' | 'ilike' | 'not_in'
@@ -196,9 +196,6 @@ const DELETABLE = new Set(['workout_draft', 'mcp_token', 'session_observation'])
 export const SESSION_LOOKUP_SQL =
   `SELECT u.id, u.email FROM session s JOIN "user" u ON u.id = s.user_id WHERE s.token = $1 AND s.expires_at > NOW() LIMIT 1`
 
-const SESSION_LOOKUP_CAMEL =
-  `SELECT u.id, u.email FROM session s JOIN "user" u ON u.id = s."userId" WHERE s.token = $1 AND s."expiresAt" > NOW() LIMIT 1`
-
 export type SelectItem =
   | { kind: 'star' }
   | { kind: 'col'; name: string }
@@ -308,44 +305,96 @@ export async function resolveAthleteId(sql: Sql, userId: string): Promise<string
   return rows[0]?.id ?? null
 }
 
-/** Better Auth cookie/bearer is `token.signature`. Look up the unsigned token. */
-export function unsignedSessionToken(raw: string | null | undefined): string | null {
-  if (!raw) return null
-  let value = raw.trim()
-  if (!value) return null
+function decodeCookieValue(raw: string): string {
   try {
-    value = decodeURIComponent(value)
+    return decodeURIComponent(raw)
   } catch {
-    /* already decoded */
+    return raw
   }
-  const dot = value.indexOf('.')
-  return dot === -1 ? value : value.slice(0, dot)
 }
 
-function bearerToken(req: Request): string | null {
+function bytesToBase64UrlNoPad(bytes: Uint8Array): string {
+  let bin = ''
+  for (const b of bytes) bin += String.fromCharCode(b)
+  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let out = 0
+  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  return out === 0
+}
+
+/** Better Auth / better-call: HMAC-SHA256, base64url without padding. */
+export async function signSessionToken(token: string, secret: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    'raw',
+    new TextEncoder().encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign'],
+  )
+  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(token)))
+  return `${token}.${bytesToBase64UrlNoPad(sig)}`
+}
+
+export function splitSessionToken(raw: string | null | undefined): { token: string; signature: string | null } | null {
+  if (!raw) return null
+  const value = decodeCookieValue(raw.trim())
+  if (!value) return null
+  const dot = value.indexOf('.')
+  if (dot === -1) return { token: value, signature: null }
+  return { token: value.slice(0, dot), signature: value.slice(dot + 1) }
+}
+
+/** Better Auth cookie/bearer is `token.signature`. Look up the unsigned token. */
+export function unsignedSessionToken(raw: string | null | undefined): string | null {
+  return splitSessionToken(raw)?.token ?? null
+}
+
+export async function verifySessionSignature(
+  token: string,
+  signature: string | null,
+  secret: string | undefined,
+  requireSignature: boolean,
+): Promise<boolean> {
+  if (!signature) return !requireSignature && Boolean(token)
+  if (!secret) return false
+  const expected = await signSessionToken(token, secret)
+  const got = `${token}.${signature}`
+  return timingSafeEqual(expected, got)
+}
+
+export async function sessionTokenFromRequest(
+  req: Request,
+  secret: string | undefined,
+): Promise<string | null> {
   const header = req.headers.get('authorization')
   if (header && header.slice(0, 7).toLowerCase() === 'bearer ') {
-    return unsignedSessionToken(header.slice(7))
+    const parts = splitSessionToken(header.slice(7))
+    if (!parts) return null
+    if (!(await verifySessionSignature(parts.token, parts.signature, secret, false))) return null
+    return parts.token
   }
   const cookie = req.headers.get('cookie') ?? ''
   const match = cookie.match(/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=([^;]+)/)
-  return unsignedSessionToken(match?.[1] ?? null)
+  const parts = splitSessionToken(match?.[1] ?? null)
+  if (!parts) return null
+  if (!(await verifySessionSignature(parts.token, parts.signature, secret, true))) return null
+  return parts.token
 }
 
-/** Session lookup in the same SQL as the query — avoids Better Auth's cached pool. */
+/** Session lookup in the same SQL as the query — avoids Better Auth's pool. */
 export async function sessionFromRequest(
   sql: Sql,
   req: Request,
+  secret?: string,
 ): Promise<{ id: string; email?: string | null } | null> {
-  const token = bearerToken(req)
+  const token = await sessionTokenFromRequest(req, secret)
   if (!token) return null
-  try {
-    const rows = await runSql<{ id: string; email: string | null }>(sql, SESSION_LOOKUP_SQL, [token])
-    return rows[0] ?? null
-  } catch {
-    const rows = await runSql<{ id: string; email: string | null }>(sql, SESSION_LOOKUP_CAMEL, [token])
-    return rows[0] ?? null
-  }
+  const rows = await runSql<{ id: string; email: string | null }>(sql, SESSION_LOOKUP_SQL, [token])
+  return rows[0] ?? null
 }
 
 function ident(name: string): string {
@@ -824,7 +873,7 @@ export function safeClientMessage(err: unknown): string {
   return 'request failed'
 }
 
-export async function handleData(req: Request, env: Env): Promise<Response> {
+export async function handleData(req: Request, env: Env, waitUntil?: WaitUntil): Promise<Response> {
   const started = beginAuthCors(req.headers.get('Origin'), env)
   if (!started.ok) return started.response
   const cors = started.cors
@@ -840,7 +889,7 @@ export async function handleData(req: Request, env: Env): Promise<Response> {
 
   try {
     return await withSql(env, async (sql) => {
-      const user = await sessionFromRequest(sql, req)
+      const user = await sessionFromRequest(sql, req, env.BETTER_AUTH_SECRET)
       if (!user) return json({ data: null, error: { message: 'unauthorized' }, count: null }, 401, cors)
       const athleteId = await resolveAthleteId(sql, user.id)
       const result = await executeDataQuery(sql, { userId: user.id, athleteId, email: user.email }, body)
@@ -849,7 +898,7 @@ export async function handleData(req: Request, env: Env): Promise<Response> {
         result.status,
         cors,
       )
-    })
+    }, waitUntil)
   } catch {
     return json({ data: null, error: { message: 'request failed' }, count: null }, 500, cors)
   }

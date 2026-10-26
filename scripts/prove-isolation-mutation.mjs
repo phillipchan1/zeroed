@@ -133,4 +133,32 @@ for (const filter of filters) {
   })
 }
 
-console.log(`\nmutation proof: ok (${filters.length}/${filters.length})`)
+expectFail('data.ts drop join-alias owner predicates', () => {
+  const next = originalData.replace(
+    /for \(const alias of joins\.keys\(\)\) \{\n\s+parts\.push\(bindOwner\(alias, athleteId, ownerSlot, alias\)\.text\)\n\s+\}/,
+    '',
+  )
+  if (next === originalData) throw new Error('could not find join-alias owner loop')
+  writeFileSync(dataPath, next)
+})
+
+expectFail('data.ts drop DELETABLE gate', () => {
+  const next = originalData.replace(
+    /if \(!DELETABLE\.has\(table\)\) return fail\('not found', 404\)\n/,
+    '',
+  )
+  if (next === originalData) throw new Error('could not find DELETABLE gate')
+  writeFileSync(dataPath, next)
+})
+
+expectFail('data.ts drop upsert 0-row 404', () => {
+  const next = originalData.replace(
+    /if \(query\.op === 'upsert' && rows\.length === 0 && ctx\.athleteId\) return fail\('not found', 404\)\n/,
+    '',
+  )
+  if (next === originalData) throw new Error('could not find upsert 0-row 404')
+  writeFileSync(dataPath, next)
+})
+
+const structural = 3
+console.log(`\nmutation proof: ok (${filters.length + structural}/${filters.length + structural})`)

@@ -3,11 +3,68 @@ import { bearer, emailOTP } from 'better-auth/plugins'
 import { Pool } from 'pg'
 import { authCookieSecure, isLocalAuthHost, resolveAuthBaseURL } from './authUrl.ts'
 import { NATIVE_APP_ORIGINS } from './cors.ts'
-import { databaseUrl, type Env } from './env.ts'
+import { sessionFromRequest } from './data.ts'
+import { withSql, type WaitUntil } from './db.ts'
+import { databaseUrl, useDatabaseSsl, type Env } from './env.ts'
 
 type AuthInstance = ReturnType<typeof createAuth>
 
-const cache = new WeakMap<object, AuthInstance>()
+/**
+ * Better Auth 1.7 defaults to camelCase columns. The committed schema
+ * (`worker/schema/better-auth.sql` and the Neon migrate script) is snake_case.
+ */
+export const BETTER_AUTH_SNAKE_CASE = {
+  user: {
+    modelName: 'user',
+    fields: {
+      name: 'name',
+      email: 'email',
+      emailVerified: 'email_verified',
+      image: 'image',
+      createdAt: 'created_at',
+      updatedAt: 'updated_at',
+    },
+  },
+  session: {
+    modelName: 'session',
+    fields: {
+      expiresAt: 'expires_at',
+      token: 'token',
+      createdAt: 'created_at',
+      updatedAt: 'updated_at',
+      ipAddress: 'ip_address',
+      userAgent: 'user_agent',
+      userId: 'user_id',
+    },
+  },
+  account: {
+    modelName: 'account',
+    fields: {
+      accountId: 'account_id',
+      providerId: 'provider_id',
+      userId: 'user_id',
+      accessToken: 'access_token',
+      refreshToken: 'refresh_token',
+      idToken: 'id_token',
+      accessTokenExpiresAt: 'access_token_expires_at',
+      refreshTokenExpiresAt: 'refresh_token_expires_at',
+      scope: 'scope',
+      password: 'password',
+      createdAt: 'created_at',
+      updatedAt: 'updated_at',
+    },
+  },
+  verification: {
+    modelName: 'verification',
+    fields: {
+      identifier: 'identifier',
+      value: 'value',
+      expiresAt: 'expires_at',
+      createdAt: 'created_at',
+      updatedAt: 'updated_at',
+    },
+  },
+} as const
 
 async function sendOtpEmail(env: Env, email: string, otp: string, type: string): Promise<void> {
   const subject = type === 'forget-password'
@@ -37,7 +94,16 @@ async function sendOtpEmail(env: Env, email: string, otp: string, type: string):
   }
 }
 
-export function createAuth(env: Env) {
+function authPool(url: string, env: Env): Pool {
+  return new Pool({
+    connectionString: url,
+    max: 1,
+    allowExitOnIdle: true,
+    ssl: useDatabaseSsl(url, env) ? { rejectUnauthorized: false } : false,
+  })
+}
+
+export function createAuth(env: Env, pool?: Pool) {
   const url = databaseUrl(env)
   if (!url) throw new Error('database is not configured (HYPERDRIVE or DATABASE_URL)')
   const secret = env.BETTER_AUTH_SECRET
@@ -47,8 +113,12 @@ export function createAuth(env: Env) {
     secret,
     baseURL,
     basePath: '/api/auth',
-    database: new Pool({ connectionString: url, max: 5 }),
+    database: pool ?? authPool(url, env),
     emailAndPassword: { enabled: false },
+    user: BETTER_AUTH_SNAKE_CASE.user,
+    session: BETTER_AUTH_SNAKE_CASE.session,
+    account: BETTER_AUTH_SNAKE_CASE.account,
+    verification: BETTER_AUTH_SNAKE_CASE.verification,
     trustedOrigins: [
       ...(isLocalAuthHost(baseURL)
         ? [baseURL, 'http://localhost:5173', 'http://localhost:8787', 'http://[::1]:5173', 'http://[::1]:8787']
@@ -80,23 +150,31 @@ export function createAuth(env: Env) {
   })
 }
 
-export function getAuth(env: Env): AuthInstance {
-  const cached = cache.get(env)
-  if (cached) return cached
-  const auth = createAuth(env)
-  cache.set(env, auth)
-  return auth
+/** One Pool per request; `waitUntil` finishes `pool.end()` after the response. */
+export async function withAuth<T>(
+  env: Env,
+  fn: (auth: AuthInstance) => Promise<T>,
+  waitUntil?: WaitUntil,
+): Promise<T> {
+  const url = databaseUrl(env)
+  if (!url) throw new Error('database is not configured (HYPERDRIVE or DATABASE_URL)')
+  const pool = authPool(url, env)
+  try {
+    return await fn(createAuth(env, pool))
+  } finally {
+    const ending = pool.end().catch(() => undefined)
+    if (waitUntil) waitUntil(ending)
+    else await ending
+  }
 }
 
 export async function sessionUser(
   env: Env,
   req: Request,
+  waitUntil?: WaitUntil,
 ): Promise<{ id: string; email?: string | null } | null> {
   try {
-    const auth = getAuth(env)
-    const session = await auth.api.getSession({ headers: req.headers })
-    if (!session?.user?.id) return null
-    return { id: session.user.id, email: session.user.email }
+    return await withSql(env, (sql) => sessionFromRequest(sql, req, env.BETTER_AUTH_SECRET), waitUntil)
   } catch {
     return null
   }

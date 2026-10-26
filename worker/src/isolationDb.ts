@@ -9,9 +9,8 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
 import { Client } from 'pg'
-import postgres from 'postgres'
 import { isLoopbackHostname } from './authUrl.ts'
-import { sslForConnection, type Sql } from './db.ts'
+import { makeClientSql, type Sql } from './db.ts'
 import { makePgliteSql } from './pgliteSql.ts'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -46,12 +45,13 @@ END
 $roles$;
 `
 
-const RESET = `
+const RESET_PG = `
 DROP SCHEMA IF EXISTS public CASCADE;
 CREATE SCHEMA public;
 GRANT ALL ON SCHEMA public TO CURRENT_USER;
 GRANT ALL ON SCHEMA public TO public;
 DROP SCHEMA IF EXISTS auth CASCADE;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 `
 
 export type IsolationBackend = 'postgres' | 'pglite'
@@ -91,24 +91,39 @@ function refuseUnsafeTestUrl(url: string): void {
   }
 }
 
-async function applySqlBundle(exec: (sql: string) => Promise<void>): Promise<void> {
-  await exec(BOOTSTRAP)
+function migrationFiles(): string[] {
   const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort()
   if (!files.length) throw new Error(`no migrations in ${migrationsDir}`)
-  for (const file of files) {
+  return files
+}
+
+export async function applyIsolationSchema(db: PGlite): Promise<void> {
+  await db.exec(BOOTSTRAP)
+  for (const file of migrationFiles()) {
     const sql = readFileSync(join(migrationsDir, file), 'utf8')
     try {
-      await exec(sql)
+      await db.exec(sql)
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
       throw new Error(`${file}: ${message}`)
     }
   }
-  await exec(readFileSync(seedPath, 'utf8'))
+  await db.exec(readFileSync(seedPath, 'utf8'))
 }
 
-export async function applyIsolationSchema(db: PGlite): Promise<void> {
-  await applySqlBundle((sql) => db.exec(sql))
+export async function applyIsolationSchemaPg(client: Client): Promise<void> {
+  await client.query(RESET_PG)
+  await client.query(BOOTSTRAP)
+  for (const file of migrationFiles()) {
+    const sql = readFileSync(join(migrationsDir, file), 'utf8')
+    try {
+      await client.query(sql)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`${file}: ${message}`)
+    }
+  }
+  await client.query(readFileSync(seedPath, 'utf8'))
 }
 
 export async function openIsolationHarness(): Promise<IsolationHarness> {
@@ -137,34 +152,41 @@ export async function openIsolationHarness(): Promise<IsolationHarness> {
   refuseUnsafeTestUrl(url)
   const client = new Client({ connectionString: url, ssl: false })
   await client.connect()
-  try {
-    await client.query(RESET)
-    await applySqlBundle(async (sql) => {
-      await client.query(sql)
-    })
-  } finally {
-    await client.end()
-  }
-
-  const sql = postgres(url, {
-    max: 1,
-    fetch_types: false,
-    prepare: false,
-    ssl: sslForConnection(url),
-  })
-
+  await applyIsolationSchemaPg(client)
+  const sql = makeClientSql((text, params) => client.query(text, params ?? []))
   return {
     sql,
     backend: 'postgres',
     async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {
-      const rows = await sql.unsafe(text, params as never)
-      return [...rows] as T[]
+      const result = await client.query(text, params)
+      return result.rows as T[]
     },
     async exec(text) {
-      await sql.unsafe(text)
+      await client.query(text)
     },
     async close() {
-      await sql.end({ timeout: 5 })
+      await client.end()
     },
+  }
+}
+
+export async function openIsolationSql(): Promise<{ sql: Sql; close: () => Promise<void> }> {
+  const url = process.env.ZEROED_REAL_PG === '1' ? process.env.DATABASE_URL?.trim() : ''
+  if (!url) {
+    const db = new PGlite()
+    await applyIsolationSchema(db)
+    return {
+      sql: makePgliteSql(db),
+      close: async () => {
+        await db.close()
+      },
+    }
+  }
+  const client = new Client({ connectionString: url })
+  await client.connect()
+  await applyIsolationSchemaPg(client)
+  return {
+    sql: makeClientSql((text, params) => client.query(text, params ?? [])),
+    close: () => client.end(),
   }
 }

@@ -2,7 +2,14 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { pgArrayLiteral, sslForConnection, withSql } from './db.ts'
+import {
+  compileTagged,
+  makeClientSql,
+  pgArrayLiteral,
+  sslForConnection,
+  taggedArray,
+  withSql,
+} from './db.ts'
 import type { Env } from './env.ts'
 import { assertCiUsesRealPostgres, openIsolationHarness, testDatabaseUrl } from './isolationDb.ts'
 import { handleMcp } from './mcp.ts'
@@ -44,12 +51,44 @@ const here = dirname(fileURLToPath(import.meta.url))
 const dbSrc = readFileSync(join(here, 'db.ts'), 'utf8')
 ok(!/\bWeakMap\b/.test(dbSrc), 'db.ts has no WeakMap client cache')
 ok(!/\bgetSql\b/.test(dbSrc), 'db.ts has no getSql cache helper')
+ok(!/\bconst cache\b/.test(dbSrc), 'db.ts has no module-scope client cache')
 ok(!/clients\s*=/.test(dbSrc), 'db.ts has no module-scope clients map')
-ok(dbSrc.includes('openSql') && dbSrc.includes('withSql'), 'db.ts exposes per-request openSql/withSql')
+ok(dbSrc.includes('withSql') && dbSrc.includes('makeClientSql'), 'db.ts exposes per-request withSql/makeClientSql')
 ok(dbSrc.includes('waitUntil'), 'db.ts closes via waitUntil when a ctx is present')
+ok(!/fetch_types:\s*false/.test(dbSrc), 'db.ts does not set postgres.js fetch_types:false')
 ok(pgArrayLiteral(['33333333-3333-3333-3333-333333333333']) === '{"33333333-3333-3333-3333-333333333333"}', 'pgArrayLiteral: one uuid')
 ok(pgArrayLiteral(['a', 'b"c']).includes('\\"'), 'pgArrayLiteral: quotes are escaped')
-ok(!/\.array\(ids\)/.test(readFileSync(join(here, 'store.ts'), 'utf8')), 'store.ts does not use sql.array (broken with fetch_types:false)')
+
+const storeSrc = readFileSync(join(here, 'store.ts'), 'utf8')
+ok(storeSrc.includes('sql.array(ids)'), 'loadNotes binds program ids with sql.array')
+ok(!/ANY\(\$\{ids\}\)/.test(storeSrc), 'store.ts has no uncast ANY(${ids})')
+
+const dataSrc = readFileSync(join(here, 'data.ts'), 'utf8')
+ok(dataSrc.includes('unnest($${idx}${cast})'), 'data in-filter uses unnest + cast')
+ok(dataSrc.includes('::uuid[]') && dataSrc.includes('::text[]'), 'data in-filter has explicit array casts')
+
+const uuid = '11111111-1111-1111-1111-111111111111'
+const compiled = compileTagged(
+  Object.assign(['WHERE program_id = ANY(', ')'], { raw: ['WHERE program_id = ANY(', ')'] }),
+  [taggedArray([uuid])],
+)
+ok(compiled.text === 'WHERE program_id = ANY($1::uuid[])', 'compileTagged: sql.array emits ::uuid[]')
+ok(Array.isArray(compiled.params[0]) && (compiled.params[0] as string[])[0] === uuid, 'compileTagged: array stays a JS array')
+
+const bare = compileTagged(
+  Object.assign(['WHERE id = ANY(', ')'], { raw: ['WHERE id = ANY(', ')'] }),
+  [[uuid]],
+)
+ok(bare.text.includes('::uuid[]'), 'compileTagged: bare JS uuid array is cast')
+
+let last = { text: '', params: [] as unknown[] }
+const sql = makeClientSql(async (text, params = []) => {
+  last = { text, params }
+  return { rows: [{ n: 1 }] }
+})
+await sql`SELECT id FROM program WHERE id = ANY(${sql.array([uuid, '22222222-2222-2222-2222-222222222222'])})`
+ok(last.text.includes('::uuid[]'), 'makeClientSql: sql.array in a tag is ::uuid[]')
+ok(Array.isArray(last.params[0]) && (last.params[0] as unknown[]).length === 2, 'makeClientSql: two ids in one array param')
 
 const url = testDatabaseUrl()
 if (url) {
@@ -61,30 +100,30 @@ if (url) {
     },
   }
 
-  const arrayBound = await withSql(env, async (sql) => {
+  const arrayBound = await withSql(env, async (clientSql) => {
     const literal = pgArrayLiteral(['33333333-3333-3333-3333-333333333333'])
-    const [row] = await sql<{ n: number }[]>`SELECT cardinality(${literal}::uuid[])::int AS n`
+    const [row] = await clientSql<{ n: number }[]>`SELECT cardinality(${literal}::uuid[])::int AS n`
     return Number(row?.n)
   }, ctx)
   ok(arrayBound === 1, 'withSql: pgArrayLiteral binds as uuid[] on real Postgres')
   ok(waitUntilCalls.length === 1, 'withSql: array bind scheduled waitUntil close')
 
-  const first = await withSql(env, async (sql) => {
-    const [row] = await sql<{ n: number }[]>`SELECT 1::int AS n`
+  const first = await withSql(env, async (clientSql) => {
+    const [row] = await clientSql<{ n: number }[]>`SELECT 1::int AS n`
     return Number(row?.n)
   }, ctx)
   ok(first === 1, 'withSql: first request on env returns 1')
   ok(waitUntilCalls.length === 2, 'withSql: first request scheduled waitUntil close')
 
-  const second = await withSql(env, async (sql) => {
-    const [row] = await sql<{ n: number }[]>`SELECT 2::int AS n`
+  const second = await withSql(env, async (clientSql) => {
+    const [row] = await clientSql<{ n: number }[]>`SELECT 2::int AS n`
     return Number(row?.n)
   }, ctx)
   ok(second === 2, 'withSql: second request on the same env returns 2')
   ok(waitUntilCalls.length === 3, 'withSql: second request scheduled its own close')
 
-  const third = await withSql(env, async (sql) => {
-    const [row] = await sql<{ n: number }[]>`SELECT 3::int AS n`
+  const third = await withSql(env, async (clientSql) => {
+    const [row] = await clientSql<{ n: number }[]>`SELECT 3::int AS n`
     return Number(row?.n)
   }, ctx)
   ok(third === 3, 'withSql: third sequential request on the same env returns 3')

@@ -129,7 +129,10 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    PGlite-only. `worker/src/mcp.check.ts` (picked up by `npm run check`) is
    the MCP parity + token isolation + revoked 401 + load-a-full-program
    gate. `check:client-data-gate` lists every `supabase.from()` as going
-   through the Worker facade when the API base is set.
+   through the Worker facade when the API base is set. CI also runs
+   `check:postgres` against a real Postgres service (Better Auth OTP +
+   owner isolation + sequential per-request clients). The Worker opens one
+   Postgres client per request and closes it with `waitUntil`.
 3. `npm run build && npx wrangler dev` serves `/` and `/api/health`.
    `POST /functions/v1/agent` reaches the Worker (not a 405 from assets).
    Missing `/assets/*` is 404 text/plain, not `index.html`.
@@ -154,7 +157,9 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    every query; the table owner bypasses RLS unless `FORCE ROW LEVEL
    SECURITY`).
 3. Apply `worker/schema/better-auth.sql` only if the script did not already
-   create those tables.
+   create those tables. Columns are snake_case (`email_verified`, `user_id`,
+   `expires_at`). `createAuth` in `worker/src/auth.ts` maps Better Auth's
+   camelCase fields onto those names — do not regenerate camelCase tables.
 4. Point the Worker Hyperdrive config at the Neon connection string.
 5. Set the Worker `BETTER_AUTH_URL` var/secret to the public Worker origin
    (never leave it as `http://localhost:8787`, and do not set
