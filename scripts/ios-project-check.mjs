@@ -96,8 +96,30 @@ if (!existsSync(iconPath)) {
 
 const workflow = read('.github/workflows/ios-release.yml')
 if (workflow) {
-  if (workflow.includes('workflow_dispatch:')) ok('ios-release.yml is manually dispatched')
-  else fail('ios-release.yml trigger')
+  if (workflow.includes('workflow_dispatch:')) ok('ios-release.yml keeps workflow_dispatch')
+  else fail('ios-release.yml workflow_dispatch')
+  if (
+    /push:\s*\n\s*branches:\s*\[master\]/.test(workflow) ||
+    workflow.includes('branches: [master]')
+  ) {
+    ok('ios-release.yml runs on push to master')
+  } else fail('ios-release.yml push-to-master trigger')
+
+  if (workflow.includes('vars.VITE_API_BASE_URL')) {
+    ok('workflow reads VITE_API_BASE_URL from a repo variable')
+  } else fail('workflow VITE_API_BASE_URL var')
+  if (workflow.includes('unset VITE_SUPABASE_URL VITE_SUPABASE_ANON_KEY')) {
+    ok('workflow does not bake VITE_SUPABASE_* when VITE_API_BASE_URL is set')
+  } else fail('workflow still bakes VITE_SUPABASE_* unconditionally')
+
+  if (
+    workflow.includes('ready=false') &&
+    workflow.includes('Skipping iOS TestFlight') &&
+    /needs\.secrets-ready\.outputs\.ready == 'true'/.test(workflow)
+  ) {
+    ok('workflow skips TestFlight (green) when secrets are missing')
+  } else fail('workflow missing-secrets skip')
+
   for (const secret of [
     'APPSTORE_KEY_ID',
     'APPSTORE_ISSUER_ID',

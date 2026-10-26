@@ -45,9 +45,28 @@ Client build-time (Vite / Vercel, unchanged until cutover):
 |---|---|
 | `VITE_SUPABASE_URL` | Keep until PostgREST is retired. |
 | `VITE_SUPABASE_ANON_KEY` | Keep until PostgREST is retired. |
-| `VITE_API_BASE_URL` | Empty = today's path. Worker: `/api` (same origin) or `https://<worker>/api`. Rollback: `https://<project>.supabase.co/functions/v1`. |
+| `VITE_API_BASE_URL` | Empty = today's path. Worker: `/api` (same origin) or `https://<worker>/api`. Rollback: `https://<project>.supabase.co/functions/v1`. iOS TestFlight reads this from a **repo variable** (not a secret) — see [iOS TestFlight at cutover](#ios-testflight-at-cutover). |
 
 Replace the placeholder Hyperdrive `id` in `wrangler.jsonc` before a real deploy.
+
+## iOS TestFlight at cutover
+
+`.github/workflows/ios-release.yml` reads `VITE_API_BASE_URL` from a GitHub
+**Actions variable** (Settings → Secrets and variables → Actions → Variables).
+It does **not** bake `VITE_SUPABASE_*` unless that variable is empty.
+
+| When | `VITE_API_BASE_URL` variable | What the IPA talks to |
+|---|---|---|
+| Before cutover (today) | unset / empty | Same Supabase path as the current Vercel build (`VITE_SUPABASE_URL` + `VITE_SUPABASE_ANON_KEY` secrets) |
+| At cutover | Worker origin + `/api`, e.g. `https://zeroed.<account>.workers.dev/api` | Worker `/api/agent`, `/api/mcp`, `/api/auth`. `VITE_SUPABASE_*` are **not** baked |
+| Rollback | clear the variable, or set `https://<project>.supabase.co/functions/v1` | Supabase functions again after the next TestFlight build |
+
+The iOS app is a Capacitor WKWebView loading local files, so a same-origin
+`/api` (what the Workers SPA uses) will not resolve. Always set the **absolute
+Worker URL** on this variable.
+
+After you set or clear it, merge to `master` (or **Run workflow**) so a new
+Internal TestFlight build ships with the new API target.
 
 ## Free-tier risk (CPU ms)
 

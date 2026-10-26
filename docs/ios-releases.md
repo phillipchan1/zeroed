@@ -15,10 +15,11 @@ Capacitor (Nuvo uses Tauri). **No App Store review. No web prod deploy.**
 | Channel | Trigger | Update on your phone |
 |---|---|---|
 | **PWA** (Vercel) | merge → `master` | Service worker |
-| **iOS TestFlight** (`ios-release.yml`) | **Actions → iOS TestFlight → Run workflow** | TestFlight app (enable **Automatic Updates**) |
+| **iOS TestFlight** (`ios-release.yml`) | merge → `master`, or **Run workflow** | TestFlight app (enable **Automatic Updates**) |
 
-Unlike Nuvo, Zeroed does **not** upload on every push to `master`. Dispatch
-when you want a new build on the phone.
+Same as Nuvo: every push to `master` uploads an Internal TestFlight build.
+**Run workflow** is still there for a re-run or a PR-branch smoke test. The
+job **skips green** (does not fail red) until the Apple secrets exist.
 
 ---
 
@@ -29,7 +30,7 @@ src/                     React SPA (same as the PWA)
 capacitor.config.ts      appId app.zeroed.app
 ios/                     Committed Capacitor Xcode project (Pods / public gitignored)
 .github/workflows/
-  ios-release.yml        Build signed IPA → upload TestFlight (manual)
+  ios-release.yml        Build signed IPA → Internal TestFlight (master + dispatch)
   checks.yml             typecheck + engine checks + iOS project structure
 ```
 
@@ -55,18 +56,26 @@ App Store product name, so the surface is `app`. Must match
 
 ## What CI does
 
-On **Run workflow**:
+On every push to `master` (and **Run workflow**):
 
-1. Stamps version `<major>.<minor>.<commit_count>` — patch is
+1. Checks that the Apple + signing secrets exist. If any are missing, the
+   upload job is **skipped** and the workflow stays green, with a notice
+   listing what is absent.
+2. Stamps version `<major>.<minor>.<commit_count>` — patch is
    `git rev-list --count HEAD` (same scheme as Nuvo).
-2. Checks that build number against App Store Connect
+3. Checks that build number against App Store Connect
    (`scripts/appstore-next-build-number.mjs`) and bumps past it if this
    exact version was already uploaded (manual re-run of the same commit).
-3. `npm ci` → `vite build` (bakes `VITE_SUPABASE_*`) → `npx cap sync ios`.
-4. `xcodebuild archive` + `-exportArchive` with
-   `method=app-store-connect`. Automatic signing via the App Store Connect
-   API key, or manual if the three `IOS_*` secrets are set.
-5. `xcrun altool --upload-app` → App Store Connect → TestFlight.
+4. `npm ci` → `vite build` → `npx cap sync ios`.
+   `VITE_API_BASE_URL` comes from a **repo variable**. When it is empty,
+   the build bakes `VITE_SUPABASE_*` (today's path). When it is set to the
+   Worker URL at cutover, those Supabase values are **not** baked. See
+   [`cloudflare-cutover.md`](./cloudflare-cutover.md) § iOS TestFlight at cutover.
+5. `xcodebuild archive` + `-exportArchive` with
+   `method=app-store-connect` and **manual** signing
+   (`IOS_CERTIFICATE` + `IOS_MOBILE_PROVISION`).
+6. `xcrun altool --upload-app` → App Store Connect → **Internal** TestFlight.
+   The workflow does not submit for App Review and does not add external testers.
 
 ~15–20 min on `macos-latest`. Concurrency group `ios-testflight` — newer
 runs cancel in-progress ones.
@@ -107,8 +116,8 @@ org/account secrets, copy these **names** from Nuvo:
 | `APPSTORE_KEY_ID` | yes | App Store Connect API Key ID |
 | `APPSTORE_ISSUER_ID` | yes | App Store Connect Issuer ID |
 | `APPSTORE_PRIVATE_KEY` | yes | Base64 of the `.p8` file |
-| `IOS_CERTIFICATE` | fallback | Base64 of Apple Distribution `.p12` |
-| `IOS_CERTIFICATE_PASSWORD` | fallback | `.p12` export password |
+| `IOS_CERTIFICATE` | yes | Base64 of Apple Distribution `.p12` |
+| `IOS_CERTIFICATE_PASSWORD` | yes | `.p12` export password |
 
 `base64 -i AuthKey_XXXXXXXXXX.p8 | pbcopy` if you need to re-encode the key.
 
@@ -116,18 +125,20 @@ org/account secrets, copy these **names** from Nuvo:
 > requires **Apple Distribution** — Nuvo's iOS `IOS_CERTIFICATE` is the
 > right one; the desktop `release.yml` cert is not.
 
-### 5 · NEW secrets / profile (Zeroed-only)
+### 5 · NEW secrets / profile / variable (Zeroed-only)
 
 Nuvo's App Store provisioning profile is bound to `day.nuvo.app` and
-**cannot** sign Zeroed. Create one and add the web build env:
+**cannot** sign Zeroed. Create an App Store Connect **distribution**
+profile for `app.zeroed.app` and add the web build env:
 
-| Secret | Why it's new |
-|---|---|
-| `VITE_SUPABASE_URL` | Zeroed's Supabase project (same value as Vercel Production) |
-| `VITE_SUPABASE_ANON_KEY` | Zeroed's anon key (same value as Vercel Production) |
-| `IOS_MOBILE_PROVISION` | Base64 of an **App Store Connect** provisioning profile for `app.zeroed.app` |
+| Name | Kind | Why it's new |
+|---|---|---|
+| `VITE_SUPABASE_URL` | secret | Zeroed's Supabase project (same value as Vercel Production). Used only while `VITE_API_BASE_URL` is empty. |
+| `VITE_SUPABASE_ANON_KEY` | secret | Zeroed's anon key (same value as Vercel Production). Used only while `VITE_API_BASE_URL` is empty. |
+| `IOS_MOBILE_PROVISION` | secret | Base64 of an **App Store Connect** distribution profile for `app.zeroed.app` |
+| `VITE_API_BASE_URL` | **variable** | Leave empty until Cloudflare cutover. Then set to `https://<worker>/api`. See [`cloudflare-cutover.md`](./cloudflare-cutover.md). |
 
-To make the profile (only needed if automatic signing fails):
+To make the distribution profile:
 
 1. Developer portal → **Profiles** → **+** → **App Store Connect**.
 2. App ID `app.zeroed.app` → link the **Apple Distribution** cert.
@@ -135,7 +146,8 @@ To make the profile (only needed if automatic signing fails):
    `base64 -i Zeroed.mobileprovision | pbcopy`.
 
 Settings → Secrets and variables → Actions on **phillipchan1/zeroed**.
-This repo does not change secrets for you.
+This repo does not change secrets for you. Until they exist, the
+TestFlight job **skips green** instead of failing red.
 
 ### 6 · TestFlight internal testing
 
@@ -152,12 +164,14 @@ App Review for personal dogfooding.
 
 ## Trigger the first build
 
-1. Finish steps 2–5 above (App ID, ASC record, secrets).
-2. GitHub → **phillipchan1/zeroed** → **Actions** → **iOS TestFlight** →
-   **Run workflow** → branch `master` (after this PR merges) or this PR's
-   branch if you want to test the pipeline first.
+1. Finish steps 2–5 above (App ID, ASC app record, distribution profile, secrets).
+2. Merge to `master` (automatic) **or** GitHub → **phillipchan1/zeroed** →
+   **Actions** → **iOS TestFlight** → **Run workflow**. Dispatch from this
+   PR's branch to smoke-test the pipeline before merge.
 3. Watch the `testflight` job. Upload prints
-   `Uploading … (v<version>, build <n>)`.
+   `Uploading … (v<version>, build <n>) to Internal TestFlight`.
+   If secrets are still missing, only **Check TestFlight secrets** runs and
+   the upload job is skipped — the workflow stays green.
 4. App Store Connect → TestFlight → wait for processing → Internal Testing.
 
 Re-running the same commit is safe: `appstore-next-build-number.mjs` bumps
@@ -189,7 +203,8 @@ python3 scripts/gen-icons.py
 
 | Symptom | Fix |
 |---|---|
-| Workflow fails at signing | Check `APPLE_TEAM_ID`; try the manual `IOS_*` secrets |
+| Workflow skips (green) | Missing secrets listed in the **Check TestFlight secrets** notice |
+| Workflow fails at signing | Check `APPLE_TEAM_ID` and the three `IOS_*` secrets |
 | `No profiles for app.zeroed.app` | Create the App ID + wait a few minutes; or add `IOS_MOBILE_PROVISION` |
 | Upload rejected (SDK too old) | Bump `runs-on:` to a newer `macos-*` in `ios-release.yml` |
 | Build not in TestFlight | App Store Connect → Activity; check email for compliance questions |

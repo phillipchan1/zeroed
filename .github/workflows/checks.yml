@@ -2,7 +2,9 @@
 # formatter check, and a structural check of the committed Capacitor iOS
 # project (as far as Linux can go without Xcode).
 #
-# The TestFlight upload (ios-release.yml) is manual — see docs/ios-releases.md.
+# The TestFlight upload (ios-release.yml) runs on push to master and
+# workflow_dispatch. It skips green when Apple secrets are missing —
+# see docs/ios-releases.md.
 name: checks
 
 on:
@@ -18,6 +20,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      - name: actionlint
+        run: |
+          set -euo pipefail
+          curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash -o /tmp/download-actionlint.bash
+          bash /tmp/download-actionlint.bash 1.7.12
+          ./actionlint -color
       - uses: actions/setup-node@v5
         with:
           node-version: 22

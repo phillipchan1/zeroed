@@ -237,8 +237,9 @@ python3 scripts/gen-icons.py
 ## iOS (TestFlight)
 
 Native iPhone shell is Capacitor (`ios/`, bundle ID **`app.zeroed.app`**). Internal
-TestFlight upload is a manual GitHub Action — same signing secrets as Nuvo,
-same `xcodebuild` + `altool` path. Setup and the first-build trigger:
+TestFlight upload runs on push to `master` and on **Run workflow** — same signing
+secrets as Nuvo, same `xcodebuild` + `altool` path. The job skips green until
+those secrets exist. Setup:
 [`docs/ios-releases.md`](docs/ios-releases.md).
 
 ```bash
