@@ -326,15 +326,19 @@ export async function withAuth<T>(
   if (!url) throw new Error('database is not configured (HYPERDRIVE or DATABASE_URL)')
   const { db, close, client } = await openAuthDb(url, env)
   try {
+    // Clone the email before auth.handler consumes the body.
+    const email = req ? await emailFromAuthRequest(req) : null
     const result = await fn(createAuth(env, db))
-    if (req && result instanceof Response && shouldPersistAdoptedEmail(req, result)) {
-      const email = await emailFromAuthRequest(req)
-      if (email) {
-        await persistAdoptedUserEmail(
-          (text, params) => client.query(text, params) as Promise<{ rows: { id: string }[] }>,
-          email,
-        )
-      }
+    if (
+      email
+      && req
+      && result instanceof Response
+      && shouldPersistAdoptedEmail(req, result)
+    ) {
+      await persistAdoptedUserEmail(
+        (text, params) => client.query(text, params) as Promise<{ rows: { id: string }[] }>,
+        email,
+      )
     }
     return result
   } finally {

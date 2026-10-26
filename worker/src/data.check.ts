@@ -89,6 +89,10 @@ ok(!authSrc.includes('allowExitOnIdle'), 'auth.ts does not use pg-pool allowExit
 ok(authSrc.includes('installEmailAdoption'), 'auth.ts installs case-insensitive email adoption')
 ok(authSrc.includes('persistAdoptedUserEmail'), 'auth.ts persists the BA user id after verified sign-in')
 ok(authSrc.includes('shouldPersistAdoptedEmail'), 'auth.ts does not persist on unauthenticated send-code')
+ok(
+  authSrc.indexOf('emailFromAuthRequest(req)') < authSrc.indexOf('fn(createAuth'),
+  'email is cloned before auth.handler consumes the body',
+)
 ok(authSrc.includes('FIND_ADOPTED_USER_SQL'), 'auth.ts looks up the persisted BA user id first')
 ok(rewriteUserEmailLookup('select * from "user" where "email" = $1') === 'select * from "user" where lower("email") = lower($1)', 'adoption lookup uses lower(email)')
 ok(
