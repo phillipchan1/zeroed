@@ -12,9 +12,11 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": true,
   },
+  // BETTER_AUTH_URL is not set here — wrangler vars are shipped to prod.
+  // Local: `.dev.vars` (see `.dev.vars.example`) or the auth.ts localhost fallback.
+  // Prod: set a Worker var/secret to the public origin (docs/cloudflare-cutover.md).
   "vars": {
     "OPENAI_MODEL": "gpt-5.4-nano",
-    "BETTER_AUTH_URL": "http://localhost:8787",
     "RESEND_FROM": "Zeroed <noreply@localhost>",
   },
   // Replace `id` with a real Hyperdrive config before `wrangler deploy`.

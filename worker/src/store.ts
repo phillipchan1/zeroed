@@ -76,6 +76,13 @@ export async function programIds(store: ConnectedStore): Promise<string[]> {
   return rows.map((p) => p.id)
 }
 
+export async function workoutProgramOwned(
+  store: ConnectedStore,
+  programId: string,
+): Promise<boolean> {
+  return (await programIds(store)).includes(programId)
+}
+
 export async function loadAthlete(
   store: ConnectedStore,
 ): Promise<AthleteRow & { current_phase: string | null; retest_date: string | null }> {
@@ -304,8 +311,7 @@ export async function loadWorkout(store: ConnectedStore, workoutId: string): Pro
 } | null> {
   const row = await selectOwnedWorkout(store, workoutId)
   if (!row) return null
-  const ownedPrograms = await programIds(store)
-  if (!ownedPrograms.includes(row.r_program_id)) return null
+  if (!(await workoutProgramOwned(store, row.r_program_id))) return null
   const obs = await store.sql<{ category: string; signal: string; severity: number }[]>`
     SELECT category, signal, severity
     FROM session_observation

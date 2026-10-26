@@ -29,7 +29,7 @@ in the Vite bundle.
 | `HYPERDRIVE` | binding | Hyperdrive config id in `wrangler.jsonc`. Connection string is injected. |
 | `DATABASE_URL` | secret (optional locally) | Direct Neon URL when Hyperdrive is not configured (`wrangler dev` / `.dev.vars`). |
 | `BETTER_AUTH_SECRET` | secret | 32+ random bytes. Rotating it signs everyone out. |
-| `BETTER_AUTH_URL` | var | Public origin of the Worker, e.g. `https://zeroed.<account>.workers.dev`. |
+| `BETTER_AUTH_URL` | **prod var / secret** | Public origin of the Worker, e.g. `https://zeroed.<account>.workers.dev`. **Do not put localhost in `wrangler.jsonc` `vars`** — those ship to prod and would reject the real SPA origin. Local only: `.dev.vars` (`BETTER_AUTH_URL=http://localhost:8787`) or the `auth.ts` fallback when unset. |
 | `OPENAI_API_KEY` | secret | Same key as today's `agent` function. |
 | `OPENAI_MODEL` | var | Default `gpt-5.4-nano`. |
 | `OPENAI_MODEL_HEAVY` | secret/var | Optional; `program_edit` only. |
@@ -74,8 +74,9 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 1. Phil sign-off recorded. No deploy happens without it.
 2. `npm run type-check && npm run lint && npm run check && npm run check:isolation-mutation`
    green on this branch. Isolation applies `supabase/migrations` onto
-   PGlite, then seeds two athletes. The mutation script deletes each of
-   the 16 per-athlete filters on its own and expects at least one failure.
+   PGlite, then seeds two athletes. The mutation script first asserts the
+   unmutated check is green, then deletes each derived owner filter
+   (`athlete_id =` and `id =`) on its own and expects at least one failure.
 3. `npm run build && npx wrangler dev` serves `/` and `/api/health`.
    `POST /functions/v1/agent` reaches the Worker (not a 405 from assets).
    Missing `/assets/*` is 404 text/plain, not `index.html`.
@@ -102,9 +103,11 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 3. Apply `worker/schema/better-auth.sql` only if the script did not already
    create those tables.
 4. Point the Worker Hyperdrive config at the Neon connection string.
-5. Rebuild the SPA with `VITE_API_BASE_URL=/api` (or the workers.dev origin +
-   `/api`) and `wrangler deploy`. Do **not** flip the production hostname until
-   smoke passes on workers.dev.
+5. Set the Worker `BETTER_AUTH_URL` var/secret to the public Worker origin
+   (never leave it as `http://localhost:8787`). Rebuild the SPA with
+   `VITE_API_BASE_URL=/api` (or the workers.dev origin + `/api`) and
+   `wrangler deploy`. Do **not** flip the production hostname until smoke
+   passes on workers.dev.
 6. Smoke:
    - `GET /` → 200, app shell.
    - `GET /app/today` → `index.html` (SPA fallback).

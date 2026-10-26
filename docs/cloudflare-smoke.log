@@ -1,85 +1,59 @@
-# Local smoke — 2026-10-26 (QA round 2)
+# Local smoke — 2026-10-26 (QA round 3)
 # npm run type-check && npm run lint && npm run check && npm run check:isolation-mutation
-# npm run build && npx wrangler dev --ip 127.0.0.1 --port 8788
+# TZ=America/Los_Angeles and TZ=UTC both pass access.check (81/81)
 
 ## type-check / lint / check
 npm run type-check   # pass
 npm run lint         # pass
 npm run check
-  73 checks, 0 failed
+  81 checks, 0 failed
   access isolation: ok   (supabase/migrations applied on PGlite + two-athlete seed)
 
-## isolation mutation (every filter)
+## isolation mutation (derived owner filters)
 npm run check:isolation-mutation
-M1 delete loadWorkout athlete_id filter          → 1 failed (selectOwnedWorkout)
-M2 set athlete_id filters to TRUE                → 35 failed
+baseline (unmutated)                             → 81/81 green
+derived 18 owner filters (athlete_id = and id =)
+M1 delete loadWorkout athlete_id filter          → 1 failed
+M2 set owner filters to TRUE                     → 41 failed
 edits.ts:183 UPDATE routine                      → 5 failed
 edits.ts:194 INSERT routine EXISTS               → 2 failed
 edits.ts:221 UPDATE phase                        → 1 failed
 edits.ts:236 INSERT phase EXISTS                 → 3 failed
 edits.ts:282 INSERT program_revision EXISTS      → 3 failed
-store.ts:74  programIds                          → 3 failed
-store.ts:86  loadAthlete row                     → 1 failed
-store.ts:92  athlete_profile                     → 1 failed
-store.ts:105 loadLiveProgram program             → 9 failed
-store.ts:162 loadLiveProgram prefs               → 1 failed
-store.ts:195 loadInsights includeSettled         → 2 failed
-store.ts:201 loadInsights open                   → 3 failed
-store.ts:234 loadWorkouts join                   → 4 failed
-store.ts:295 selectOwnedWorkout                  → 1 failed
-store.ts:382 loadJourney                         → 1 failed
-store.ts:431 loadNotes coach                     → 1 failed
-mutation proof: ok (M1, M2, and 16 single-filter mutations failed as expected)
+edits.ts:343 UPDATE athlete sessions_per_week    → 1 failed
+edits.ts:350 UPDATE athlete training_preferences → 1 failed
+store.ts:74  programIds                          → 5 failed
+store.ts:93  loadAthlete row                     → 1 failed
+store.ts:99  athlete_profile                     → 1 failed
+store.ts:112 loadLiveProgram program             → 9 failed
+store.ts:169 loadLiveProgram prefs               → 1 failed
+store.ts:202 loadInsights settled                → 2 failed
+store.ts:208 loadInsights open                   → 3 failed
+store.ts:241 loadWorkouts join                   → 4 failed
+store.ts:302 selectOwnedWorkout                  → 1 failed
+store.ts:388 loadJourney                         → 1 failed
+store.ts:437 loadNotes coach                     → 1 failed
+mutation proof: ok (18/18)
 
 ## live Vercel headers (2026-10-26)
 
 $ curl -sI https://zeroed-two.vercel.app/
 HTTP/2 200
-accept-ranges: bytes
 access-control-allow-origin: *
-age: 3028
 cache-control: public, max-age=0, must-revalidate
-content-disposition: inline
-content-type: text/html; charset=utf-8
-date: Mon, 26 Oct 2026 01:22:23 GMT
-etag: "4ed557c2192a86a2ac05b3b91caf8e5d"
-last-modified: Mon, 26 Oct 2026 00:31:55 GMT
-server: Vercel
 strict-transport-security: max-age=63072000; includeSubDomains; preload
-x-vercel-cache: HIT
-x-vercel-id: pdx1::ptfp7-1792977743655-8f5baecce494
-content-length: 1663
 
 $ curl -sI https://zeroed-two.vercel.app/assets/index-C5_rVfg7.js
 HTTP/2 200
-accept-ranges: bytes
 access-control-allow-origin: *
-age: 2977
 cache-control: public, max-age=0, must-revalidate
-content-disposition: inline; filename="index-C5_rVfg7.js"
-content-type: application/javascript; charset=utf-8
-date: Mon, 26 Oct 2026 01:22:23 GMT
-etag: "82c0d41780f15053cc72d0bd34c3ed33"
-last-modified: Mon, 26 Oct 2026 00:32:45 GMT
-server: Vercel
 strict-transport-security: max-age=63072000; includeSubDomains; preload
-x-vercel-cache: HIT
-x-vercel-id: pdx1::ptfp7-1792977743731-a33946e62b3f
-content-length: 786083
 
-This hostname currently sends max-age=0 on the hashed JS (no nosniff).
-Workers /assets/* is restored to public, max-age=31536000, immutable (Vite
-hashed assets) and keeps nosniff. ACAO * is on static paths because live
-sends it on both / and the hashed JS file.
+Workers /assets/* is public, max-age=31536000, immutable + nosniff (stricter than live).
 
 ## wrangler dev
-GET /                         200 text/html   HSTS + nosniff + ACAO * + max-age=0
-GET /app/today                200 text/html   SPA fallback (same ETag)
-GET /api/health               200 HSTS + nosniff
-POST /functions/v1/agent      400 worker JSON (not assets 405)
-GET /assets/index-*.js        200 max-age=31536000, immutable + nosniff
-GET /assets/nope-missing.js   404 text/plain
-GET /nope.png                 404 text/plain
-GET /missing.json             404 text/plain
-OPTIONS /api/auth/* Origin=http://localhost:5173
-                              ACAO http://localhost:5173 + credentials (never *)
+GET /api/auth (500 dummy DB) Origin=http://localhost:5173
+  ACAO http://localhost:5173 + credentials + Vary
+GET /assets/*.js        200 immutable 1y + nosniff
+GET /nope.png           404
+POST /functions/v1/agent  400 worker JSON (not 405)

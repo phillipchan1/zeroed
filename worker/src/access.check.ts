@@ -3,6 +3,8 @@
 // Proves: athlete A cannot read, edit, or delete athlete B's rows on every
 // store / edits query path. Mutating those SQL filters must make this fail.
 
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
 import {
   applyEdits,
@@ -27,6 +29,7 @@ import {
   makeStore,
   programIds,
   selectOwnedWorkout,
+  workoutProgramOwned,
 } from './store.ts'
 import { executeZeroedTool } from './tools.ts'
 import type { LiveProgram } from './store.ts'
@@ -38,6 +41,15 @@ let checks = 0
 function ok(cond: boolean, msg: string) {
   checks++
   if (!cond) fails.push(msg)
+}
+
+function utcDay(value: unknown): string {
+  if (value instanceof Date) return value.toISOString().slice(0, 10)
+  const raw = String(value ?? '')
+  const iso = raw.match(/^(\d{4}-\d{2}-\d{2})/)
+  if (iso) return iso[1]
+  const ms = Date.parse(raw)
+  return Number.isNaN(ms) ? '' : new Date(ms).toISOString().slice(0, 10)
 }
 
 const A = '11111111-1111-1111-1111-111111111111'
@@ -78,8 +90,8 @@ const athleteB = await loadAthlete(storeB)
 ok(athleteA.id === A && athleteA.name === 'Athlete A', 'loadAthlete: A is A')
 ok(athleteA.goals === 'A only goal', 'loadAthlete: A does not see B goals')
 ok(athleteB.id === B, 'loadAthlete: B is B')
-ok(athleteA.current_phase === 'Strength' && !/15/.test(String(athleteA.retest_date ?? '')), 'loadAthlete profile: A phase is A')
-ok(athleteB.current_phase === 'Power' && /15/.test(String(athleteB.retest_date ?? '')), 'loadAthlete profile: B phase is B')
+ok(athleteA.current_phase === 'Strength' && utcDay(athleteA.retest_date) === '2026-12-01', 'loadAthlete profile: A phase is A')
+ok(athleteB.current_phase === 'Power' && utcDay(athleteB.retest_date) === '2026-12-15', 'loadAthlete profile: B phase is B')
 
 const liveA = await loadLiveProgram(storeA)
 const liveB = await loadLiveProgram(storeB)
@@ -115,6 +127,14 @@ ok(ownWorkout?.observations.every((o) => o.signal !== 'B felt good') ?? false, '
 ok(await loadWorkout(storeB, WORKOUT_A) === null, 'loadWorkout: B asking for A workout_id gets null')
 ok(await selectOwnedWorkout(storeA, WORKOUT_B) === null, 'selectOwnedWorkout: SQL athlete_id hides B')
 ok((await selectOwnedWorkout(storeA, WORKOUT_A))?.id === WORKOUT_A, 'selectOwnedWorkout: A own row')
+ok(await workoutProgramOwned(storeA, PROG_A), 'loadWorkout second check: A owns A program')
+ok(!(await workoutProgramOwned(storeA, PROG_B)), 'loadWorkout second check: A does not own B program')
+ok(!(await workoutProgramOwned(storeB, PROG_A)), 'loadWorkout second check: B does not own A program')
+ok(
+  readFileSync(fileURLToPath(new URL('./store.ts', import.meta.url)), 'utf8')
+    .includes('workoutProgramOwned(store, row.r_program_id)'),
+  'loadWorkout second check is applied after SQL',
+)
 
 const liftsA = await loadLiftHistory(storeA, 'Deadlift')
 const liftsB = await loadLiftHistory(storeB, 'Deadlift')
@@ -211,6 +231,21 @@ const sneakB: EditInput[] = [{
 const sneak = await applyEdits(storeA, sneakB, { confirm: true, timing: 'now' })
 ok(!sneak.includes('should not apply') || sneak.includes('skipped') || sneak.includes('Nothing'), 'applyEdits: A cannot target B session name on A week')
 ok((await scalar<string>('SELECT name FROM routine WHERE id = $1', [ROUTINE_B])) === 'B day', 'applyEdits sneak: B name still B day')
+
+const bSessions = Number(await scalar<number | string>('SELECT sessions_per_week FROM athlete WHERE id = $1', [B]))
+const bPrefs = await scalar<string>('SELECT training_preferences FROM athlete WHERE id = $1', [B])
+await applyEdits(storeA, [{
+  type: 'set_sessions_per_week',
+  sessions_per_week: 5,
+  rationale: 'isolation days',
+}], { confirm: true, timing: 'now', request: 'A wants more days' })
+ok(Number(await scalar<number | string>('SELECT sessions_per_week FROM athlete WHERE id = $1', [A])) === 5, 'applyEdits: A sessions_per_week updated')
+ok(Number(await scalar<number | string>('SELECT sessions_per_week FROM athlete WHERE id = $1', [B])) === bSessions, 'applyEdits: B sessions_per_week untouched')
+ok((await scalar<string>('SELECT training_preferences FROM athlete WHERE id = $1', [B])) === bPrefs, 'applyEdits: B training_preferences untouched')
+ok(
+  String(await scalar<string>('SELECT training_preferences FROM athlete WHERE id = $1', [A])).includes('A wants more days'),
+  'applyEdits: A training_preferences updated',
+)
 
 const bWeekEnd = await scalar<string>('SELECT week_end::text FROM phase WHERE id = $1', [PHASE_B])
 const closeErrors: string[] = []

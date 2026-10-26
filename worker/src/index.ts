@@ -56,7 +56,10 @@ app.all('/api/auth/*', async (c) => {
     return new Response(res.body, { status: res.status, headers })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    return c.json({ error: message }, 500)
+    return new Response(JSON.stringify({ error: message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...cors },
+    })
   }
 })
 

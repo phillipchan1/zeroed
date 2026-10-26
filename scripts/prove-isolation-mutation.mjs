@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 /**
  * Mutation proof for access isolation.
- * Deletes each per-athlete filter in store.ts / edits.ts on its own and
- * asserts access.check fails. Also keeps the original M1 (loadWorkout) and
- * M2 (all filters → TRUE) cases.
+ * Asserts the unmutated tree is green, then deletes each owner filter in
+ * store.ts / edits.ts on its own and expects access.check to fail.
  */
 import { readFileSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
@@ -14,7 +13,8 @@ const originalStore = readFileSync(storePath, 'utf8')
 const originalEdits = readFileSync(editsPath, 'utf8')
 
 const ATHLETE_FILTER = /(?:p\.)?athlete_id = \$\{store\.athleteId\}/g
-const STORE_ID_FILTER = /WHERE id = \$\{store\.athleteId\}/g
+// Owner `id =` filters only — not the `athlete_id =` substring.
+const ID_FILTER = /(?<![A-Za-z_])id = \$\{store\.athleteId\}/g
 
 function restore() {
   writeFileSync(storePath, originalStore)
@@ -32,38 +32,29 @@ function lineOf(source, index) {
   return source.slice(0, index).split('\n').length
 }
 
-function collectFilters() {
+function collectFrom(file, path, source) {
   const items = []
-  for (const match of originalStore.matchAll(ATHLETE_FILTER)) {
-    items.push({
-      file: 'store',
-      path: storePath,
-      source: originalStore,
-      index: match.index ?? 0,
-      text: match[0],
-      line: lineOf(originalStore, match.index ?? 0),
-    })
+  for (const re of [ATHLETE_FILTER, ID_FILTER]) {
+    re.lastIndex = 0
+    for (const match of source.matchAll(re)) {
+      items.push({
+        file,
+        path,
+        source,
+        index: match.index ?? 0,
+        text: match[0],
+        line: lineOf(source, match.index ?? 0),
+      })
+    }
   }
-  for (const match of originalStore.matchAll(STORE_ID_FILTER)) {
-    items.push({
-      file: 'store',
-      path: storePath,
-      source: originalStore,
-      index: match.index ?? 0,
-      text: match[0],
-      line: lineOf(originalStore, match.index ?? 0),
-    })
-  }
-  for (const match of originalEdits.matchAll(ATHLETE_FILTER)) {
-    items.push({
-      file: 'edits',
-      path: editsPath,
-      source: originalEdits,
-      index: match.index ?? 0,
-      text: match[0],
-      line: lineOf(originalEdits, match.index ?? 0),
-    })
-  }
+  return items
+}
+
+function collectFilters() {
+  const items = [
+    ...collectFrom('store', storePath, originalStore),
+    ...collectFrom('edits', editsPath, originalEdits),
+  ]
   items.sort((a, b) => a.file.localeCompare(b.file) || a.index - b.index)
   return items
 }
@@ -71,7 +62,7 @@ function collectFilters() {
 function neutralize(source, index, text) {
   const before = source.slice(0, index)
   const after = source.slice(index + text.length)
-  if (text.startsWith('WHERE ')) return `${before}WHERE TRUE${after}`
+  if (before.endsWith('WHERE ')) return `${before}TRUE${after}`
   return `${before}TRUE${after}`
 }
 
@@ -92,12 +83,21 @@ function expectFail(label, mutate) {
   }
 }
 
-const filters = collectFilters()
-if (filters.length !== 16) {
-  console.error('expected 16 per-athlete filters, found:')
-  for (const f of filters) console.error(`  ${f.file}.ts:${f.line} ${f.text}`)
-  throw new Error(`expected 16 filters, found ${filters.length}`)
+const baseline = runCheck()
+const baselineOut = `${baseline.stdout || ''}\n${baseline.stderr || ''}`.trim()
+console.log('=== baseline (unmutated) ===')
+console.log(baselineOut)
+if (baseline.status !== 0) {
+  throw new Error('unmutated isolation check must be green before mutations run')
 }
+console.log('baseline: isolation check green')
+
+const filters = collectFilters()
+if (filters.length === 0) {
+  throw new Error('no owner filters found in store.ts / edits.ts')
+}
+console.log(`derived ${filters.length} owner filters:`)
+for (const f of filters) console.log(`  ${f.file}.ts:${f.line} ${f.text}`)
 
 expectFail('M1 delete loadWorkout athlete_id filter', () => {
   const next = originalStore.replace(
@@ -112,6 +112,7 @@ expectFail('M2 set athlete_id filters to TRUE', () => {
   const repl = (source) => source
     .replace(/p\.athlete_id = \$\{store\.athleteId\}/g, 'TRUE')
     .replace(/athlete_id = \$\{store\.athleteId\}/g, 'TRUE')
+    .replace(/(?<![A-Za-z_])id = \$\{store\.athleteId\}/g, 'TRUE')
   writeFileSync(storePath, repl(originalStore))
   writeFileSync(editsPath, repl(originalEdits))
 })
@@ -123,4 +124,4 @@ for (const filter of filters) {
   })
 }
 
-console.log(`\nmutation proof: ok (M1, M2, and ${filters.length} single-filter mutations failed as expected)`)
+console.log(`\nmutation proof: ok (${filters.length}/${filters.length})`)

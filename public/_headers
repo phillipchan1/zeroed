@@ -1,8 +1,11 @@
-# Live Vercel (zeroed-two.vercel.app, 2026-10-26):
-#   /  → HSTS + cache-control max-age=0 + ACAO *
-#   hashed /assets/*.js → ACAO * + HSTS; Vite hashed assets are served
-#   immutable 1y on a typical Vercel Vite deploy, so we restore that here.
-# nosniff stays. No XFO / XSS / Permissions / Referrer (live does not send them).
+# Live Vercel (zeroed-two.vercel.app, 2026-10-26 curl -sI):
+#   / and /assets/index-C5_rVfg7.js both send:
+#     access-control-allow-origin: *
+#     cache-control: public, max-age=0, must-revalidate
+#     strict-transport-security: max-age=63072000; includeSubDomains; preload
+#   Live does not send nosniff, XFO, XSS, Permissions-Policy, or Referrer-Policy.
+# Workers differs on purpose: nosniff everywhere, and hashed /assets/* is
+# public, max-age=31536000, immutable (stricter than this hostname's max-age=0).
 
 /*
   Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
