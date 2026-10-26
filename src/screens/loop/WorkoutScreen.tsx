@@ -13,7 +13,7 @@ import {
 } from '../../lib/workoutOutbox'
 import {
   gatherSessionPrescription, gatherExerciseBests, gatherLastSetsByName, actualsFromPending,
-  coachStarterPrompts, runCoachChat,
+  coachStarterPrompts, runCoachChat, logTimestampForWeek, addDaysISO,
   type SessionPrescription, type SessionActuals, type ClearanceView,
   type PendingSession, type PendingDebrief, type DebriefExerciseInput,
 } from '../../engine'
@@ -1173,6 +1173,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // edited straight out of the outbox. Querying the database for that id was how
   // "Review / edit" on a just-finished session came up blank.
   const editRef      = searchParams.get('w')
+  const weekStartParam = searchParams.get('week')
+  const targetWeek = weekStartParam && /^\d{4}-\d{2}-\d{2}$/.test(weekStartParam)
+    ? { start: weekStartParam, end: addDaysISO(weekStartParam, 6) }
+    : null
   const pendingRefId = parsePendingRef(editRef)
   // That reference can go stale under the athlete's thumb: the commit finishes
   // while the sheet is open. A queued session that has already become a row is
@@ -1233,7 +1237,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // past log is the one case that still needs a picker (§ footer), since
   // there the date itself may be what's being corrected.
   const [performedAt, setPerformedAt] = useState<string>(() => toDateInput(
-    seedActuals?.performedAt ? new Date(seedActuals.performedAt) : new Date(),
+    seedActuals?.performedAt
+      ? new Date(seedActuals.performedAt)
+      : targetWeek
+        ? logTimestampForWeek(new Date(), targetWeek.start, targetWeek.end)
+        : new Date(),
   ))
   // An edit with nothing to edit — the row is gone, the queued session was
   // dropped, or we're offline and the log only exists on the server. Say so
@@ -1908,7 +1916,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         : isEdit ? null : onboardingTransition,
       debrief,
       editWorkoutId: pendingEditId ? pendingTarget : isEdit ? editWorkoutId : null,
-      performedAt: isEdit ? dateInputToISO(performedAt) : dateInputToISO(toDateInput(new Date())),
+      performedAt: isEdit
+        ? dateInputToISO(performedAt)
+        : targetWeek
+          ? logTimestampForWeek(new Date(), targetWeek.start, targetWeek.end).toISOString()
+          : dateInputToISO(toDateInput(new Date())),
       queuedAt: new Date().toISOString(),
       // Freeze the prescription these set indices were logged against. The
       // program editor rewrites routine.exercises in place, so a session read

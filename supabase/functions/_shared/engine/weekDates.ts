@@ -42,9 +42,26 @@ export function weekEndingISO(monday: Date): string {
   return isoDate(sun)
 }
 
-/** The Monday a deferred change would land on. */
-export function nextMondayISO(from: Date = new Date()): string {
-  return addDaysISO(isoDate(startOfWeekMonday(from)), 7)
+/** The athlete's training calendar. Sunday 5pm here is still Sunday, even if UTC has rolled to Monday. */
+export const ATHLETE_TIME_ZONE = 'America/Los_Angeles'
+
+const DOW_FROM_WEEKDAY: Record<string, number> = {
+  Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
+}
+
+/** The Monday a deferred change would land on, in the athlete's timezone. */
+export function nextMondayISO(from: Date = new Date(), timeZone = ATHLETE_TIME_ZONE): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone,
+    weekday: 'short',
+    year: 'numeric',
+    month: 'numeric',
+    day: 'numeric',
+  }).formatToParts(from)
+  const get = (type: string) => parts.find((p) => p.type === type)?.value ?? ''
+  const todayISO = `${Number(get('year'))}-${String(Number(get('month'))).padStart(2, '0')}-${String(Number(get('day'))).padStart(2, '0')}`
+  const dow = DOW_FROM_WEEKDAY[get('weekday')] ?? 0
+  return addDaysISO(addDaysISO(todayISO, -((dow + 6) % 7)), 7)
 }
 
 /**
