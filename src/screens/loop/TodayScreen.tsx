@@ -550,7 +550,7 @@ function PagerBoundary({ boundary }: { boundary: NonNullable<WeekPagerData['boun
   return (
     <div className="card">
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <Lock size={16} strokeWidth={1.75} color="var(--text-dim)" />
+        <Lock size={16} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />
         <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700 }}>{boundary.phaseName}</h3>
       </div>
       {boundary.goal && <p className="text-sm text-dim" style={{ marginTop: 10 }}>{boundary.goal}</p>}
@@ -958,7 +958,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     if (retestDue) {
       return (
         <Banner
-          icon={<Activity size={20} strokeWidth={1.75} color="var(--signal)" />}
+          icon={<Activity size={20} strokeWidth={1.75} style={{ color: 'var(--signal)' }} />}
           title="Retest due"
           sub="A quick rescreen re-scopes your program."
           onClick={() => navigate('/app/retest')}
@@ -968,7 +968,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     if (showRecap && latestReview) {
       return (
         <Banner
-          icon={<Sparkles size={20} strokeWidth={1.75} color="var(--signal)" />}
+          icon={<Sparkles size={20} strokeWidth={1.75} style={{ color: 'var(--signal)' }} />}
           title="Your weekly recap is ready"
           sub="What moved, and the call for this week."
           onClick={() => { markRecapSeen(latestReview.id); navigate(`/app/recap/${latestReview.id}`) }}
@@ -1177,7 +1177,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
               weekClosed ? (
                 <Banner
                   tone="good"
-                  icon={<Flag size={20} strokeWidth={1.75} color="var(--confirmed)" />}
+                  icon={<Flag size={20} strokeWidth={1.75} style={{ color: 'var(--confirmed)' }} />}
                   title="Week closed"
                   sub="View the recap"
                   onClick={() => latestReview && navigate(`/app/recap/${latestReview.id}`)}
@@ -1185,7 +1185,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
               ) : (
                 <Banner
                   tone="quiet"
-                  icon={<Flag size={20} strokeWidth={1.75} color="var(--text-dim)" />}
+                  icon={<Flag size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
                   title="Done with the week?"
                   sub="Crunch the numbers and set next week."
                   onClick={() => setShowCloseSheet(true)}

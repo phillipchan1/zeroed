@@ -534,7 +534,7 @@ function RoadAheadCard({ phase }: { phase: MapPhase }) {
   return (
     <div className="card" style={{ opacity: 0.85 }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
-        <Lock size={16} strokeWidth={1.75} color="var(--text-dim)" />
+        <Lock size={16} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />
         <h3 style={{ fontSize: 'var(--fs-base)', fontWeight: 700 }}>{phase.name}</h3>
       </div>
       {phase.goal && (

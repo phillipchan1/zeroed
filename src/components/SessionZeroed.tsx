@@ -83,7 +83,7 @@ export function SessionZeroed({ session, week, onDone }: {
 
       <LockOn style={{ '--lock-gap': '-14px', '--lock-from': '22px' } as React.CSSProperties}>
         <span className="zeroed-moment__mark">
-          <Check size={36} strokeWidth={2.75} color="var(--signal)" />
+          <Check size={36} strokeWidth={2.75} style={{ color: 'var(--signal)' }} />
         </span>
       </LockOn>
 
