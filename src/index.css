@@ -3556,15 +3556,16 @@ textarea.input {
 .demo-floor { stroke: var(--line); stroke-width: 1.2; }
 .demo-prop { stroke: #3A3A3A; stroke-width: 2.4; fill: var(--surface); stroke-linecap: round; }
 .demo-prop--rail { stroke: var(--text-dim); stroke-width: 3; }
-.demo-bone polyline, .demo-bone line {
-  fill: none;
-  stroke: var(--text);
-  stroke-width: 5.5;
-  stroke-linecap: round;
+/* The body: solid bone-white, each part edged in the ground colour so a limb
+   crossing the torso still reads as in front of it. The far-side limbs sit
+   back in grey. */
+.demo-body path, .demo-body circle {
+  fill: #ECECEC;
+  stroke: var(--ground);
+  stroke-width: 0.9;
   stroke-linejoin: round;
 }
-.demo-bone--far polyline { stroke: var(--text-dim); stroke-opacity: 0.45; }
-.demo-head { fill: var(--text); }
+.demo-body--far path { fill: #4A4A4A; }
 .demo-load circle, .demo-load line {
   fill: rgba(10, 10, 10, 0.55);
   stroke: var(--signal);

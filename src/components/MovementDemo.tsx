@@ -79,11 +79,104 @@ function LoadShape({ load, at, forearm }: { load: Load; at: Pt; forearm: number 
   }
 }
 
-function Limbs({ fig, side }: { fig: Figure; side: 0 | 1 }) {
+// ---- the body ---------------------------------------------------------------
+// An athlete's build, not a stick: every segment is a tapered shape with its
+// muscle belly where it sits on a real limb (quads high on the thigh, calves
+// high on the shin, delts capping the shoulder), and the torso is a V-taper
+// with chest in front and glutes behind. Radii are in view units.
+
+type Profile = [number, number][]   // [t along the segment 0..1, radius]
+
+const UPPER_ARM: Profile = [[0, 4.8], [0.3, 4.3], [0.55, 4.1], [1, 2.8]]
+const FOREARM: Profile = [[0, 2.9], [0.25, 3.3], [1, 2.0]]
+const THIGH: Profile = [[0, 5.6], [0.3, 5.7], [0.7, 4.6], [1, 3.6]]
+const SHIN: Profile = [[0, 3.3], [0.3, 3.7], [0.75, 2.4], [1, 2.1]]
+const FOOT: Profile = [[0, 2.4], [1, 1.5]]
+const NECK: Profile = [[0, 3.6], [1, 3.0]]
+
+function radiusAt(prof: Profile, t: number): number {
+  for (let i = 1; i < prof.length; i++) {
+    const [t1, r1] = prof[i]
+    const [t0, r0] = prof[i - 1]
+    if (t <= t1) return r0 + ((r1 - r0) * (t - t0)) / (t1 - t0 || 1)
+  }
+  return prof[prof.length - 1][1]
+}
+
+/** A segment from a to b swelled to the profile, rounded at both ends. */
+function taper(a: Pt, b: Pt, prof: Profile): string {
+  const len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1
+  const d: Pt = [(b[0] - a[0]) / len, (b[1] - a[1]) / len]
+  const n: Pt = [-d[1], d[0]]
+  const at = (t: number): Pt => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+  const ts = [0, 0.15, 0.3, 0.45, 0.6, 0.75, 0.9, 1]
+  const left: Pt[] = ts.map((t) => { const p = at(t), r = radiusAt(prof, t); return [p[0] + n[0] * r, p[1] + n[1] * r] })
+  const right: Pt[] = ts.map((t) => { const p = at(t), r = radiusAt(prof, t); return [p[0] - n[0] * r, p[1] - n[1] * r] })
+  const cap = (c: Pt, r: number, u: Pt, v: Pt): Pt[] =>
+    Array.from({ length: 7 }, (_, i) => {
+      const th = ((i + 1) / 8) * Math.PI
+      return [c[0] + r * (Math.cos(th) * u[0] + Math.sin(th) * v[0]), c[1] + r * (Math.cos(th) * u[1] + Math.sin(th) * v[1])]
+    })
+  const rEnd = radiusAt(prof, 1)
+  const rStart = radiusAt(prof, 0)
+  const pts = [
+    ...left,
+    ...cap(b, rEnd, n, d),
+    ...right.reverse(),
+    ...cap(a, rStart, [-n[0], -n[1]], [-d[0], -d[1]]),
+  ]
+  return `M${line(pts).replace(/ /g, 'L')}Z`
+}
+
+/** A closed Catmull-Rom curve through the points — the torso's outline. */
+function smoothClosed(pts: Pt[]): string {
+  const n = pts.length
+  const f = (v: number) => v.toFixed(2)
+  let path = `M${f(pts[0][0])},${f(pts[0][1])}`
+  for (let i = 0; i < n; i++) {
+    const p0 = pts[(i - 1 + n) % n], p1 = pts[i], p2 = pts[(i + 1) % n], p3 = pts[(i + 2) % n]
+    const c1: Pt = [p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6]
+    const c2: Pt = [p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6]
+    path += `C${f(c1[0])},${f(c1[1])} ${f(c2[0])},${f(c2[1])} ${f(p2[0])},${f(p2[1])}`
+  }
+  return path + 'Z'
+}
+
+// Torso outline in its own frame: u runs hip (0) → shoulder (1) as a fraction
+// of the torso; v is the offset toward the chest (+) or the back (−).
+const TORSO: Pt[] = [
+  [-0.04, 5.0], [0.3, 5.4], [0.56, 7.8], [0.78, 9.0], [0.95, 7.2], [1.07, 3.4],    // front: abs → pec
+  [1.07, -3.6], [0.95, -7.6], [0.7, -8.2], [0.44, -5.6], [0.16, -6.4], [-0.02, -8.0], [-0.18, -4.0], // back: traps → glutes
+]
+
+function torsoPath(fig: Figure): string {
+  const L = BONE.torso
+  const d: Pt = [(fig.shoulder[0] - fig.hip[0]) / L, (fig.shoulder[1] - fig.hip[1]) / L]
+  // The chest side: the torso's direction turned toward the figure's front.
+  const front: Pt = [-d[1], d[0]]
+  return smoothClosed(TORSO.map(([u, v]) => [
+    fig.hip[0] + d[0] * u * L + front[0] * v,
+    fig.hip[1] + d[1] * u * L + front[1] * v,
+  ]))
+}
+
+function Limbs({ fig, side, part }: { fig: Figure; side: 0 | 1; part: 'legs' | 'arms' }) {
+  const cls = side === 0 ? 'demo-body' : 'demo-body demo-body--far'
+  if (part === 'legs') {
+    const [hip, knee, ankle, toe] = fig.legs[side]
+    return (
+      <g className={cls}>
+        <path d={taper(ankle, toe, FOOT)} />
+        <path d={taper(knee, ankle, SHIN)} />
+        <path d={taper(hip, knee, THIGH)} />
+      </g>
+    )
+  }
+  const [shoulder, elbow, hand] = fig.arms[side]
   return (
-    <g className={side === 0 ? 'demo-bone' : 'demo-bone demo-bone--far'}>
-      <polyline points={line(fig.legs[side])} />
-      <polyline points={line(fig.arms[side])} />
+    <g className={cls}>
+      <path d={taper(elbow, hand, FOREARM)} />
+      <path d={taper(shoulder, elbow, UPPER_ARM)} />
     </g>
   )
 }
@@ -117,12 +210,15 @@ export function DemoFigure({ demo, seconds, trace }: { demo: Demo; seconds: numb
         <line className="demo-cable" x1={cable.from[0]} y1={cable.from[1]} x2={fig.load[0]} y2={fig.load[1]} />
       )}
 
-      <Limbs fig={fig} side={1} />
-      <g className="demo-bone">
-        <line x1={fig.hip[0]} y1={fig.hip[1]} x2={fig.shoulder[0]} y2={fig.shoulder[1]} />
+      <Limbs fig={fig} side={1} part="legs" />
+      <Limbs fig={fig} side={1} part="arms" />
+      <g className="demo-body">
+        <path d={taper(fig.shoulder, fig.head, NECK)} />
+        <path d={torsoPath(fig)} />
+        <circle cx={fig.head[0]} cy={fig.head[1]} r={BONE.head - 0.3} />
       </g>
-      <circle className="demo-head" cx={fig.head[0]} cy={fig.head[1]} r={BONE.head} />
-      <Limbs fig={fig} side={0} />
+      <Limbs fig={fig} side={0} part="legs" />
+      <Limbs fig={fig} side={0} part="arms" />
       {demo.load && fig.load && <LoadShape load={demo.load} at={fig.load} forearm={fig.forearm} />}
     </svg>
   )

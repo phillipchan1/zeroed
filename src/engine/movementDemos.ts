@@ -196,28 +196,26 @@ const ROMANIAN_DEADLIFT: MovementDemo = {
   ],
 }
 
-// Lying on a bench, head to the right. The bar comes down to the lower chest
-// and presses back up over the shoulders.
+// Lying on a bench, head to the left so the chest faces up (a figure turned the
+// other way would be face-down). The bar comes down to the lower chest and
+// presses back up over the shoulders.
+const BENCH_LEGS: [Limb, Limb] = [{ reach: [116, FLOOR], bend: 'up' }, { reach: [116, FLOOR], bend: 'up' }]
 const BENCH_PRESS: MovementDemo = {
   load: { kind: 'barbell', at: 'hands' },
   trace: true,
-  props: [{ kind: 'bench', x: 36, w: 72, top: 88 }],
+  props: [{ kind: 'bench', x: 52, w: 72, top: 88 }],
   beats: [
     {
       pose: {
-        hip: [62, 84], torso: 90,
-        legs: [{ reach: [44, FLOOR], bend: 'up' }, { reach: [44, FLOOR], bend: 'up' }],
-        arms: [{ reach: [93, 51], bend: 'down' }, { reach: [93, 51], bend: 'down' }],
-        feet: [-90, -90],
+        hip: [98, 81], torso: -90, legs: BENCH_LEGS,
+        arms: [{ reach: [67, 48], bend: 'down' }, { reach: [67, 48], bend: 'down' }],
       },
       hold: 0.4, move: 1.4, cue: 'Lower to your lower chest, elbows tucked',
     },
     {
       pose: {
-        hip: [62, 84], torso: 90,
-        legs: [{ reach: [44, FLOOR], bend: 'up' }, { reach: [44, FLOOR], bend: 'up' }],
-        arms: [{ reach: [88, 77], bend: 'down' }, { reach: [88, 77], bend: 'down' }],
-        feet: [-90, -90],
+        hip: [98, 81], torso: -90, legs: BENCH_LEGS,
+        arms: [{ reach: [72, 71], bend: 'down' }, { reach: [72, 71], bend: 'down' }],
       },
       hold: 0.2, move: 1.0, cue: 'Press up and back over your shoulders',
     },
