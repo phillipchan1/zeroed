@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import type { User } from '@supabase/supabase-js'
+import type { AuthUser } from '../../lib/authClient'
 import { supabase } from '../../lib/supabaseClient'
 import { Spinner } from '../../components/ui'
 import { HookAct, OBSTACLE_STORAGE_KEY, PROBE_STORAGE_KEY, type ProbeStash } from './HookAct'
@@ -22,7 +22,7 @@ export function OnboardingRouter({
   athlete,
   refresh,
 }: {
-  user: User | null
+  user: AuthUser | null
   athlete: AthleteRow | null
   refresh: () => void
 }) {

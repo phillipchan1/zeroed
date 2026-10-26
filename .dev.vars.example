@@ -1,0 +1,13 @@
+# Copy to `.dev.vars` (gitignored) for `wrangler dev`.
+# Never VITE_-prefix these.
+
+OPENAI_API_KEY=sk-replace-me
+OPENAI_MODEL=gpt-5.4-nano
+# OPENAI_MODEL_HEAVY=gpt-5.4
+BETTER_AUTH_SECRET=replace-with-32-plus-random-bytes
+# Dev-only. Production must set this as a Worker var/secret to the public origin.
+BETTER_AUTH_URL=http://localhost:8787
+# RESEND_API_KEY=
+RESEND_FROM=Zeroed <noreply@localhost>
+# Optional when Hyperdrive localConnectionString is not used:
+# DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/zeroed

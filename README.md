@@ -59,6 +59,21 @@ npm run build        # Production build → dist/
 npm run preview      # Serve the dist/ build locally
 ```
 
+## Cloudflare (draft — do not cut over)
+
+Workers Static Assets + a Hono Worker for `/api/agent`, `/api/mcp`, and
+Better Auth (`/api/auth`). Live Vercel + Supabase stay up until cutover.
+Runbook: [`docs/cloudflare-cutover.md`](docs/cloudflare-cutover.md).
+
+```bash
+cp .dev.vars.example .dev.vars   # server secrets for wrangler
+npm run build
+npx wrangler dev                 # SPA + /api on :8787
+```
+
+`VITE_API_BASE_URL` empty = today's Supabase path. Set it to `/api` (same-origin
+Worker) or `https://<project>.supabase.co/functions/v1` to roll back.
+
 ## Deploy to Vercel
 
 1. Push the repo to GitHub.

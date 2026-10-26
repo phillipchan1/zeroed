@@ -26,15 +26,17 @@
  */
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { supabaseUrl } from './supabaseClient'
+import { healthUrl } from './api'
 
 // Reaching the app's own origin proves very little (a service worker or the
 // bundled native shell can answer it), so the probe targets the API the loop
 // actually needs. Supabase's auth health endpoint is unauthenticated and tiny;
 // `no-cors` means we never depend on its CORS headers — an opaque response still
 // tells us the request reached a server, which is the only thing we're asking.
-const PROBE_URL = supabaseUrl.includes('placeholder')
-  ? '/favicon.ico'                    // dev / unconfigured build: same-origin fallback
-  : `${supabaseUrl}/auth/v1/health`
+const PROBE_URL = healthUrl()
+  ?? (supabaseUrl.includes('placeholder')
+    ? '/favicon.ico'
+    : `${supabaseUrl}/auth/v1/health`)
 const PROBE_PARAM = 'zeroed-ping'     // sw.js passes these straight to the network
 const PROBE_TIMEOUT_MS = 6_000
 

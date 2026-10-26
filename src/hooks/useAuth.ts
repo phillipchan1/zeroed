@@ -1,44 +1,51 @@
 import { useEffect, useState } from 'react'
-import type { User } from '@supabase/supabase-js'
-import { supabase } from '../lib/supabaseClient'
+import {
+  getSessionUser,
+  persistAuthUser,
+  persistedBetterAuthUser,
+  subscribeAuth,
+  type AuthUser,
+} from '../lib/authClient'
+import { isCloudflareApi } from '../lib/api'
 import { clearAllCache } from '../lib/cache'
 import { clearAllDraftsLocal } from '../lib/workoutDraft'
 import { persistedUser } from '../lib/persistedSession'
 
 interface AuthState {
-  user: User | null
+  user: AuthUser | null
   loading: boolean
 }
 
+function initialUser(): AuthUser | null {
+  if (isCloudflareApi()) return persistedBetterAuthUser()
+  const fromSb = persistedUser()
+  return fromSb ? { id: fromSb.id, email: fromSb.email } : null
+}
+
 export function useAuth(): AuthState {
-  // Hydrate synchronously from the session already stored on this device, so a
-  // returning athlete never sees the splash — not on a cold launch, not on a
-  // dead connection. `loading` is true only for a device that has never signed
-  // in, where there genuinely is nothing to paint yet.
-  //
-  // supabase.auth stays the authority: it refreshes the token in the background
-  // and, if the session turns out to be dead, SIGNED_OUT arrives through
-  // onAuthStateChange and swaps the app back to onboarding.
-  const [user, setUser]       = useState<User | null>(() => persistedUser())
-  const [loading, setLoading] = useState(() => persistedUser() === null)
+  const [user, setUser] = useState<AuthUser | null>(initialUser)
+  const [loading, setLoading] = useState(() => initialUser() === null)
 
   useEffect(() => {
-    // Reconcile with the real session (token refresh, expiry, another tab).
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setUser(session?.user ?? null)
+    getSessionUser().then((next) => {
+      setUser(next)
       setLoading(false)
     })
 
-    // Subscribe to auth changes (magic link confirm, sign out, etc.)
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
-      // Drop every cached view and any local workout draft on sign-out so the
-      // next account on this device starts clean.
-      if (event === 'SIGNED_OUT') { clearAllCache(); clearAllDraftsLocal() }
-      setUser(session?.user ?? null)
+    const unsubscribe = subscribeAuth((next, event) => {
+      // Drop cached views and local workout drafts only on an explicit
+      // sign-out. TOKEN_REFRESHED / INITIAL_SESSION / a dead session probe
+      // must not wipe in-progress drafts on this device.
+      if (event === 'SIGNED_OUT') {
+        clearAllCache()
+        clearAllDraftsLocal()
+        persistAuthUser(null)
+      }
+      setUser(next)
       setLoading(false)
     })
 
-    return () => subscription.unsubscribe()
+    return unsubscribe
   }, [])
 
   return { user, loading }

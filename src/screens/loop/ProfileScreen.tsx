@@ -2,6 +2,8 @@ import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell } from 'lucide-react'
 import { supabase, supabaseAnonKey, supabaseUrl } from '../../lib/supabaseClient'
+import { signOutLocal } from '../../lib/authClient'
+import { mcpUrl } from '../../lib/api'
 import { useCachedLoader, mutateCache } from '../../lib/cache'
 import { cacheKeys } from '../../lib/loopCache'
 import { getWeightUnit, setWeightUnit, type WeightUnit } from '../../lib/units'
@@ -34,6 +36,8 @@ async function sha256Hex(s: string): Promise<string> {
 }
 
 function mcpEndpoint(): string {
+  const cloud = mcpUrl()
+  if (cloud) return cloud
   const url = new URL(`${supabaseUrl.replace(/\/$/, '')}/functions/v1/mcp`)
   url.searchParams.set('apikey', supabaseAnonKey)
   return url.toString()
@@ -191,7 +195,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
       // Local scope clears this device's session with no network round-trip, so
       // sign-out is instant even on the flaky signal you often have right after
       // a workout. Global scope used to hang here, leaving the button spinning.
-      await supabase.auth.signOut({ scope: 'local' })
+      await signOutLocal()
       // SIGNED_OUT propagates through useAuth and swaps the app to onboarding.
     } catch {
       // Never strand the athlete on a dead button — force a clean reload.

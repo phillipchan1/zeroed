@@ -1,0 +1,59 @@
+# Local smoke — 2026-10-26 (QA round 3)
+# npm run type-check && npm run lint && npm run check && npm run check:isolation-mutation
+# TZ=America/Los_Angeles and TZ=UTC both pass access.check (81/81)
+
+## type-check / lint / check
+npm run type-check   # pass
+npm run lint         # pass
+npm run check
+  81 checks, 0 failed
+  access isolation: ok   (supabase/migrations applied on PGlite + two-athlete seed)
+
+## isolation mutation (derived owner filters)
+npm run check:isolation-mutation
+baseline (unmutated)                             → 81/81 green
+derived 18 owner filters (athlete_id = and id =)
+M1 delete loadWorkout athlete_id filter          → 1 failed
+M2 set owner filters to TRUE                     → 41 failed
+edits.ts:183 UPDATE routine                      → 5 failed
+edits.ts:194 INSERT routine EXISTS               → 2 failed
+edits.ts:221 UPDATE phase                        → 1 failed
+edits.ts:236 INSERT phase EXISTS                 → 3 failed
+edits.ts:282 INSERT program_revision EXISTS      → 3 failed
+edits.ts:343 UPDATE athlete sessions_per_week    → 1 failed
+edits.ts:350 UPDATE athlete training_preferences → 1 failed
+store.ts:74  programIds                          → 5 failed
+store.ts:93  loadAthlete row                     → 1 failed
+store.ts:99  athlete_profile                     → 1 failed
+store.ts:112 loadLiveProgram program             → 9 failed
+store.ts:169 loadLiveProgram prefs               → 1 failed
+store.ts:202 loadInsights settled                → 2 failed
+store.ts:208 loadInsights open                   → 3 failed
+store.ts:241 loadWorkouts join                   → 4 failed
+store.ts:302 selectOwnedWorkout                  → 1 failed
+store.ts:388 loadJourney                         → 1 failed
+store.ts:437 loadNotes coach                     → 1 failed
+mutation proof: ok (18/18)
+
+## live Vercel headers (2026-10-26)
+
+$ curl -sI https://zeroed-two.vercel.app/
+HTTP/2 200
+access-control-allow-origin: *
+cache-control: public, max-age=0, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+
+$ curl -sI https://zeroed-two.vercel.app/assets/index-C5_rVfg7.js
+HTTP/2 200
+access-control-allow-origin: *
+cache-control: public, max-age=0, must-revalidate
+strict-transport-security: max-age=63072000; includeSubDomains; preload
+
+Workers /assets/* is public, max-age=31536000, immutable + nosniff (stricter than live).
+
+## wrangler dev
+GET /api/auth (500 dummy DB) Origin=http://localhost:5173
+  ACAO http://localhost:5173 + credentials + Vary
+GET /assets/*.js        200 immutable 1y + nosniff
+GET /nope.png           404
+POST /functions/v1/agent  400 worker JSON (not 405)

@@ -1,0 +1,32 @@
+# Manual-only Workers deploy. Does not run on push/PR and does not flip DNS.
+# Required repo secret: CLOUDFLARE_API_TOKEN
+# Optional: CLOUDFLARE_ACCOUNT_ID
+name: deploy-cloudflare
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wrangler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Production web build
+        run: npm run build
+        env:
+          VITE_API_BASE_URL: /api
+      - name: wrangler deploy
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          command: deploy

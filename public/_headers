@@ -1,0 +1,22 @@
+# Live Vercel (zeroed-two.vercel.app, 2026-10-26 curl -sI):
+#   / and /assets/index-C5_rVfg7.js both send:
+#     access-control-allow-origin: *
+#     cache-control: public, max-age=0, must-revalidate
+#     strict-transport-security: max-age=63072000; includeSubDomains; preload
+#   Live does not send nosniff, XFO, XSS, Permissions-Policy, or Referrer-Policy.
+# Workers differs on purpose: nosniff everywhere, and hashed /assets/* is
+# public, max-age=31536000, immutable (stricter than this hostname's max-age=0).
+
+/*
+  Strict-Transport-Security: max-age=63072000; includeSubDomains; preload
+  X-Content-Type-Options: nosniff
+  Access-Control-Allow-Origin: *
+
+/
+  Cache-Control: public, max-age=0, must-revalidate
+
+/index.html
+  Cache-Control: public, max-age=0, must-revalidate
+
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

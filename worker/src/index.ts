@@ -1,0 +1,98 @@
+import { Hono } from 'hono'
+import { handleAgent } from './agent.ts'
+import { API_SECURITY, authCors } from './cors.ts'
+import { getAuth } from './auth.ts'
+import type { Env } from './env.ts'
+import { handleMcp } from './mcp.ts'
+
+const app = new Hono<{ Bindings: Env }>()
+
+app.use('*', async (c, next) => {
+  await next()
+  const path = new URL(c.req.url).pathname
+  if (path.startsWith('/api/') || path.startsWith('/functions/v1/')) {
+    for (const [key, value] of Object.entries(API_SECURITY)) {
+      c.res.headers.set(key, value)
+    }
+  }
+})
+
+function missingAsset(): Response {
+  return new Response('Not found', {
+    status: 404,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'cache-control': 'public, max-age=0, must-revalidate',
+      ...API_SECURITY,
+    },
+  })
+}
+
+app.get('/api/health', (c) =>
+  c.json({
+    ok: true,
+    service: 'zeroed',
+    runtime: 'cloudflare-workers',
+  }),
+)
+
+app.all('/api/auth/*', async (c) => {
+  const cors = authCors(c.req.header('Origin'), c.env)
+  if (c.req.method === 'OPTIONS') return new Response('ok', { headers: cors })
+  try {
+    const auth = getAuth(c.env)
+    const res = await auth.handler(c.req.raw)
+    const headers = new Headers(res.headers)
+    for (const [k, v] of Object.entries(cors)) {
+      if (k === 'Access-Control-Allow-Origin' || !headers.has(k)) headers.set(k, v)
+    }
+    headers.delete('Access-Control-Allow-Credentials')
+    if (cors['Access-Control-Allow-Credentials']) {
+      headers.set('Access-Control-Allow-Credentials', 'true')
+    }
+    if (headers.get('Access-Control-Allow-Origin') === '*' && headers.get('Access-Control-Allow-Credentials') === 'true') {
+      headers.set('Access-Control-Allow-Origin', cors['Access-Control-Allow-Origin'])
+    }
+    return new Response(res.body, { status: res.status, headers })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return new Response(JSON.stringify({ error: message }), {
+      status: 500,
+      headers: { 'Content-Type': 'application/json', ...cors },
+    })
+  }
+})
+
+app.all('/api/agent', (c) => handleAgent(c.req.raw, c.env))
+app.all('/api/mcp', (c) => handleMcp(c.req.raw, c.env))
+
+// Compatibility aliases so VITE_API_BASE_URL can point at either
+// `https://<worker>/api` or the old `/functions/v1` prefix.
+app.all('/functions/v1/agent', (c) => handleAgent(c.req.raw, c.env))
+app.all('/functions/v1/mcp', (c) => handleMcp(c.req.raw, c.env))
+
+// Hashed Vite assets must 404 when missing — SPA fallback would serve
+// index.html and the browser would try to execute HTML as JS.
+function hasFileExtension(path: string): boolean {
+  return /\.[A-Za-z0-9]{1,16}$/.test(path)
+}
+
+async function fromAssets(c: { env: Env; req: { raw: Request; url: string } }): Promise<Response> {
+  const assets = c.env.ASSETS
+  if (!assets) return missingAsset()
+  const res = await assets.fetch(c.req.raw)
+  const path = new URL(c.req.url).pathname
+  const contentType = res.headers.get('content-type') ?? ''
+  if (hasFileExtension(path) && (res.status === 404 || contentType.includes('text/html'))) {
+    return missingAsset()
+  }
+  return res
+}
+
+app.all('/assets/*', (c) => fromAssets(c))
+
+// Unknown paths with a file extension are real 404s. Extensionless deep
+// links still fall through to the SPA document.
+app.all('*', (c) => fromAssets(c))
+
+export default app

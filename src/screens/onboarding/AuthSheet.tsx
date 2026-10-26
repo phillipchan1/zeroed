@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { supabase } from '../../lib/supabaseClient'
+import { sendSignInCode, verifySignInCode } from '../../lib/authClient'
 import { Button, Input, Sheet } from '../../components/ui'
 
 type Phase = 'idle' | 'sending' | 'sent' | 'verifying' | 'error'
@@ -25,10 +25,7 @@ export function AuthSheet({ onClose }: { onClose: () => void }) {
     setPhase('sending')
     setError(null)
 
-    const { error: authErr } = await supabase.auth.signInWithOtp({
-      email: trimmed,
-      options: { emailRedirectTo: window.location.origin },
-    })
+    const { error: authErr } = await sendSignInCode(trimmed)
 
     if (authErr) {
       setError(authErr.message)
@@ -46,11 +43,7 @@ export function AuthSheet({ onClose }: { onClose: () => void }) {
     setError(null)
     setPhase('verifying')
 
-    const { error: vErr } = await supabase.auth.verifyOtp({
-      email: email.trim(),
-      token,
-      type: 'email',
-    })
+    const { error: vErr } = await verifySignInCode(email.trim(), token)
 
     // On success the global auth listener resumes the funnel; only surface errors.
     if (vErr) {
