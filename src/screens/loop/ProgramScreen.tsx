@@ -5,7 +5,7 @@ import { supabase } from '../../lib/supabaseClient'
 import { useCachedLoader } from '../../lib/cache'
 import {
   gatherProgramMap, gatherTrainingLog,
-  gatherBlockVolume,
+  gatherBlockVolume, activeBlockRetestDate,
   type NextWeekProjection, type MapPhase, type BlockVolume, type BlockVolumeWeek,
 } from '../../engine'
 import { capIsActive, clearanceTestOf, describeClearanceTest } from '../../engine/prescription'
@@ -217,8 +217,13 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
   const profile   = data?.profile ?? null
   const loading   = coldLoading
 
-  const retestDays = profile?.retest_date
-    ? Math.ceil((new Date(profile.retest_date).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
+  const retestDate = activeBlockRetestDate({
+    programRetest: program?.retest_date ?? profile?.retest_date,
+    phaseStart: phase?.week_start,
+    phaseEnd: phase?.week_end,
+  })
+  const retestDays = retestDate
+    ? Math.ceil((new Date(`${retestDate}T12:00:00`).getTime() - Date.now()) / (1000 * 60 * 60 * 24))
     : null
 
   const phaseName = (phase?.name ?? profile?.current_phase ?? 'Stability') as PhaseName

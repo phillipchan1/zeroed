@@ -17,6 +17,7 @@ import {
   rpeContract, DEFAULT_RPE_CONTRACT,
   tallyWeek, decidePrescription,
   autoregulateDelta, recommendedLoad, roundLoad, maxUpFor,
+  parseExplicitLoad, trainingIntent, allowsAutoProgress, projectExerciseLoad, isComparableWorkingBase,
   advanceStatus, addressesLimiter, capIsActive, isLiftHeld,
   clearanceTestOf, pickClearanceLift, describeClearanceTest, newClearanceTest, judgeClearanceSession,
   P1_RESOLVE_THRESHOLD,
@@ -240,6 +241,89 @@ const withTests = insight({
 } as Partial<InsightRow>)
 eq(clearanceTestOf(withTests)?.lift, 'Overhead Press', 'the open test wins over the closed one')
 eq(clearanceTestOf(insight()), null, 'no evidence → no test')
+
+// ---- 9. explicit / intent loads beat auto-progression -----------------------
+// The safety bug: a deload-week speed bench prescribed 5×2 at ~170 lb, RPE 5
+// was projected as 265×2 because +5% ran on last week's heavy top set.
+
+eq(parseExplicitLoad('about 170 lb'), 170, 'about 170 lb is an explicit load')
+eq(parseExplicitLoad('~170'), 170, '~170 is an explicit load')
+eq(parseExplicitLoad('170lbs'), 170, '170lbs is an explicit load')
+eq(parseExplicitLoad('light'), null, 'light is qualitative, not a number')
+eq(parseExplicitLoad('5x2'), null, '5x2 is sets×reps, not a load')
+eq(trainingIntent('Speed bench', 'deload week'), 'deload', 'deload wins over speed in the same text')
+eq(trainingIntent('Convert strength into speed', 'Speed bench 5x2'), 'speed', 'speed session')
+
+ok(!allowsAutoProgress({
+  exercise: ex('Bench Press', { load: 'about 170 lb', target_rpe: 5 }),
+  sessionIntent: 'Speed work — deload week',
+  directive: 'DELOAD',
+}), 'deload week never auto-progresses')
+ok(!allowsAutoProgress({
+  exercise: ex('Bench Press', { load: 'about 170 lb', target_rpe: 5 }),
+  sessionIntent: 'Speed bench',
+  directive: 'PROGRESS',
+}), 'speed work never auto-progresses')
+ok(!allowsAutoProgress({
+  exercise: ex('Bench Press', { target_rpe: 5 }),
+  sessionName: 'Tue Technique',
+  directive: 'PROGRESS',
+}), 'technique / RPE-5 work never auto-progresses')
+ok(allowsAutoProgress({
+  exercise: ex('Bench Press', { load: 'heavy', target_rpe: 8 }),
+  sessionIntent: 'Build the strength base',
+  directive: 'PROGRESS',
+}), 'a working strength lift may progress')
+
+ok(!isComparableWorkingBase({
+  currentIntent: 'speed', lastIntent: 'work', lastRpe: 8, lastWeight: 250,
+}), 'a heavy working top set is not a base for speed work')
+ok(isComparableWorkingBase({
+  currentIntent: 'work', lastIntent: 'work', lastRpe: 8, lastWeight: 250,
+}), 'same-intent working sets are comparable')
+
+const speedProj = projectExerciseLoad({
+  exercise: ex('Bench Press', { sets: 5, reps: '2', load: 'about 170 lb', target_rpe: 5 }),
+  lastWeight: 250,
+  lastRpe: 8,
+  lastIntent: 'work',
+  weeklyDelta: 5,
+  directive: 'PROGRESS',
+  sessionIntent: 'Speed bench — deload',
+  sessionName: 'Tue Speed',
+  u: LB,
+})
+eq(speedProj.source, 'explicit', 'explicit 170 wins over last week\'s 250')
+eq(speedProj.weight, 170, 'speed bench stays 170, not 265')
+ok(speedProj.weight !== recommendedLoad(set(250, 2, 8), 5, LB),
+  'auto +5% off 250 is not what the projection uses')
+
+const deloadHeld = projectExerciseLoad({
+  exercise: ex('Back Squat', { sets: 3, reps: '5', load: 'moderate', target_rpe: 5 }),
+  lastWeight: 315,
+  lastRpe: 8,
+  lastIntent: 'work',
+  weeklyDelta: 5,
+  directive: 'DELOAD',
+  sessionIntent: 'Deload week',
+  u: LB,
+})
+ok(deloadHeld.source !== 'progressed', 'a deload week does not apply +5%')
+ok(deloadHeld.weight == null || deloadHeld.weight === 315,
+  'deload either holds the last same-intent load or shows the prescription, never 315+5%')
+
+const explicitBeats = projectExerciseLoad({
+  exercise: ex('Bench Press', { load: '185 lb', target_rpe: 8 }),
+  lastWeight: 250,
+  lastRpe: 8,
+  lastIntent: 'work',
+  weeklyDelta: 5,
+  directive: 'PROGRESS',
+  sessionIntent: 'Strength',
+  u: LB,
+})
+eq(explicitBeats.weight, 185, 'an explicit load always beats +5% off last week')
+eq(explicitBeats.source, 'explicit', 'source is explicit')
 
 // ---- report -----------------------------------------------------------------
 

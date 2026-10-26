@@ -57,6 +57,20 @@ export function formatDraft(draft: ProgramDraft): string {
   return [header, '', ...draft.sessions.map(formatSession)].join('\n')
 }
 
+/** Queued Monday block: name the start date AND list the sessions, not just a one-liner. */
+export function formatQueuedBlock(
+  phase: { name: string; weekStart: string },
+  sessions: ProgramDraft['sessions'],
+): string {
+  const title = `## Queued: ${phase.name} starts ${phase.weekStart}`
+  if (!sessions.length) return title
+  return [
+    title,
+    '',
+    formatDraft({ sessionsPerWeek: sessions.length, sessions }),
+  ].join('\n')
+}
+
 export function formatLoggedWorkout(
   w: LoggedWorkoutLike & {
     id?: string

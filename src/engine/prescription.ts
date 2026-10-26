@@ -21,6 +21,7 @@ import { isClearanceTest } from '../types/database.ts'
 import { roundToIncrement, type UnitContext } from '../lib/units.ts'
 import { resolveCategory } from './exerciseLibrary.ts'
 import { MAIN_LIFT } from './weekDiff.ts'
+import { weekAdherence } from './weekStatus.ts'
 
 // ────────────────────────────────────────────────────────────────────────────
 // FELT-CHIP SEVERITY BANDS — one vocabulary, read the same way everywhere.
@@ -98,12 +99,23 @@ export function tallyWeek(
   planned: number,
   workouts: WeekWorkout[],
   observations: WeekObservation[],
+  week?: { start: string; end: string },
 ): WeeklyTally {
-  const done = workouts.length
-  const adherence = planned > 0 ? done / planned : 0
+  const inRange = (iso: string) => {
+    if (!week) return true
+    const day = iso.slice(0, 10)
+    return day >= week.start && day <= week.end
+  }
+  const scoped = workouts.filter((w) => inRange(w.performed_at ?? ''))
+  const { done, adherence } = weekAdherence(
+    planned,
+    scoped.map((w) => ({ routineId: '', performedAt: w.performed_at })),
+    week?.start ?? '0000-01-01',
+    week?.end ?? '9999-12-31',
+  )
 
   const rpes: number[] = []
-  for (const w of workouts) {
+  for (const w of scoped) {
     const sets = w.actual_weights ? Object.values(w.actual_weights).flat() : []
     const setRpes = sets.map((s) => s.rpe).filter((r): r is number => r != null)
     if (setRpes.length) rpes.push(...setRpes)
@@ -114,9 +126,10 @@ export function tallyWeek(
   // Pain and hard are counted SEPARATELY. Only pain (Tweak/Pain) can veto — a
   // week of hard work is a week of hard work, and the flagged categories the
   // coach narrates should name what hurt, not what was heavy.
-  const painObs = observations.filter((o) => o.severity >= SEVERITY_PAIN)
-  const hardCount = observations.filter((o) => o.severity === SEVERITY_HARD).length
-  const positiveCount = observations.filter((o) => POSITIVE_SIGNAL.test(o.signal)).length
+  const weekObs = observations.filter((o) => inRange(o.logged_at ?? ''))
+  const painObs = weekObs.filter((o) => o.severity >= SEVERITY_PAIN)
+  const hardCount = weekObs.filter((o) => o.severity === SEVERITY_HARD).length
+  const positiveCount = weekObs.filter((o) => POSITIVE_SIGNAL.test(o.signal)).length
   const flagged_categories = [
     ...new Set(painObs.map((o) => o.signal.split('—')[0].trim()).filter(Boolean)),
   ].slice(0, 5)
@@ -263,6 +276,130 @@ export function autoregulateDelta(
 /** How far a single easy lift may jump in one step, by block. */
 export function maxUpFor(phaseName: string | null | undefined): number {
   return phaseName === 'Stability' ? 5 : 15
+}
+
+export type TrainingIntent = 'work' | 'speed' | 'technique' | 'prehab' | 'test' | 'deload'
+
+const INTENT_RULES: Array<{ intent: TrainingIntent; re: RegExp }> = [
+  { intent: 'deload', re: /\bdeload\b/i },
+  { intent: 'speed', re: /\b(speed|velocity|dynamic[\s-]?effort|\bde\b)\b/i },
+  { intent: 'technique', re: /\b(technique|tech work|form work|groove)\b/i },
+  { intent: 'prehab', re: /\b(prehab|rehab|corrective)\b/i },
+  { intent: 'test', re: /\b(baseline|retest|\btest\b)\b/i },
+]
+
+/** Classify a session or lift from the words the program used. */
+export function trainingIntent(...texts: Array<string | null | undefined>): TrainingIntent {
+  const hay = texts.filter(Boolean).join(' ')
+  for (const { intent, re } of INTENT_RULES) {
+    if (re.test(hay)) return intent
+  }
+  return 'work'
+}
+
+/**
+ * An explicit number on the prescription ("170 lb", "about 170", "~77kg").
+ * Qualitative stamps (light / moderate / heavy / bodyweight) are not loads.
+ */
+export function parseExplicitLoad(load: string | null | undefined): number | null {
+  if (!load) return null
+  const trimmed = load.trim()
+  if (/^(light|moderate|heavy|bodyweight|bw|rpe\b)/i.test(trimmed)) return null
+  const m = trimmed.match(/(?:(?:about|approx(?:imately)?|around|~)\s*)?(\d+(?:\.\d+)?)\s*(?:lb|lbs|kg|#)?/i)
+  if (!m) return null
+  const n = Number(m[1])
+  // Guard against reading "5x2" or a lone RPE as a bar weight.
+  if (!Number.isFinite(n) || n < 20) return null
+  return n
+}
+
+export function allowsAutoProgress(opts: {
+  exercise: Pick<ExerciseTemplate, 'name' | 'load' | 'target_rpe'>
+  sessionIntent?: string | null
+  sessionName?: string | null
+  directive?: WeeklyDirective | null
+}): boolean {
+  if (opts.directive === 'DELOAD' || opts.directive === 'RECOVERY') return false
+  const intent = trainingIntent(opts.sessionIntent, opts.sessionName, opts.exercise.name, opts.exercise.load)
+  if (intent !== 'work') return false
+  if (opts.exercise.target_rpe != null && opts.exercise.target_rpe <= 5) return false
+  return true
+}
+
+/** Last logged top set is only a base when it was the same lift and the same intent. */
+export function isComparableWorkingBase(opts: {
+  currentIntent: TrainingIntent
+  lastIntent?: TrainingIntent | null
+  lastRpe?: number | null
+  lastWeight?: number | null
+  prescribedWeight?: number | null
+}): boolean {
+  const last = opts.lastIntent
+    ?? ((opts.lastRpe != null && opts.lastRpe >= 7) ||
+        (opts.prescribedWeight != null && opts.lastWeight != null && opts.lastWeight > opts.prescribedWeight * 1.15)
+      ? 'work'
+      : opts.currentIntent)
+  return last === opts.currentIntent
+}
+
+export type ProjectedLoadSource = 'explicit' | 'progressed' | 'held' | 'none'
+
+export interface ProjectedLoad {
+  weight: number | null
+  source: ProjectedLoadSource
+}
+
+/**
+ * What next week should put on the bar.
+ *
+ * Explicit prescribed load / RPE-% always wins. Auto +5% never runs on a
+ * deload week or on speed / technique / prehab / test work, and never off a
+ * top set logged under a different intent.
+ */
+export function projectExerciseLoad(opts: {
+  exercise: Pick<ExerciseTemplate, 'name' | 'sets' | 'reps' | 'load' | 'target_rpe'>
+  lastWeight: number | null
+  lastRpe?: number | null
+  lastIntent?: TrainingIntent | null
+  weeklyDelta: number
+  directive: WeeklyDirective | null
+  sessionIntent?: string | null
+  sessionName?: string | null
+  u: UnitContext
+}): ProjectedLoad {
+  const explicit = parseExplicitLoad(opts.exercise.load)
+  if (explicit != null) {
+    return { weight: opts.u.prescribe(explicit), source: 'explicit' }
+  }
+
+  const currentIntent = trainingIntent(opts.sessionIntent, opts.sessionName, opts.exercise.name, opts.exercise.load)
+  const canProgress = allowsAutoProgress({
+    exercise: opts.exercise,
+    sessionIntent: opts.sessionIntent,
+    sessionName: opts.sessionName,
+    directive: opts.directive,
+  })
+  const comparable = opts.lastWeight != null && isComparableWorkingBase({
+    currentIntent,
+    lastIntent: opts.lastIntent,
+    lastRpe: opts.lastRpe,
+    lastWeight: opts.lastWeight,
+    prescribedWeight: explicit,
+  })
+
+  if (!canProgress || !comparable) {
+    if (opts.lastWeight != null && comparable && !canProgress) {
+      return { weight: opts.u.show(opts.lastWeight), source: 'held' }
+    }
+    return { weight: null, source: 'none' }
+  }
+
+  const progressed = recommendedLoad(
+    { set: 1, weight: opts.lastWeight, reps: null, rpe: opts.lastRpe ?? null, done: true },
+    opts.weeklyDelta,
+    opts.u,
+  )
+  return { weight: progressed, source: progressed == null ? 'none' : 'progressed' }
 }
 
 // ────────────────────────────────────────────────────────────────────────────

@@ -1,6 +1,6 @@
 import type { McpTool } from './mcpProtocol.ts'
 import { applyEdits, liveToDraft, previewEdits, type EditInput } from './zeroedEdits.ts'
-import { formatDraft, formatLoggedWorkout, jsonBlock } from './zeroedFormat.ts'
+import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from './zeroedFormat.ts'
 import {
   loadAthlete,
   loadInsights,
@@ -217,7 +217,9 @@ export async function executeZeroedTool(
             `## Live program — ${live.phaseName} (${live.weekStart} → ${live.weekEnd})`,
             live.goal ? `Goal: ${live.goal}` : null,
             live.nonNegotiables.length ? `Non-negotiables: ${live.nonNegotiables.join('; ')}` : null,
-            live.scheduledPhase ? `Queued block: ${live.scheduledPhase.name} on ${live.scheduledPhase.weekStart}` : null,
+            live.scheduledPhase
+              ? formatQueuedBlock(live.scheduledPhase, live.scheduledSessions)
+              : null,
             '',
             formatDraft(liveToDraft(live)),
           ].filter((l) => l !== null).join('\n')
@@ -252,7 +254,7 @@ export async function executeZeroedTool(
         live.goal ? `Goal: ${live.goal}` : null,
         live.nonNegotiables.length ? `Non-negotiables:\n${live.nonNegotiables.map((n) => `- ${n}`).join('\n')}` : null,
         live.advancementCriteria.length ? `Advances when:\n${live.advancementCriteria.map((n) => `- ${n}`).join('\n')}` : null,
-        live.scheduledPhase ? `Queued: ${live.scheduledPhase.name} starts ${live.scheduledPhase.weekStart}` : null,
+        live.scheduledPhase ? formatQueuedBlock(live.scheduledPhase, live.scheduledSessions) : null,
         live.standingPreferences ? `\nStanding preferences:\n${live.standingPreferences}` : null,
         '',
         formatDraft(draft),
@@ -266,6 +268,18 @@ export async function executeZeroedTool(
             intendedDow: s.intendedDow,
             exercises: s.exercises.map((e) => e.name),
           })),
+          queued: live.scheduledPhase
+            ? {
+                name: live.scheduledPhase.name,
+                weekStart: live.scheduledPhase.weekStart,
+                sessions: live.scheduledSessions.map((s) => ({
+                  routineId: s.routineId,
+                  name: s.name,
+                  intendedDow: s.intendedDow,
+                  exercises: s.exercises.map((e) => e.name),
+                })),
+              }
+            : null,
         }),
       ].filter((l) => l !== null).join('\n')
     }
