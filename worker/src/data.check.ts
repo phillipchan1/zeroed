@@ -2,6 +2,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { serializeSignedCookie } from 'better-call'
 import { BETTER_AUTH_SNAKE_CASE } from './auth.ts'
 import {
   bindOwner,
@@ -102,6 +103,14 @@ const signedBearer = new Request('http://local/api/data', {
   headers: { authorization: `Bearer ${signed}` },
 })
 ok(await sessionTokenFromRequest(signedBearer, secret) === 'tok', 'signed bearer authenticates')
+const encodedBearer = new Request('http://local/api/data', {
+  headers: { authorization: `Bearer ${encodeURIComponent(signed)}` },
+})
+ok(await sessionTokenFromRequest(encodedBearer, secret) === 'tok', 'url-encoded signed bearer authenticates')
+const baCookie = await serializeSignedCookie('better-auth.session_token', 'tok', secret)
+ok(await sessionTokenFromRequest(new Request('http://local/api/data', {
+  headers: { cookie: baCookie.split(';')[0] ?? baCookie },
+}), secret) === 'tok', 'better-call signed cookie authenticates')
 
 const authClientSrc = readFileSync(join(here, '../../src/lib/authClient.ts'), 'utf8')
 ok(authClientSrc.includes("res.headers.get('set-auth-token')"), 'auth client captures set-auth-token')

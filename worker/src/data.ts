@@ -313,30 +313,45 @@ function decodeCookieValue(raw: string): string {
   }
 }
 
-function bytesToBase64UrlNoPad(bytes: Uint8Array): string {
+function bytesToBase64(bytes: Uint8Array): string {
   let bin = ''
   for (const b of bytes) bin += String.fromCharCode(b)
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return btoa(bin)
 }
 
-function timingSafeEqual(a: string, b: string): boolean {
-  if (a.length !== b.length) return false
-  let out = 0
-  for (let i = 0; i < a.length; i++) out |= a.charCodeAt(i) ^ b.charCodeAt(i)
-  return out === 0
+/** better-call signs with standard base64; accept url-safe too. */
+function decodeSignatureBytes(sig: string): Uint8Array | null {
+  try {
+    const decoded = decodeCookieValue(sig)
+    const normalized = decoded.replace(/-/g, '+').replace(/_/g, '/')
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4)
+    const bin = atob(padded)
+    const out = new Uint8Array(bin.length)
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i)
+    return out
+  } catch {
+    return null
+  }
 }
 
-/** Better Auth / better-call: HMAC-SHA256, base64url without padding. */
-export async function signSessionToken(token: string, secret: string): Promise<string> {
-  const key = await crypto.subtle.importKey(
+async function hmacKey(secret: string, usage: ('sign' | 'verify')[]): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
     'raw',
     new TextEncoder().encode(secret),
     { name: 'HMAC', hash: 'SHA-256' },
     false,
-    ['sign'],
+    usage,
   )
-  const sig = new Uint8Array(await crypto.subtle.sign('HMAC', key, new TextEncoder().encode(token)))
-  return `${token}.${bytesToBase64UrlNoPad(sig)}`
+}
+
+/** better-call `signCookieValue`: HMAC-SHA256, standard base64 (`btoa`). */
+export async function signSessionToken(token: string, secret: string): Promise<string> {
+  const sig = new Uint8Array(await crypto.subtle.sign(
+    'HMAC',
+    await hmacKey(secret, ['sign']),
+    new TextEncoder().encode(token),
+  ))
+  return `${token}.${bytesToBase64(sig)}`
 }
 
 export function splitSessionToken(raw: string | null | undefined): { token: string; signature: string | null } | null {
@@ -359,9 +374,14 @@ export async function verifySessionSignature(
   secret: string | undefined,
 ): Promise<boolean> {
   if (!signature || !secret || !token) return false
-  const expected = await signSessionToken(token, secret)
-  const got = `${token}.${signature}`
-  return timingSafeEqual(expected, got)
+  const sigBytes = decodeSignatureBytes(signature)
+  if (!sigBytes?.length) return false
+  return crypto.subtle.verify(
+    'HMAC',
+    await hmacKey(secret, ['verify']),
+    sigBytes,
+    new TextEncoder().encode(token),
+  )
 }
 
 export async function sessionTokenFromRequest(
