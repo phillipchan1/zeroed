@@ -39,6 +39,7 @@ CREATE TABLE IF NOT EXISTS public.athlete (
   arena_raw         TEXT,
   limiter_choice    TEXT,
   training_preferences TEXT,
+  training_max_overrides JSONB,
   CONSTRAINT athlete_auth_user_unique UNIQUE (auth_user_id),
   CONSTRAINT athlete_onboarding_step_check CHECK (onboarding_step IN (
     'hook',
@@ -53,6 +54,9 @@ CREATE TABLE IF NOT EXISTS public.athlete (
     )
   )
 );
+
+COMMENT ON COLUMN public.athlete.training_max_overrides IS
+  'Hand-set training maxes by lift id ({"bench": 275, "ohp": 140}), storage weight unit. Absent lifts use 90% of the working max.';
 
 COMMENT ON COLUMN public.athlete.training_preferences IS
   'Athlete-stated standing training preferences, newest first. Fed to phase design as the emphasis so steering survives a phase change.';
@@ -216,7 +220,13 @@ CREATE TABLE IF NOT EXISTS public.workout (
   actual_reps        JSONB,
   rpe                INTEGER CHECK (rpe BETWEEN 1 AND 10),
   duration_mins      INTEGER,
-  exercises_snapshot JSONB
+  exercises_snapshot JSONB,
+  -- The session check-in (migration 20261026000001), each optional.
+  knee_pain_l        SMALLINT CHECK (knee_pain_l IS NULL OR knee_pain_l BETWEEN 0 AND 10),
+  knee_pain_r        SMALLINT CHECK (knee_pain_r IS NULL OR knee_pain_r BETWEEN 0 AND 10),
+  sleep_hours        NUMERIC(3, 1) CHECK (sleep_hours IS NULL OR sleep_hours BETWEEN 0 AND 24),
+  readiness          SMALLINT CHECK (readiness IS NULL OR readiness BETWEEN 1 AND 10),
+  bodyweight         NUMERIC(6, 1) CHECK (bodyweight IS NULL OR bodyweight > 0)
 );
 
 CREATE INDEX IF NOT EXISTS workout_routine_id_idx   ON public.workout(routine_id);

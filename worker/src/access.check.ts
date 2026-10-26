@@ -494,6 +494,36 @@ const loadedOwn = await executeDataQuery(sql, ctxA, {
 ok((loadedOwn.data as { id: string } | null)?.id === WORKOUT_A, 'smoke load workout: A reads own row')
 ok((loadedOwn.data as { routine?: { program_id: string } } | null)?.routine?.program_id === PROG_A, 'data workout embed: routine.program_id is A')
 
+// The lift model's reads and the check-in write, in the exact shape the app sends
+// them. An unlisted column here doesn't fail loudly in the app — the model just
+// falls back — so the allow-list is pinned by these.
+const liftLog = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'select',
+  columns: 'id, performed_at, actual_weights, exercises_snapshot, routine!inner(exercises, program_id), knee_pain_l, knee_pain_r, sleep_hours, readiness, bodyweight',
+  filters: [
+    { column: 'routine.program_id', op: 'in', value: [PROG_A, PROG_B] },
+    { column: 'performed_at', op: 'gte', value: '2026-01-01T00:00:00Z' },
+  ],
+  order: { column: 'performed_at', ascending: true },
+  limit: 1000,
+})
+ok(liftLog.error == null, `data lift log: check-in columns and program filter are allowed (${liftLog.error?.message ?? 'ok'})`)
+ok(
+  Array.isArray(liftLog.data) && (liftLog.data as { id: string }[]).every((r) => r.id === WORKOUT_A),
+  'data lift log: A reads only own sessions even when it names B\'s program',
+)
+const checkin = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'update',
+  values: { knee_pain_l: 2, knee_pain_r: 5, sleep_hours: 6.5, readiness: 7, bodyweight: 204.5 },
+  filters: [{ column: 'id', op: 'eq', value: WORKOUT_A }],
+})
+ok(checkin.error == null, `data check-in write: allowed (${checkin.error?.message ?? 'ok'})`)
+ok(Number(await scalar('SELECT knee_pain_r FROM workout WHERE id = $1', [WORKOUT_A])) === 5, 'data check-in write: landed on A')
+const tmRead = await executeDataQuery(sql, ctxA, { table: 'athlete', op: 'select', columns: 'training_max_overrides', single: 'maybe' })
+ok(tmRead.error == null, `data TM read: training_max_overrides is allowed (${tmRead.error?.message ?? 'ok'})`)
+
 const loadedB = await executeDataQuery(sql, ctxA, {
   table: 'workout',
   op: 'select',

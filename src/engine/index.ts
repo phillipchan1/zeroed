@@ -2435,19 +2435,29 @@ export async function gatherLiftSources(athleteId: string, u: UnitContext): Prom
   if (!ids.length) return null
   const base = 'id, performed_at, actual_weights, exercises_snapshot, routine!inner(exercises, program_id)'
   const withCheckin = `${base}, knee_pain_l, knee_pain_r, sleep_hours, readiness, bodyweight`
-  const page = (cols: string, from: number) => supabase
-    .from('workout').select(cols).in('routine.program_id', ids)
-    .order('performed_at', { ascending: true }).range(from, from + 999)
-  const workouts: ModelWorkout[] = []
+  // Keyset pages on performed_at rather than .range(): the Worker's /api/data
+  // facade speaks filters and limits, not offsets. A page boundary inside one
+  // timestamp re-reads that timestamp; ids dedupe it.
+  const PAGE = 1000
+  const page = (cols: string, after: string | null) => {
+    let q = supabase.from('workout').select(cols).in('routine.program_id', ids)
+    if (after) q = q.gte('performed_at', after)
+    return q.order('performed_at', { ascending: true }).limit(PAGE)
+  }
+  const byId = new Map<string, ModelWorkout>()
   let cols = withCheckin
-  for (let from = 0; from < 5000; from += 1000) {
-    let res = await page(cols, from)
-    if (res.error && cols === withCheckin) { cols = base; res = await page(cols, from) }
+  let after: string | null = null
+  for (let n = 0; n < 10; n++) {
+    let res = await page(cols, after)
+    if (res.error && cols === withCheckin) { cols = base; res = await page(cols, after) }
     if (res.error) throw res.error
     const rows = (res.data ?? []) as unknown as ModelWorkout[]
-    workouts.push(...rows)
-    if (rows.length < 1000) break
+    const before = byId.size
+    for (const w of rows) byId.set(w.id ?? `${w.performed_at}:${byId.size}`, w)
+    if (rows.length < PAGE || byId.size === before) break
+    after = rows[rows.length - 1].performed_at
   }
+  const workouts = [...byId.values()]
   const weekStart = mondayOf(localDay(new Date().toISOString()))
   const recentIds = workouts
     .filter((w) => localDay(w.performed_at) >= addDaysIso(weekStart, -14))
@@ -3795,8 +3805,9 @@ function checkinColumns(c: SessionCheckinInput | null | undefined): Record<strin
 // sitting in the outbox forever over four optional numbers.
 function isMissingColumn(err: { code?: string; message?: string } | null | undefined): boolean {
   if (!err) return false
+  // PostgREST says PGRST204 / 42703; the Worker's /api/data says "unknown column".
   return err.code === 'PGRST204' || err.code === '42703'
-    || /column .*(does not exist|could not find)|could not find the .* column/i.test(err.message ?? '')
+    || /column .*(does not exist|could not find)|could not find the .* column|unknown column/i.test(err.message ?? '')
 }
 
 export interface CommitResult {
