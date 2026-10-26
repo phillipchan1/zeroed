@@ -47,10 +47,81 @@ jobs:
           cache: npm
       - run: npm ci --no-audit --no-fund
       - name: Install PostgreSQL client tools
+        env:
+          SUPABASE_READONLY_URL: ${{ secrets.SUPABASE_READONLY_URL }}
         run: |
           set -euo pipefail
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-client
+
+          # PGDG signing key: https://www.postgresql.org/media/keys/ACCC4CF8.asc
+          # Fingerprint is pinned so a substituted key fails the job.
+          KEY_URL='https://www.postgresql.org/media/keys/ACCC4CF8.asc'
+          KEY_FINGERPRINT='B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8'
+          KEY_PATH='/usr/share/postgresql-common/pgdg/apt.postgresql.org.asc'
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl ca-certificates gnupg
+
+          curl -fsSL --retry 5 --retry-delay 2 "${KEY_URL}" -o /tmp/pgdg.asc
+          GOT_FPR="$(gpg --batch --show-keys --with-colons /tmp/pgdg.asc | awk -F: '/^fpr:/ { print $10; exit }')"
+          if [ "${GOT_FPR}" != "${KEY_FINGERPRINT}" ]; then
+            echo "::error::PGDG apt key fingerprint mismatch (got ${GOT_FPR:-empty}, expected ${KEY_FINGERPRINT})"
+            exit 1
+          fi
+          sudo install -d /usr/share/postgresql-common/pgdg
+          sudo install -m 0644 /tmp/pgdg.asc "${KEY_PATH}"
+          rm -f /tmp/pgdg.asc
+
+          # shellcheck source=/dev/null
+          . /etc/os-release
+          echo "deb [arch=$(dpkg --print-architecture) signed-by=${KEY_PATH}] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" | sudo tee /etc/apt/sources.list.d/pgdg.list >/dev/null
+
+          printf '%s\n' \
+            'Package: postgresql-client-*' \
+            'Pin: origin apt.postgresql.org' \
+            'Pin-Priority: 1001' \
+            | sudo tee /etc/apt/preferences.d/pgdg >/dev/null
+
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+
+          install_client() {
+            local major="$1"
+            if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq "postgresql-client-${major}"; then
+              echo "::error::Could not install postgresql-client-${major} from the PGDG apt repo (signed, pinned)."
+              exit 1
+            fi
+            if [ ! -x "/usr/lib/postgresql/${major}/bin/pg_dump" ]; then
+              echo "::error::postgresql-client-${major} installed but /usr/lib/postgresql/${major}/bin/pg_dump is missing."
+              exit 1
+            fi
+          }
+
+          MAJOR=17
+          install_client "${MAJOR}"
+
+          SOURCE_URL="${SUPABASE_READONLY_URL:-}"
+          if [ -n "${SOURCE_URL}" ]; then
+            export PATH="/usr/lib/postgresql/${MAJOR}/bin:${PATH}"
+            if ! NUM="$(psql -v ON_ERROR_STOP=1 -tA -d "${SOURCE_URL}" -c 'SHOW server_version_num' | tr -d '[:space:]')"; then
+              echo "::error::Could not read source server_version_num; cannot pick a matching pg_dump."
+              exit 1
+            fi
+            if ! [[ "${NUM}" =~ ^[0-9]{5,}$ ]]; then
+              echo "::error::unparsable source server_version_num: ${NUM}"
+              exit 1
+            fi
+            DETECTED=$((NUM / 10000))
+            echo "Source server_version_num=${NUM} (Postgres ${DETECTED})"
+            if [ "${DETECTED}" -ne "${MAJOR}" ]; then
+              install_client "${DETECTED}"
+              MAJOR="${DETECTED}"
+            fi
+          else
+            echo "No source URL in this step; using postgresql-client-17 (Zeroed Supabase is 17.x)."
+          fi
+
+          echo "/usr/lib/postgresql/${MAJOR}/bin" >> "${GITHUB_PATH}"
+          "/usr/lib/postgresql/${MAJOR}/bin/pg_dump" --version
+          "/usr/lib/postgresql/${MAJOR}/bin/psql" --version
       - name: Prepare auth user mapping
         env:
           AUTH_USERS_MAPPING: ${{ secrets.AUTH_USERS_MAPPING }}
