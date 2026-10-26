@@ -1,124 +1,238 @@
 #!/usr/bin/env node
 /**
- * Dump a Zeroed Supabase project into Neon (schema + data) and map
- * auth.users → Better Auth `user` with the same UUIDs so athlete.auth_user_id
- * still matches.
+ * Dump Zeroed public data from Supabase into Neon and map auth users →
+ * Better Auth `user` with the same UUIDs so athlete.auth_user_id still matches.
  *
- * SOURCE IS READ-ONLY. The script only runs pg_dump and COPY … TO STDOUT
- * against SUPABASE_DB_URL. It never ALTER/DROP/DISABLE anything on the source.
+ * SOURCE IS READ-ONLY. The script only runs pg_dump and (unless skipped)
+ * COPY … TO STDOUT against the source URL. It never ALTER/DROP/DISABLE
+ * anything on the source.
  *
- * Target-only optional relax (`--relax-target-rls`): disable RLS, drop
- * athlete_select / get_current_athlete_id() / athlete_auth_user_id_fkey on
- * the Neon database after restore. Off by default — the Worker connects as
- * the table owner (RLS does not apply unless FORCE ROW LEVEL SECURITY).
- * A stub `auth.users` + `auth.uid()` is created on the target before restore
- * so dumped FKs and SQL functions can land on a fresh Postgres. Extensions
- * are excluded from dump/restore; `CREATE EXTENSION IF NOT EXISTS pgcrypto`
- * runs as the first target write (works as a Neon non-superuser). A
- * this-run extension is dropped on failure; a pre-existing one is kept.
+ * Schema then data (the script handles this):
+ *   1. Apply worker/schema/app.sql + better-auth.sql on Neon if needed
+ *   2. Load auth user mappings into auth.users + Better Auth "user"
+ *   3. Data-only restore of public.* (no Supabase RLS / GRANT dump)
+ *
+ * The migration role often cannot read auth.users. In that case:
+ *   --skip-auth-users --auth-users-file=users.json
+ * The file is CSV or JSON of (id, email, created_at). Those ids are written
+ * into Better Auth "user" unchanged.
  *
  * Usage:
- *   SUPABASE_DB_URL=postgres://... NEON_DB_URL=postgres://... \
- *     node scripts/migrate-supabase-to-neon.mjs
+ *   SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… \
+ *     node scripts/migrate-supabase-to-neon.mjs --skip-auth-users --auth-users-file=users.csv
  *
  *   node scripts/migrate-supabase-to-neon.mjs --dry-run
  *   node scripts/migrate-supabase-to-neon.mjs --relax-target-rls
  *
+ * Env aliases: SUPABASE_DB_URL / SOURCE_DATABASE_URL,
+ *              NEON_DB_URL / TARGET_DATABASE_URL,
+ *              AUTH_USERS_FILE
+ *
  * Requires: pg_dump, psql, pg_restore (PostgreSQL client tools).
  */
 import { spawnSync } from 'node:child_process'
-import { closeSync, existsSync, mkdtempSync, openSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import {
-  BETTER_AUTH_TABLES_SQL,
-  CHECKSUM_TABLES,
-  LIST_USER_OBJECTS_TEXT_SQL,
-  REQUIRED_EXTENSIONS_SQL,
-  STUB_AUTH_SQL,
-  assertCountsMatch,
-  assertSourceUsersReady,
-  checksumQuery,
-  createdSince,
-  dropCreatedSql,
-  filterRestoreToc,
-  formatNonEmptyTargetAbort,
-  isNonEmptyTargetObject,
-  loadBetterAuthUsersSql,
-  loadStubAuthUsersSql,
-  parseAuthUsersCsv,
-  parseCounts,
-  parseObjectList,
-} from './migrate-users.lib.mjs'
+import { dirname, join, resolve } from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-const dryRun = process.argv.includes('--dry-run')
-const relaxTargetRls = process.argv.includes('--relax-target-rls')
-const source = process.env.SUPABASE_DB_URL || process.env.SOURCE_DATABASE_URL || ''
-const target = process.env.NEON_DB_URL || process.env.TARGET_DATABASE_URL || ''
+const here = dirname(fileURLToPath(import.meta.url))
+const root = join(here, '..')
+
+export function redactSecrets(text) {
+  return String(text ?? '').replace(/postgres(?:ql)?:\/\/\S+/gi, 'postgresql://[redacted]')
+}
+
+export function argValue(argv, name) {
+  const prefix = `${name}=`
+  const eq = argv.find((a) => a.startsWith(prefix))
+  if (eq) return eq.slice(prefix.length)
+  const i = argv.indexOf(name)
+  if (i >= 0 && argv[i + 1] && !argv[i + 1].startsWith('-')) return argv[i + 1]
+  return ''
+}
+
+export function parseMigrateArgs(argv = [], env = process.env) {
+  const dryRun = argv.includes('--dry-run')
+  const relaxTargetRls = argv.includes('--relax-target-rls')
+  const authUsersFile = argValue(argv, '--auth-users-file') || env.AUTH_USERS_FILE || ''
+  const skipAuthUsers = argv.includes('--skip-auth-users') || Boolean(authUsersFile)
+  return { dryRun, relaxTargetRls, skipAuthUsers, authUsersFile }
+}
+
+export function resolveSourceUrl(env = process.env) {
+  return env.SUPABASE_READONLY_URL || env.SUPABASE_DB_URL || env.SOURCE_DATABASE_URL || ''
+}
+
+export function resolveTargetUrl(env = process.env) {
+  return env.NEON_DIRECT_URL || env.NEON_DB_URL || env.TARGET_DATABASE_URL || ''
+}
+
+export function isExecutedDirectly(metaUrl, argv1) {
+  if (!argv1) return false
+  try {
+    return metaUrl === pathToFileURL(resolve(argv1)).href
+  } catch {
+    return false
+  }
+}
+
+function csvEscape(value) {
+  const s = String(value ?? '')
+  if (/[",\n\r]/.test(s)) return `"${s.replace(/"/g, '""')}"`
+  return s
+}
+
+function parseCsvLine(line) {
+  const out = []
+  let cur = ''
+  let inQ = false
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]
+    if (inQ) {
+      if (c === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"'
+          i += 1
+        } else {
+          inQ = false
+        }
+      } else {
+        cur += c
+      }
+    } else if (c === '"') {
+      inQ = true
+    } else if (c === ',') {
+      out.push(cur)
+      cur = ''
+    } else {
+      cur += c
+    }
+  }
+  out.push(cur)
+  return out.map((s) => s.trim())
+}
+
+export function normalizeAuthUser(row) {
+  const id = String(row.id ?? row.user_id ?? '').trim()
+  const email = String(row.email ?? '').trim()
+  if (!id || !email) throw new Error('auth user mapping requires id and email')
+  const createdAt = row.created_at ?? row.createdAt ?? ''
+  const updatedAt = row.updated_at ?? row.updatedAt ?? createdAt
+  const name = String(row.name ?? email.split('@')[0] ?? '').trim()
+  return {
+    id,
+    email,
+    name,
+    created_at: createdAt ? String(createdAt) : '',
+    updated_at: updatedAt ? String(updatedAt) : '',
+    email_verified: Boolean(row.email_verified ?? row.emailVerified ?? false),
+  }
+}
+
+export function parseAuthUsersCsv(text) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith('#'))
+  if (!lines.length) return []
+  const first = parseCsvLine(lines[0]).map((h) => h.toLowerCase())
+  const hasHeader = first.includes('id') && first.includes('email')
+  const headers = hasHeader ? first : ['id', 'email', 'created_at']
+  const start = hasHeader ? 1 : 0
+  const rows = []
+  for (let i = start; i < lines.length; i++) {
+    const cols = parseCsvLine(lines[i])
+    const rec = {}
+    headers.forEach((h, idx) => {
+      rec[h] = cols[idx]
+    })
+    if (!hasHeader) {
+      rec.id = cols[0]
+      rec.email = cols[1]
+      rec.created_at = cols[2]
+    }
+    rows.push(normalizeAuthUser(rec))
+  }
+  return rows
+}
+
+export function parseAuthUsersMapping(content, filename = 'auth-users') {
+  const trimmed = String(content ?? '').replace(/^\uFEFF/, '').trim()
+  if (!trimmed) return []
+  if (trimmed.startsWith('[') || trimmed.startsWith('{')) {
+    let parsed
+    try {
+      parsed = JSON.parse(trimmed)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`${filename}: invalid JSON (${message})`)
+    }
+    const list = Array.isArray(parsed)
+      ? parsed
+      : parsed.users || parsed.rows || [parsed]
+    if (!Array.isArray(list)) throw new Error(`${filename}: JSON must be an array of {id, email, created_at}`)
+    return list.map((row) => normalizeAuthUser(row))
+  }
+  return parseAuthUsersCsv(trimmed)
+}
+
+export function authUsersToCopyCsv(rows) {
+  return rows.map((r) => {
+    const created = r.created_at || ''
+    const updated = r.updated_at || created
+    return [
+      r.id,
+      csvEscape(r.name),
+      csvEscape(r.email),
+      r.email_verified ? 't' : 'f',
+      created,
+      updated,
+    ].join(',')
+  }).join('\n') + (rows.length ? '\n' : '')
+}
+
+export function checksumQuery() {
+  return `
+    SELECT 'athlete' AS t, COUNT(*)::bigint AS n FROM public.athlete
+    UNION ALL SELECT 'program', COUNT(*) FROM public.program
+    UNION ALL SELECT 'phase', COUNT(*) FROM public.phase
+    UNION ALL SELECT 'routine', COUNT(*) FROM public.routine
+    UNION ALL SELECT 'workout', COUNT(*) FROM public.workout
+    UNION ALL SELECT 'insight', COUNT(*) FROM public.insight
+    UNION ALL SELECT 'mcp_token', COUNT(*) FROM public.mcp_token
+    ORDER BY 1;
+  `
+}
+
+export function parseCounts(text) {
+  const out = {}
+  for (const line of text.split('\n')) {
+    const m = line.match(/^(\w+)\s*\|\s*(\d+)/)
+    if (m) out[m[1]] = Number(m[2])
+  }
+  return out
+}
+
+export function formatCountComparison(srcCounts, dstCounts) {
+  const tables = [...new Set([...Object.keys(srcCounts), ...Object.keys(dstCounts)])].sort()
+  const lines = []
+  let mismatch = false
+  for (const table of tables) {
+    const a = srcCounts[table]
+    const b = dstCounts[table] ?? -1
+    const mark = a === b ? 'ok' : 'MISMATCH'
+    if (a !== b) mismatch = true
+    lines.push(`  ${table}: source=${a} neon=${b} ${mark}`)
+  }
+  return { lines, mismatch }
+}
 
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, {
-    encoding: 'utf8',
-    stdio: ['pipe', 'pipe', 'pipe'],
-    maxBuffer: 64 * 1024 * 1024,
-    ...opts,
-  })
+  const res = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], ...opts })
   if (res.status !== 0) {
     const err = (res.stderr || res.stdout || '').trim()
-    throw new Error(`${cmd} ${args.join(' ')} failed (${res.status}): ${err}`)
+    const safeArgs = args.map((a) => (/postgres(?:ql)?:\/\//i.test(a) ? '[redacted-url]' : a))
+    throw new Error(`${cmd} ${safeArgs.join(' ')} failed (${res.status}): ${redactSecrets(err)}`)
   }
   return res.stdout
-}
-
-/** Stream stdout to a file so a large COPY cannot hit spawnSync maxBuffer. */
-function runToFile(cmd, args, file) {
-  const fd = openSync(file, 'w')
-  try {
-    const res = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', fd, 'pipe'] })
-    if (res.status !== 0) {
-      const err = (res.stderr || '').trim()
-      throw new Error(`${cmd} ${args.join(' ')} failed (${res.status}): ${err}`)
-    }
-  } finally {
-    closeSync(fd)
-  }
-}
-
-function maybeFailAfter(step) {
-  if (process.env.ZEROED_MIGRATE_FAIL_AFTER === step) {
-    throw new Error(`forced migrate failure after ${step}`)
-  }
-}
-
-function toolMajor(bin) {
-  const res = spawnSync(bin, ['--version'], { encoding: 'utf8' })
-  if (res.status !== 0) return null
-  const m = `${res.stdout || ''}\n${res.stderr || ''}`.match(/(\d+)\./)
-  return m ? Number(m[1]) : null
-}
-
-function serverMajor(url) {
-  const out = run('psql', ['-v', 'ON_ERROR_STOP=1', '-tA', '-d', url, '-c', 'SHOW server_version_num'])
-  const n = Number(String(out).trim())
-  if (!Number.isFinite(n) || n < 10000) throw new Error(`unparsable server_version_num: ${out}`)
-  return Math.floor(n / 10000)
-}
-
-/** pg_dump refuses a newer server; prefer the matching major over a leftover PATH client. */
-function resolvePgBin(name, major) {
-  const candidates = [
-    process.env.PG_BIN ? join(process.env.PG_BIN, name) : null,
-    `/usr/lib/postgresql/${major}/bin/${name}`,
-    `/usr/pgsql-${major}/bin/${name}`,
-    name,
-  ].filter(Boolean)
-  for (const bin of candidates) {
-    if (bin !== name && !existsSync(bin)) continue
-    if (toolMajor(bin) === major) return bin
-  }
-  throw new Error(
-    `${name} matching Postgres ${major} not found. Install postgresql-client-${major} (or set PG_BIN).`,
-  )
 }
 
 function needBin(name) {
@@ -126,8 +240,17 @@ function needBin(name) {
   if (res.status !== 0) throw new Error(`Missing ${name}. Install PostgreSQL client tools.`)
 }
 
-function psql(url, extraArgs, sql) {
-  return run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', url, ...extraArgs, '-c', sql])
+function readCounts(url, label) {
+  try {
+    return parseCounts(run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', url, '-c', checksumQuery()]))
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (/does not exist|undefined_table/i.test(message)) {
+      console.log(`${label}: tables not present yet`)
+      return {}
+    }
+    throw err
+  }
 }
 
 /** Neon target only. Never concatenated into a source session. */
@@ -159,148 +282,201 @@ BEGIN
 END $$;
 `
 
-if (dryRun && !source && !target) {
-  console.log('dry-run: would pg_dump public + auth.users from SUPABASE_DB_URL (read-only)')
-  console.log('dry-run: would abort before any Neon write if an email is blank or lower(email) is duplicated (both lists)')
-  console.log('dry-run: would refuse a non-empty target (any user table/function/enum/type in public or auth)')
-  console.log('dry-run: would CREATE EXTENSION IF NOT EXISTS pgcrypto, then stub auth.users + auth.uid() on NEON_DB_URL')
-  console.log('dry-run: would pg_restore --exit-on-error with EXTENSION entries filtered out')
-  console.log('dry-run: would insert auth.users into Better Auth "user" (and stub auth.users) with the same ids in one transaction')
-  console.log(relaxTargetRls
+function printOfflineDryRun(args) {
+  console.log('dry-run: would apply worker/schema/app.sql then data-only restore of public.*')
+  console.log('dry-run: would create Better Auth tables from worker/schema/better-auth.sql')
+  if (args.skipAuthUsers) {
+    console.log('dry-run: --skip-auth-users — will not read auth.users on the source')
+    if (args.authUsersFile) {
+      if (!existsSync(args.authUsersFile)) {
+        throw new Error(`--auth-users-file not found: ${args.authUsersFile}`)
+      }
+      const rows = parseAuthUsersMapping(readFileSync(args.authUsersFile, 'utf8'), args.authUsersFile)
+      console.log(`dry-run: would map ${rows.length} provided auth users → Better Auth "user" (same UUIDs)`)
+    } else {
+      console.log('dry-run: no --auth-users-file — Better Auth mapping would be skipped')
+    }
+  } else {
+    console.log('dry-run: would COPY auth.users from source (pass --skip-auth-users if the role cannot read it)')
+  }
+  console.log(args.relaxTargetRls
     ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
-    : 'dry-run: would leave RLS / athlete_select / get_current_athlete_id / auth_user_id FK on Neon (pass --relax-target-rls to drop them on the target)')
-  console.log('dry-run: would compare row counts per table with psql -tA and abort on mismatch or unparsable counts')
+    : 'dry-run: would leave any leftover RLS artifacts on Neon (pass --relax-target-rls to drop them on the target)')
+  console.log('dry-run: would compare row counts per table and abort on mismatch')
   console.log('tools required: pg_dump, pg_restore, psql')
-  process.exit(0)
 }
 
-if (!source || !target) {
-  console.error('Set SUPABASE_DB_URL and NEON_DB_URL (or pass --dry-run).')
-  process.exit(2)
+function loadProvidedAuthUsers(args) {
+  if (!args.authUsersFile) {
+    throw new Error('--skip-auth-users requires --auth-users-file (CSV or JSON of id, email, created_at)')
+  }
+  if (!existsSync(args.authUsersFile)) {
+    throw new Error(`--auth-users-file not found: ${args.authUsersFile}`)
+  }
+  return parseAuthUsersMapping(readFileSync(args.authUsersFile, 'utf8'), args.authUsersFile)
 }
 
-if (source === target) {
-  console.error('SUPABASE_DB_URL and NEON_DB_URL must be different. Source is read-only.')
-  process.exit(2)
-}
-
-needBin('psql')
-const srcMajor = serverMajor(source)
-const pgDump = resolvePgBin('pg_dump', srcMajor)
-const pgRestore = resolvePgBin('pg_restore', srcMajor)
-console.log(`using ${pgDump} / ${pgRestore} for Postgres ${srcMajor}`)
-
-const dir = mkdtempSync(join(tmpdir(), 'zeroed-migrate-'))
-const dumpPath = join(dir, 'public.dump')
-const usersPath = join(dir, 'auth_users.csv')
-const stubAuthPath = join(dir, 'stub_auth.sql')
-const betterAuthPath = join(dir, 'better_auth.sql')
-const relaxPath = join(dir, 'relax_target.sql')
-try {
-  writeFileSync(stubAuthPath, STUB_AUTH_SQL)
-  writeFileSync(betterAuthPath, BETTER_AUTH_TABLES_SQL)
-  writeFileSync(relaxPath, RELAX_TARGET_SQL)
-
-  console.log('dumping public schema + data (no-owner, no-acl)…')
-  run(pgDump, [
-    '--format=custom',
-    '--no-owner',
-    '--no-acl',
-    '--schema=public',
-    `--file=${dumpPath}`,
-    source,
-  ])
-
-  console.log('exporting auth.users…')
-  const usersCopy = `
-    COPY (
-      SELECT id::text, COALESCE(raw_user_meta_data->>'name', split_part(email, '@', 1), ''),
-             email, COALESCE(email_confirmed_at IS NOT NULL, false),
-             created_at, updated_at
-      FROM auth.users
-    ) TO STDOUT WITH CSV
+function loadUsersSql(usersPath) {
+  return `
+    CREATE TEMP TABLE auth_users_import (
+      id TEXT, name TEXT, email TEXT, email_verified BOOLEAN,
+      created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
+    );
+    \\copy auth_users_import FROM '${usersPath}' WITH CSV
+    INSERT INTO auth.users (id, email, created_at, updated_at)
+    SELECT id::uuid, email, COALESCE(created_at, NOW()), COALESCE(updated_at, created_at, NOW())
+    FROM auth_users_import
+    ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email;
+    INSERT INTO "user" (id, name, email, email_verified, created_at, updated_at)
+    SELECT id, name, email, email_verified, COALESCE(created_at, NOW()), COALESCE(updated_at, created_at, NOW())
+    FROM auth_users_import
+    ON CONFLICT (id) DO UPDATE SET
+      email = EXCLUDED.email,
+      name = EXCLUDED.name,
+      email_verified = EXCLUDED.email_verified;
   `
-  runToFile('psql', ['-v', 'ON_ERROR_STOP=1', '-d', source, '-c', usersCopy], usersPath)
-  const csv = readFileSync(usersPath, 'utf8')
+}
 
-  console.log('pre-checking source emails (read-only)…')
-  assertSourceUsersReady(parseAuthUsersCsv(csv))
+export function main(argv = process.argv.slice(2), env = process.env) {
+  const args = parseMigrateArgs(argv, env)
+  const source = resolveSourceUrl(env)
+  const target = resolveTargetUrl(env)
 
-  if (dryRun) {
-    console.log(`dry-run: dump at ${dumpPath} (${readFileSync(dumpPath).length} bytes)`)
-    console.log(`dry-run: ${csv.trim().split('\n').filter(Boolean).length} auth.users rows`)
-    console.log(relaxTargetRls
-      ? 'dry-run: would apply --relax-target-rls on Neon only'
-      : 'dry-run: would keep RLS artifacts on Neon')
-    process.exit(0)
+  if (args.dryRun && !source && !target) {
+    printOfflineDryRun(args)
+    return 0
   }
 
-  console.log('checking target is empty…')
-  const before = parseObjectList(psql(target, ['-tA'], LIST_USER_OBJECTS_TEXT_SQL))
-  const dirty = before.filter(isNonEmptyTargetObject)
-  if (dirty.length) throw new Error(formatNonEmptyTargetAbort(dirty))
+  if (!source || !target) {
+    console.error('Set SUPABASE_READONLY_URL and NEON_DIRECT_URL (or pass --dry-run).')
+    return 2
+  }
 
-  let wroteTarget = false
+  if (source === target) {
+    console.error('Source and target URLs must be different. Source is read-only.')
+    return 2
+  }
+
+  if (args.skipAuthUsers && !args.dryRun && !args.authUsersFile) {
+    console.error('--skip-auth-users requires --auth-users-file for a live restore.')
+    return 2
+  }
+
+  needBin('pg_dump')
+  needBin('pg_restore')
+  needBin('psql')
+
+  const dir = mkdtempSync(join(tmpdir(), 'zeroed-migrate-'))
+  const dumpPath = join(dir, 'public.dump')
+  const usersPath = join(dir, 'auth_users.csv')
+  const relaxPath = join(dir, 'relax_target.sql')
+
   try {
-    console.log('ensuring pgcrypto on Neon (target only)…')
-    wroteTarget = true
-    writeFileSync(join(dir, 'required_ext.sql'), REQUIRED_EXTENSIONS_SQL)
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(dir, 'required_ext.sql')])
-    maybeFailAfter('extension')
+    writeFileSync(relaxPath, RELAX_TARGET_SQL)
 
-    console.log('creating stub auth.users + auth.uid() on Neon (target only)…')
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', stubAuthPath])
-    const stubUsersPath = join(dir, 'load_stub_users.sql')
-    writeFileSync(stubUsersPath, loadStubAuthUsersSql(usersPath))
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', stubUsersPath])
-
-    console.log('restoring into Neon…')
-    const tocPath = join(dir, 'restore.toc')
-    const filteredTocPath = join(dir, 'restore.filtered.toc')
-    writeFileSync(tocPath, run(pgRestore, ['-l', dumpPath]))
-    writeFileSync(filteredTocPath, filterRestoreToc(readFileSync(tocPath, 'utf8')))
-    run(pgRestore, [
+    console.log('dumping public data only (no-owner, no-acl, no schema/RLS)…')
+    run('pg_dump', [
+      '--format=custom',
       '--no-owner',
       '--no-acl',
+      '--data-only',
+      '--schema=public',
+      `--file=${dumpPath}`,
+      source,
+    ])
+
+    let mappedUsers = 0
+    if (args.skipAuthUsers) {
+      console.log('skipping auth.users export (--skip-auth-users)')
+      if (args.authUsersFile) {
+        const rows = loadProvidedAuthUsers(args)
+        mappedUsers = rows.length
+        writeFileSync(usersPath, authUsersToCopyCsv(rows))
+        console.log(`loaded ${mappedUsers} auth users from provided mapping`)
+      } else {
+        writeFileSync(usersPath, '')
+        console.log('no --auth-users-file — Better Auth mapping skipped')
+      }
+    } else {
+      console.log('exporting auth.users…')
+      const usersCopy = `
+        COPY (
+          SELECT id::text, COALESCE(raw_user_meta_data->>'name', split_part(email, '@', 1), ''),
+                 email, COALESCE(email_confirmed_at IS NOT NULL, false),
+                 created_at, updated_at
+          FROM auth.users
+        ) TO STDOUT WITH CSV
+      `
+      const csv = run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', source, '-c', usersCopy])
+      writeFileSync(usersPath, csv)
+      mappedUsers = csv.trim().split('\n').filter(Boolean).length
+      console.log(`exported ${mappedUsers} auth.users rows`)
+    }
+
+    const srcCounts = readCounts(source, 'source')
+    const dstCounts = readCounts(target, 'neon')
+    const before = formatCountComparison(srcCounts, dstCounts)
+    console.log('row counts before restore:')
+    for (const line of before.lines) console.log(line)
+
+    if (args.dryRun) {
+      console.log(`dry-run: dump at ${dumpPath} (${readFileSync(dumpPath).length} bytes)`)
+      console.log(`dry-run: ${mappedUsers} auth users to map`)
+      console.log(args.relaxTargetRls
+        ? 'dry-run: would apply worker/schema/app.sql + data-only restore + --relax-target-rls on Neon only'
+        : 'dry-run: would apply worker/schema/app.sql + data-only restore (no Neon writes in this dry-run)')
+      return 0
+    }
+
+    console.log('applying worker/schema/app.sql + better-auth.sql on Neon…')
+    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(root, 'worker/schema/app.sql')])
+    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(root, 'worker/schema/better-auth.sql')])
+
+    if (mappedUsers > 0) {
+      console.log('mapping auth users → "user" + stub auth.users…')
+      writeFileSync(join(dir, 'load_users.sql'), loadUsersSql(usersPath))
+      run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(dir, 'load_users.sql')])
+    }
+
+    console.log('restoring public data into Neon…')
+    run('pg_restore', [
       '--exit-on-error',
-      '-L', filteredTocPath,
-      '--dbname', target,
+      '--data-only',
+      '--no-owner',
+      '--no-acl',
+      '--disable-triggers',
+      '--dbname',
+      target,
       dumpPath,
     ])
-    maybeFailAfter('restore')
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', betterAuthPath])
-    if (relaxTargetRls) {
-      console.log('relaxing RLS / auth helpers on Neon (--relax-target-rls)…')
+
+    if (args.relaxTargetRls) {
+      console.log('relaxing leftover RLS / auth helpers on Neon (--relax-target-rls)…')
       run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', relaxPath])
-    } else {
-      console.log('keeping RLS / auth helpers on Neon (pass --relax-target-rls to drop them on the target)')
     }
 
-    console.log('mapping auth.users → "user" (one transaction)…')
-    const loadPath = join(dir, 'load_users.sql')
-    writeFileSync(loadPath, loadBetterAuthUsersSql(usersPath))
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', loadPath])
-
-    const srcCounts = parseCounts(psql(source, ['-tA'], checksumQuery()))
-    const dstCounts = parseCounts(psql(target, ['-tA'], checksumQuery()))
-    for (const table of CHECKSUM_TABLES) {
-      console.log(`  ${table}: source=${srcCounts[table]} neon=${dstCounts[table]}`)
+    const afterSrc = readCounts(source, 'source')
+    const afterDst = readCounts(target, 'neon')
+    const after = formatCountComparison(afterSrc, afterDst)
+    console.log('row counts after restore:')
+    for (const line of after.lines) console.log(line)
+    if (after.mismatch) {
+      console.error('Row-count mismatch — abort. Neon was written but is not trusted.')
+      return 1
     }
-    assertCountsMatch(srcCounts, dstCounts)
     console.log('migration ok')
-  } catch (err) {
-    if (wroteTarget) {
-      console.error('load failed — dropping objects this run created…')
-      const after = parseObjectList(psql(target, ['-tA'], LIST_USER_OBJECTS_TEXT_SQL))
-      const created = createdSince(before, after)
-      const cleanupPath = join(dir, 'cleanup_this_run.sql')
-      writeFileSync(cleanupPath, dropCreatedSql(created))
-      if (readFileSync(cleanupPath, 'utf8').trim()) {
-        run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', cleanupPath])
-      }
-    }
-    throw err
+    return 0
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
   }
-} finally {
-  rmSync(dir, { recursive: true, force: true })
+}
+
+if (isExecutedDirectly(import.meta.url, process.argv[1])) {
+  try {
+    process.exit(main())
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    console.error(redactSecrets(message))
+    process.exit(1)
+  }
 }

@@ -1,7 +1,8 @@
 -- Better Auth tables for a fresh Neon database.
--- Cutover from a live Supabase project should use
--- `scripts/migrate-supabase-to-neon.mjs` instead (it dumps public.* and maps
--- auth.users → "user" with the same UUIDs).
+-- Apply after worker/schema/app.sql. Cutover from a live Supabase project
+-- should use `scripts/migrate-supabase-to-neon.mjs` (schema, then data-only
+-- restore). If the migration role cannot read auth.users, pass
+-- `--skip-auth-users --auth-users-file=…` so the same UUIDs land in "user".
 
 CREATE TABLE IF NOT EXISTS "user" (
   id TEXT PRIMARY KEY,

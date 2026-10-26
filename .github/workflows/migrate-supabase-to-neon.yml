@@ -1,0 +1,85 @@
+# Manual-only Supabase → Neon data restore. Does not run on push/PR.
+# Does not deploy, change DNS, or write production hosts.
+#
+# Required repository secrets (never printed):
+#   SUPABASE_READONLY_URL
+#   NEON_DIRECT_URL
+#
+# The migration role cannot read auth.users. This workflow always passes
+# --skip-auth-users. Provide a CSV/JSON mapping via the auth_users input
+# when you want those ids written into Better Auth.
+name: migrate-supabase-to-neon
+
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Dump source and compare row counts without writing Neon
+        type: boolean
+        default: true
+      auth_users:
+        description: Optional CSV or JSON of (id, email, created_at) mapped into Better Auth
+        type: string
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: migrate-supabase-to-neon
+  cancel-in-progress: false
+
+jobs:
+  migrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Install PostgreSQL client tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-client
+      - name: Run migration
+        env:
+          SUPABASE_READONLY_URL: ${{ secrets.SUPABASE_READONLY_URL }}
+          NEON_DIRECT_URL: ${{ secrets.NEON_DIRECT_URL }}
+          AUTH_USERS: ${{ github.event.inputs.auth_users }}
+          DRY_RUN: ${{ github.event.inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          if [ -z "${SUPABASE_READONLY_URL}" ]; then
+            echo "::error::Missing repository secret SUPABASE_READONLY_URL"
+            exit 1
+          fi
+          if [ -z "${NEON_DIRECT_URL}" ]; then
+            echo "::error::Missing repository secret NEON_DIRECT_URL"
+            exit 1
+          fi
+          echo "Secrets are present (values not printed)."
+
+          ARGS=(--skip-auth-users)
+          if [ "${DRY_RUN}" = "true" ]; then
+            ARGS+=(--dry-run)
+            echo "Mode: dry-run (no writes to Neon)"
+          else
+            echo "Mode: live data-only restore to Neon"
+          fi
+
+          if [ -n "${AUTH_USERS}" ]; then
+            AUTH_FILE="${RUNNER_TEMP}/auth-users.mapping"
+            umask 077
+            printf '%s' "${AUTH_USERS}" > "${AUTH_FILE}"
+            ARGS+=(--auth-users-file="${AUTH_FILE}")
+            echo "Auth user mapping file provided (contents not printed)."
+          else
+            echo "No auth user mapping provided; source auth.users will not be read."
+          fi
+
+          node scripts/migrate-supabase-to-neon.mjs "${ARGS[@]}"
