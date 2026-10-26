@@ -8,9 +8,13 @@ dist/
 .env.local
 .env.*.local
 .env
+.dev.vars
 mcp/.env
 supabase/functions/.env       # Edge Function secrets for local `functions serve`
 supabase/.temp/
+
+# Wrangler local state
+.wrangler/
 
 # Android native folder (not in this PR)
 android/

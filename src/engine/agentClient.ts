@@ -13,6 +13,8 @@
 // =============================================================================
 
 import { supabase } from '../lib/supabaseClient'
+import { agentUrl } from '../lib/api'
+import { getAccessToken } from '../lib/authClient'
 
 export type AgentResult<T> =
   | { ok: true; data: T }
@@ -304,12 +306,54 @@ function getDeviceId(): string {
 
 // ---- core invoke ------------------------------------------------------------
 
+type AgentWire = { ok?: boolean; data?: unknown; error?: string; reason?: string }
+
+function classifyAgentError(parsed: AgentWire | null, fallback: string): AgentResult<never> {
+  if (parsed?.error === 'rate_limited') return { ok: false, error: 'rate_limited' }
+  if (parsed?.error === 'unauthorized') return { ok: false, error: 'unauthorized' }
+  if (typeof parsed?.error === 'string' && parsed.error.startsWith('unknown task')) {
+    return { ok: false, error: 'stale_function', reason: parsed.error }
+  }
+  return { ok: false, error: 'network', reason: parsed?.error ?? fallback }
+}
+
+async function invokeAgentViaUrl<T>(
+  url: string,
+  task: string,
+  payload: unknown,
+  opts?: { deviceId?: string },
+): Promise<AgentResult<T>> {
+  const token = await getAccessToken()
+  const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+  if (token) headers.Authorization = `Bearer ${token}`
+  const res = await fetch(url, {
+    method: 'POST',
+    headers,
+    credentials: 'include',
+    body: JSON.stringify({ task, payload, device_id: opts?.deviceId }),
+  })
+  let parsed: AgentWire | null = null
+  try {
+    parsed = await res.json() as AgentWire
+  } catch {
+    parsed = null
+  }
+  if (!res.ok) return classifyAgentError(parsed, `http ${res.status}`)
+  if (!parsed || parsed.ok !== true) {
+    return { ok: false, error: 'model_failed', reason: parsed?.reason ?? parsed?.error }
+  }
+  return { ok: true, data: parsed.data as T }
+}
+
 async function invokeAgent<T>(
   task: string,
   payload: unknown,
   opts?: { deviceId?: string },
 ): Promise<AgentResult<T>> {
   try {
+    const url = agentUrl()
+    if (url) return await invokeAgentViaUrl<T>(url, task, payload, opts)
+
     const { data, error } = await supabase.functions.invoke('agent', {
       body: { task, payload, device_id: opts?.deviceId },
     })
@@ -324,12 +368,7 @@ async function invokeAgent<T>(
       } catch {
         /* ignore */
       }
-      if (parsed?.error === 'rate_limited') return { ok: false, error: 'rate_limited' }
-      if (parsed?.error === 'unauthorized') return { ok: false, error: 'unauthorized' }
-      if (typeof parsed?.error === 'string' && parsed.error.startsWith('unknown task')) {
-        return { ok: false, error: 'stale_function', reason: parsed.error }
-      }
-      return { ok: false, error: 'network', reason: parsed?.error ?? error.message }
+      return classifyAgentError(parsed, error.message)
     }
 
     if (!data || data.ok !== true) {

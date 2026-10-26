@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { supabase } from '../../lib/supabaseClient'
+import { sendSignInCode, verifySignInCode } from '../../lib/authClient'
 import { Logo, Button, Input } from '../../components/ui'
 
 type Phase = 'idle' | 'sending' | 'sent' | 'verifying' | 'error'
@@ -18,10 +18,7 @@ export function AuthScreen() {
     setPhase('sending')
     setError(null)
 
-    const { error: authErr } = await supabase.auth.signInWithOtp({
-      email: trimmed,
-      options: { emailRedirectTo: window.location.origin },
-    })
+    const { error: authErr } = await sendSignInCode(trimmed)
 
     if (authErr) {
       setError(authErr.message)
@@ -42,11 +39,7 @@ export function AuthScreen() {
     setError(null)
     setPhase('verifying')
 
-    const { error: vErr } = await supabase.auth.verifyOtp({
-      email: email.trim(),
-      token,
-      type: 'email',
-    })
+    const { error: vErr } = await verifySignInCode(email.trim(), token)
 
     if (vErr) {
       setError(vErr.message)

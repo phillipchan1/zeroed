@@ -1,0 +1,32 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "zeroed",
+  "main": "worker/src/index.ts",
+  "compatibility_date": "2026-01-15",
+  "compatibility_flags": ["nodejs_compat"],
+  // Static Vite build. Deep links fall back to index.html (same as Vercel SPA).
+  "assets": {
+    "directory": "./dist",
+    "binding": "ASSETS",
+    "html_handling": "auto-trailing-slash",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*"],
+  },
+  "vars": {
+    "OPENAI_MODEL": "gpt-5.4-nano",
+    "BETTER_AUTH_URL": "http://localhost:8787",
+    "RESEND_FROM": "Zeroed <noreply@localhost>",
+  },
+  // Replace `id` with a real Hyperdrive config before `wrangler deploy`.
+  // Local `wrangler dev` uses localConnectionString (or DATABASE_URL in .dev.vars).
+  "hyperdrive": [
+    {
+      "binding": "HYPERDRIVE",
+      "id": "00000000000000000000000000000000",
+      "localConnectionString": "postgresql://postgres:postgres@127.0.0.1:5432/zeroed",
+    },
+  ],
+  "observability": {
+    "enabled": true,
+  },
+}

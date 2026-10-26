@@ -25,7 +25,9 @@ jobs:
       - run: npm ci --no-audit --no-fund
       - name: Typecheck
         run: npm run type-check
-      - name: Engine / lib checks
+      - name: Lint
+        run: npm run lint
+      - name: Engine / lib / access checks
         run: npm run check
       - name: MCP checks
         run: |
