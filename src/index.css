@@ -1268,7 +1268,10 @@ textarea.input {
 
 /* Gray brightening for the focused field — yellow is reserved for signal. */
 .set-row__input:focus { border-color: #5A5A5A; background: #101010; }
-.set-row__input::placeholder { color: var(--text-dim); }
+/* Placeholders preview what the check will log (the target, or the set before),
+   so they're numbers now — lighter and dimmer than anything typed, so a row of
+   them never reads as a logged set. */
+.set-row__input::placeholder { color: #6E6E6E; font-weight: 400; }
 .set-row__input::-webkit-inner-spin-button,
 .set-row__input::-webkit-outer-spin-button { -webkit-appearance: none; }
 
@@ -1536,6 +1539,9 @@ textarea.input {
 .howto-tag:hover { color: var(--text); border-color: var(--text-dim); }
 
 /* --- RPE tap-scale (set row) ---------------------------------------------- */
+/* An unset RPE reads as empty — dim and regular, like the lb/reps
+   placeholders. Bright and bold, it looked like a value already entered. */
+.set-row__rpe.set-row__rpe--empty { color: var(--text-dim); font-weight: 400; }
 .set-row__rpe {
   width: 100%;
   height: 52px;
@@ -1751,6 +1757,45 @@ textarea.input {
 
 /* Elapsed, drawn along the bottom edge — readable from across a rack without
    parsing digits. */
+/* Docked: a full-width row in the workout footer, above Complete, instead of a
+   pill floating over the set list. */
+.rest-pill--docked {
+  position: relative;
+  bottom: auto;
+  left: auto;
+  transform: none;
+  width: 100%;
+  justify-content: space-between;
+  margin-bottom: 10px;
+  animation: fadeRise var(--dur-mid) var(--ease-out);
+}
+
+/* Rest's up — the brackets lock on in the slot the timer just left. */
+.rest-up {
+  display: flex;
+  width: 100%;
+  height: 48px;
+  margin-bottom: 10px;
+  --lock-color: var(--signal);
+}
+.rest-up__text {
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--signal);
+  animation: rest-up-pulse 700ms var(--ease-out) 2;
+}
+@keyframes rest-up-pulse {
+  0%   { opacity: 0.4; }
+  100% { opacity: 1; }
+}
+
+/* The footer's CTA holds one height whether it's the quiet outline or the
+   signal fill, so the bar doesn't jump the moment you reach the last lift. */
+.workout-footer__inner .btn { height: var(--tap-lg); }
+
 .rest-pill__bar {
   position: absolute;
   left: 0;
@@ -1775,8 +1820,8 @@ textarea.input {
 .workout-list {
   flex: 1;
   overflow-y: auto;
-  /* Bottom padding clears the fixed footer (~122px) plus the rest pill that
-     floats above it, so the last exercise's chips are never trapped under it. */
+  /* Bottom padding clears the fixed footer (~122px) plus the rest timer row
+     docked in it (~58px), so the last exercise's chips are never trapped. */
   padding: 0 16px 200px;
 }
 

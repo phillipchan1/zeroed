@@ -22,14 +22,14 @@ import { isSetLogged, tallySession } from '../../engine/volume'
 import { resolveTrackingType } from '../../engine/exerciseLibrary'
 import { restSecondsFor, adjustRest, formatRest } from '../../engine/restTimer'
 import { fireRestAlert } from '../../lib/restAlert'
-import { tick } from '../../lib/haptics'
+import { tick, record } from '../../lib/haptics'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
 import { unitContext, convertWeight, type UnitContext } from '../../lib/units'
 import type { FinishedSession } from '../../components/SessionZeroed'
 import { fetchCoachView } from './CoachScreen'
 import type { CoachChatTurn } from '../../engine/agentClient'
 import {
-  Button, Spinner, Sheet, Chip, Markdown, ChatComposer, TypingDots,
+  Button, Spinner, Sheet, Chip, Markdown, ChatComposer, TypingDots, LockOn,
 } from '../../components/ui'
 import type {
   RoutineRow, ExerciseTemplate, SetLog, InsightRow, TrackingType,
@@ -265,7 +265,7 @@ function SetRow({
     <div style={{ position: 'relative' }} ref={rpeRef}>
       <button
         type="button"
-        className="set-row__rpe"
+        className={`set-row__rpe${log.rpe == null ? ' set-row__rpe--empty' : ''}`}
         onClick={() => setRpeOpen((o) => !o)}
       >
         {log.rpe ?? 'RPE'}
@@ -340,10 +340,19 @@ function SetRow({
   // template itself is shared with the header via gridFor().
   let cells: ReactNode
 
+  // An empty field's placeholder is what tapping the check will log into it —
+  // the same carry-then-prescription order toggleDone() uses — so "one tap to
+  // repeat" shows its number before you commit to it. Dim, so it never reads
+  // as entered.
+  const willWeight = carry.weight != null ? u.show(carry.weight) : prescribedLoad
+  const willReps   = carry.reps ?? prescribedReps
+  const willSecs   = carry.duration ?? prescribedDuration
+  const hint = (v: number | null | undefined, fallback: string) => (v != null ? String(v) : fallback)
+
   if (trackingType === 'time') {
     cells = (
       <>
-        {numInput(log.duration, 'sec', (n) => setField('duration', n), 'numeric', `Set ${setNum} seconds`)}
+        {numInput(log.duration, hint(willSecs, 'sec'), (n) => setField('duration', n), 'numeric', `Set ${setNum} seconds`)}
         {rpeCell}
       </>
     )
@@ -352,8 +361,8 @@ function SetRow({
   } else if (trackingType === 'bodyweight_reps') {
     cells = (
       <>
-        {numInput(log.reps, 'reps', (n) => setField('reps', n), 'numeric', `Set ${setNum} reps`)}
-        {weightInput(`+${u.unit}`, `Set ${setNum} added weight in ${u.unit}`)}
+        {numInput(log.reps, hint(willReps, 'reps'), (n) => setField('reps', n), 'numeric', `Set ${setNum} reps`)}
+        {weightInput(carry.weight != null ? `+${u.show(carry.weight)}` : `+${u.unit}`, `Set ${setNum} added weight in ${u.unit}`)}
         {rpeCell}
       </>
     )
@@ -361,8 +370,8 @@ function SetRow({
     // weight_reps (default)
     cells = (
       <>
-        {weightInput(u.unit, `Set ${setNum} weight in ${u.unit}`)}
-        {numInput(log.reps, 'reps', (n) => setField('reps', n), 'numeric', `Set ${setNum} reps`)}
+        {weightInput(hint(willWeight, u.unit), `Set ${setNum} weight in ${u.unit}`)}
+        {numInput(log.reps, hint(willReps, 'reps'), (n) => setField('reps', n), 'numeric', `Set ${setNum} reps`)}
         {rpeCell}
       </>
     )
@@ -376,7 +385,7 @@ function SetRow({
   const prevPr = useRef(pr)
   const [prFlash, setPrFlash] = useState(false)
   useEffect(() => {
-    if (pr && !prevPr.current) setPrFlash(true)
+    if (pr && !prevPr.current) { setPrFlash(true); record() }
     prevPr.current = pr
   }, [pr])
 
@@ -1051,6 +1060,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   const [restEndsAt, setRestEndsAt] = useState<number | null>(null)
   const [restTotal, setRestTotal] = useState(0)
   const [, setNowTick] = useState(0)
+  // A short "rest's up" beat after the clock runs out — cleared by the next set.
+  const [restUp, setRestUp] = useState(false)
+  useEffect(() => {
+    if (!restUp) return
+    const t = setTimeout(() => setRestUp(false), 2600)
+    return () => clearTimeout(t)
+  }, [restUp])
 
   // insight_id → insight, for the per-exercise "why" surface
   const [insightMap, setInsightMap] = useState<Record<string, InsightRow>>(() => seedBoot?.insightMap ?? {})
@@ -1137,6 +1153,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       setNowTick((t) => t + 1)
       if (Date.now() >= restEndsAt) {
         setRestEndsAt(null)
+        setRestUp(true)
         // The whole point of a rest timer is knowing without looking.
         fireRestAlert()
       }
@@ -1768,6 +1785,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
 
   const setsTotal = allSetsFlat.length
   const setsDone  = allSetsFlat.filter(isLogged).length
+  // Complete earns the signal colour once you're on the last lift (or every set
+  // is in). Before that it's a quiet outline: one set in, a yellow "Complete
+  // workout" competed with the next set for the eye. It works either way.
+  const lastExIdx = routine ? (routine.exercises as ExerciseTemplate[]).length - 1 : -1
+  const finishing = setsDone === setsTotal || (setLogs[lastExIdx] ?? []).some(isLogged)
   // Load moved. NOT in the sticky header: that strip was deliberately cut back
   // to a title, one metadata line and a progress bar, and a fourth field wraps
   // it onto two lines and re-creates the telemetry crush that pass removed. It
@@ -1816,23 +1838,28 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
               {avgRpeLive !== null ? ` · RPE ${avgRpeLive}` : ''}
             </p>
           </div>
+          {/* Icons, not labelled pills: two pills took half the bar and the
+              session's own name truncated to "Lower A — Squat…". */}
           <button
             type="button"
-            className="howto-tag"
-            style={{ color: 'var(--computing)', borderColor: 'rgba(90,143,184,0.35)' }}
+            className="icon-btn"
+            style={{ margin: 0, color: 'var(--computing)' }}
             onClick={() => setBriefOpen(true)}
             aria-label="Why this session"
+            title="Why this session"
           >
-            <Info size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Why
+            <Info size={22} strokeWidth={1.9} />
           </button>
           {athleteId && (
             <button
               type="button"
-              className="howto-tag"
+              className="icon-btn"
+              style={{ margin: 0 }}
               onClick={() => setCoachOpen(true)}
               aria-label="Ask the coach"
+              title="Ask the coach"
             >
-              <MessageCircle size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Coach
+              <MessageCircle size={22} strokeWidth={1.9} />
             </button>
           )}
         </div>
@@ -1888,7 +1915,17 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           const trackingType = ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
           const pReps = leadingInt(ex.reps)
           const pDur  = trackingType === 'time' ? leadingInt(ex.reps) : null
-          const pLoad = leadingInt(ex.load ?? undefined)
+          // The number to hit is the engine's target for today — the same one
+          // Train's session preview and the hint chip quote — not the program's
+          // raw load text, which predates every progression since it was written.
+          // A pushed lift aims at its uncapped number. Weight-and-reps only: a
+          // bodyweight lift's "load" is added weight, which the engine doesn't set.
+          const rxTarget = trackingType === 'weight_reps'
+            ? (feedback[exIdx]?.pushed && prescription?.pushTargets?.[exIdx] != null
+                ? prescription.pushTargets[exIdx]
+                : prescription?.targets?.[exIdx] ?? null)
+            : null
+          const pLoad = rxTarget ?? leadingInt(ex.load ?? undefined)
           // Details sheet: the hardcoded how-to library, the program-specific
           // cue, the insight this lift serves, and the reading note. Show the
           // affordance whenever any of them exists.
@@ -1960,7 +1997,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                 trackingType={trackingType}
                 u={u}
                 prescribedReps={ex.reps}
-                prescribedLoad={ex.load ?? null}
+                prescribedLoad={rxTarget != null ? String(rxTarget) : (ex.load ?? null)}
               />
 
               {logs.map((log, setIdx) => {
@@ -1971,7 +2008,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                 const inSessionPrev = setIdx > 0 ? logs[setIdx - 1] : null
                 const lastSame = (prevByExercise[exIdx] ?? [])[setIdx]
                 const carry: Partial<SetLog> = {
-                  weight:   inSessionPrev?.weight   ?? lastSame?.weight   ?? null,
+                  // Set 1 with a target for today logs the target, not last
+                  // week's weight — otherwise a one-tap check quietly undoes
+                  // the progression the preview just promised.
+                  weight:   inSessionPrev?.weight   ?? (rxTarget != null ? null : lastSame?.weight) ?? null,
                   reps:     inSessionPrev?.reps     ?? lastSame?.reps     ?? null,
                   rpe:      inSessionPrev?.rpe      ?? null,
                   duration: inSessionPrev?.duration ?? lastSame?.duration ?? null,
@@ -1995,6 +2035,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                       const secs = restSecondsFor(ex, prescription?.phaseName, trackingType)
                       setRestTotal(secs)
                       setRestEndsAt(Date.now() + secs * 1000)
+                      setRestUp(false)
                     }}
                     onActivate={() => setActiveExIdx(exIdx)}
                   />
@@ -2068,55 +2109,6 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
        </aside>
       </div>
 
-      {/* Rest timer pill (mobile; desktop surfaces it in the rail instead).
-          Three controls, not one: the clock the app prescribed, and the two taps
-          that say it was wrong. The coach isn't in the gym, and the set that just
-          happened is better evidence than any table. */}
-      {restEndsAt != null && restLeft > 0 && (
-        <div className="rest-pill" role="timer" aria-label={`Rest, ${restLeft} seconds left`}>
-          <button
-            type="button"
-            className="rest-pill__step"
-            aria-label="30 seconds less rest"
-            onClick={() => {
-              const next = adjustRest(restLeft, -1)
-              setRestTotal(next)
-              setRestEndsAt(Date.now() + next * 1000)
-            }}
-          >
-            −30
-          </button>
-          <span className="num rest-pill__time">{formatRest(restLeft)}</span>
-          <button
-            type="button"
-            className="rest-pill__step"
-            aria-label="30 seconds more rest"
-            onClick={() => {
-              const next = adjustRest(restLeft, 1)
-              setRestTotal(next)
-              setRestEndsAt(Date.now() + next * 1000)
-            }}
-          >
-            +30
-          </button>
-          <button
-            type="button"
-            className="rest-pill__skip"
-            aria-label="Skip rest"
-            onClick={() => setRestEndsAt(null)}
-          >
-            <X size={14} strokeWidth={2.5} />
-          </button>
-          {/* How far through, drawn along the bottom edge — readable at a glance
-              from across a rack without parsing digits. */}
-          <span
-            className="rest-pill__bar"
-            style={{ width: restTotal > 0 ? `${Math.max(0, Math.min(100, (1 - restLeft / restTotal) * 100))}%` : '0%' }}
-            aria-hidden="true"
-          />
-        </div>
-      )}
-
       {/* Bottom complete bar */}
       <div
         style={{
@@ -2126,6 +2118,63 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         }}
       >
         <div className="workout-footer__inner">
+          {/* Rest timer (mobile; desktop surfaces it in the rail instead). Docked in
+              the footer, above Complete: floating, it sat over the set list and
+              covered whatever was under it — Add set, the felt chips.
+              Three controls, not one: the clock the app prescribed, and the two taps
+              that say it was wrong. The coach isn't in the gym, and the set that just
+              happened is better evidence than any table. */}
+          {restEndsAt != null && restLeft > 0 && (
+            <div className="rest-pill rest-pill--docked" role="timer" aria-label={`Rest, ${restLeft} seconds left`}>
+              <button
+                type="button"
+                className="rest-pill__step"
+                aria-label="30 seconds less rest"
+                onClick={() => {
+                  const next = adjustRest(restLeft, -1)
+                  setRestTotal(next)
+                  setRestEndsAt(Date.now() + next * 1000)
+                }}
+              >
+                −30
+              </button>
+              <span className="num rest-pill__time">{formatRest(restLeft)}</span>
+              <button
+                type="button"
+                className="rest-pill__step"
+                aria-label="30 seconds more rest"
+                onClick={() => {
+                  const next = adjustRest(restLeft, 1)
+                  setRestTotal(next)
+                  setRestEndsAt(Date.now() + next * 1000)
+                }}
+              >
+                +30
+              </button>
+              <button
+                type="button"
+                className="rest-pill__skip"
+                aria-label="Skip rest"
+                onClick={() => setRestEndsAt(null)}
+              >
+                <X size={14} strokeWidth={2.5} />
+              </button>
+              {/* How far through, drawn along the bottom edge — readable at a glance
+                  from across a rack without parsing digits. */}
+              <span
+                className="rest-pill__bar"
+                style={{ width: restTotal > 0 ? `${Math.max(0, Math.min(100, (1 - restLeft / restTotal) * 100))}%` : '0%' }}
+                aria-hidden="true"
+              />
+            </div>
+          )}
+
+          {/* Rest's up: the brackets lock on, once, alongside the beep/buzz. */}
+          {restUp && restEndsAt == null && (
+            <LockOn className="rest-up" style={{ '--lock-gap': '0px', '--lock-from': '10px', '--lock-size': '10px' } as React.CSSProperties}>
+              <span className="rest-up__text">Rest's up · next set</span>
+            </LockOn>
+          )}
           {/* A new session is just logged as today, the instant Complete is
               tapped — no picker, no real estate spent on it. Editing a past
               log is the one place the date itself might need correcting. */}
@@ -2145,7 +2194,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
               />
             </label>
           )}
-          <Button variant="primary" full onClick={handleCompleteWorkout} disabled={!hasAnyLog}>
+          <Button variant={isEdit || finishing ? 'primary' : 'outline'} full onClick={handleCompleteWorkout} disabled={!hasAnyLog}>
             {isEdit ? 'Save changes →' : 'Complete workout →'}
           </Button>
           {/* Only for a session that exists nowhere but this draft. An edit

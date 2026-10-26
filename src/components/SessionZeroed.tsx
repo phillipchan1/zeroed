@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { Check } from 'lucide-react'
 import { LockOn, TickingNumber } from './ui'
+import { success } from '../lib/haptics'
 
 /** What a just-finished session came to — handed from the workout screen to
  *  Today through router state, so it never outlives the navigation. */
@@ -39,7 +40,7 @@ export function SessionZeroed({ session, onDone }: { session: FinishedSession; o
 
   useEffect(() => {
     // Start the count-up just after the check lands, and leave on our own.
-    const start = setTimeout(() => setCounting(true), 450)
+    const start = setTimeout(() => { setCounting(true); success() }, 450)
     const leave = setTimeout(() => setLeaving(true), HOLD_MS)
     return () => { clearTimeout(start); clearTimeout(leave) }
   }, [])
