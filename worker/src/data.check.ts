@@ -332,6 +332,10 @@ ok(
   workflow.includes("PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql"),
   'migrate-pg version probe uses a clean read-only libpq env',
 )
+ok(migrateWf.includes('PGPASSFILE=/dev/null'), 'manual migrate version probe nulls PGPASSFILE')
+ok(workflow.includes('PGPASSFILE=/dev/null'), 'migrate-pg version probe nulls PGPASSFILE')
+ok(migrateWf.includes('-u PGSSLMODE') && migrateWf.includes('-u PGHOSTADDR'), 'manual migrate version probe unsets PGSSLMODE and PGHOSTADDR')
+ok(workflow.includes('-u PGSSLMODE') && workflow.includes('-u PGHOSTADDR'), 'migrate-pg version probe unsets PGSSLMODE and PGHOSTADDR')
 ok(migrateWf.includes('GITHUB_PATH'), 'manual migrate puts the matching client first on PATH')
 
 const secret = 's'.repeat(32)

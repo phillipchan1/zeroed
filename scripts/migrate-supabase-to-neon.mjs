@@ -529,21 +529,57 @@ export function authUsersToCopyCsv(rows) {
   }).join('\n') + (rows.length ? '\n' : '')
 }
 
-export const REQUIRED_COUNT_TABLES = [
-  'athlete', 'insight', 'mcp_token', 'phase', 'program', 'routine', 'workout',
+/** Public app tables restored by this script. Better Auth stays excluded. */
+export const PUBLIC_RESTORE_ORDER = [
+  'athlete',
+  'diagnostic',
+  'insight',
+  'insight_draft',
+  'athlete_profile',
+  'program',
+  'phase',
+  'routine',
+  'workout',
+  'session_observation',
+  'weekly_review',
+  'coach_message',
+  'probe_throttle',
+  'workout_draft',
+  'program_revision',
+  'mcp_token',
 ]
 
-export function checksumQuery() {
+export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]
+
+export function checksumQuery(tables = REQUIRED_COUNT_TABLES) {
+  return tables
+    .map((table, i) => (
+      i === 0
+        ? `SELECT '${table}' AS t, COUNT(*)::bigint AS n FROM public.${table}`
+        : `UNION ALL SELECT '${table}', COUNT(*) FROM public.${table}`
+    ))
+    .join('\n')
+    + '\nORDER BY 1;\n'
+}
+
+/** Public app tables that have created_at (Better Auth stays out via the allowlist). */
+export function createdAtTablesQuery(tables = REQUIRED_COUNT_TABLES) {
+  const list = tables.map((t) => `'${t.replace(/'/g, "''")}'`).join(', ')
   return `
-    SELECT 'athlete' AS t, COUNT(*)::bigint AS n FROM public.athlete
-    UNION ALL SELECT 'program', COUNT(*) FROM public.program
-    UNION ALL SELECT 'phase', COUNT(*) FROM public.phase
-    UNION ALL SELECT 'routine', COUNT(*) FROM public.routine
-    UNION ALL SELECT 'workout', COUNT(*) FROM public.workout
-    UNION ALL SELECT 'insight', COUNT(*) FROM public.insight
-    UNION ALL SELECT 'mcp_token', COUNT(*) FROM public.mcp_token
+    SELECT table_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND column_name = 'created_at'
+      AND table_name IN (${list})
     ORDER BY 1;
   `
+}
+
+export function maxCreatedAtQuery(table) {
+  if (!REQUIRED_COUNT_TABLES.includes(table)) {
+    throw new Error(`refusing max(created_at) for unknown table ${table}`)
+  }
+  return `SELECT COALESCE(MAX(created_at)::text, '') FROM public.${table}`
 }
 
 export function orphanAthleteQuery() {
@@ -622,25 +658,6 @@ export function formatCountComparison(srcCounts, dstCounts) {
   return { lines, mismatch }
 }
 
-export const PUBLIC_RESTORE_ORDER = [
-  'athlete',
-  'diagnostic',
-  'insight',
-  'insight_draft',
-  'athlete_profile',
-  'program',
-  'phase',
-  'routine',
-  'workout',
-  'session_observation',
-  'weekly_review',
-  'coach_message',
-  'probe_throttle',
-  'workout_draft',
-  'program_revision',
-  'mcp_token',
-]
-
 const SKIP_RESTORE_TABLES = new Set(['user', 'session', 'account', 'verification'])
 
 export function orderRestoreList(tocText) {
@@ -694,6 +711,26 @@ function needBin(name) {
 
 function psqlTuples(url, sql) {
   return run('psql', ['-v', 'ON_ERROR_STOP=1', '-At', '-F', ',', '-d', url, '-c', sql])
+}
+
+function printDryRunCreatedAt(sourceUrl, targetUrl) {
+  const tables = parseIdList(psqlTuples(sourceUrl, createdAtTablesQuery()))
+    .filter((t) => REQUIRED_COUNT_TABLES.includes(t))
+  if (!tables.length) {
+    console.log('dry-run: no counted public table has created_at')
+    return
+  }
+  console.log('dry-run: max(created_at) per table (helps explain count drift):')
+  for (const table of tables) {
+    const src = String(psqlTuples(sourceUrl, maxCreatedAtQuery(table)) || '').trim() || 'n/a'
+    let dst = 'n/a'
+    try {
+      dst = String(psqlTuples(targetUrl, maxCreatedAtQuery(table)) || '').trim() || 'n/a'
+    } catch {
+      dst = 'n/a'
+    }
+    console.log(`  ${table}: source=${src} neon=${dst}`)
+  }
 }
 
 function readCounts(url, label, { required = true } = {}) {
@@ -951,6 +988,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       console.log(args.relaxTargetRls
         ? 'dry-run: would apply worker/schema/app.sql + data-only restore + --relax-target-rls on Neon only'
         : 'dry-run: would apply worker/schema/app.sql + data-only restore (no Neon writes in this dry-run)')
+      printDryRunCreatedAt(source, target)
       return 0
     }
 

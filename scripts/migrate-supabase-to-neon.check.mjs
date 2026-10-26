@@ -21,7 +21,9 @@ import {
   authUsersToCopyCsv,
   canExecutePgControlSystemQuery,
   checkSourceLockAbsentOnTarget,
+  checksumQuery,
   confirmDropMismatchReason,
+  createdAtTablesQuery,
   fingerprintQuery,
   formatCountComparison,
   isNeonHost,
@@ -30,6 +32,7 @@ import {
   libpqCleanEnv,
   loadUsersSql,
   main,
+  maxCreatedAtQuery,
   missingMappedAuthUserIds,
   orderRestoreList,
   orphanAthleteQuery,
@@ -45,6 +48,7 @@ import {
   refuseSourceWipeReason,
   releaseHeldAdvisoryLocks,
   refuseTargetFingerprintReason,
+  REQUIRED_COUNT_TABLES,
   requireCounts,
   resolveSourceUrl,
   resolveTargetUrl,
@@ -182,31 +186,73 @@ ok(txn.includes('INSERT INTO "user"') && txn.includes('COPY public.athlete'), 'r
 // Captured from `psql` 16 default aligned output (leading spaces, padded
 // columns, header, rule, "(N rows)"). The old /^(\\w+)\\s*\\| regex missed this.
 
+const EXTRA_COUNT_TABLES = [
+  'weekly_review', 'probe_throttle', 'diagnostic', 'insight_draft',
+  'athlete_profile', 'workout_draft', 'program_revision', 'session_observation',
+  'coach_message',
+]
 const PSQL_ALIGNED = `     t     | n 
 -----------+---
  athlete   | 3
+ athlete_profile | 0
+ coach_message | 0
+ diagnostic | 0
  insight   | 0
+ insight_draft | 0
  mcp_token | 1
  phase     | 1
+ probe_throttle | 0
  program   | 1
+ program_revision | 0
  routine   | 1
+ session_observation | 0
+ weekly_review | 0
  workout   | 1
-(7 rows)
+ workout_draft | 0
+(16 rows)
 `
+
+eq(REQUIRED_COUNT_TABLES.length, 16, 'counts cover all 16 public app tables')
+for (const table of EXTRA_COUNT_TABLES) {
+  ok(REQUIRED_COUNT_TABLES.includes(table), `counts include ${table}`)
+}
+ok(!REQUIRED_COUNT_TABLES.includes('user'), 'counts exclude Better Auth user')
+ok(!REQUIRED_COUNT_TABLES.includes('session'), 'counts exclude Better Auth session')
+ok(!REQUIRED_COUNT_TABLES.includes('account'), 'counts exclude Better Auth account')
+ok(!REQUIRED_COUNT_TABLES.includes('verification'), 'counts exclude Better Auth verification')
+
+const checksumSql = checksumQuery()
+for (const table of REQUIRED_COUNT_TABLES) {
+  ok(checksumSql.includes(`public.${table}`), `checksumQuery includes ${table}`)
+}
+ok(!/FROM public\."?user"?/.test(checksumSql), 'checksumQuery excludes Better Auth user')
+ok(!/FROM public\.session(?:\s|;|$)/.test(checksumSql), 'checksumQuery excludes Better Auth session')
+ok(createdAtTablesQuery().includes("column_name = 'created_at'"), 'createdAtTablesQuery finds created_at columns')
+ok(maxCreatedAtQuery('athlete').includes('MAX(created_at)'), 'maxCreatedAtQuery reads athlete.created_at')
+let refusedAuthTable = false
+try {
+  maxCreatedAtQuery('user')
+} catch {
+  refusedAuthTable = true
+}
+ok(refusedAuthTable, 'maxCreatedAtQuery refuses Better Auth tables')
 
 const aligned = parseCounts(PSQL_ALIGNED)
 eq(aligned.athlete, 3, 'parseCounts reads padded psql aligned athlete')
 eq(aligned.mcp_token, 1, 'parseCounts reads padded psql aligned mcp_token')
 eq(aligned.insight, 0, 'parseCounts reads a zero count from aligned psql')
+eq(aligned.weekly_review, 0, 'parseCounts reads padded psql aligned weekly_review')
+eq(aligned.coach_message, 0, 'parseCounts reads padded psql aligned coach_message')
 requireCounts(aligned, 'aligned-fixture')
 ok(true, 'requireCounts accepts a complete aligned parse')
 
-const atCsv = parseCounts('athlete,3\ninsight,0\nmcp_token,1\nphase,1\nprogram,1\nroutine,1\nworkout,1\n')
+const atCsv = parseCounts('athlete,3\nathlete_profile,0\ncoach_message,0\ndiagnostic,0\ninsight,0\ninsight_draft,0\nmcp_token,1\nphase,1\nprobe_throttle,0\nprogram,1\nprogram_revision,0\nroutine,1\nsession_observation,0\nweekly_review,0\nworkout,1\nworkout_draft,0\n')
 eq(atCsv.athlete, 3, 'parseCounts reads psql -At CSV')
 requireCounts(atCsv, 'at-csv')
 
-const csvHeaderOut = parseCounts('t,n\nathlete,3\ninsight,0\nmcp_token,1\nphase,1\nprogram,1\nroutine,1\nworkout,1\n')
+const csvHeaderOut = parseCounts('t,n\nathlete,3\nathlete_profile,0\ncoach_message,0\ndiagnostic,0\ninsight,0\ninsight_draft,0\nmcp_token,1\nphase,1\nprobe_throttle,0\nprogram,1\nprogram_revision,0\nroutine,1\nsession_observation,0\nweekly_review,0\nworkout,1\nworkout_draft,0\n')
 eq(csvHeaderOut.workout, 1, 'parseCounts skips psql --csv header')
+eq(csvHeaderOut.session_observation, 0, 'parseCounts reads session_observation from csv header output')
 
 let emptyFailed = false
 try {
@@ -216,9 +262,8 @@ try {
 }
 ok(emptyFailed, 'requireCounts fails hard when aligned output has no table rows')
 
-const full = {
-  athlete: 3, insight: 0, mcp_token: 1, phase: 1, program: 1, routine: 1, workout: 1,
-}
+const full = Object.fromEntries(REQUIRED_COUNT_TABLES.map((t) => [t, aligned[t] ?? 0]))
+eq(Object.keys(full).length, 16, 'complete count fixture has 16 tables')
 ok(!formatCountComparison(full, full).mismatch, 'matching required tables are ok')
 ok(formatCountComparison(full, { ...full, athlete: 2 }).mismatch, 'mismatch is flagged')
 ok(formatCountComparison(full, null).mismatch, 'missing dest counts are a mismatch')
@@ -713,6 +758,13 @@ ok(
 )
 ok(!/emailVerified|createdAt|updatedAt|userId|expiresAt/.test(loadUsersSql('/tmp/x.csv')), 'auth-user SQL has no camelCase columns')
 ok(!/CREATE TABLE IF NOT EXISTS "user"[\s\S]*emailVerified/.test(readFileSync(join(root, 'worker/schema/better-auth.sql'), 'utf8')), 'better-auth.sql has no camelCase user table')
+ok(migrateSrc.includes('weekly_review') && migrateSrc.includes('coach_message'), 'migrate counts weekly_review and coach_message')
+ok(migrateSrc.includes('createdAtTablesQuery') || migrateSrc.includes("column_name = 'created_at'"), 'migrate looks up created_at columns')
+ok(/max\(created_at\)/.test(migrateSrc), 'dry-run prints max(created_at)')
+ok(/PGPASSFILE=\/dev\/null/.test(workflow), 'migrate workflow version-check nulls PGPASSFILE')
+ok(/-u PGSSLMODE|-u PGHOSTADDR|PGHOSTADDR/.test(workflow), 'migrate workflow version-check unsets inherited PGHOSTADDR/PGSSLMODE')
+ok(/PGPASSFILE=\/dev\/null/.test(checksYml), 'migrate-pg version-check nulls PGPASSFILE')
+ok(/-u PGSSLMODE|-u PGHOSTADDR|PGHOSTADDR/.test(checksYml), 'migrate-pg version-check unsets inherited PGHOSTADDR/PGSSLMODE')
 
 const db = new PGlite()
 await db.exec(readFileSync(join(root, 'worker/schema/app.sql'), 'utf8'))
@@ -722,9 +774,9 @@ await db.exec(readFileSync(join(root, 'worker/schema/preview-seed.sql'), 'utf8')
 const tables = await db.query(`
   SELECT tablename FROM pg_tables
   WHERE schemaname = 'public'
-    AND tablename IN ('athlete','program','phase','routine','workout','insight','mcp_token')
+    AND tablename IN (${REQUIRED_COUNT_TABLES.map((t) => `'${t}'`).join(',')})
 `)
-eq(tables.rows.length, 7, 'PGlite app.sql creates the counted public tables')
+eq(tables.rows.length, 16, 'PGlite app.sql creates the counted public tables')
 
 const policies = await db.query(`SELECT COUNT(*)::int AS n FROM pg_policy`)
 eq(Number(policies.rows[0]?.n ?? -1), 0, 'PGlite app.sql created no RLS policies')
@@ -769,7 +821,10 @@ const livePsql = livePsqlUrl
     '-d',
     livePsqlUrl,
     '-c',
-    `SELECT 'athlete' AS t, 3::bigint AS n UNION ALL SELECT 'insight', 0 UNION ALL SELECT 'mcp_token', 1 UNION ALL SELECT 'phase', 1 UNION ALL SELECT 'program', 1 UNION ALL SELECT 'routine', 1 UNION ALL SELECT 'workout', 1 ORDER BY 1;`,
+    REQUIRED_COUNT_TABLES.map((t, i) => {
+      const n = t === 'athlete' ? 3 : ['mcp_token', 'phase', 'program', 'routine', 'workout'].includes(t) ? 1 : 0
+      return i === 0 ? `SELECT '${t}' AS t, ${n}::bigint AS n` : `UNION ALL SELECT '${t}', ${n}`
+    }).join(' ') + ' ORDER BY 1;',
   ], {
     encoding: 'utf8',
     env: libpqCleanEnv({ PATH: process.env.PATH || '/usr/bin', HOME: process.env.HOME || '', LANG: 'C' }),
@@ -836,6 +891,21 @@ async function runLivePostgresChecks() {
 
   const athletesBefore = Number(pinnedPsql(sourceUrl, 'SELECT COUNT(*) FROM public.athlete').trim())
   const nspBefore = pinnedPsql(sourceUrl, `SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' ORDER BY 1`)
+
+  const dryLive = spawnMigrate(['--dry-run', '--skip-auth-users', '--auth-users-file', mapPath], {
+    SUPABASE_READONLY_URL: sourceUrl,
+    NEON_DIRECT_URL: targetUrl,
+  })
+  const dryLiveOut = `${dryLive.stdout}\n${dryLive.stderr}`
+  if (dryLive.status !== 0) console.error(redactSecrets(dryLiveOut))
+  eq(dryLive.status, 0, 'connected dry-run exits 0')
+  ok(/max\(created_at\)/.test(dryLiveOut), 'connected dry-run prints max(created_at)')
+  ok(/athlete: source=/.test(dryLiveOut), 'connected dry-run prints athlete max(created_at)')
+  eq(
+    Number(pinnedPsql(sourceUrl, 'SELECT COUNT(*) FROM public.athlete').trim()),
+    athletesBefore,
+    'connected dry-run leaves source athlete rows unchanged',
+  )
 
   const srcFp = readFingerprint(sourceUrl)
   const dstFp = readFingerprint(targetUrl)
