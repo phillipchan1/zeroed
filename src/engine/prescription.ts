@@ -22,6 +22,7 @@ import { roundToIncrement, type UnitContext } from '../lib/units.ts'
 import { resolveCategory } from './exerciseLibrary.ts'
 import { MAIN_LIFT } from './weekDiff.ts'
 import { weekAdherence } from './weekStatus.ts'
+import { isoInWeek } from './weekDates.ts'
 
 // ────────────────────────────────────────────────────────────────────────────
 // FELT-CHIP SEVERITY BANDS — one vocabulary, read the same way everywhere.
@@ -99,19 +100,20 @@ export function tallyWeek(
   planned: number,
   workouts: WeekWorkout[],
   observations: WeekObservation[],
-  week?: { start: string; end: string },
+  week?: { start?: string; end?: string; weekStart?: string; weekEnd?: string },
 ): WeeklyTally {
+  const start = week?.start ?? week?.weekStart ?? null
+  const end = week?.end ?? week?.weekEnd ?? null
   const inRange = (iso: string) => {
-    if (!week) return true
-    const day = iso.slice(0, 10)
-    return day >= week.start && day <= week.end
+    if (!start || !end) return !week
+    return isoInWeek(iso, start, end)
   }
   const scoped = workouts.filter((w) => inRange(w.performed_at ?? ''))
   const { done, adherence } = weekAdherence(
     planned,
     scoped.map((w) => ({ routineId: '', performedAt: w.performed_at })),
-    week?.start ?? '0000-01-01',
-    week?.end ?? '9999-12-31',
+    start ?? '0000-01-01',
+    end ?? '9999-12-31',
   )
 
   const rpes: number[] = []

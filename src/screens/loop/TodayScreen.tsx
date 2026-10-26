@@ -15,7 +15,7 @@ import { effectiveTrackingType } from '../../engine/exerciseLibrary'
 import { tallySession } from '../../engine/volume'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
-import { loadDraftStarts, weekStart } from '../../lib/workoutDraft'
+import { loadDraftStarts } from '../../lib/workoutDraft'
 import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
 import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
 import {
@@ -109,8 +109,6 @@ function isSameDay(a: Date, b: Date) {
 
 const shortDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short' })
 const shortDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-// Local YYYY-MM-DD (matches the engine's week_ending, which is local-time Sunday).
-const localIso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
 // The cached Today view. Everything here is serializable (ISO strings, plain
 // numbers) so it round-trips through localStorage; the date-derived week strip

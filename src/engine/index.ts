@@ -60,7 +60,7 @@ import {
   SEVERITY_STRONG, SEVERITY_PAIN,
   rpeContract, PHASE_RPE, tallyWeek, decidePrescription,
   recommendedLoad, autoregulateDelta, maxUpFor,
-  projectExerciseLoad, allowsAutoProgress, parseExplicitLoad,
+  projectExerciseLoad, allowsAutoProgress,
   P1_RESOLVE_THRESHOLD, P1_DISCONFIRM_STEP, advanceStatus,
   addressesLimiter, capIsActive, isLiftHeld,
   CLEARANCE_TOP_SETS, CLEARANCE_SESSIONS,

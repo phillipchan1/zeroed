@@ -162,10 +162,10 @@ export function planPagerFutureWeeks(opts: {
   maxForward?: number
 }): PagerWeekPlan[] {
   const max = opts.maxForward ?? 6
-  const horizon = [opts.activeWeekEnd, opts.queued?.weekEnd]
+  const ends = [opts.activeWeekEnd, opts.queued?.weekEnd]
     .filter((d): d is string => !!d)
     .sort()
-    .at(-1) ?? addDaysISO(opts.thisMonday, 6)
+  const horizon = ends.length ? ends[ends.length - 1] : addDaysISO(opts.thisMonday, 6)
 
   const out: PagerWeekPlan[] = []
   for (let k = 1; k <= max; k++) {

@@ -85,7 +85,7 @@ export {
   startOfWeekMonday, isoDate, addDaysISO, nextMondayISO, sundayOnOrAfterISO,
   ATHLETE_TIME_ZONE, weekWindowInZone, upcomingWeekWindow, isSundayInZone,
   logTimestampForWeek, isoInWeek, isoDateInZone, planPagerFutureWeeks,
-}
+} from './weekDates'
 
 // ---- reading the live program ----------------------------------------------
 
