@@ -146,11 +146,14 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    restore without that mapping exits 2. A live restore also requires
    `--confirm-drop=<target dbname>` and a `*.neon.tech` target. The script
    refuses when source and target normalize to the same host+port+dbname
-   (user, password, and query are ignored), when the target host looks
-   like Supabase (`supabase.co` / `supabase.com` / `pooler.supabase`),
-   or when a pre-DROP probe finds a `storage` schema, any `pg_policies`
-   row, or a matching `current_database()` plus
-   `inet_server_addr()`/`system_identifier`. Do not pass
+   (user, password, and query are ignored; libpq `?host=` / `hostaddr=` /
+   `dbname=` overrides are honored), when the target host looks like
+   Supabase (`supabase.co` / `supabase.com` / `pooler.supabase`), is a
+   socket path, or a host override that is not `*.neon.tech`, or when a
+   pre-DROP probe cannot read either fingerprint (fail closed), finds a
+   `storage` schema, any `pg_policies` row, a matching
+   `current_database()` plus `inet_server_addr()` / port / start time /
+   `system_identifier`, or a source marker visible on the target. Do not pass
    `--relax-target-rls` unless you intend to drop leftover RLS on Neon.
    Manual GitHub Action: `migrate-supabase-to-neon` (`workflow_dispatch` only,
    `dry_run` defaults to true). Secrets: `SUPABASE_READONLY_URL`,

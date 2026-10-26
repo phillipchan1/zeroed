@@ -20,7 +20,10 @@ import {
   fingerprintQuery,
   formatCountComparison,
   isNeonHost,
+  isSocketHost,
   isSupabaseHost,
+  loadUsersSql,
+  main,
   missingMappedAuthUserIds,
   orderRestoreList,
   orphanAthleteQuery,
@@ -256,6 +259,24 @@ eq(parsedAlias.dbname, 'neondb', 'postgresUrlParts reads dbname')
 eq(postgresUrlParts(neonCased).host, parsedAlias.host, 'postgresUrlParts treats host case as equal')
 eq(postgresUrlParts(neonCased).dbname, parsedAlias.dbname, 'postgresUrlParts lowercases dbname')
 eq(postgresUrlParts(neonCased).port, parsedAlias.port, 'postgresUrlParts default port matches explicit-default')
+eq(
+  postgresUrlParts(`${neonDirect}?dbname=other`).dbname,
+  'other',
+  'postgresUrlParts honors libpq dbname= override',
+)
+eq(
+  postgresUrlParts(`${neonDirect}?host=/tmp/pg`).host,
+  '/tmp/pg',
+  'postgresUrlParts honors libpq host= override',
+)
+eq(
+  postgresUrlParts(`${neonDirect}?hostaddr=127.0.0.1`).host,
+  '127.0.0.1',
+  'postgresUrlParts honors libpq hostaddr= override',
+)
+ok(isSocketHost('/tmp/pg'), 'isSocketHost treats an absolute path as a socket')
+ok(isSocketHost('/tmp/pg.sock'), 'isSocketHost treats a sock path as a socket')
+ok(!isSocketHost('ep-foo.us-east-2.aws.neon.tech'), 'isSocketHost rejects a Neon hostname')
 
 ok(isSupabaseHost('db.abcdefghijkl.supabase.co'), 'isSupabaseHost matches *.supabase.co')
 ok(isSupabaseHost('db.abcdefghijkl.supabase.com'), 'isSupabaseHost matches *.supabase.com')
@@ -310,6 +331,16 @@ eq(
   '',
   'same Neon host with a different dbname is allowed at the URL layer',
 )
+eq(
+  refuseSourceWipeReason(supabaseDirect, `${neonDirect}?host=/tmp/pg`),
+  'target host is a socket path',
+  '.neon.tech URL with ?host=socket is refused',
+)
+eq(
+  refuseSourceWipeReason(supabaseDirect, `${neonDirect}?hostaddr=127.0.0.1`),
+  'target host override must end in .neon.tech',
+  '.neon.tech URL with hostaddr= is refused',
+)
 
 eq(
   confirmDropMismatchReason('', neonDirect),
@@ -326,42 +357,72 @@ eq(confirmDropMismatchReason('NEONDB', neonDirect), '', '--confirm-drop matches 
 
 ok(fingerprintQuery().includes('to_regnamespace'), 'fingerprint query checks storage schema')
 ok(fingerprintQuery().includes('pg_policies'), 'fingerprint query checks pg_policies')
-ok(fingerprintQuery().includes('pg_control_system'), 'fingerprint query reads system_identifier')
+ok(fingerprintQuery().includes('pg_control_system'), 'fingerprint query reads system_identifier when permitted')
+ok(fingerprintQuery().includes('has_function_privilege'), 'fingerprint query does not require pg_control_system')
 ok(fingerprintQuery().includes('inet_server_addr'), 'fingerprint query reads inet_server_addr')
+ok(fingerprintQuery().includes('inet_server_port'), 'fingerprint query reads inet_server_port')
+ok(fingerprintQuery().includes('pg_postmaster_start_time'), 'fingerprint query reads postmaster start time')
 
-const fp = parseFingerprint('{"db":"neondb","addr":"","sysid":"1","has_storage":false,"has_policies":false}\n')
+const fp = parseFingerprint('{"db":"neondb","addr":"","port":"","start":"t0","sysid":"1","has_storage":false,"has_policies":false}\n')
 eq(fp.db, 'neondb', 'parseFingerprint reads db')
+eq(fp.start, 't0', 'parseFingerprint reads start time')
 ok(!fp.has_storage && !fp.has_policies, 'parseFingerprint reads false flags')
 eq(
-  refuseTargetFingerprintReason({ ...fp, has_storage: true }, null),
+  refuseTargetFingerprintReason(null, fp),
+  'could not read target fingerprint',
+  'unreadable target fingerprint is refused',
+)
+eq(
+  refuseTargetFingerprintReason(fp, null),
+  'could not read source fingerprint',
+  'unreadable source fingerprint is refused',
+)
+eq(
+  refuseTargetFingerprintReason({ ...fp, has_storage: true }, fp),
   'target has a storage schema (Supabase)',
   'storage schema on target is refused',
 )
 eq(
-  refuseTargetFingerprintReason({ ...fp, has_policies: true }, null),
+  refuseTargetFingerprintReason({ ...fp, has_policies: true }, fp),
   'target has pg_policies rows (Supabase RLS)',
   'pg_policies on target are refused',
 )
 eq(
   refuseTargetFingerprintReason(
-    { db: 'postgres', addr: '1.2.3.4', sysid: '99', has_storage: false, has_policies: false },
-    { db: 'postgres', addr: '1.2.3.4', sysid: '88' },
+    { db: 'postgres', addr: '1.2.3.4', port: '5432', start: '', sysid: '99', has_storage: false, has_policies: false },
+    { db: 'postgres', addr: '1.2.3.4', port: '5432', start: '', sysid: '88' },
   ),
   'target server identity matches the source',
   'same current_database + inet_server_addr is refused',
 )
 eq(
   refuseTargetFingerprintReason(
-    { db: 'postgres', addr: '', sysid: '99', has_storage: false, has_policies: false },
-    { db: 'postgres', addr: '', sysid: '99' },
+    { db: 'postgres', addr: '', port: '', start: '', sysid: '99', has_storage: false, has_policies: false },
+    { db: 'postgres', addr: '', port: '', start: '', sysid: '99' },
   ),
   'target server identity matches the source',
   'same current_database + system_identifier is refused',
 )
 eq(
   refuseTargetFingerprintReason(
-    { db: 'neondb', addr: '9.9.9.9', sysid: '1', has_storage: false, has_policies: false },
-    { db: 'postgres', addr: '1.2.3.4', sysid: '2' },
+    { db: 'postgres', addr: '', port: '', start: '2026-01-01', sysid: '', has_storage: false, has_policies: false },
+    { db: 'postgres', addr: '', port: '', start: '2026-01-01', sysid: '' },
+  ),
+  'target server identity matches the source',
+  'same current_database + postmaster start time is refused',
+)
+eq(
+  refuseTargetFingerprintReason(
+    { db: 'postgres', addr: '', port: '', start: '', sysid: '', has_storage: false, has_policies: false },
+    { db: 'postgres', addr: '', port: '', start: '', sysid: '' },
+  ),
+  'could not prove target is a different server from the source',
+  'incomplete fingerprints fail closed',
+)
+eq(
+  refuseTargetFingerprintReason(
+    { db: 'neondb', addr: '9.9.9.9', port: '5432', start: 't1', sysid: '1', has_storage: false, has_policies: false },
+    { db: 'postgres', addr: '1.2.3.4', port: '5432', start: 't2', sysid: '2' },
   ),
   '',
   'distinct db + server identity is allowed',
@@ -411,6 +472,7 @@ ok(/every source auth_user_id/.test(drySkip.stdout), 'dry-run documents id-match
 ok(/one transaction/.test(drySkip.stdout), 'dry-run documents a single restore transaction')
 ok(/--confirm-drop=<target dbname>/.test(drySkip.stdout), 'dry-run documents --confirm-drop')
 ok(/\.neon\.tech/.test(drySkip.stdout), 'dry-run documents a .neon.tech target')
+ok(/unreadable fingerprint/.test(drySkip.stdout), 'dry-run documents fail-closed fingerprints')
 ok(!/would COPY auth\.users from source/.test(drySkip.stdout), 'skip path does not COPY auth.users')
 
 const liveNoConfirm = spawnMigrate(['--skip-auth-users'], {
@@ -459,6 +521,14 @@ refusedBeforeWrite(spawnMigrate(['--skip-auth-users', '--confirm-drop=postgres']
   SUPABASE_READONLY_URL: neonDirect,
   NEON_DIRECT_URL: supabaseDirect,
 }), 'supabase host as target')
+refusedBeforeWrite(spawnMigrate(['--skip-auth-users', '--confirm-drop=neondb'], {
+  SUPABASE_READONLY_URL: supabaseDirect,
+  NEON_DIRECT_URL: `${neonDirect}?host=/tmp/pg`,
+}), '.neon.tech URL with ?host=socket')
+refusedBeforeWrite(spawnMigrate(['--skip-auth-users', '--confirm-drop=neondb'], {
+  SUPABASE_READONLY_URL: supabaseDirect,
+  NEON_DIRECT_URL: `${neonDirect}?hostaddr=127.0.0.1`,
+}), '.neon.tech URL with hostaddr=')
 
 const dryDefault = spawnMigrate(['--dry-run'])
 eq(dryDefault.status, 0, 'offline dry-run without skip exits 0')
@@ -481,6 +551,35 @@ try {
   writeFileSync(badJson, '{not json')
   const dryBad = spawnMigrate(['--dry-run', '--auth-users-file', badJson])
   ok(dryBad.status !== 0, 'invalid mapping JSON fails')
+
+  let dropAttempted = false
+  const unreadFp = main(
+    ['--skip-auth-users', '--confirm-drop=neondb', '--auth-users-file', mapPath],
+    {
+      SUPABASE_READONLY_URL: supabaseDirect,
+      NEON_DIRECT_URL: neonDirect,
+    },
+    {
+      readFingerprint(url) {
+        if (/supabase/.test(url)) throw new Error('could not read source fingerprint')
+        return {
+          db: 'neondb',
+          addr: '9.9.9.9',
+          port: '5432',
+          start: 't-target',
+          sysid: '1',
+          has_storage: false,
+          has_policies: false,
+        }
+      },
+      checkSourceMarker() {
+        dropAttempted = true
+        return ''
+      },
+    },
+  )
+  eq(unreadFp, 2, 'unreadable source fingerprint exits 2')
+  ok(!dropAttempted, 'unreadable source fingerprint does not write a marker or drop')
 } finally {
   rmSync(tmp, { recursive: true, force: true })
 }
@@ -533,6 +632,15 @@ ok(/refuseSourceWipeReason/.test(migrateSrc), 'live restore refuses source-wipe 
 ok(/refuseTargetFingerprintReason/.test(migrateSrc), 'live restore fingerprints the target before DROP')
 ok(/confirmDropMismatchReason/.test(migrateSrc), 'live restore requires --confirm-drop')
 ok(/probing target identity before drop/.test(migrateSrc), 'fingerprint probe is logged before DROP')
+ok(/could not read source fingerprint/.test(migrateSrc), 'unreadable source fingerprint fails closed')
+ok(/source marker is visible on the target/.test(migrateSrc), 'source marker visible on target is refused')
+ok(/hostaddr/.test(migrateSrc) && /dbname/.test(migrateSrc), 'URL parser honors libpq hostaddr and dbname')
+ok(
+  /INSERT INTO "user" \(id, name, email, email_verified, created_at, updated_at\)/.test(migrateSrc),
+  'auth-user copy writes snake_case Better Auth user columns',
+)
+ok(!/emailVerified|createdAt|updatedAt|userId|expiresAt/.test(loadUsersSql('/tmp/x.csv')), 'auth-user SQL has no camelCase columns')
+ok(!/CREATE TABLE IF NOT EXISTS "user"[\s\S]*emailVerified/.test(readFileSync(join(root, 'worker/schema/better-auth.sql'), 'utf8')), 'better-auth.sql has no camelCase user table')
 
 const db = new PGlite()
 await db.exec(readFileSync(join(root, 'worker/schema/app.sql'), 'utf8'))
@@ -551,6 +659,26 @@ eq(Number(policies.rows[0]?.n ?? -1), 0, 'PGlite app.sql created no RLS policies
 
 const preview = await db.query(`SELECT email FROM "user" WHERE id = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'`)
 eq(preview.rows[0]?.email, 'preview.athlete@zeroed.invalid', 'preview seed maps the same UUID into Better Auth')
+
+const authCols = await db.query(`
+  SELECT table_name, column_name
+  FROM information_schema.columns
+  WHERE table_schema = 'public'
+    AND table_name IN ('user', 'session', 'account', 'verification')
+`)
+ok(authCols.rows.length > 0, 'Better Auth tables exist')
+ok(
+  authCols.rows.every((r) => !/[A-Z]/.test(r.column_name)),
+  'Better Auth user/session/account/verification columns are snake_case',
+)
+ok(
+  authCols.rows.some((r) => r.table_name === 'user' && r.column_name === 'email_verified'),
+  'user.email_verified is snake_case',
+)
+ok(
+  !authCols.rows.some((r) => /emailVerified|createdAt|userId|expiresAt/.test(r.column_name)),
+  'Better Auth tables have no camelCase columns',
+)
 
 const athletes = await db.query(`SELECT COUNT(*)::int AS n FROM public.athlete`)
 eq(Number(athletes.rows[0]?.n ?? 0), 1, 'preview seed inserts one synthetic athlete')

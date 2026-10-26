@@ -36,7 +36,10 @@
  *   - target host does not end in .neon.tech
  *   - --confirm-drop is missing or is not the target dbname
  *   - target has a storage schema, any pg_policies row, or the same
- *     current_database() plus inet_server_addr()/system_identifier as source
+ *     current_database() plus inet_server_addr()/port/start time/system_identifier
+ *   - either fingerprint is unreadable (fail closed, no DROP)
+ *   - a source marker is visible on the target (same server/db)
+ *   - target ?host= / hostaddr= is a socket or does not end in .neon.tech
  *
  * Env aliases: SUPABASE_DB_URL / SOURCE_DATABASE_URL,
  *              NEON_DB_URL / TARGET_DATABASE_URL,
@@ -44,6 +47,7 @@
  *
  * Requires: pg_dump, psql, pg_restore (PostgreSQL client tools).
  */
+import { randomBytes } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -57,18 +61,36 @@ export function redactSecrets(text) {
   return String(text ?? '').replace(/postgres(?:ql)?:\/\/\S+/gi, 'postgresql://[redacted]')
 }
 
+export function isSocketHost(host) {
+  const h = String(host || '')
+  return h.startsWith('/') || h.startsWith('@') || h.includes('/')
+}
+
+/**
+ * Parse a postgres URL the way libpq does: ?host=, hostaddr=, dbname=, and
+ * port= override the URI authority / path.
+ */
 export function postgresUrlParts(url) {
   const parsed = new URL(url)
-  let host = decodeURIComponent(parsed.hostname || '').toLowerCase()
-  if (!host) host = (parsed.searchParams.get('host') || '').toLowerCase()
-  let port = parsed.port || parsed.searchParams.get('port') || ''
-  if (!port && host && !host.startsWith('/')) port = '5432'
-  const dbname = decodeURIComponent((parsed.pathname || '').replace(/^\//, '').split('/')[0] || '').toLowerCase()
+  const urlHost = decodeURIComponent(parsed.hostname || '').toLowerCase()
+  const queryHost = decodeURIComponent(parsed.searchParams.get('host') || '').toLowerCase()
+  const hostaddr = decodeURIComponent(parsed.searchParams.get('hostaddr') || '').toLowerCase()
+  const queryDb = decodeURIComponent(parsed.searchParams.get('dbname') || '').toLowerCase()
+  const queryPort = parsed.searchParams.get('port') || ''
+  const host = hostaddr || queryHost || urlHost
+  const socket = isSocketHost(host) || isSocketHost(queryHost) || isSocketHost(urlHost)
+  let port = queryPort || parsed.port || ''
+  if (!port && host && !socket) port = '5432'
+  const dbname = queryDb || decodeURIComponent((parsed.pathname || '').replace(/^\//, '').split('/')[0] || '').toLowerCase()
   return {
     user: decodeURIComponent(parsed.username || ''),
     host,
     port,
     dbname,
+    urlHost,
+    queryHost,
+    hostaddr,
+    isSocket: socket,
   }
 }
 
@@ -99,7 +121,14 @@ export function refuseSourceWipeReason(source, target) {
   } catch {
     return 'target URL is not a valid postgres URL'
   }
-  if (isSupabaseHost(dst.host)) return 'target host looks like Supabase'
+  if (dst.isSocket || isSocketHost(dst.host) || isSocketHost(dst.queryHost) || isSocketHost(dst.hostaddr) || isSocketHost(dst.urlHost)) {
+    return 'target host is a socket path'
+  }
+  if (dst.queryHost && !isNeonHost(dst.queryHost)) return 'target host override must end in .neon.tech'
+  if (dst.hostaddr && !isNeonHost(dst.hostaddr)) return 'target host override must end in .neon.tech'
+  if (isSupabaseHost(dst.host) || isSupabaseHost(dst.urlHost) || isSupabaseHost(dst.queryHost)) {
+    return 'target host looks like Supabase'
+  }
   if (!isNeonHost(dst.host)) return 'target host must end in .neon.tech'
   if (src.host && dst.host && src.host === dst.host && src.port === dst.port && src.dbname && src.dbname === dst.dbname) {
     return 'source and target resolve to the same host, port, and database'
@@ -112,7 +141,19 @@ export function fingerprintQuery() {
     SELECT json_build_object(
       'db', current_database(),
       'addr', COALESCE(host(inet_server_addr()), ''),
-      'sysid', (SELECT system_identifier::text FROM pg_control_system()),
+      'port', COALESCE(inet_server_port()::text, ''),
+      'start', COALESCE(pg_postmaster_start_time()::text, ''),
+      'sysid', CASE
+        WHEN EXISTS (
+          SELECT 1
+          FROM pg_proc p
+          JOIN pg_namespace n ON n.oid = p.pronamespace
+          WHERE n.nspname = 'pg_catalog'
+            AND p.proname = 'pg_control_system'
+            AND has_function_privilege(p.oid, 'EXECUTE')
+        ) THEN (SELECT system_identifier::text FROM pg_control_system())
+        ELSE ''
+      END,
       'has_storage', to_regnamespace('storage') IS NOT NULL,
       'has_policies', EXISTS (SELECT 1 FROM pg_policies)
     )
@@ -121,32 +162,105 @@ export function fingerprintQuery() {
 
 export function parseFingerprint(text) {
   const raw = String(text ?? '').trim().split('\n').filter(Boolean).pop() || ''
+  if (!raw) throw new Error('empty fingerprint')
   const parsed = JSON.parse(raw)
   return {
     db: String(parsed.db ?? ''),
     addr: String(parsed.addr ?? ''),
+    port: String(parsed.port ?? ''),
+    start: String(parsed.start ?? ''),
     sysid: String(parsed.sysid ?? ''),
     has_storage: Boolean(parsed.has_storage),
     has_policies: Boolean(parsed.has_policies),
   }
 }
 
+export function readFingerprint(url) {
+  return parseFingerprint(psqlTuples(url, fingerprintQuery()))
+}
+
+/** Fail closed: unreadable either side, same server/db, or no proof they differ. */
 export function refuseTargetFingerprintReason(targetFp, sourceFp) {
-  if (targetFp?.has_storage) return 'target has a storage schema (Supabase)'
-  if (targetFp?.has_policies) return 'target has pg_policies rows (Supabase RLS)'
-  if (
-    sourceFp
-    && targetFp
-    && targetFp.db
-    && targetFp.db === sourceFp.db
-    && (
-      (targetFp.sysid && targetFp.sysid === sourceFp.sysid)
-      || (targetFp.addr && sourceFp.addr && targetFp.addr === sourceFp.addr)
-    )
-  ) {
+  if (!targetFp) return 'could not read target fingerprint'
+  if (!sourceFp) return 'could not read source fingerprint'
+  if (targetFp.has_storage) return 'target has a storage schema (Supabase)'
+  if (targetFp.has_policies) return 'target has pg_policies rows (Supabase RLS)'
+
+  const sameDb = Boolean(targetFp.db && sourceFp.db && targetFp.db === sourceFp.db)
+  const sameSysid = Boolean(targetFp.sysid && sourceFp.sysid && targetFp.sysid === sourceFp.sysid)
+  const sameAddr = Boolean(
+    targetFp.addr
+    && sourceFp.addr
+    && targetFp.addr === sourceFp.addr
+    && (!targetFp.port || !sourceFp.port || targetFp.port === sourceFp.port),
+  )
+  const sameStart = Boolean(targetFp.start && sourceFp.start && targetFp.start === sourceFp.start)
+  if (sameDb && (sameSysid || sameAddr || sameStart)) {
     return 'target server identity matches the source'
   }
-  return ''
+
+  const differentDb = Boolean(targetFp.db && sourceFp.db && targetFp.db !== sourceFp.db)
+  const differentSysid = Boolean(targetFp.sysid && sourceFp.sysid && targetFp.sysid !== sourceFp.sysid)
+  const differentAddr = Boolean(
+    (targetFp.addr && sourceFp.addr && targetFp.addr !== sourceFp.addr)
+    || (targetFp.port && sourceFp.port && targetFp.port !== sourceFp.port),
+  )
+  const differentStart = Boolean(targetFp.start && sourceFp.start && targetFp.start !== sourceFp.start)
+  if (differentDb || differentSysid || differentAddr || differentStart) return ''
+  return 'could not prove target is a different server from the source'
+}
+
+export function newSourceMarkerToken() {
+  return randomBytes(16).toString('hex')
+}
+
+export function sourceMarkerWriteSql(token) {
+  const id = String(token || '')
+  if (!/^[0-9a-f]+$/i.test(id)) throw new Error('invalid source marker token')
+  return `
+    CREATE SCHEMA IF NOT EXISTS zeroed_cutover_guard;
+    CREATE TABLE IF NOT EXISTS zeroed_cutover_guard.marker (
+      id text PRIMARY KEY,
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    INSERT INTO zeroed_cutover_guard.marker (id) VALUES ('${id}');
+  `
+}
+
+export function sourceMarkerVisibleSql(token) {
+  const id = String(token || '')
+  if (!/^[0-9a-f]+$/i.test(id)) throw new Error('invalid source marker token')
+  return `SELECT id FROM zeroed_cutover_guard.marker WHERE id = '${id}'`
+}
+
+export function sourceMarkerCleanupSql(token) {
+  const id = String(token || '')
+  if (!/^[0-9a-f]+$/i.test(id)) throw new Error('invalid source marker token')
+  return `DELETE FROM zeroed_cutover_guard.marker WHERE id = '${id}';`
+}
+
+/**
+ * Positive proof they are not the same database: a token written on the
+ * source must not be readable from the target. Read-only sources skip this
+ * (fingerprint comparison is the equivalent proof).
+ */
+export function checkSourceMarkerAbsentOnTarget(sourceUrl, targetUrl, token = newSourceMarkerToken()) {
+  try {
+    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', sourceUrl, '-c', sourceMarkerWriteSql(token)])
+  } catch {
+    return ''
+  }
+  try {
+    const seen = String(psqlTuples(targetUrl, sourceMarkerVisibleSql(token)) || '').trim()
+    if (seen) return 'source marker is visible on the target'
+    return ''
+  } finally {
+    try {
+      run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', sourceUrl, '-c', sourceMarkerCleanupSql(token)])
+    } catch {
+      // best-effort cleanup
+    }
+  }
 }
 
 /** Live run only: --confirm-drop must equal the parsed target dbname. */
@@ -567,6 +681,7 @@ function printOfflineDryRun(args) {
   console.log('dry-run: live restore drops and recreates public/auth, then restores in one transaction')
   console.log('dry-run: live restore without --auth-users-file exits 2')
   console.log('dry-run: live restore requires --confirm-drop=<target dbname> and a .neon.tech target')
+  console.log('dry-run: live restore refuses an unreadable fingerprint or a source marker visible on the target')
   console.log('tools required: pg_dump, pg_restore, psql')
 }
 
@@ -580,7 +695,7 @@ function loadProvidedAuthUsers(args) {
   return parseAuthUsersMapping(readFileSync(args.authUsersFile, 'utf8'), args.authUsersFile)
 }
 
-function loadUsersSql(usersPath) {
+export function loadUsersSql(usersPath) {
   return `
     CREATE TEMP TABLE auth_users_import (
       id TEXT, name TEXT, email TEXT, email_verified BOOLEAN,
@@ -601,10 +716,14 @@ function loadUsersSql(usersPath) {
   `
 }
 
-export function main(argv = process.argv.slice(2), env = process.env) {
+export function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const args = parseMigrateArgs(argv, env)
   const source = resolveSourceUrl(env)
   const target = resolveTargetUrl(env)
+  const readFp = typeof deps.readFingerprint === 'function' ? deps.readFingerprint : readFingerprint
+  const checkMarker = typeof deps.checkSourceMarker === 'function'
+    ? deps.checkSourceMarker
+    : checkSourceMarkerAbsentOnTarget
 
   if (args.dryRun && !source && !target) {
     printOfflineDryRun(args)
@@ -635,6 +754,35 @@ export function main(argv = process.argv.slice(2), env = process.env) {
   if (args.skipAuthUsers && !args.dryRun && !args.authUsersFile) {
     console.error('Live restore without --auth-users-file exits 2. Pass a CSV/JSON mapping; the migration role cannot read auth.users.')
     return 2
+  }
+
+  if (!args.dryRun) {
+    if (typeof deps.readFingerprint !== 'function') needBin('psql')
+    console.log('probing target identity before drop…')
+    let targetFp
+    let sourceFp
+    try {
+      targetFp = readFp(target)
+    } catch {
+      console.error('Refusing to drop target: could not read target fingerprint. Source is read-only.')
+      return 2
+    }
+    try {
+      sourceFp = readFp(source)
+    } catch {
+      console.error('Refusing to drop target: could not read source fingerprint. Source is read-only.')
+      return 2
+    }
+    const fpReason = refuseTargetFingerprintReason(targetFp, sourceFp)
+    if (fpReason) {
+      console.error(`Refusing to drop target: ${fpReason}. Source is read-only.`)
+      return 2
+    }
+    const markerReason = checkMarker(source, target)
+    if (markerReason) {
+      console.error(`Refusing to drop target: ${markerReason}. Source is read-only.`)
+      return 2
+    }
   }
 
   needBin('pg_dump')
@@ -711,20 +859,6 @@ export function main(argv = process.argv.slice(2), env = process.env) {
         ? 'dry-run: would apply worker/schema/app.sql + data-only restore + --relax-target-rls on Neon only'
         : 'dry-run: would apply worker/schema/app.sql + data-only restore (no Neon writes in this dry-run)')
       return 0
-    }
-
-    console.log('probing target identity before drop…')
-    const targetFp = parseFingerprint(psqlTuples(target, fingerprintQuery()))
-    let sourceFp = null
-    try {
-      sourceFp = parseFingerprint(psqlTuples(source, fingerprintQuery()))
-    } catch {
-      sourceFp = null
-    }
-    const fpReason = refuseTargetFingerprintReason(targetFp, sourceFp)
-    if (fpReason) {
-      console.error(`Refusing to drop target: ${fpReason}. Source is read-only.`)
-      return 2
     }
 
     console.log('resetting Neon public/auth schemas so a rerun starts empty…')
