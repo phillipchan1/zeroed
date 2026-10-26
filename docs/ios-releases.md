@@ -87,7 +87,8 @@ runs cancel in-progress ones.
 
 ## One-time setup (Phil)
 
-Do these once. After that, **Run workflow** is the only deploy step.
+Do these once. After that, every push to `master` (or **Run workflow**)
+uploads an Internal TestFlight build.
 
 ### 1 · Apple Developer Program
 
