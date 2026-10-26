@@ -138,7 +138,14 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --no-audit --no-fund
-      - name: Install PostgreSQL client
-        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Install PostgreSQL 17 client
+        run: |
+          sudo apt-get update
+          if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client-17; then
+            sudo apt-get install -y postgresql-common
+            sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client-17
+          fi
+          pg_dump --version
       - name: Better Auth + owner isolation on Postgres
         run: npm run check:postgres
