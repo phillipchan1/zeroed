@@ -80,6 +80,10 @@
 
   /* Animation */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  /* The Convergence reticle times its collapse with var(--ease). It was never
+     defined, which voids the whole transition declaration — so the brand's
+     signature move, the cloud collapsing onto the read, never actually played. */
+  --ease: var(--ease-out);
   --dur-fast:       120ms;   /* hover/press feedback — must feel like a click */
   --dur-enter:      160ms;   /* a screen or card arriving */
   --dur-mid:        250ms;
@@ -869,7 +873,7 @@ textarea.input {
   font-family: var(--font-sans);
 }
 
-.nav__item--active { color: var(--text); border-top-color: var(--signal); }
+.nav__item--active { color: var(--text); }
 .nav__item--active-signal { color: var(--signal); }
 
 .nav__label {
@@ -3108,3 +3112,280 @@ textarea.input {
   letter-spacing: 0.06em;
   color: var(--text-dim);
 }
+
+/* ==========================================================================
+   Motion — "zeroing in"
+   One idea, used everywhere: things CONVERGE on the answer. Brackets snap in
+   onto a target, letter-spacing tightens onto the wordmark, a check draws
+   itself once the set is locked. Every animation here is one-shot, fires on a
+   real event (a set logged, a PR typed, a session finished, a tab chosen), and
+   has a readable static end state, so the reduced-motion rule at the top of
+   this file collapses all of it to nothing without losing information.
+   ========================================================================== */
+
+:root {
+  /* A small overshoot: settles like a needle, not a bounce. */
+  --ease-snap: cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* --- Press feedback ------------------------------------------------------- */
+/* A button that changes colour on press reads as a web page; one that gives a
+   millimetre reads as a control. */
+.btn { transition-property: background, color, opacity, transform; }
+.btn:active:not(:disabled) { transform: scale(0.975); }
+
+/* --- Lock-on brackets ----------------------------------------------------- */
+/* Four corners that start wide and snap onto whatever they frame. The brand's
+   reticle, reduced to the one gesture that means "acquired". */
+.lockon {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  --lock-gap: -12px;
+  --lock-size: 12px;
+  --lock-from: 14px;
+  --lock-color: var(--signal);
+}
+.lockon__c {
+  position: absolute;
+  width: var(--lock-size);
+  height: var(--lock-size);
+  border: 0 solid var(--lock-color);
+  animation: lockon-in 520ms var(--ease-snap) 80ms backwards;
+  pointer-events: none;
+}
+.lockon__c--tl { top: var(--lock-gap);    left: var(--lock-gap);  border-top-width: 2px;    border-left-width: 2px;  --lx: calc(var(--lock-from) * -1); --ly: calc(var(--lock-from) * -1); }
+.lockon__c--tr { top: var(--lock-gap);    right: var(--lock-gap); border-top-width: 2px;    border-right-width: 2px; --lx: var(--lock-from);           --ly: calc(var(--lock-from) * -1); }
+.lockon__c--bl { bottom: var(--lock-gap); left: var(--lock-gap);  border-bottom-width: 2px; border-left-width: 2px;  --lx: calc(var(--lock-from) * -1); --ly: var(--lock-from); }
+.lockon__c--br { bottom: var(--lock-gap); right: var(--lock-gap); border-bottom-width: 2px; border-right-width: 2px; --lx: var(--lock-from);           --ly: var(--lock-from); }
+@keyframes lockon-in {
+  from { opacity: 0; transform: translate(var(--lx), var(--ly)); }
+  to   { opacity: 1; transform: translate(0, 0); }
+}
+
+/* --- Wordmark converge ---------------------------------------------------- */
+/* The letters arrive spread and tighten onto the mark: Z E R O E D, zeroing in.
+   Letter-spacing reflows, so this is kept to one-off moments (splash, finish),
+   never anything that repeats while you work. */
+.converge {
+  animation: converge-in 900ms var(--ease-out) backwards;
+}
+@keyframes converge-in {
+  from { letter-spacing: 1.1em; opacity: 0; filter: blur(6px); }
+  60%  { opacity: 1; filter: blur(0); }
+}
+
+/* --- Splash --------------------------------------------------------------- */
+.splash__mark { font-size: var(--fs-2xl); letter-spacing: 0.42em; margin-right: -0.42em; }
+.splash__status {
+  margin-top: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  animation: fadeRise var(--dur-mid) var(--ease-out) 700ms backwards;
+}
+.splash__line { animation: fadeRise var(--dur-mid) var(--ease-out) 850ms backwards; }
+.splash__cta  { animation: splash-breathe 2600ms ease-in-out 1200ms infinite backwards; }
+@keyframes splash-breathe {
+  0%, 100% { opacity: 0.35; }
+  50%      { opacity: 0.8; }
+}
+
+/* --- Bottom nav ----------------------------------------------------------- */
+/* The active marker draws out from the centre and the icon gives a small kick,
+   so choosing a tab is felt, not just seen. */
+.nav__item { position: relative; }
+.nav__item::before {
+  content: '';
+  position: absolute;
+  top: -1px;
+  left: 28%;
+  right: 28%;
+  height: 2px;
+  border-radius: 0 0 2px 2px;
+  background: var(--signal);
+  transform: scaleX(0);
+  transition: transform var(--dur-mid) var(--ease-out);
+}
+.nav__item--active::before { transform: scaleX(1); }
+.nav__item svg { transition: transform var(--dur-fast) var(--ease-out); }
+.nav__item:active svg { transform: scale(0.86); }
+.nav__item--active svg { animation: nav-kick 380ms var(--ease-snap); }
+@keyframes nav-kick {
+  0%   { transform: scale(0.82); }
+  100% { transform: scale(1); }
+}
+
+/* --- Set logged ----------------------------------------------------------- */
+/* The check draws itself and the box snaps, with a ring going out from it —
+   the set is locked in. Only on the tap that completes it (--snap), never on a
+   resumed session repainting sets that were done an hour ago. */
+.set-row__done--snap { animation: done-snap 420ms var(--ease-snap); }
+.set-row__done--snap::after {
+  content: '';
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  border: 2px solid var(--signal);
+  animation: done-ring 520ms var(--ease-out) forwards;
+  pointer-events: none;
+}
+.set-row__done { position: relative; }
+.set-row__done--snap svg {
+  stroke-dasharray: 24;
+  animation: check-draw 300ms var(--ease-out) 60ms backwards;
+}
+@keyframes done-snap {
+  0%   { transform: scale(0.84); }
+  100% { transform: scale(1); }
+}
+@keyframes done-ring {
+  from { opacity: 0.9; transform: scale(1); }
+  to   { opacity: 0;   transform: scale(1.45); }
+}
+@keyframes check-draw {
+  from { stroke-dashoffset: 24; }
+  to   { stroke-dashoffset: 0; }
+}
+
+/* --- PR ------------------------------------------------------------------- */
+/* The one moment the log exists for. A signal sweep crosses the row and the
+   badge stamps in — once, as the record-breaking number goes in. */
+.set-row--pr-flash {
+  background-image: linear-gradient(100deg, transparent 0%, rgba(232, 204, 10, 0.22) 45%, transparent 70%);
+  background-size: 250% 100%;
+  background-repeat: no-repeat;
+  animation: pr-sweep 900ms var(--ease-out) forwards;
+}
+@keyframes pr-sweep {
+  from { background-position: 120% 0; }
+  to   { background-position: -120% 0; }
+}
+.set-row--pr-flash .set-row__pr { animation: pr-stamp 480ms var(--ease-snap); }
+@keyframes pr-stamp {
+  0%   { transform: scale(1.9); opacity: 0; }
+  100% { transform: scale(1);   opacity: 1; }
+}
+
+/* --- Progress draws in ---------------------------------------------------- */
+/* Rings and meters arrive empty and fill to their value, so the week's progress
+   is something you watch land rather than a static figure. `backwards` only:
+   once it has played, the base value and its transition own the element again. */
+.ring__fill { animation: ring-draw 900ms var(--ease-out) 120ms backwards; }
+@keyframes ring-draw { from { stroke-dashoffset: var(--ring-circ); } }
+.meter__fill { transform-origin: left center; animation: meter-grow 800ms var(--ease-out) 120ms backwards; }
+@keyframes meter-grow { from { transform: scaleX(0); } }
+
+/* --- Staggered arrival ---------------------------------------------------- */
+/* A list lands one item after another instead of all at once. Kept tight
+   (40ms steps, capped) so a screen you've already seen never reads as loading. */
+.stagger > * { animation: fadeRise var(--dur-mid) var(--ease-out) backwards; }
+.stagger > :nth-child(2) { animation-delay: 40ms; }
+.stagger > :nth-child(3) { animation-delay: 80ms; }
+.stagger > :nth-child(4) { animation-delay: 120ms; }
+.stagger > :nth-child(5) { animation-delay: 160ms; }
+.stagger > :nth-child(n+6) { animation-delay: 200ms; }
+
+/* --- Recap verdict -------------------------------------------------------- */
+/* PROGRESS / HOLD / DELOAD is the week's call. It lands like one. */
+.verdict-stamp {
+  display: inline-block;
+  transform-origin: left center;
+  animation: verdict-stamp 560ms var(--ease-snap) 150ms backwards;
+}
+@keyframes verdict-stamp {
+  from { opacity: 0; transform: scale(1.4); letter-spacing: 0.2em; }
+  to   { opacity: 1; transform: scale(1); }
+}
+
+/* --- Session zeroed (the finish moment) ----------------------------------- */
+.zeroed-moment {
+  position: fixed;
+  inset: 0;
+  z-index: 400;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: calc(24px + env(safe-area-inset-top, 0px)) 24px calc(24px + env(safe-area-inset-bottom, 0px));
+  text-align: center;
+  overflow: hidden;   /* the converging eyebrow starts wider than a 320px phone */
+  background:
+    radial-gradient(circle at 50% 42%, rgba(232, 204, 10, 0.09) 0%, transparent 55%),
+    var(--ground);
+  cursor: pointer;
+  animation: sheet-fade var(--dur-mid) var(--ease-out);
+}
+.zeroed-moment--out { animation: zeroed-out 220ms var(--ease-out) forwards; }
+@keyframes zeroed-out { to { opacity: 0; transform: scale(1.02); } }
+
+.zeroed-moment__mark {
+  width: 72px;
+  height: 72px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  background: var(--signal-dim);
+  animation: done-snap 520ms var(--ease-snap) 120ms backwards;
+}
+.zeroed-moment__mark svg {
+  stroke-dasharray: 24;
+  animation: check-draw 420ms var(--ease-out) 380ms backwards;
+}
+.zeroed-moment__eyebrow {
+  margin-top: 40px;
+  color: var(--signal);
+  letter-spacing: 0.32em;
+  margin-right: -0.32em;
+}
+.zeroed-moment__title {
+  margin-top: 10px;
+  max-width: 340px;
+  animation: fadeRise var(--dur-mid) var(--ease-out) 450ms backwards;
+}
+.zeroed-moment__stats {
+  margin-top: 32px;
+  display: flex;
+  justify-content: center;
+  gap: 28px;
+  animation: fadeRise var(--dur-mid) var(--ease-out) 550ms backwards;
+}
+.zeroed-moment__stat-value {
+  display: block;
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  line-height: 1.1;
+}
+.zeroed-moment__stat-label {
+  display: block;
+  margin-top: 6px;
+}
+.zeroed-moment__pr {
+  margin-top: 28px;
+  animation: verdict-stamp 560ms var(--ease-snap) 1100ms backwards;
+}
+.zeroed-moment__hint {
+  position: absolute;
+  bottom: calc(32px + env(safe-area-inset-bottom, 0px));
+  left: 0;
+  right: 0;
+  opacity: 0.5;
+}
+/* The auto-dismiss, drawn: a hairline that runs out as the moment does. */
+.zeroed-moment__timer {
+  position: absolute;
+  top: env(safe-area-inset-top, 0px);
+  left: 0;
+  height: 2px;
+  width: 100%;
+  background: var(--signal);
+  opacity: 0.6;
+  transform-origin: left center;
+  animation: zeroed-timer var(--zeroed-hold, 4000ms) linear forwards;
+}
+@keyframes zeroed-timer { from { transform: scaleX(1); } to { transform: scaleX(0); } }

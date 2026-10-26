@@ -1,5 +1,7 @@
 import { useEffect, useState } from 'react'
-import { useNavigate, useOutletContext } from 'react-router-dom'
+import { useLocation, useNavigate, useOutletContext } from 'react-router-dom'
+import { SessionZeroed, type FinishedSession } from '../../components/SessionZeroed'
+import { ConvergenceReticle } from '../../components/convergence/ConvergenceReticle'
 import { supabase } from '../../lib/supabaseClient'
 import { loadCache, mutateCache, useCachedLoader } from '../../lib/cache'
 import {
@@ -19,7 +21,7 @@ import {
   pendingRef, parsePendingRef, pendingSessionById,
 } from '../../lib/workoutOutbox'
 import { setIntendedDay, orderByPlannedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
-import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, Meter } from '../../components/ui'
+import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner } from '../../components/ui'
 import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate } from '../../types/database'
 
 interface TodayScreenProps {
@@ -649,6 +651,11 @@ function StuckSessionsSheet({
  */
 export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep }: TodayScreenProps) {
   const navigate   = useNavigate()
+  const location   = useLocation()
+  // A session finished a moment ago rides in on router state. Cleared on dismiss
+  // (replace, no state) so a reload or a back-swipe never replays it.
+  const finished = (location.state as { finished?: FinishedSession } | null)?.finished ?? null
+  const dismissFinished = () => navigate(location.pathname, { replace: true, state: null })
   const { refresh, athleteName } = (useOutletContext<LoopContext>() ?? { refresh: () => {}, athleteName: null })
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [draftRoutineIds, setDraftRoutineIds] = useState<string[]>([])
@@ -907,6 +914,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
 
   return (
     <div className="screen with-nav">
+      {finished && <SessionZeroed session={finished} onDone={dismissFinished} />}
       <div className="page page--rail">
        <div className="page__main">
 
@@ -1027,18 +1035,20 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                     History ›
                   </button>
                 </div>
-                {weekList.map((r) => (
-                  <SessionCard
-                    key={r.id}
-                    routine={r}
-                    recommended={r.id === primaryRoutineId}
-                    state={statusFor(r.id)}
-                    lastDone={lastDoneByRoutine[r.id] ?? null}
-                    plannedDow={plannedDowFor(r)}
-                    onOpen={() => setOpenSessionId(r.id)}
-                    onStart={() => navigate(`/app/workout/${r.id}`)}
-                  />
-                ))}
+                <div className="stagger">
+                  {weekList.map((r) => (
+                    <SessionCard
+                      key={r.id}
+                      routine={r}
+                      recommended={r.id === primaryRoutineId}
+                      state={statusFor(r.id)}
+                      lastDone={lastDoneByRoutine[r.id] ?? null}
+                      plannedDow={plannedDowFor(r)}
+                      onOpen={() => setOpenSessionId(r.id)}
+                      onStart={() => navigate(`/app/workout/${r.id}`)}
+                    />
+                  ))}
+                </div>
               </>
             )}
 
@@ -1051,12 +1061,22 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                 className="card card--tap fade-rise"
                 style={{ width: '100%', textAlign: 'left', marginTop: 24, color: 'var(--text)' }}
               >
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
-                  <span className="section-header">The read</span>
-                  <span className="num text-sm text-signal">{confidencePct}% confident</span>
+                {/* The brand's reticle, doing its actual job: its tightness IS this
+                    read's confidence (real state, never a timer), so the one place
+                    the phone shows "the read" is also where Zeroed looks like
+                    Zeroed. It collapses in once on arrival, then holds. */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+                  <div style={{ flexShrink: 0 }}>
+                    <ConvergenceReticle confidence={p1.confidence} size={64} showLabel={false} />
+                  </div>
+                  <div style={{ minWidth: 0, flex: 1 }}>
+                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
+                      <span className="section-header">The read</span>
+                      <span className="num text-sm text-signal">{confidencePct}%</span>
+                    </div>
+                    <p className="text-base prose-clamp" style={{ marginTop: 6, lineHeight: 1.45 }}>{p1.claim}</p>
+                  </div>
                 </div>
-                <p className="text-base prose-clamp" style={{ marginTop: 8, lineHeight: 1.45 }}>{p1.claim}</p>
-                <div style={{ marginTop: 12 }}><Meter value={p1.confidence} label="Confidence in this read" /></div>
               </button>
             )}
 

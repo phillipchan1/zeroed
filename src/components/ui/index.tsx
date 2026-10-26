@@ -14,6 +14,22 @@ export function Logo({ signal }: { signal?: boolean }) {
   )
 }
 
+// ---- Lock-on brackets --------------------------------------------------------
+
+/** Four corner brackets that snap onto their content — "acquired". One-shot on
+ *  mount; the static end state is just a framed target. */
+export function LockOn({ children, className = '', style }: { children: ReactNode; className?: string; style?: React.CSSProperties }) {
+  return (
+    <span className={`lockon ${className}`} style={style}>
+      {children}
+      <i className="lockon__c lockon__c--tl" aria-hidden />
+      <i className="lockon__c lockon__c--tr" aria-hidden />
+      <i className="lockon__c lockon__c--bl" aria-hidden />
+      <i className="lockon__c lockon__c--br" aria-hidden />
+    </span>
+  )
+}
+
 // ---- Buttons ---------------------------------------------------------------
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -358,6 +374,9 @@ export function Ring({ value, size = 72, stroke = 6, tone, label, children }: Ri
           className="ring__fill"
           cx={size / 2} cy={size / 2} r={r} fill="none" strokeWidth={stroke}
           stroke={tone}
+          // The mount draw (ring-draw) starts from an empty ring, which is a
+          // full-circumference offset — a value only this component knows.
+          style={{ '--ring-circ': circ } as React.CSSProperties}
           strokeDasharray={circ}
           strokeDashoffset={circ * (1 - pct)}
         />
@@ -653,9 +672,11 @@ interface TickingNumberProps {
   duration?: number
   className?: string
   style?: React.CSSProperties
+  /** Display formatting for the in-flight value (thousands separators etc.). */
+  format?: (n: number) => string
 }
 
-export function TickingNumber({ value, duration = 350, className, style }: TickingNumberProps) {
+export function TickingNumber({ value, duration = 350, className, style, format }: TickingNumberProps) {
   const [display, setDisplay] = useState(value)
   const prevRef = useRef(value)
 
@@ -678,7 +699,7 @@ export function TickingNumber({ value, duration = 350, className, style }: Ticki
     return () => cancelAnimationFrame(raf)
   }, [value, duration])
 
-  return <span className={className} style={style}>{display}</span>
+  return <span className={className} style={style}>{format ? format(display) : display}</span>
 }
 
 // ---- BracketFrame — subtle corner brackets ---------------------------------
