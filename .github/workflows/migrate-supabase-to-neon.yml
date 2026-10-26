@@ -4,10 +4,12 @@
 # Required repository secrets (never printed):
 #   SUPABASE_READONLY_URL
 #   NEON_DIRECT_URL
+#   AUTH_USERS_MAPPING   base64 CSV of id,email,created_at
+#                        A live run (dry_run=false) without this secret exits 2.
 #
-# The migration role cannot read auth.users. This workflow always passes
-# --skip-auth-users. Provide a CSV/JSON mapping via the auth_users input
-# when you want those ids written into Better Auth.
+# Recommended (repo settings, not created by this PR): pin this workflow
+# to a GitHub Environment with required reviewers so a live restore cannot
+# run from an arbitrary click.
 name: migrate-supabase-to-neon
 
 on:
@@ -17,11 +19,6 @@ on:
         description: Dump source and compare row counts without writing Neon
         type: boolean
         default: true
-      auth_users:
-        description: Optional CSV or JSON of (id, email, created_at) mapped into Better Auth
-        type: string
-        required: false
-        default: ''
 
 permissions:
   contents: read
@@ -46,11 +43,24 @@ jobs:
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-client
+      - name: Prepare auth user mapping
+        env:
+          AUTH_USERS_MAPPING: ${{ secrets.AUTH_USERS_MAPPING }}
+        run: |
+          set -euo pipefail
+          AUTH_FILE="${RUNNER_TEMP}/auth-users.mapping"
+          echo "AUTH_FILE=${AUTH_FILE}" >> "$GITHUB_ENV"
+          if [ -z "${AUTH_USERS_MAPPING}" ]; then
+            echo "AUTH_USERS_MAPPING secret is not set. A live restore will exit 2."
+            exit 0
+          fi
+          umask 077
+          printf '%s' "${AUTH_USERS_MAPPING}" | base64 --decode > "${AUTH_FILE}"
+          echo "Auth user mapping decoded (contents not printed)."
       - name: Run migration
         env:
           SUPABASE_READONLY_URL: ${{ secrets.SUPABASE_READONLY_URL }}
           NEON_DIRECT_URL: ${{ secrets.NEON_DIRECT_URL }}
-          AUTH_USERS: ${{ github.event.inputs.auth_users }}
           DRY_RUN: ${{ github.event.inputs.dry_run }}
         run: |
           set -euo pipefail
@@ -72,14 +82,18 @@ jobs:
             echo "Mode: live data-only restore to Neon"
           fi
 
-          if [ -n "${AUTH_USERS}" ]; then
-            AUTH_FILE="${RUNNER_TEMP}/auth-users.mapping"
-            umask 077
-            printf '%s' "${AUTH_USERS}" > "${AUTH_FILE}"
+          if [ -n "${AUTH_FILE:-}" ] && [ -f "${AUTH_FILE}" ] && [ -s "${AUTH_FILE}" ]; then
             ARGS+=(--auth-users-file="${AUTH_FILE}")
-            echo "Auth user mapping file provided (contents not printed)."
+            echo "Auth user mapping file attached (contents not printed)."
           else
-            echo "No auth user mapping provided; source auth.users will not be read."
+            echo "No AUTH_USERS_MAPPING; source auth.users will not be read. Live restore exits 2."
           fi
 
           node scripts/migrate-supabase-to-neon.mjs "${ARGS[@]}"
+      - name: Delete auth user mapping
+        if: always()
+        run: |
+          set -euo pipefail
+          if [ -n "${AUTH_FILE:-}" ]; then
+            rm -f "${AUTH_FILE}"
+          fi

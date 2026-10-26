@@ -16,6 +16,7 @@
  *   --skip-auth-users --auth-users-file=users.json
  * The file is CSV or JSON of (id, email, created_at). Those ids are written
  * into Better Auth "user" unchanged.
+ * A live restore with --skip-auth-users and no mapping file exits 2.
  *
  * Usage:
  *   SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… \
@@ -41,6 +42,34 @@ const root = join(here, '..')
 
 export function redactSecrets(text) {
   return String(text ?? '').replace(/postgres(?:ql)?:\/\/\S+/gi, 'postgresql://[redacted]')
+}
+
+export function postgresUrlParts(url) {
+  const parsed = new URL(url)
+  return {
+    user: decodeURIComponent(parsed.username || ''),
+    host: decodeURIComponent(parsed.hostname || ''),
+  }
+}
+
+/** GitHub Actions masks. Call before any pg_dump / psql / pg_restore. */
+export function addMaskLines(urls) {
+  const values = new Set()
+  for (const url of urls) {
+    if (!url) continue
+    try {
+      const { user, host } = postgresUrlParts(url)
+      if (user) values.add(user)
+      if (host) values.add(host)
+    } catch {
+      // unparseable URL — skip rather than print it
+    }
+  }
+  return [...values].map((v) => `::add-mask::${v}`)
+}
+
+export function maskDatabaseUrls(...urls) {
+  for (const line of addMaskLines(urls)) console.log(line)
 }
 
 export function argValue(argv, name) {
@@ -189,6 +218,10 @@ export function authUsersToCopyCsv(rows) {
   }).join('\n') + (rows.length ? '\n' : '')
 }
 
+export const REQUIRED_COUNT_TABLES = [
+  'athlete', 'insight', 'mcp_token', 'phase', 'program', 'routine', 'workout',
+]
+
 export function checksumQuery() {
   return `
     SELECT 'athlete' AS t, COUNT(*)::bigint AS n FROM public.athlete
@@ -202,27 +235,105 @@ export function checksumQuery() {
   `
 }
 
+export function orphanAthleteQuery() {
+  return `
+    SELECT a.auth_user_id::text
+    FROM public.athlete a
+    LEFT JOIN "user" u ON u.id = a.auth_user_id::text
+    WHERE u.id IS NULL
+    ORDER BY 1;
+  `
+}
+
+/** Default aligned psql, `psql -At`, and `psql --csv`. */
 export function parseCounts(text) {
   const out = {}
-  for (const line of text.split('\n')) {
-    const m = line.match(/^(\w+)\s*\|\s*(\d+)/)
+  for (const raw of String(text ?? '').split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    if (line.startsWith('(') || line.startsWith('-') || line.startsWith('+')) continue
+    if (/^t\s*[,|]\s*n$/i.test(line)) continue
+    const m = line.match(/^(\w+)\s*[,|]\s*(\d+)\s*$/)
     if (m) out[m[1]] = Number(m[2])
   }
   return out
 }
 
+export function requireCounts(counts, label) {
+  const missing = REQUIRED_COUNT_TABLES.filter((t) => !Number.isFinite(counts?.[t]))
+  if (missing.length) {
+    throw new Error(`${label}: missing row counts for ${missing.join(', ')} (refusing to continue)`)
+  }
+  return counts
+}
+
+export function parseOrphanIds(text) {
+  return String(text ?? '').split('\n').map((s) => s.trim()).filter(Boolean)
+}
+
 export function formatCountComparison(srcCounts, dstCounts) {
-  const tables = [...new Set([...Object.keys(srcCounts), ...Object.keys(dstCounts)])].sort()
+  const tables = REQUIRED_COUNT_TABLES
   const lines = []
   let mismatch = false
   for (const table of tables) {
-    const a = srcCounts[table]
-    const b = dstCounts[table] ?? -1
-    const mark = a === b ? 'ok' : 'MISMATCH'
-    if (a !== b) mismatch = true
-    lines.push(`  ${table}: source=${a} neon=${b} ${mark}`)
+    const a = srcCounts?.[table]
+    const b = dstCounts == null ? undefined : dstCounts[table]
+    const aDisp = Number.isFinite(a) ? a : 'n/a'
+    const bDisp = Number.isFinite(b) ? b : 'n/a'
+    const mark = a === b && Number.isFinite(a) ? 'ok' : 'MISMATCH'
+    if (mark !== 'ok') mismatch = true
+    lines.push(`  ${table}: source=${aDisp} neon=${bDisp} ${mark}`)
   }
   return { lines, mismatch }
+}
+
+export const PUBLIC_RESTORE_ORDER = [
+  'athlete',
+  'diagnostic',
+  'insight',
+  'insight_draft',
+  'athlete_profile',
+  'program',
+  'phase',
+  'routine',
+  'workout',
+  'session_observation',
+  'weekly_review',
+  'coach_message',
+  'probe_throttle',
+  'workout_draft',
+  'program_revision',
+  'mcp_token',
+]
+
+const SKIP_RESTORE_TABLES = new Set(['user', 'session', 'account', 'verification'])
+
+export function orderRestoreList(tocText) {
+  const comments = []
+  const tableData = []
+  const rest = []
+  for (const line of String(tocText ?? '').split('\n')) {
+    if (!line.trim() || line.startsWith(';')) {
+      comments.push(line)
+      continue
+    }
+    const m = line.match(/\sTABLE DATA\s+public\s+("([^"]+)"|(\S+))\s/)
+    if (m) {
+      const table = m[2] || m[3]
+      if (SKIP_RESTORE_TABLES.has(table)) continue
+      tableData.push({ line, table })
+      continue
+    }
+    rest.push(line)
+  }
+  tableData.sort((a, b) => {
+    const ia = PUBLIC_RESTORE_ORDER.indexOf(a.table)
+    const ib = PUBLIC_RESTORE_ORDER.indexOf(b.table)
+    const ra = ia === -1 ? PUBLIC_RESTORE_ORDER.length + 1 : ia
+    const rb = ib === -1 ? PUBLIC_RESTORE_ORDER.length + 1 : ib
+    return ra - rb || a.table.localeCompare(b.table)
+  })
+  return [...comments, ...tableData.map((x) => x.line), ...rest].join('\n').replace(/\n*$/, '\n')
 }
 
 function run(cmd, args, opts = {}) {
@@ -240,14 +351,24 @@ function needBin(name) {
   if (res.status !== 0) throw new Error(`Missing ${name}. Install PostgreSQL client tools.`)
 }
 
-function readCounts(url, label) {
+function psqlTuples(url, sql) {
+  return run('psql', ['-v', 'ON_ERROR_STOP=1', '-At', '-F', ',', '-d', url, '-c', sql])
+}
+
+function readCounts(url, label, { required = true } = {}) {
   try {
-    return parseCounts(run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', url, '-c', checksumQuery()]))
+    const counts = parseCounts(psqlTuples(url, checksumQuery()))
+    if (required) return requireCounts(counts, label)
+    if (REQUIRED_COUNT_TABLES.some((t) => !Number.isFinite(counts[t]))) {
+      console.log(`${label}: incomplete row counts`)
+      return counts
+    }
+    return counts
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    if (/does not exist|undefined_table/i.test(message)) {
+    if (!required && /does not exist|undefined_table/i.test(message)) {
       console.log(`${label}: tables not present yet`)
-      return {}
+      return null
     }
     throw err
   }
@@ -303,6 +424,7 @@ function printOfflineDryRun(args) {
     ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
     : 'dry-run: would leave any leftover RLS artifacts on Neon (pass --relax-target-rls to drop them on the target)')
   console.log('dry-run: would compare row counts per table and abort on mismatch')
+  console.log('dry-run: live restore without --auth-users-file exits 2')
   console.log('tools required: pg_dump, pg_restore, psql')
 }
 
@@ -357,8 +479,10 @@ export function main(argv = process.argv.slice(2), env = process.env) {
     return 2
   }
 
+  maskDatabaseUrls(source, target)
+
   if (args.skipAuthUsers && !args.dryRun && !args.authUsersFile) {
-    console.error('--skip-auth-users requires --auth-users-file for a live restore.')
+    console.error('Live restore without --auth-users-file exits 2. Pass a CSV/JSON mapping; the migration role cannot read auth.users.')
     return 2
   }
 
@@ -413,11 +537,20 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       console.log(`exported ${mappedUsers} auth.users rows`)
     }
 
-    const srcCounts = readCounts(source, 'source')
-    const dstCounts = readCounts(target, 'neon')
+    const srcCounts = readCounts(source, 'source', { required: true })
+    const dstCounts = readCounts(target, 'neon', { required: false })
     const before = formatCountComparison(srcCounts, dstCounts)
     console.log('row counts before restore:')
     for (const line of before.lines) console.log(line)
+
+    if (args.skipAuthUsers && args.authUsersFile) {
+      const needed = Number(psqlTuples(source, 'SELECT COUNT(DISTINCT auth_user_id)::text FROM public.athlete').trim())
+      if (!Number.isFinite(needed)) throw new Error('source: could not count distinct athlete.auth_user_id')
+      if (mappedUsers < needed) {
+        console.error(`Partial --auth-users-file: mapped ${mappedUsers} users, source has ${needed} distinct athlete.auth_user_id values`)
+        return 1
+      }
+    }
 
     if (args.dryRun) {
       console.log(`dry-run: dump at ${dumpPath} (${readFileSync(dumpPath).length} bytes)`)
@@ -438,13 +571,16 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(dir, 'load_users.sql')])
     }
 
-    console.log('restoring public data into Neon…')
+    console.log('restoring public data into Neon (FK-safe order, triggers stay on)…')
+    const tocPath = join(dir, 'restore.list')
+    writeFileSync(tocPath, orderRestoreList(run('pg_restore', ['-l', dumpPath])))
     run('pg_restore', [
       '--exit-on-error',
       '--data-only',
       '--no-owner',
       '--no-acl',
-      '--disable-triggers',
+      '-L',
+      tocPath,
       '--dbname',
       target,
       dumpPath,
@@ -455,8 +591,8 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', relaxPath])
     }
 
-    const afterSrc = readCounts(source, 'source')
-    const afterDst = readCounts(target, 'neon')
+    const afterSrc = readCounts(source, 'source', { required: true })
+    const afterDst = readCounts(target, 'neon', { required: true })
     const after = formatCountComparison(afterSrc, afterDst)
     console.log('row counts after restore:')
     for (const line of after.lines) console.log(line)
@@ -464,6 +600,14 @@ export function main(argv = process.argv.slice(2), env = process.env) {
       console.error('Row-count mismatch — abort. Neon was written but is not trusted.')
       return 1
     }
+
+    const orphans = parseOrphanIds(psqlTuples(target, orphanAthleteQuery()))
+    if (orphans.length) {
+      console.error(`Orphan athletes (auth_user_id with no Better Auth "user"): ${orphans.length}`)
+      console.error('Partial --auth-users-file left athletes unmapped — abort.')
+      return 1
+    }
+
     console.log('migration ok')
     return 0
   } finally {

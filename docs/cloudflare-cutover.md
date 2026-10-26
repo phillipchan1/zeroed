@@ -142,11 +142,14 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    empty Neon (or let the migrate script do it). Then
    `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --dry-run --skip-auth-users --auth-users-file=users.json`
    (read-only source is enough for dry-run). The migration role cannot read
-   `auth.users` — provide a CSV/JSON of `(id, email, created_at)`. Do not pass
-   `--relax-target-rls` unless you intend to drop leftover RLS on Neon.
+   `auth.users` — provide a CSV/JSON of `(id, email, created_at)`. A live
+   restore without that mapping exits 2. Do not pass `--relax-target-rls`
+   unless you intend to drop leftover RLS on Neon.
    Manual GitHub Action: `migrate-supabase-to-neon` (`workflow_dispatch` only,
    `dry_run` defaults to true). Secrets: `SUPABASE_READONLY_URL`,
-   `NEON_DIRECT_URL`.
+   `NEON_DIRECT_URL`, `AUTH_USERS_MAPPING` (base64 CSV). Recommended: pin
+   the workflow to a GitHub Environment with required reviewers (repo
+   settings — not created by this PR).
 6. Worker deployed to `*.workers.dev` only (not the production hostname).
 7. Rollback values written down: current Vercel URL, `VITE_SUPABASE_*`,
    Supabase functions base `https://<project>.supabase.co/functions/v1`.
@@ -155,10 +158,13 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 
 1. Write-freeze is optional here; run it anyway so the template is exercised.
 2. `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --skip-auth-users --auth-users-file=users.json`
-   — abort on a row-count mismatch. Order is **schema then data-only
-   restore**: the script applies `worker/schema/app.sql` +
-   `better-auth.sql`, maps the provided auth users (same UUIDs) into
-   Better Auth `"user"`, then `pg_restore --data-only` of `public.*`.
+   — abort on a row-count mismatch or an athlete whose `auth_user_id`
+   has no Better Auth `"user"`. A live run without `--auth-users-file`
+   exits 2. Order is **schema then data-only restore**: the script
+   applies `worker/schema/app.sql` + `better-auth.sql`, maps the
+   provided auth users (same UUIDs) into Better Auth `"user"`, then
+   `pg_restore --data-only` in FK-safe table order (no
+   `--disable-triggers`; Neon’s `neondb_owner` is not superuser).
    The source URL is **read-only**. RLS artifacts stay on Supabase. The
    Neon schema has no Supabase roles, policies, or `auth.uid()` grants.
    Pass `--relax-target-rls` only if a leftover RLS artifact needs

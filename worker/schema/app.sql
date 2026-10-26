@@ -352,3 +352,57 @@ CREATE TABLE IF NOT EXISTS public.mcp_token (
 
 CREATE INDEX IF NOT EXISTS mcp_token_athlete_idx ON public.mcp_token (athlete_id);
 CREATE INDEX IF NOT EXISTS mcp_token_hash_live_idx ON public.mcp_token (token_hash) WHERE revoked_at IS NULL;
+
+-- =============================================================================
+-- DEBUG RESET — same no-arg signature DebugReset.tsx calls.
+-- Neon has no auth.uid() / get_current_athlete_id(). Resolve the athlete from
+-- app.current_auth_user_id (Worker) or request.jwt.claim.sub (legacy JWT).
+-- =============================================================================
+CREATE OR REPLACE FUNCTION public.reset_athlete_orientation()
+RETURNS void
+LANGUAGE plpgsql
+SET search_path = public
+AS $$
+DECLARE
+  aid UUID;
+  uid TEXT;
+BEGIN
+  uid := NULLIF(current_setting('app.current_auth_user_id', true), '');
+  IF uid IS NULL THEN
+    uid := NULLIF(current_setting('request.jwt.claim.sub', true), '');
+  END IF;
+  IF uid IS NOT NULL THEN
+    SELECT id INTO aid FROM public.athlete WHERE auth_user_id::text = uid LIMIT 1;
+  END IF;
+  IF aid IS NULL THEN
+    RAISE EXCEPTION 'No athlete for the current user';
+  END IF;
+
+  DELETE FROM public.session_observation so
+   USING public.workout w, public.routine r, public.program p
+   WHERE so.workout_id = w.id
+     AND w.routine_id  = r.id
+     AND r.program_id  = p.id
+     AND p.athlete_id  = aid;
+
+  DELETE FROM public.workout w
+   USING public.routine r, public.program p
+   WHERE w.routine_id = r.id
+     AND r.program_id = p.id
+     AND p.athlete_id = aid;
+
+  DELETE FROM public.program WHERE athlete_id = aid;
+  DELETE FROM public.insight       WHERE athlete_id = aid;
+  DELETE FROM public.insight_draft WHERE athlete_id = aid;
+  DELETE FROM public.diagnostic      WHERE athlete_id = aid;
+  DELETE FROM public.athlete_profile WHERE athlete_id = aid;
+
+  UPDATE public.athlete
+     SET onboarding_step = 'hook',
+         obstacle        = NULL,
+         arena_type      = NULL,
+         arena_raw       = NULL,
+         limiter_choice  = NULL
+   WHERE id = aid;
+END;
+$$;

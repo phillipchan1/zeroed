@@ -13,13 +13,18 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
 import {
+  addMaskLines,
   argValue,
   authUsersToCopyCsv,
   formatCountComparison,
+  orderRestoreList,
+  orphanAthleteQuery,
   parseAuthUsersMapping,
   parseCounts,
+  parseOrphanIds,
   parseMigrateArgs,
   redactSecrets,
+  requireCounts,
   resolveSourceUrl,
   resolveTargetUrl,
 } from './migrate-supabase-to-neon.mjs'
@@ -113,16 +118,81 @@ ok(copy.includes('33333333-3333-4333-8333-333333333333'), 'COPY CSV includes the
 ok(copy.includes('c@example.invalid'), 'COPY CSV includes email')
 
 // ---- counts / redact --------------------------------------------------------
+// Captured from `psql` 16 default aligned output (leading spaces, padded
+// columns, header, rule, "(N rows)"). The old /^(\\w+)\\s*\\| regex missed this.
 
-const counts = parseCounts('athlete | 3\nprogram | 1\n')
-eq(counts.athlete, 3, 'parseCounts athlete')
-const cmp = formatCountComparison({ athlete: 3 }, { athlete: 3 })
-ok(!cmp.mismatch && cmp.lines[0].includes('ok'), 'matching counts are ok')
-ok(formatCountComparison({ athlete: 3 }, { athlete: 2 }).mismatch, 'mismatch is flagged')
+const PSQL_ALIGNED = `     t     | n 
+-----------+---
+ athlete   | 3
+ insight   | 0
+ mcp_token | 1
+ phase     | 1
+ program   | 1
+ routine   | 1
+ workout   | 1
+(7 rows)
+`
+
+const aligned = parseCounts(PSQL_ALIGNED)
+eq(aligned.athlete, 3, 'parseCounts reads padded psql aligned athlete')
+eq(aligned.mcp_token, 1, 'parseCounts reads padded psql aligned mcp_token')
+eq(aligned.insight, 0, 'parseCounts reads a zero count from aligned psql')
+requireCounts(aligned, 'aligned-fixture')
+ok(true, 'requireCounts accepts a complete aligned parse')
+
+const atCsv = parseCounts('athlete,3\ninsight,0\nmcp_token,1\nphase,1\nprogram,1\nroutine,1\nworkout,1\n')
+eq(atCsv.athlete, 3, 'parseCounts reads psql -At CSV')
+requireCounts(atCsv, 'at-csv')
+
+const csvHeaderOut = parseCounts('t,n\nathlete,3\ninsight,0\nmcp_token,1\nphase,1\nprogram,1\nroutine,1\nworkout,1\n')
+eq(csvHeaderOut.workout, 1, 'parseCounts skips psql --csv header')
+
+let emptyFailed = false
+try {
+  requireCounts(parseCounts('     t     | n \n-----------+---\n(0 rows)\n'), 'empty')
+} catch (err) {
+  emptyFailed = /missing row counts/.test(err instanceof Error ? err.message : '')
+}
+ok(emptyFailed, 'requireCounts fails hard when aligned output has no table rows')
+
+const full = {
+  athlete: 3, insight: 0, mcp_token: 1, phase: 1, program: 1, routine: 1, workout: 1,
+}
+ok(!formatCountComparison(full, full).mismatch, 'matching required tables are ok')
+ok(formatCountComparison(full, { ...full, athlete: 2 }).mismatch, 'mismatch is flagged')
+ok(formatCountComparison(full, null).mismatch, 'missing dest counts are a mismatch')
+ok(formatCountComparison({}, {}).mismatch, 'empty vs empty is a mismatch, not ok')
+
+eq(parseOrphanIds('aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa\n').length, 1, 'parseOrphanIds counts a uuid')
+ok(orphanAthleteQuery().includes('"user"'), 'orphan query joins Better Auth user')
+
+const toc = orderRestoreList(`;
+; Selected TOC Entries:
+;
+210; 0 16400 TABLE DATA public workout postgres
+211; 0 16410 TABLE DATA public athlete postgres
+212; 0 16420 TABLE DATA public session_observation postgres
+213; 0 16430 TABLE DATA public "user" postgres
+214; 0 16440 SEQUENCE SET public probe_throttle_id_seq postgres
+`)
+ok(toc.indexOf('TABLE DATA public athlete') < toc.indexOf('TABLE DATA public workout'), 'restore list puts athlete before workout')
+ok(toc.indexOf('TABLE DATA public workout') < toc.indexOf('TABLE DATA public session_observation'), 'restore list puts workout before session_observation')
+ok(!/TABLE DATA public "?user"?/.test(toc), 'restore list skips Better Auth user')
+ok(/SEQUENCE SET public probe_throttle_id_seq/.test(toc), 'restore list keeps SEQUENCE SET after data')
 
 const leaked = 'pg_dump --dbname postgresql://user:s3cret@db.example/zeroed failed'
 ok(!redactSecrets(leaked).includes('s3cret'), 'redactSecrets strips postgres URLs')
 ok(redactSecrets(leaked).includes('postgresql://[redacted]'), 'redactSecrets keeps a placeholder')
+
+const masks = addMaskLines([
+  'postgresql://neondb_owner:s3cret@ep-foo.us-east-2.aws.neon.tech/neondb',
+  'postgres://reader@db.example.com:5432/zeroed',
+])
+ok(masks.includes('::add-mask::neondb_owner'), 'masks Neon user')
+ok(masks.includes('::add-mask::ep-foo.us-east-2.aws.neon.tech'), 'masks Neon host')
+ok(masks.includes('::add-mask::reader'), 'masks source user')
+ok(masks.includes('::add-mask::db.example.com'), 'masks source host')
+ok(!masks.join(' ').includes('s3cret'), 'mask lines do not include the password')
 
 // ---- spawn --skip-auth-users dry-run ----------------------------------------
 
@@ -130,7 +200,15 @@ function spawnMigrate(extraArgs, extraEnv = {}) {
   return spawnSync(process.execPath, ['scripts/migrate-supabase-to-neon.mjs', ...extraArgs], {
     encoding: 'utf8',
     cwd: root,
-    env: { ...process.env, ...extraEnv, SUPABASE_READONLY_URL: '', NEON_DIRECT_URL: '', SUPABASE_DB_URL: '', NEON_DB_URL: '' },
+    env: {
+      ...process.env,
+      SUPABASE_READONLY_URL: '',
+      NEON_DIRECT_URL: '',
+      SUPABASE_DB_URL: '',
+      NEON_DB_URL: '',
+      AUTH_USERS_FILE: '',
+      ...extraEnv,
+    },
   })
 }
 
@@ -144,7 +222,22 @@ ok(
   /data-only restore/.test(drySkip.stdout),
   'dry-run documents schema then data-only restore',
 )
+ok(/live restore without --auth-users-file exits 2/.test(drySkip.stdout), 'dry-run documents live exit 2')
 ok(!/would COPY auth\.users from source/.test(drySkip.stdout), 'skip path does not COPY auth.users')
+
+const liveNoMap = spawnMigrate(['--skip-auth-users'], {
+  SUPABASE_READONLY_URL: 'postgresql://reader@db.example.com/zeroed',
+  NEON_DIRECT_URL: 'postgresql://neondb_owner@ep-foo.neon.tech/neondb',
+})
+eq(liveNoMap.status, 2, 'live run without a mapping exits 2')
+ok(
+  /Live restore without --auth-users-file exits 2/.test(`${liveNoMap.stdout}\n${liveNoMap.stderr}`),
+  'live run without a mapping says it exits 2',
+)
+ok(
+  /::add-mask::reader/.test(liveNoMap.stdout) && /::add-mask::neondb_owner/.test(liveNoMap.stdout),
+  'live run masks DB users before exiting',
+)
 
 const dryDefault = spawnMigrate(['--dry-run'])
 eq(dryDefault.status, 0, 'offline dry-run without skip exits 0')
@@ -201,6 +294,14 @@ ok(/default: true/.test(workflow), 'migrate workflow dry_run defaults to true')
 ok(!/echo +["']?\$\{?SUPABASE_READONLY_URL/.test(workflow), 'workflow does not echo SUPABASE_READONLY_URL')
 ok(!/echo +["']?\$\{?NEON_DIRECT_URL/.test(workflow), 'workflow does not echo NEON_DIRECT_URL')
 ok(/--skip-auth-users/.test(workflow), 'workflow always skips auth.users export')
+ok(!/^\s+auth_users:/m.test(workflow), 'workflow has no auth_users input (PII)')
+ok(/AUTH_USERS_MAPPING/.test(workflow), 'workflow reads AUTH_USERS_MAPPING secret')
+ok(/base64 --decode/.test(workflow), 'workflow decodes AUTH_USERS_MAPPING as base64')
+ok(/umask 077/.test(workflow), 'workflow writes the mapping under umask 077')
+ok(/if: always\(\)/.test(workflow), 'workflow deletes the mapping in always()')
+ok(/Recommended/.test(workflow) && /Environment/.test(workflow), 'workflow documents a GitHub Environment as recommended')
+ok(!/^\s+environment:/.test(workflow), 'workflow does not add a protected environment key')
+ok(!/disable-triggers/.test(readFileSync(join(root, 'scripts/migrate-supabase-to-neon.mjs'), 'utf8')), 'migrate script does not use --disable-triggers')
 
 const db = new PGlite()
 await db.exec(readFileSync(join(root, 'worker/schema/app.sql'), 'utf8'))
@@ -222,6 +323,26 @@ eq(preview.rows[0]?.email, 'preview.athlete@zeroed.invalid', 'preview seed maps 
 
 const athletes = await db.query(`SELECT COUNT(*)::int AS n FROM public.athlete`)
 eq(Number(athletes.rows[0]?.n ?? 0), 1, 'preview seed inserts one synthetic athlete')
+
+ok(/reset_athlete_orientation/.test(appSql), 'app.sql defines reset_athlete_orientation')
+await db.query(`SELECT set_config('app.current_auth_user_id', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', false)`)
+await db.query(`SELECT public.reset_athlete_orientation()`)
+const afterReset = await db.query(`SELECT onboarding_step, obstacle FROM public.athlete WHERE id = '11111111-1111-4111-8111-111111111111'`)
+eq(afterReset.rows[0]?.onboarding_step, 'hook', 'reset_athlete_orientation returns the athlete to hook')
+eq(Number((await db.query(`SELECT COUNT(*)::int AS n FROM public.workout`)).rows[0]?.n ?? -1), 0, 'reset_athlete_orientation clears workouts')
+
+const livePsql = spawnSync('psql', [
+  '-c',
+  `SELECT 'athlete' AS t, 3::bigint AS n UNION ALL SELECT 'insight', 0 UNION ALL SELECT 'mcp_token', 1 UNION ALL SELECT 'phase', 1 UNION ALL SELECT 'program', 1 UNION ALL SELECT 'routine', 1 UNION ALL SELECT 'workout', 1 ORDER BY 1;`,
+], { encoding: 'utf8' })
+if (livePsql.status === 0 && livePsql.stdout) {
+  const live = parseCounts(livePsql.stdout)
+  eq(live.athlete, 3, 'parseCounts reads a live psql aligned session')
+  requireCounts(live, 'live-psql')
+} else {
+  requireCounts(aligned, 'captured-psql-aligned')
+  ok(PSQL_ALIGNED.startsWith('     t     | n'), 'captured fixture is real padded psql aligned output')
+}
 
 if (fails.length) {
   console.error(`✗ ${fails.length} of ${checks} migrate checks failed:`)
