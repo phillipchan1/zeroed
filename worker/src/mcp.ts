@@ -85,9 +85,7 @@ export type McpHandleOpts = {
 function mcpWaitUntil(opts?: McpHandleOpts | WaitUntilArg): WaitUntilArg | undefined {
   if (!opts) return undefined
   if (typeof opts === 'function') return opts
-  if ('waitUntil' in opts && typeof opts.waitUntil === 'function' && !('sql' in opts) && !('ctx' in opts)) {
-    return opts as WaitUntilArg
-  }
+  if ('waitUntil' in opts) return opts
   return opts.ctx
 }
 

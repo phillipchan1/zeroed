@@ -187,9 +187,9 @@ export function jsonParam(sql: Sql, value: unknown): JsonParam {
 }
 
 /**
- * Postgres array literal for `fetch_types:false`. `sql.array()` does not
- * serialize to `{…}` unless type OIDs were fetched, so a JS array becomes
- * `String(ids)` (a bare uuid) and `ANY($1::uuid[])` raises 22P02.
+ * Postgres array literal for drivers that do not fetch type OIDs.
+ * `sql.array()` otherwise becomes `String(ids)` (a bare uuid) and
+ * `ANY($1::uuid[])` raises 22P02.
  */
 export function pgArrayLiteral(values: string[]): string {
   return `{${values.map((value) => `"${value.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`).join(',')}}`
