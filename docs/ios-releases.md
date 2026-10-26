@@ -19,7 +19,8 @@ Capacitor (Nuvo uses Tauri). **No App Store review. No web prod deploy.**
 
 Same as Nuvo: every push to `master` uploads an Internal TestFlight build.
 **Run workflow** is still there for a re-run or a PR-branch smoke test. The
-job **skips green** (does not fail red) until the Apple secrets exist.
+job **fails** if the Apple / Distribution signing secrets are missing — it
+does not mint or revoke certificates as a fallback.
 
 ---
 
@@ -58,9 +59,9 @@ App Store product name, so the surface is `app`. Must match
 
 On every push to `master` (and **Run workflow**):
 
-1. Checks that the Apple + signing secrets exist. If any are missing, the
-   upload job is **skipped** and the workflow stays green, with a notice
-   listing what is absent.
+1. Checks that the Apple + Distribution signing secrets exist. If any are
+   missing, the workflow **fails** with an error listing what is absent.
+   There is no automatic-signing fallback and no certificate create/revoke.
 2. Stamps version `<major>.<minor>.<commit_count>` — patch is
    `git rev-list --count HEAD` (same scheme as Nuvo).
 3. Checks that build number against App Store Connect
@@ -75,18 +76,22 @@ On every push to `master` (and **Run workflow**):
    [`cloudflare-cutover.md`](./cloudflare-cutover.md) § iOS TestFlight at cutover.
 5. After the web build, write the App Store Connect `.p8` under
    `$RUNNER_TEMP/zeroed-asc.p8` with `umask 077` (raw PEM or base64). Copy
-   to `~/.appstoreconnect/private_keys/AuthKey_<id>.p8` for `altool`.
-6. Resolve the build number against App Store Connect, then
-   `xcodebuild archive` + `-exportArchive` with `method=app-store-connect`,
-   `-allowProvisioningUpdates`, and the API key (`-authenticationKeyPath`
-   / `-authenticationKeyID` / `-authenticationKeyIssuerID`). Release does
-   not set a code-sign identity: `iPhone Developer` makes the archive
-   request a development certificate, and passing `CODE_SIGN_STYLE` on
-   the command line does the same. Cloud-managed distribution signing —
-   no `.p12`, no hand-made provisioning profile.
+   to `~/.appstoreconnect/private_keys/AuthKey_<id>.p8` for `altool`
+   (upload + build-number only — not for signing).
+6. Import the Apple Distribution `.p12` and App Store `.mobileprovision`
+   into a temporary keychain. Then write `CODE_SIGN_STYLE=Manual`,
+   `CODE_SIGN_IDENTITY='Apple Distribution'`,
+   `PROVISIONING_PROFILE_SPECIFIER`, and `DEVELOPMENT_TEAM` onto the
+   **App target only** (`scripts/ios-apply-app-signing.mjs`) and
+   `xcodebuild archive`. Those settings are not passed as xcodebuild
+   flags — command-line `SETTING=value` applies to every target,
+   including CocoaPods (`CODE_SIGNING_ALLOWED=NO`, `org.cocoapods.*`
+   bundle ids). Export with `method=app-store` and `signingStyle=manual`.
+   Do not pass allowProvisioningUpdates.
 7. `xcrun altool --upload-app` → App Store Connect → **Internal** TestFlight.
    The workflow does not submit for App Review and does not add external testers.
-8. An `always()` step deletes `${{ runner.temp }}/zeroed-asc.p8` and
+8. An `always()` step deletes the temporary keychain, the imported `.p12`
+   / profile, `${{ runner.temp }}/zeroed-asc.p8`, and
    `~/.appstoreconnect/private_keys/AuthKey_*.p8` — fixed path/glob, not
    env set by an earlier step.
 
@@ -123,9 +128,9 @@ Do **not** Submit for Review.
 ### 4 · App Store Connect API key
 
 Create an App Store Connect API key (Users and Access → Integrations →
-App Store Connect API) with **Admin** or **App Manager** so
-`-allowProvisioningUpdates` can create the cloud-managed distribution
-profile and certificate. Download the `.p8` once.
+App Store Connect API) with **App Manager** or **Admin**. The key is
+used only to resolve the next build number and to upload the IPA with
+`altool`. It is **not** used to create or revoke certificates.
 
 | Secret | Required | Value |
 |---|---|---|
@@ -140,10 +145,58 @@ The workflow accepts either form, writes the PEM to
 before `xcodebuild`), and deletes that path plus
 `~/.appstoreconnect/private_keys/AuthKey_*.p8` in an `always()` step.
 
-No `.p12`. No hand-made `.mobileprovision`. Xcode's automatic signing
-creates the App Store Connect distribution profile against `app.zeroed.app`.
+### 5 · Apple Distribution certificate and App Store profile
 
-### 5 · NEW secrets / variable (Zeroed-only)
+CI signs with a certificate and profile you create **once** in the Apple
+Developer portal. The runner imports them into a temporary keychain and
+never calls Apple to create or revoke certificates.
+
+#### Distribution certificate (`.p12`)
+
+1. Prefer an **existing** Apple Distribution certificate on this team
+   (Nuvo shares the team — do not revoke anything).
+2. On a Mac that already has that certificate **and its private key** in
+   Keychain Access: select **Apple Distribution: \<Team\>**,
+   **File → Export Items…** → Personal Information Exchange (`.p12`),
+   set a password.
+3. If none exists: [Certificates, Identifiers & Profiles](https://developer.apple.com/account/resources/certificates/list)
+   → **Certificates** → **+** → **Apple Distribution**. Create a CSR in
+   Keychain Access (**Certificate Assistant → Request a Certificate From
+   a Certificate Authority…**, save to disk). Upload the CSR, download
+   the `.cer`, double-click to install, then export as `.p12` as above.
+4. Encode the file (macOS):
+
+   ```bash
+   base64 -i AppleDistribution.p12 | pbcopy
+   ```
+
+#### App Store provisioning profile
+
+1. [Profiles](https://developer.apple.com/account/resources/profiles/list)
+   → **+** → **App Store Connect** (iOS App Store) → App ID
+   **`app.zeroed.app`** → select the same Distribution certificate →
+   download the `.mobileprovision`.
+2. Encode:
+
+   ```bash
+   base64 -i Zeroed_AppStore.mobileprovision | pbcopy
+   ```
+
+| Secret | Required | Value |
+|---|---|---|
+| `IOS_DIST_CERT_P12_BASE64` | yes | base64 of the Apple Distribution `.p12` |
+| `IOS_DIST_CERT_PASSWORD` | yes | password you set when exporting the `.p12` |
+| `IOS_APPSTORE_PROFILE_BASE64` | yes | base64 of the App Store `.mobileprovision` |
+
+Paste each value under Settings → Secrets and variables → Actions.
+Missing any of these **fails** the workflow with an error. There is no
+automatic-signing fallback.
+
+When you renew the Distribution cert or regenerate the profile, re-export,
+re-encode, and update the same three secrets. Do not let CI create or
+revoke certificates.
+
+### 6 · NEW secrets / variable (Zeroed-only)
 
 | Name | Kind | Why it's new |
 |---|---|---|
@@ -153,9 +206,9 @@ creates the App Store Connect distribution profile against `app.zeroed.app`.
 
 Settings → Secrets and variables → Actions on **phillipchan1/zeroed**.
 This repo does not change secrets for you. Until they exist, the
-TestFlight job **skips green** instead of failing red.
+TestFlight workflow **fails** and lists the missing names.
 
-### 6 · TestFlight internal testing
+### 7 · TestFlight internal testing
 
 1. After the first CI upload succeeds, the build appears in
    App Store Connect → **TestFlight** (~5–15 min processing).
@@ -170,14 +223,16 @@ App Review for personal dogfooding.
 
 ## Trigger the first build
 
-1. Finish steps 2–5 above (App ID, ASC app record, API key secrets).
+1. Finish steps 2–6 above (App ID, ASC app record, API key, Distribution
+   `.p12` + App Store profile, Zeroed secrets).
 2. Merge to `master` (automatic) **or** GitHub → **phillipchan1/zeroed** →
    **Actions** → **iOS TestFlight** → **Run workflow**. Dispatch from this
    PR's branch to smoke-test the pipeline before merge.
 3. Watch the `testflight` job. Upload prints
    `Uploading … (v<version>, build <n>) to Internal TestFlight`.
-   If secrets are still missing, only **Check TestFlight secrets** runs and
-   the upload job is skipped — the workflow stays green.
+   If secrets are still missing, **Check TestFlight secrets** fails with
+   an error listing what to add. The workflow will not sign automatically
+   and will not create or revoke certificates.
 4. App Store Connect → TestFlight → wait for processing → Internal Testing.
 
 Re-running the same commit is safe: `appstore-next-build-number.mjs` bumps
@@ -209,10 +264,10 @@ python3 scripts/gen-icons.py
 
 | Symptom | Fix |
 |---|---|
-| Workflow skips (green) | Missing secrets listed in the **Check TestFlight secrets** notice |
-| Workflow fails at signing | Check `ASC_API_KEY_*`, `APPLE_TEAM_ID`, and that the key is Admin / App Manager |
-| `No profiles for app.zeroed.app` | Register the App ID, then re-run — automatic signing creates the App Store profile |
-| `Choose a certificate to revoke` / `iOS App Development provisioning profiles` | CI used to pass `DEVELOPMENT_TEAM` on the `xcodebuild` command line, which signs for development and mints a certificate the runner then throws away. The workflow now writes the team into the project and revokes stale **Apple Development: Created via API** certs before archiving. Distribution certs are not touched. If a run still asks for a development profile, revoke any remaining API development certs by hand in [Certificates](https://developer.apple.com/account/resources/certificates/list) |
+| Workflow fails at **Check TestFlight secrets** | Missing secrets listed in the error — add `IOS_DIST_CERT_*`, `IOS_APPSTORE_PROFILE_BASE64`, `ASC_API_KEY_*`, and `APPLE_TEAM_ID` |
+| Workflow fails at signing | Re-export the Apple Distribution `.p12` (must include the private key) and an App Store profile for `app.zeroed.app`. Confirm `IOS_DIST_CERT_PASSWORD` matches |
+| `No profiles for app.zeroed.app` | Create an App Store provisioning profile for the App ID and set `IOS_APPSTORE_PROFILE_BASE64` |
+| `Choose a certificate to revoke` / `iOS App Development provisioning profiles` | The archive is still requesting a Development cert. Confirm the workflow does not pass allowProvisioningUpdates and that `ios-apply-app-signing.mjs` wrote Manual / Apple Distribution onto the App target. Do not revoke Distribution certs — Nuvo shares this team |
 | Upload rejected (SDK too old) | Bump `runs-on:` to a newer `macos-*` in `ios-release.yml` |
 | ITMS-90685 CFBundleIdentifier collision | Do not pass `PRODUCT_BUNDLE_IDENTIFIER` to `xcodebuild`. Pod frameworks (`Capacitor`, `CapacitorCordova`, `Pods_App`) inherit it. The Podfile pins them to `org.cocoapods.*`; CI unzips the IPA and fails on a duplicate. |
 | ITMS-90474 iPad orientations | `UIRequiresFullScreen=true` in `Info.plist` (portrait-only). |
@@ -228,5 +283,9 @@ python3 scripts/gen-icons.py
 ## Rotating credentials
 
 New ASC API key → update `ASC_API_KEY_ID`, `ASC_API_ISSUER_ID`, and
-`ASC_API_KEY_P8`, then revoke the old key. Cloud-managed distribution
-certs and profiles are renewed by Apple; nothing in this repo stores them.
+`ASC_API_KEY_P8`, then revoke the old key. That key is upload-only.
+
+New Distribution certificate or App Store profile → re-export the `.p12`
+and `.mobileprovision`, re-encode, and update `IOS_DIST_CERT_P12_BASE64`,
+`IOS_DIST_CERT_PASSWORD`, and `IOS_APPSTORE_PROFILE_BASE64`. The workflow
+never creates or revokes certificates.

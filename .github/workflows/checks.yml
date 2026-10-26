@@ -3,8 +3,8 @@
 # project (as far as Linux can go without Xcode).
 #
 # The TestFlight upload (ios-release.yml) runs on push to master and
-# workflow_dispatch. It skips green when Apple secrets are missing —
-# see docs/ios-releases.md.
+# workflow_dispatch. It fails if the Distribution signing secrets are
+# missing — see docs/ios-releases.md.
 name: checks
 
 on:

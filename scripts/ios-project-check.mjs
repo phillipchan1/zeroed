@@ -6,7 +6,7 @@
 // App Store icon (1024 RGB, no alpha), and that capacitor.config.ts agrees.
 
 import { execFileSync } from 'node:child_process'
-import { readFileSync, existsSync, statSync } from 'node:fs'
+import { readFileSync, existsSync, statSync, unlinkSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -41,7 +41,7 @@ if (pbx) {
   if (/MARKETING_VERSION = 0\.1\.0;/.test(pbx)) ok('pbxproj MARKETING_VERSION 0.1.0')
   else fail('pbxproj MARKETING_VERSION', 'expected 0.1.0 (package.json major.minor)')
 
-  if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (CI uses cloud-managed ASC signing)')
+  if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (local Xcode; CI overrides to Manual Distribution)')
   else fail('pbxproj CODE_SIGN_STYLE')
 
   // A forced identity makes `xcodebuild archive` request a development
@@ -138,18 +138,22 @@ if (workflow) {
   } else fail('workflow still bakes VITE_SUPABASE_* unconditionally')
 
   if (
-    workflow.includes('ready=false') &&
-    workflow.includes('Skipping iOS TestFlight') &&
-    /needs\.secrets-ready\.outputs\.ready == 'true'/.test(workflow)
+    workflow.includes('::error::Missing GitHub Actions secrets required for iOS TestFlight') &&
+    workflow.includes('exit 1') &&
+    !workflow.includes('ready=false') &&
+    !workflow.includes('Skipping iOS TestFlight')
   ) {
-    ok('workflow skips TestFlight (green) when secrets are missing')
-  } else fail('workflow missing-secrets skip')
+    ok('workflow fails when TestFlight secrets are missing')
+  } else fail('workflow missing-secrets fail', 'must exit 1 with ::error:: — no skip-green, no automatic-signing fallback')
 
   for (const secret of [
     'ASC_API_KEY_ID',
     'ASC_API_ISSUER_ID',
     'ASC_API_KEY_P8',
     'APPLE_TEAM_ID',
+    'IOS_DIST_CERT_P12_BASE64',
+    'IOS_DIST_CERT_PASSWORD',
+    'IOS_APPSTORE_PROFILE_BASE64',
   ]) {
     if (workflow.includes(secret)) ok(`workflow references ${secret}`)
     else fail(`workflow missing secret ${secret}`)
@@ -167,21 +171,43 @@ if (workflow) {
     else ok(`workflow dropped ${dropped}`)
   }
 
-  if (workflow.includes('-allowProvisioningUpdates') && workflow.includes('-authenticationKeyPath')) {
-    ok('workflow uses automatic signing with ASC API key')
-  } else fail('workflow automatic signing / authenticationKey flags')
+  if (workflow.includes('-allowProvisioningUpdates')) {
+    fail('workflow uses -allowProvisioningUpdates', 'manual Distribution signing must not mint certificates')
+  } else ok('workflow does not pass -allowProvisioningUpdates')
 
-  if (!/CODE_SIGN_STYLE=Automatic/.test(workflow) && !/CODE_SIGN_IDENTITY=/.test(workflow) && !/DEVELOPMENT_TEAM="\$APPLE_DEVELOPMENT_TEAM"/.test(workflow)) {
-    ok('workflow does not force development signing on the xcodebuild command line')
-  } else fail('workflow signing overrides', 'do not pass CODE_SIGN_STYLE, CODE_SIGN_IDENTITY, or DEVELOPMENT_TEAM to xcodebuild')
+  if (workflow.includes('asc-revoke-api-dev-certs') || workflow.includes('Drop stale API')) {
+    fail('workflow still revokes certificates')
+  } else ok('workflow does not revoke certificates')
+  if (existsSync(join(root, 'scripts/asc-revoke-api-dev-certs.mjs'))) {
+    fail('scripts/asc-revoke-api-dev-certs.mjs is still present')
+  } else ok('revoke-certs script is gone')
 
-  if (workflow.includes('ios-set-development-team.mjs') && workflow.includes('asc-revoke-api-dev-certs.mjs')) {
-    ok('workflow installs the team in the project and drops stale API development certs')
-  } else fail('workflow signing prep', 'expected ios-set-development-team.mjs and asc-revoke-api-dev-certs.mjs')
+  if (workflow.includes('ios-apply-app-signing.mjs')) {
+    ok('workflow writes Distribution signing onto the App target only')
+  } else fail('workflow App-target signing', 'must call ios-apply-app-signing.mjs so pods do not inherit the App Store profile')
 
-  if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete App Store Connect API key')) {
-    ok('workflow deletes the .p8 in an always() step')
-  } else fail('workflow .p8 cleanup')
+  // xcodebuild SETTING=value applies to CocoaPods too. Identity / profile /
+  // team / style belong on the App target, not on the archive command line.
+  if (/^\s+CODE_SIGN_IDENTITY=/.test(workflow)) {
+    fail('workflow passes CODE_SIGN_IDENTITY to xcodebuild', 'scope it to the App target — pods have different bundle IDs')
+  } else ok('workflow does not pass CODE_SIGN_IDENTITY to every target')
+  if (/^\s+PROVISIONING_PROFILE_SPECIFIER=/.test(workflow)) {
+    fail('workflow passes PROVISIONING_PROFILE_SPECIFIER to xcodebuild', 'scope it to the App target — the App Store profile is for app.zeroed.app only')
+  } else ok('workflow does not pass PROVISIONING_PROFILE_SPECIFIER to every target')
+  if (/^\s+DEVELOPMENT_TEAM=/.test(workflow)) {
+    fail('workflow passes DEVELOPMENT_TEAM to xcodebuild', 'scope it to the App target')
+  } else ok('workflow does not pass DEVELOPMENT_TEAM to every target')
+  if (/^\s+CODE_SIGN_STYLE=/.test(workflow)) {
+    fail('workflow passes CODE_SIGN_STYLE to xcodebuild', 'scope it to the App target')
+  } else ok('workflow does not pass CODE_SIGN_STYLE to every target')
+
+  if (workflow.includes('create-keychain') && workflow.includes('security import') && workflow.includes('delete-keychain')) {
+    ok('workflow imports the Distribution .p12 into a temporary keychain')
+  } else fail('workflow keychain import / cleanup')
+
+  if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete signing keychain')) {
+    ok('workflow deletes the signing keychain and .p8 in an always() step')
+  } else fail('workflow keychain / .p8 cleanup')
 
   if (workflow.includes('umask 077')) ok('workflow sets umask 077 before writing the .p8')
   else fail('workflow umask 077')
@@ -222,7 +248,39 @@ if (workflow) {
 
 const exportScript = join(root, 'scripts/ios-write-export-options.sh')
 if (!existsSync(exportScript)) fail('scripts/ios-write-export-options.sh missing')
-else ok('export-options writer present')
+else {
+  ok('export-options writer present')
+  const exportOut = join(root, 'scripts/.ios-export-options-self-test.plist')
+  try {
+    execFileSync('bash', [exportScript, exportOut], {
+      env: {
+        ...process.env,
+        APPLE_DEVELOPMENT_TEAM: 'ABCDE12345',
+        PROVISIONING_PROFILE_SPECIFIER: 'Zeroed App Store',
+        IOS_BUNDLE_ID: BUNDLE_ID,
+      },
+    })
+    const plist = readFileSync(exportOut, 'utf8')
+    if (
+      plist.includes('<string>app-store</string>') &&
+      plist.includes('<string>manual</string>') &&
+      plist.includes('<string>Apple Distribution</string>') &&
+      plist.includes(`<key>${BUNDLE_ID}</key>`) &&
+      plist.includes('<string>Zeroed App Store</string>') &&
+      plist.includes('<string>ABCDE12345</string>')
+    ) {
+      ok('export-options writer emits manual app-store signing')
+    } else fail('export-options writer contents', plist)
+  } catch (err) {
+    fail('export-options writer self-test', err instanceof Error ? err.message : String(err))
+  } finally {
+    try {
+      unlinkSync(exportOut)
+    } catch {
+      // ignore
+    }
+  }
+}
 
 try {
   execFileSync(process.execPath, [join(root, 'scripts/ios-check-ipa-bundle-ids.mjs'), '--self-test'], {
@@ -232,11 +290,42 @@ try {
   fail('ios-check-ipa-bundle-ids --self-test')
 }
 
-for (const script of ['ios-set-development-team.mjs', 'asc-revoke-api-dev-certs.mjs']) {
+if (existsSync(join(root, 'scripts/ios-set-development-team.mjs'))) {
+  fail('scripts/ios-set-development-team.mjs is still present', 'unused after App-target signing moved to ios-apply-app-signing.mjs')
+} else ok('ios-set-development-team.mjs is gone')
+
+try {
+  execFileSync(process.execPath, [join(root, 'scripts/ios-apply-app-signing.mjs'), '--self-test'], {
+    stdio: 'inherit',
+  })
+} catch {
+  fail('ios-apply-app-signing --self-test')
+}
+
+if (pbx) {
   try {
-    execFileSync(process.execPath, [join(root, 'scripts', script), '--self-test'], { stdio: 'inherit' })
-  } catch {
-    fail(`${script} --self-test`)
+    const { withAppSigning } = await import(new URL('./ios-apply-app-signing.mjs', import.meta.url))
+    const signed = withAppSigning(pbx, { teamId: 'ABCDE12345', profileSpecifier: 'Zeroed App Store' })
+    const appRelease = [...signed.matchAll(/\/\* Release \*\/ = \{[\s\S]*?name = Release;\n\t\t\};/g)].map((m) => m[0])
+    const appBlocks = appRelease.filter((b) => b.includes('PRODUCT_BUNDLE_IDENTIFIER = app.zeroed.app;'))
+    const projectBlocks = appRelease.filter((b) => !b.includes('PRODUCT_BUNDLE_IDENTIFIER'))
+    if (
+      appBlocks.length === 1 &&
+      appBlocks[0].includes('CODE_SIGN_STYLE = Manual;') &&
+      appBlocks[0].includes('CODE_SIGN_IDENTITY = "Apple Distribution";') &&
+      appBlocks[0].includes('PROVISIONING_PROFILE_SPECIFIER = "Zeroed App Store";') &&
+      appBlocks[0].includes('DEVELOPMENT_TEAM = ABCDE12345;')
+    ) {
+      ok('apply-app-signing writes Manual Distribution onto the App Release target')
+    } else fail('apply-app-signing App Release target')
+    if (projectBlocks.every((b) => !b.includes('CODE_SIGN_IDENTITY') && !b.includes('DEVELOPMENT_TEAM'))) {
+      ok('apply-app-signing does not write signing onto project-level Release')
+    } else fail('apply-app-signing leaked signing onto project-level Release')
+    if (signed.includes('ProvisioningStyle = Manual;') && !signed.includes('ProvisioningStyle = Automatic;')) {
+      ok('apply-app-signing sets TargetAttributes ProvisioningStyle=Manual')
+    } else fail('apply-app-signing ProvisioningStyle')
+  } catch (err) {
+    fail('apply-app-signing against committed pbxproj', err instanceof Error ? err.message : String(err))
   }
 }
 
