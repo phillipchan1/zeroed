@@ -1086,7 +1086,7 @@ async function runLivePostgresChecks() {
     ${checksumSessionSetSql()};
     SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ',' ORDER BY t.id), '')) FROM tz_hash_probe t;
   `)
-  const tzHashes = tzLive.split('\n').map((s) => s.trim()).filter(Boolean)
+  const tzHashes = tzLive.split('\n').map((s) => s.trim()).filter((s) => /^[0-9a-f]{32}$/i.test(s))
   eq(tzHashes.length, 4, 'live TimeZone probe returns four hashes')
   ok(tzHashes[0] !== tzHashes[1], 'live unpinned TimeZone=America/New_York vs UTC is a false mismatch')
   eq(tzHashes[2], tzHashes[3], 'live checksum session pins make TimeZone drift hash the same')
