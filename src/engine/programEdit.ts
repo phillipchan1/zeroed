@@ -81,7 +81,11 @@ export type ApplyTiming = 'now' | 'next_week'
 // The week-date primitives live in weekDates.ts (pure, so they can be checked
 // without a database). Re-exported here so existing importers of this module
 // keep working.
-export { startOfWeekMonday, isoDate, addDaysISO, nextMondayISO, sundayOnOrAfterISO }
+export {
+  startOfWeekMonday, isoDate, addDaysISO, nextMondayISO, sundayOnOrAfterISO,
+  ATHLETE_TIME_ZONE, weekWindowInZone, upcomingWeekWindow, isSundayInZone,
+  logTimestampForWeek, isoInWeek, isoDateInZone, planPagerFutureWeeks,
+} from './weekDates'
 
 // ---- reading the live program ----------------------------------------------
 

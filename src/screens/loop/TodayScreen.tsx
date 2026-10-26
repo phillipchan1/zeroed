@@ -7,13 +7,15 @@ import { loadCache, mutateCache, useCachedLoader } from '../../lib/cache'
 import {
   runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, gatherSessionPrescription,
   gatherSessionActuals, actualsFromPending,
+  sessionStateForWeek, weekLoggedDays, activeBlockRetestDate,
+  weekWindowInZone, upcomingWeekWindow, isoInWeek,
   type PagerWeekView, type WeekPagerData, type SessionActuals,
 } from '../../engine'
 import { effectiveTrackingType } from '../../engine/exerciseLibrary'
 import { tallySession } from '../../engine/volume'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
-import { loadDraftRoutineIds, weekStart } from '../../lib/workoutDraft'
+import { loadDraftStarts } from '../../lib/workoutDraft'
 import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
 import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
 import {
@@ -69,6 +71,34 @@ function getWeekDays(): Date[] {
   })
 }
 
+function daysFromWeekStart(weekStart: string): Date[] {
+  return Array.from({ length: 7 }, (_, i) => {
+    const d = new Date(`${weekStart}T12:00:00`)
+    d.setDate(d.getDate() + i)
+    return d
+  })
+}
+
+function asRoutineRow(r: {
+  id: string
+  name: string
+  exercises: ExerciseTemplate[]
+  intent: string | null
+  intended_dow: number | null
+  session_type?: string | null
+}): RoutineRow {
+  return {
+    id: r.id,
+    program_id: '',
+    phase_id: null,
+    name: r.name,
+    session_type: r.session_type ?? null,
+    exercises: r.exercises,
+    intent: r.intent,
+    intended_dow: r.intended_dow,
+  }
+}
+
 function isSameDay(a: Date, b: Date) {
   return (
     a.getFullYear() === b.getFullYear() &&
@@ -79,8 +109,6 @@ function isSameDay(a: Date, b: Date) {
 
 const shortDay = (iso: string) => new Date(iso).toLocaleDateString(undefined, { weekday: 'short' })
 const shortDate = (iso: string) => new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
-// Local YYYY-MM-DD (matches the engine's week_ending, which is local-time Sunday).
-const localIso = (d: Date) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 
 // The cached Today view. Everything here is serializable (ISO strings, plain
 // numbers) so it round-trips through localStorage; the date-derived week strip
@@ -106,35 +134,51 @@ interface TodayView {
 
 export async function fetchTodayView(athleteId: string): Promise<TodayView> {
   const days = getWeekDays()
-  const weekEnd = new Date(days[6].getFullYear(), days[6].getMonth(), days[6].getDate(), 23, 59, 59)
+  const from = new Date(days[0])
+  from.setDate(from.getDate() - 7)
+  from.setHours(0, 0, 0, 0)
+  const weekEnd = new Date(days[6].getFullYear(), days[6].getMonth(), days[6].getDate() + 7, 23, 59, 59)
 
-  const [workoutRes, insightRes, athRes, profileRes] = await Promise.all([
+  const [workoutRes, insightRes, athRes, profileRes, progRes] = await Promise.all([
     supabase
       .from('workout')
       .select('id, performed_at, routine_id, routine!inner(program!inner(athlete_id))')
-      .gte('performed_at', days[0].toISOString())
+      .gte('performed_at', from.toISOString())
       .lte('performed_at', weekEnd.toISOString()),
     supabase.from('insight').select('*').eq('athlete_id', athleteId).order('priority'),
     supabase.from('athlete').select('goals, obstacle, sessions_per_week').eq('id', athleteId).maybeSingle(),
     supabase.from('athlete_profile').select('retest_date').eq('athlete_id', athleteId).maybeSingle(),
+    supabase.from('program').select('id, retest_date').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle(),
   ])
   if (workoutRes.error) throw workoutRes.error
   if (insightRes.error) throw insightRes.error
   if (athRes.error) throw athRes.error
   if (profileRes.error) throw profileRes.error
+  if (progRes.error) throw progRes.error
 
   const all = (insightRes.data ?? []) as InsightRow[]
   const active = all.filter((i) => i.status !== 'resolved' && i.status !== 'disproved')
   const top = active[0] ?? null
   const ath = athRes.data as { goals: string | null; obstacle: string | null; sessions_per_week: number | null } | null
+  const prog = progRes.data as { id: string; retest_date: string | null } | null
+
+  let blockRetest: string | null = null
+  if (prog?.id) {
+    const { data: phaseRow } = await supabase
+      .from('phase').select('week_start, week_end').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
+    const ph = phaseRow as { week_start: string | null; week_end: string | null } | null
+    blockRetest = activeBlockRetestDate({
+      programRetest: prog.retest_date,
+      phaseStart: ph?.week_start,
+      phaseEnd: ph?.week_end,
+    })
+  }
 
   // Latest weekly review (recap prompt) + last-performed per routine (so a
   // session done in a prior week still shows its history, not a blank "to do").
   // Both scoped by the active program.
   let latestReview: { id: string; weekEnding: string } | null = null
   const lastDoneByRoutine: Record<string, string> = {}
-  const { data: prog } = await supabase
-    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
   if (prog?.id) {
     const [{ data: rev }, { data: recent }] = await Promise.all([
       supabase
@@ -166,7 +210,7 @@ export async function fetchTodayView(athleteId: string): Promise<TodayView> {
     lastSignalAt: all.reduce<string | null>((max, i) => (!max || i.updated_at > max ? i.updated_at : max), null),
     goal: (ath?.goals as string | null) || (ath?.obstacle as string | null) || null,
     p1: top ? { category: top.category, confidence: top.confidence, claim: top.claim } : null,
-    retestDate: (profileRes.data?.retest_date as string | null) ?? null,
+    retestDate: blockRetest ?? (profileRes.data?.retest_date as string | null) ?? null,
     sessionsPerWeek: (ath?.sessions_per_week as number | null) ?? null,
     latestReview,
     lastDoneByRoutine,
@@ -701,7 +745,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const dismissFinished = () => navigate(location.pathname, { replace: true, state: null })
   const { refresh, athleteName } = (useOutletContext<LoopContext>() ?? { refresh: () => {}, athleteName: null })
   const isFirstVisit = onboardingStep === 'first_session_pending'
-  const [draftRoutineIds, setDraftRoutineIds] = useState<string[]>([])
+  const [draftStarts, setDraftStarts] = useState<Record<string, string>>({})
   const [showCloseSheet, setShowCloseSheet] = useState(false)
   const [openSessionId, setOpenSessionId] = useState<string | null>(null)
   const [closing, setClosing] = useState(false)
@@ -739,28 +783,19 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // flight) are folded in alongside the synced ones, so a session reads DONE the
   // instant it's finished — with no connection and no refetch. They drop out on
   // their own once the outbox drains and the real rows arrive.
-  const weekWorkouts: WeekWorkout[] = (() => {
+  const allWorkouts: WeekWorkout[] = (() => {
     const committed = view?.weekWorkouts ?? []
-    const monday = weekStart()
     const queued = pendingSessionsRaw()
-      // A session can be backdated, so the day it counts for is performedAt.
       .map((p) => ({ id: pendingRef(p.id), routineId: p.routineId, performedAt: p.performedAt ?? p.queuedAt }))
-      .filter((p) => new Date(p.performedAt) >= monday)
       .filter((p) => !committed.some(
         (w) => w.routineId === p.routineId && isSameDay(new Date(w.performedAt), new Date(p.performedAt)),
       ))
     return [...committed, ...queued]
   })()
 
-  // Week strip — recomputed from the workouts against the current day, so "today"
-  // and the Mon–Sun window are always correct even from a stale cache.
   const today = new Date()
-  const loggedDates = weekWorkouts.map((w) => new Date(w.performedAt))
-  const weekDays: WeekDayStatus[] = getWeekDays().map((d) => ({
-    date: d,
-    logged: loggedDates.some((ld) => isSameDay(ld, d)),
-    isToday: isSameDay(d, today),
-  }))
+  const thisWindow = weekWindowInZone(today)
+  const nextWindow = upcomingWeekWindow(today)
 
   // Plant a bootstrap for every session on the week list, so the FIRST tap on
   // one paints its exercises immediately instead of spinning on the network.
@@ -768,12 +803,15 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // prescription — are left alone; the workout screen revalidates either way.
   useEffect(() => {
     routines.forEach((r) => seedWorkoutBootstrap(r, athleteId, athleteName, onboardingStep ?? null))
-  }, [routines, athleteId, athleteName, onboardingStep])
+    for (const r of pager?.upcoming?.routines ?? []) {
+      seedWorkoutBootstrap(asRoutineRow(r), athleteId, athleteName, onboardingStep ?? null)
+    }
+  }, [routines, pager, athleteId, athleteName, onboardingStep])
 
   // Which sessions are mid-flight (a live draft). Offline-tolerant — the local
   // scan alone is enough, so the markers show with no connection.
   useEffect(() => {
-    void loadDraftRoutineIds(athleteId).then(setDraftRoutineIds).catch(() => setDraftRoutineIds([]))
+    void loadDraftStarts(athleteId).then(setDraftStarts).catch(() => setDraftStarts({}))
   }, [athleteId, view])
 
   // Lazy outer-cadence triggers (§4.2, §5): run the weekly review + phase
@@ -792,13 +830,52 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [athleteId])
 
-  // Per-routine status for the week list.
+  const latestReview = view?.latestReview ?? null
+  const pastWeeks = pager?.past ?? []
+  const futureWeeks = pager?.future ?? []
+  const boundary = pager?.boundary ?? null
+  const minWeekOffset = -pastWeeks.length
+  const maxWeekOffset = Math.max(1, futureWeeks.length) + (boundary ? 1 : 0)
+  const wOffset = Math.max(minWeekOffset, Math.min(maxWeekOffset, weekOffset))
+  const atBoundary = boundary != null && wOffset === Math.max(1, futureWeeks.length) + 1
+  const pagerWeek: PagerWeekView | null =
+    wOffset < 0 ? pastWeeks[pastWeeks.length + wOffset]
+    : wOffset > 0 && wOffset <= futureWeeks.length ? futureWeeks[wOffset - 1]
+    : null
+
+  const viewingUpcoming = wOffset === 1
+  const displayWindow = viewingUpcoming ? (pager?.upcoming
+    ? { weekStart: pager.upcoming.weekStart, weekEnd: pager.upcoming.weekEnd }
+    : nextWindow) : thisWindow
+
+  const plannedThisWeek = Math.max(1, view?.sessionsPerWeek ?? (routines.length || 3))
+  const thisWeekDone = weekLoggedDays(allWorkouts, thisWindow.weekStart, thisWindow.weekEnd)
+  const doneCount = weekLoggedDays(allWorkouts, displayWindow.weekStart, displayWindow.weekEnd)
+  const lastDoneByRoutine = view?.lastDoneByRoutine ?? {}
+
+  const weekDays: WeekDayStatus[] = daysFromWeekStart(displayWindow.weekStart).map((d) => ({
+    date: d,
+    logged: allWorkouts.some((w) =>
+      isSameDay(new Date(w.performedAt), d) && isoInWeek(w.performedAt, displayWindow.weekStart, displayWindow.weekEnd),
+    ),
+    isToday: isSameDay(d, today),
+  }))
+
   function statusFor(routineId: string): SessionState {
-    const ws = weekWorkouts
-      .filter((w) => w.routineId === routineId)
-      .sort((a, b) => b.performedAt.localeCompare(a.performedAt))
-    if (ws.length) return { kind: 'done', lastWorkout: ws[0], count: ws.length }
-    if (draftRoutineIds.includes(routineId)) return { kind: 'in_progress' }
+    const state = sessionStateForWeek({
+      routineId,
+      weekStart: displayWindow.weekStart,
+      weekEnd: displayWindow.weekEnd,
+      workouts: allWorkouts,
+      draftStartedAt: draftStarts[routineId] ?? null,
+    })
+    if (state.kind === 'done' && state.lastPerformedAt) {
+      const last = allWorkouts
+        .filter((w) => w.routineId === routineId && w.performedAt === state.lastPerformedAt)
+        .sort((a, b) => b.performedAt.localeCompare(a.performedAt))[0]
+      if (last) return { kind: 'done', lastWorkout: last, count: state.count }
+    }
+    if (state.kind === 'in_progress') return { kind: 'in_progress' }
     return { kind: 'todo' }
   }
 
@@ -816,9 +893,8 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   //
   // Sessions done is counted the way computeWeekSchedule counts it — distinct
   // calendar DAYS trained, so logging Session A twice in one week counts twice
-  // and twice in one day counts once.
-  const plannedThisWeek = Math.max(1, view?.sessionsPerWeek ?? (routines.length || 3))
-  const doneCount = new Set(weekWorkouts.map((w) => localIso(new Date(w.performedAt)))).size
+  // and twice in one day counts once. Counts are scoped to the week instance
+  // so last week's logs never fill this week's ring.
   const weekZeroed = doneCount >= plannedThisWeek
   // "Week zeroed" on the finish moment only for the session that filled it, not
   // every session logged after. Days are what count toward the week, so it's
@@ -826,49 +902,38 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   // commit has already landed, the pending id is gone and this reads false:
   // the moment just says "Session zeroed", which is still true.)
   const filledWeekNow = (() => {
-    if (!finished || !weekZeroed) return false
+    if (!finished || thisWeekDone < plannedThisWeek) return false
     const mine = pendingRef(finished.pendingId)
-    if (!weekWorkouts.some((w) => w.id === mine)) return false
-    const before = new Set(
-      weekWorkouts.filter((w) => w.id !== mine).map((w) => localIso(new Date(w.performedAt))),
-    ).size
+    const thisWeekLogs = allWorkouts.filter((w) =>
+      isoInWeek(w.performedAt, thisWindow.weekStart, thisWindow.weekEnd),
+    )
+    if (!thisWeekLogs.some((w) => w.id === mine)) return false
+    const before = weekLoggedDays(
+      thisWeekLogs.filter((w) => w.id !== mine),
+      thisWindow.weekStart,
+      thisWindow.weekEnd,
+    )
     return before < plannedThisWeek
   })()
-  const lastDoneByRoutine = view?.lastDoneByRoutine ?? {}
+  const upcomingRoutines = (pager?.upcoming?.routines ?? []).map(asRoutineRow)
+  const liveList = viewingUpcoming && upcomingRoutines.length
+    ? upcomingRoutines
+    : weekList
+  const startWeek = viewingUpcoming ? displayWindow.weekStart : null
+  const startHref = (id: string) => startWeek ? `/app/workout/${id}?week=${startWeek}` : `/app/workout/${id}`
 
-  // Exactly one session gets the primary (yellow) Start: the scheduler's pick if
-  // it's still to-do, otherwise the first to-do in the list. Guarantees a clear
-  // CTA even when the week has rolled over and there's no scheduled "today".
   const primaryRoutineId =
-    (todayRoutine && statusFor(todayRoutine.id).kind === 'todo' ? todayRoutine.id : null)
-    ?? weekList.find((r) => statusFor(r.id).kind === 'in_progress')?.id
-    ?? weekList.find((r) => statusFor(r.id).kind === 'todo')?.id
+    (!viewingUpcoming && todayRoutine && statusFor(todayRoutine.id).kind === 'todo' ? todayRoutine.id : null)
+    ?? liveList.find((r) => statusFor(r.id).kind === 'in_progress')?.id
+    ?? liveList.find((r) => statusFor(r.id).kind === 'todo')?.id
     ?? null
-
-  // Recap prompt: the latest review, shown for ~10 days after it's cut, until
-  // viewed or dismissed (tracked locally — no schema change).
-  const latestReview = view?.latestReview ?? null
 
   const recapRecent = latestReview
     ? Date.now() - new Date(`${latestReview.weekEnding}T12:00:00`).getTime() < 11 * 864e5
     : false
-  // No separate dismiss control: opening the recap marks it seen, and it
-  // self-expires after ~11 days. One banner, one action.
   const showRecap = !loading && !!latestReview && recapRecent && !recapSeen(latestReview.id)
 
-  // ── Week pager — ← real past weeks · this week · projected future → · phase edge.
-  const pastWeeks = pager?.past ?? []
-  const futureWeeks = pager?.future ?? []
-  const boundary = pager?.boundary ?? null
-  const minWeekOffset = -pastWeeks.length
-  const maxWeekOffset = futureWeeks.length + (boundary ? 1 : 0)
-  const wOffset = Math.max(minWeekOffset, Math.min(maxWeekOffset, weekOffset))
-  const atBoundary = boundary != null && wOffset === futureWeeks.length + 1
-  const pagerWeek: PagerWeekView | null =
-    wOffset < 0 ? pastWeeks[pastWeeks.length + wOffset]
-    : wOffset > 0 && wOffset <= futureWeeks.length ? futureWeeks[wOffset - 1]
-    : null
-  const curRange = fmtWeekRange(localIso(weekDays[0]?.date ?? today), localIso(weekDays[6]?.date ?? today))
+  const curRange = fmtWeekRange(thisWindow.weekStart, thisWindow.weekEnd)
   const weekTitle = wOffset === 0 ? 'This week'
     : atBoundary ? boundary!.phaseName
     : wOffset === 1 ? 'Next week'
@@ -876,15 +941,14 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
   const weekSub = wOffset === 0 ? curRange
     : atBoundary ? 'Upcoming phase'
     : wOffset < 0 ? `${pagerWeek ? fmtWeekRange(pagerWeek.weekStart, pagerWeek.weekEnd) : ''} · logged`
-    : `${pagerWeek?.phaseName ? pagerWeek.phaseName + ' · ' : ''}projected`
+    : viewingUpcoming
+      ? `${pager?.upcoming?.phaseName ? pager.upcoming.phaseName + ' · ' : ''}${fmtWeekRange(displayWindow.weekStart, displayWindow.weekEnd)}`
+      : `${pagerWeek?.phaseName ? pagerWeek.phaseName + ' · ' : ''}projected`
 
-  // The current week's close-out (origin/master's flow). weekClosed is true once
-  // a review exists for THIS week's Sunday — re-closing is idempotent, but we swap
-  // the CTA so it reads "done" rather than inviting a second close.
-  const currentWeekEnding = localIso(weekDays[6].date)
+  const currentWeekEnding = thisWindow.weekEnd
   const weekClosed = (latestReview?.weekEnding ?? null) === currentWeekEnding
-  const weekLoggedOut = doneCount >= plannedThisWeek
-  const canPreviewNextWeek = (pager?.future?.length ?? 0) > 0
+  const weekLoggedOut = thisWeekDone >= plannedThisWeek
+  const canPreviewNextWeek = (pager?.future?.length ?? 0) > 0 || !!pager?.upcoming
 
   // Finished the week (or closed it) → land on next week's preview unless they
   // explicitly swiped back to this week.
@@ -915,7 +979,11 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
     }
   }
 
-  const openSession = routines.find((r) => r.id === openSessionId) ?? null
+  const openSession =
+    liveList.find((r) => r.id === openSessionId)
+    ?? routines.find((r) => r.id === openSessionId)
+    ?? upcomingRoutines.find((r) => r.id === openSessionId)
+    ?? null
 
   // The open sheet's prescription — the concrete lb/kg number per lift, from the
   // same engine read the workout screen shows. Cached per routine so a re-open
@@ -1023,9 +1091,9 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           </button>
         </div>
 
-        {wOffset === 0 ? (
+        {wOffset === 0 || viewingUpcoming ? (
           <>
-            {isFirstVisit && (
+            {isFirstVisit && !viewingUpcoming && (
               <Banner
                 tone="quiet"
                 title="Start anywhere"
@@ -1038,20 +1106,20 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             {/* THE WEEK, AT A GLANCE — a ring and seven dots instead of a
                 sentence. Replaces the old "2/4 done" text plus a separate
                 day strip stranded in a desktop-only rail. */}
-            {!loading && routines.length > 0 && (
+            {!loading && liveList.length > 0 && (
               <div className="card fade-rise" style={{ marginBottom: 24 }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 18 }}>
                   {/* A full week is the instrument's lock: the brackets close on the
                       ring. Anything short of it is just a ring. */}
                   {weekZeroed ? (
                     <LockOn style={{ '--lock-gap': '-6px', '--lock-from': '12px', '--lock-size': '10px' } as React.CSSProperties}>
-                      <Ring value={1} size={72} label={`${doneCount} of ${plannedThisWeek} sessions logged this week`}>
+                      <Ring value={1} size={72} label={`${doneCount} of ${plannedThisWeek} sessions logged ${viewingUpcoming ? 'next week' : 'this week'}`}>
                         <span style={{ fontSize: 'var(--fs-xl)', fontWeight: 700 }}>{doneCount}</span>
                         <span className="text-micro text-dim" style={{ marginTop: 2 }}>of {plannedThisWeek}</span>
                       </Ring>
                     </LockOn>
                   ) : (
-                    <Ring value={doneCount / plannedThisWeek} size={72} label={`${doneCount} of ${plannedThisWeek} sessions logged this week`}>
+                    <Ring value={doneCount / plannedThisWeek} size={72} label={`${doneCount} of ${plannedThisWeek} sessions logged ${viewingUpcoming ? 'next week' : 'this week'}`}>
                       <span style={{ fontSize: 'var(--fs-xl)', fontWeight: 700 }}>{doneCount}</span>
                       <span className="text-micro text-dim" style={{ marginTop: 2 }}>of {plannedThisWeek}</span>
                     </Ring>
@@ -1101,7 +1169,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             )}
 
             {/* Sessions */}
-            {loading && routines.length === 0 ? (
+            {loading && liveList.length === 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
                 {Array.from({ length: 3 }).map((_, i) => (
                   <div key={i} className="card" style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1109,7 +1177,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                   </div>
                 ))}
               </div>
-            ) : routines.length === 0 ? (
+            ) : liveList.length === 0 ? (
               <div className="card">
                 <p className="text-base text-dim">
                   No sessions yet. Finish onboarding and your program builds here.
@@ -1128,7 +1196,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                   </button>
                 </div>
                 <div className="stagger">
-                  {weekList.map((r) => (
+                  {liveList.map((r) => (
                     <SessionCard
                       key={r.id}
                       routine={r}
@@ -1137,7 +1205,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
                       lastDone={lastDoneByRoutine[r.id] ?? null}
                       plannedDow={plannedDowFor(r)}
                       onOpen={() => setOpenSessionId(r.id)}
-                      onStart={() => navigate(`/app/workout/${r.id}`, { viewTransition: true })}
+                      onStart={() => navigate(startHref(r.id), { viewTransition: true })}
                     />
                   ))}
                 </div>
@@ -1173,7 +1241,7 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
             )}
 
             {/* End-of-week close-out. */}
-            {!loading && routines.length > 0 && (
+            {!loading && !viewingUpcoming && routines.length > 0 && (
               weekClosed ? (
                 <Banner
                   tone="good"
@@ -1215,8 +1283,8 @@ export function TodayScreen({ athleteId, todayRoutine, routines, onboardingStep 
           plannedDow={plannedDowFor(openSession)}
           onPlanDay={(dow) => handlePlanDay(openSession.id, dow)}
           onClose={() => setOpenSessionId(null)}
-          onStart={() => navigate(`/app/workout/${openSession.id}`, { viewTransition: true })}
-          onLogAgain={() => navigate(`/app/workout/${openSession.id}`)}
+          onStart={() => navigate(startHref(openSession.id), { viewTransition: true })}
+          onLogAgain={() => navigate(startHref(openSession.id))}
           onEdit={() => {
             const s = statusFor(openSession.id)
             if (s.kind === 'done') navigate(`/app/workout/${openSession.id}?w=${s.lastWorkout.id}`)

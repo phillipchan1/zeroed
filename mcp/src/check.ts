@@ -4,7 +4,7 @@
 import { applyEditsToDraft, diffDraft, type ProgramDraft } from '../../src/engine/programDraft.ts'
 import type { ProgramEdit } from '../../src/engine/agentClient.ts'
 import { previewEdits, toProgramEdit, type EditInput } from './edits.ts'
-import { formatDiff, formatDraft, formatLoggedWorkout, formatSet } from './format.ts'
+import { formatDiff, formatDraft, formatLoggedWorkout, formatQueuedBlock, formatSet } from './format.ts'
 import { createZeroedServer, SERVER_INSTRUCTIONS } from './server.ts'
 import { epley1rm } from './store.ts'
 import type { LiveProgram } from './store.ts'
@@ -65,6 +65,7 @@ const live: LiveProgram = {
     },
   ],
   scheduledPhase: null,
+  scheduledSessions: [],
 }
 
 const base: ProgramDraft = {
@@ -108,6 +109,20 @@ ok(refused.exercises.length === 0, 'notes do not invent exercises')
 // ---- formatters ------------------------------------------------------------
 ok(formatSet({ set: 1, weight: 315, reps: 5, rpe: 8, done: true }, 'lb') === '315lb×5 @8', 'loaded set format')
 ok(formatDraft(base).includes('Lower A'), 'draft formatter lists sessions')
+const queuedText = formatQueuedBlock(
+  { name: 'Power', weekStart: '2026-11-02' },
+  [{
+    routineId: 'q1',
+    name: 'Mon Power Lower',
+    intent: 'Convert strength into speed',
+    sessionType: 'power',
+    intendedDow: 0,
+    exercises: [{ name: 'Speed Bench', sets: 5, reps: '2', load: 'about 170 lb', target_rpe: 5 }],
+  }],
+)
+ok(queuedText.includes('Queued: Power starts 2026-11-02'), 'queued header names the block')
+ok(queuedText.includes('Speed Bench'), 'queued block lists its sessions, not just the start date')
+ok(queuedText.includes('about 170 lb'), 'queued session keeps the prescribed load')
 ok(formatDiff(jumpDiff).includes('Box Jump'), 'diff formatter names additions')
 ok(epley1rm(315, 5) === 368, `epley 315x5 should be 368, got ${epley1rm(315, 5)}`)
 

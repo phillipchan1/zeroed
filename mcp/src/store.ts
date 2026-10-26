@@ -41,6 +41,14 @@ export interface LiveProgram {
     exercises: ExerciseTemplate[]
   }>
   scheduledPhase: { id: string; name: string; weekStart: string } | null
+  scheduledSessions: Array<{
+    routineId: string
+    name: string
+    intent: string
+    sessionType: string
+    intendedDow: number | null
+    exercises: ExerciseTemplate[]
+  }>
 }
 
 export interface WorkoutRowView extends LoggedWorkoutLike {
@@ -197,6 +205,30 @@ export async function loadLiveProgram(store: ConnectedStore): Promise<LiveProgra
     routineRows = data ?? []
   }
 
+  const mapSession = (r: {
+    id: string; name: string; intent: string | null; session_type: string | null
+    intended_dow: number | null; exercises: ExerciseTemplate[]
+  }) => ({
+    routineId: r.id,
+    name: r.name,
+    intent: r.intent ?? '',
+    sessionType: r.session_type ?? 'strength',
+    intendedDow: r.intended_dow ?? null,
+    exercises: Array.isArray(r.exercises) ? r.exercises : [],
+  })
+
+  let scheduledSessions: LiveProgram['scheduledSessions'] = []
+  if (queuedRes.data) {
+    const queuedRoutines = await store.supabase
+      .from('routine').select('*').eq('program_id', prog.id).eq('phase_id', queuedRes.data.id)
+    if (queuedRoutines.error) throw new Error(queuedRoutines.error.message)
+    scheduledSessions = ((queuedRoutines.data ?? []) as Array<{
+      id: string; name: string; intent: string | null; session_type: string | null
+      intended_dow: number | null; exercises: ExerciseTemplate[]
+    }>).map(mapSession)
+      .sort((a, b) => (a.intendedDow ?? 7) - (b.intendedDow ?? 7) || a.name.localeCompare(b.name))
+  }
+
   return {
     programId: prog.id,
     goal: (prog.goal as string | null) ?? null,
@@ -211,17 +243,11 @@ export async function loadLiveProgram(store: ConnectedStore): Promise<LiveProgra
     sessions: (routineRows as Array<{
       id: string; name: string; intent: string | null; session_type: string | null
       intended_dow: number | null; exercises: ExerciseTemplate[]
-    }>).map((r) => ({
-      routineId: r.id,
-      name: r.name,
-      intent: r.intent ?? '',
-      sessionType: r.session_type ?? 'strength',
-      intendedDow: r.intended_dow ?? null,
-      exercises: Array.isArray(r.exercises) ? r.exercises : [],
-    })),
+    }>).map(mapSession),
     scheduledPhase: queuedRes.data
       ? { id: queuedRes.data.id, name: queuedRes.data.name, weekStart: queuedRes.data.week_start }
       : null,
+    scheduledSessions,
   }
 }
 
