@@ -4,6 +4,7 @@ import { API_SECURITY, beginAuthCors } from './cors.ts'
 import { getAuth } from './auth.ts'
 import type { Env } from './env.ts'
 import { handleMcp } from './mcp.ts'
+import type { WaitUntilCtx } from './db.ts'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -65,13 +66,24 @@ app.all('/api/auth/*', async (c) => {
   }
 })
 
-app.all('/api/agent', (c) => handleAgent(c.req.raw, c.env))
-app.all('/api/mcp', (c) => handleMcp(c.req.raw, c.env))
+function waitUntilCtx(c: { executionCtx?: WaitUntilCtx }): WaitUntilCtx | undefined {
+  try {
+    const ctx = c.executionCtx
+    if (ctx && typeof ctx.waitUntil === 'function') return ctx
+  } catch {
+    /* app.request() in Node has no ExecutionContext */
+  }
+  return undefined
+}
+
+app.all('/api/agent', (c) => handleAgent(c.req.raw, c.env, waitUntilCtx(c)))
+app.all('/api/mcp', (c) => handleMcp(c.req.raw, c.env, { ctx: waitUntilCtx(c) }))
+app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, { ctx: waitUntilCtx(c) }))
 
 // Compatibility aliases so VITE_API_BASE_URL can point at either
 // `https://<worker>/api` or the old `/functions/v1` prefix.
-app.all('/functions/v1/agent', (c) => handleAgent(c.req.raw, c.env))
-app.all('/functions/v1/mcp', (c) => handleMcp(c.req.raw, c.env))
+app.all('/functions/v1/agent', (c) => handleAgent(c.req.raw, c.env, waitUntilCtx(c)))
+app.all('/functions/v1/mcp', (c) => handleMcp(c.req.raw, c.env, { ctx: waitUntilCtx(c) }))
 
 // Hashed Vite assets must 404 when missing — SPA fallback would serve
 // index.html and the browser would try to execute HTML as JS.
