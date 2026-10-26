@@ -12,8 +12,15 @@ import {
   authFailureMessage,
   persistAdoptedUserEmail,
   rewriteUserEmailLookup,
+  shouldPersistAdoptedEmail,
   stripSessionToken,
 } from './auth.ts'
+import {
+  assertNoEmailDupes,
+  findCaseInsensitiveEmailDupes,
+  formatEmailDupeAbort,
+  migrateAuthUsers,
+} from '../../scripts/migrate-users.lib.mjs'
 import {
   bindOwner,
   ownerPredicate,
@@ -80,7 +87,8 @@ ok(authSrc.includes('verification: BETTER_AUTH_SNAKE_CASE.verification'), 'auth.
 ok(authSrc.includes('bearer({ requireSignature: true })'), 'auth.ts requires signed bearers')
 ok(!authSrc.includes('allowExitOnIdle'), 'auth.ts does not use pg-pool allowExitOnIdle')
 ok(authSrc.includes('installEmailAdoption'), 'auth.ts installs case-insensitive email adoption')
-ok(authSrc.includes('persistAdoptedUserEmail'), 'auth.ts persists the BA user id before rewrite')
+ok(authSrc.includes('persistAdoptedUserEmail'), 'auth.ts persists the BA user id after verified sign-in')
+ok(authSrc.includes('shouldPersistAdoptedEmail'), 'auth.ts does not persist on unauthenticated send-code')
 ok(authSrc.includes('FIND_ADOPTED_USER_SQL'), 'auth.ts looks up the persisted BA user id first')
 ok(rewriteUserEmailLookup('select * from "user" where "email" = $1') === 'select * from "user" where lower("email") = lower($1)', 'adoption lookup uses lower(email)')
 ok(
@@ -99,8 +107,34 @@ ok(
   rewriteUserEmailLookup('UPDATE "user" SET "email" = $1 WHERE "email" = $2') === 'UPDATE "user" SET "email" = $1 WHERE "email" = $2',
   'email rewrite skips UPDATE even when WHERE mentions email',
 )
-const stripped = stripSessionToken({ session: { id: 's', token: 'raw-db-token', userId: 'u' }, user: { id: 'u' } }) as { session: { token?: string }; user: { id: string } }
+const stripped = stripSessionToken({
+  token: 'raw-top-level',
+  session: { id: 's', token: 'raw-db-token', userId: 'u' },
+  user: { id: 'u' },
+}) as { token?: string; session: { token?: string }; user: { id: string } }
 ok(stripped.user.id === 'u' && stripped.session.token === undefined, 'get-session body strips session.token')
+ok(stripped.token === undefined, 'sign-in body strips the top-level raw token')
+ok(
+  shouldPersistAdoptedEmail(
+    new Request('http://localhost/api/auth/sign-in/email-otp', { method: 'POST' }),
+    new Response('{}', { status: 200 }),
+  ),
+  'verified sign-in may persist lowercase email',
+)
+ok(
+  !shouldPersistAdoptedEmail(
+    new Request('http://localhost/api/auth/email-otp/send-verification-otp', { method: 'POST' }),
+    new Response('{}', { status: 200 }),
+  ),
+  'send-code does not persist lowercase email',
+)
+ok(
+  !shouldPersistAdoptedEmail(
+    new Request('http://localhost/api/auth/sign-in/email-otp', { method: 'POST' }),
+    new Response('{}', { status: 401 }),
+  ),
+  'failed sign-in does not persist lowercase email',
+)
 ok(authFailureMessage(new Error('The server does not support SSL connections')) === 'request failed', 'ssl errors stay generic')
 ok(authFailureMessage(new Error('BETTER_AUTH_SECRET is not set')) === 'BETTER_AUTH_SECRET is not set', 'auth config errors stay specific')
 
@@ -128,14 +162,48 @@ const mixedId = await persistAdoptedUserEmail(async (text, params) => {
 ok(mixedId === 'migrated-id', 'mixed-case email adopts the existing BA user id')
 ok(mixedCalls.includes(PERSIST_ADOPTED_EMAIL_SQL), 'first-time adoption persists lowercase email')
 
+const dupeUsers = [
+  { id: 'id-dup', email: 'dup@example.com' },
+  { id: 'id-DUP', email: 'DUP@example.com' },
+]
+const dupeGroups = findCaseInsensitiveEmailDupes(dupeUsers)
+ok(dupeGroups.length === 1 && dupeGroups[0].rows.length === 2, 'lower(email) groups source dupes')
+try {
+  assertNoEmailDupes(dupeUsers)
+  ok(false, 'assertNoEmailDupes must abort on dup@ / DUP@')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  ok(msg.includes('id-dup') && msg.includes('id-DUP'), 'dupe abort lists ids')
+  ok(msg.includes('dup@example.com') && msg.includes('DUP@example.com'), 'dupe abort lists emails')
+  ok(msg.includes('wrote nothing'), 'dupe abort says it wrote nothing')
+}
+ok(formatEmailDupeAbort(dupeGroups).includes('wrote nothing'), 'dupe abort formatter is explicit')
+let migrateWrites = 0
+try {
+  await migrateAuthUsers(async () => {
+    migrateWrites += 1
+    return { rows: [] }
+  }, dupeUsers)
+  ok(false, 'migrateAuthUsers must abort before writing')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  ok(!/must abort before writing/.test(msg), 'migrateAuthUsers aborted on source dupes')
+}
+ok(migrateWrites === 0, 'source dupe pre-check writes nothing')
+
 const schemaSql = readFileSync(join(here, '../schema/better-auth.sql'), 'utf8')
 ok(schemaSql.includes('email_verified') && schemaSql.includes('user_id') && schemaSql.includes('expires_at'), 'better-auth.sql is snake_case')
 ok(!schemaSql.includes('emailVerified') && !schemaSql.includes('"userId"'), 'better-auth.sql is not camelCase')
 ok(schemaSql.includes('user_email_lower_uidx') && schemaSql.includes('lower(email)'), 'better-auth.sql has case-insensitive email uniqueness')
+ok(schemaSql.includes('cannot create unique index user_email_lower_uidx'), 'better-auth.sql index migration names existing dupes')
 const migrateSrc = readFileSync(join(here, '../../scripts/migrate-supabase-to-neon.mjs'), 'utf8')
-ok(migrateSrc.includes('email_verified BOOLEAN') && migrateSrc.includes('user_id TEXT'), 'migrate script Better Auth SQL is snake_case')
-ok(migrateSrc.includes('user_email_lower_uidx'), 'migrate script adds case-insensitive email uniqueness')
-ok(migrateSrc.includes('lower(email)'), 'migrate script lowercases adopted emails')
+ok(migrateSrc.includes('assertNoEmailDupes'), 'migrate pre-checks source emails before any target write')
+ok(migrateSrc.includes('loadAuthUsersSql'), 'migrate user/auth load is one transaction')
+const migrateLib = readFileSync(join(here, '../../scripts/migrate-users.lib.mjs'), 'utf8')
+ok(migrateLib.includes('email_verified BOOLEAN') && migrateLib.includes('user_id TEXT'), 'migrate lib Better Auth SQL is snake_case')
+ok(migrateLib.includes('user_email_lower_uidx'), 'migrate lib adds case-insensitive email uniqueness')
+ok(migrateLib.includes('lower(email)'), 'migrate lib lowercases adopted emails')
+ok(migrateLib.includes('BEGIN'), 'migrate lib wraps the user load in a transaction')
 const corsSrc = readFileSync(join(here, 'cors.ts'), 'utf8')
 ok(corsSrc.includes("'Access-Control-Expose-Headers': 'set-auth-token'"), 'CORS exposes set-auth-token')
 const dataSrc = readFileSync(join(here, 'data.ts'), 'utf8')

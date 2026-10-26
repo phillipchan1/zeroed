@@ -149,14 +149,23 @@ export async function emailFromAuthRequest(req: Request): Promise<string | null>
   }
 }
 
-/** Drop the raw DB session token from get-session / sign-in JSON. */
+/** Drop raw DB tokens from get-session / sign-in JSON. Keep set-auth-token signed. */
 export function stripSessionToken(body: unknown): unknown {
   if (!body || typeof body !== 'object') return body
-  const rec = body as Record<string, unknown>
+  const rec = { ...(body as Record<string, unknown>) }
+  if ('token' in rec) delete rec.token
   const session = rec.session
-  if (!session || typeof session !== 'object' || !('token' in session)) return body
-  const { token: _token, ...rest } = session as Record<string, unknown>
-  return { ...rec, session: rest }
+  if (session && typeof session === 'object' && 'token' in session) {
+    const { token: _token, ...rest } = session as Record<string, unknown>
+    rec.session = rest
+  }
+  return rec
+}
+
+export function shouldPersistAdoptedEmail(req: Request, res: Response): boolean {
+  if (!res.ok) return false
+  const path = new URL(req.url).pathname
+  return path.endsWith('/sign-in/email-otp') || path.endsWith('/email-otp/verify-email')
 }
 
 export async function mapAuthJson(res: Response, map: (body: unknown) => unknown): Promise<Response> {
@@ -317,7 +326,8 @@ export async function withAuth<T>(
   if (!url) throw new Error('database is not configured (HYPERDRIVE or DATABASE_URL)')
   const { db, close, client } = await openAuthDb(url, env)
   try {
-    if (req) {
+    const result = await fn(createAuth(env, db))
+    if (req && result instanceof Response && shouldPersistAdoptedEmail(req, result)) {
       const email = await emailFromAuthRequest(req)
       if (email) {
         await persistAdoptedUserEmail(
@@ -326,7 +336,7 @@ export async function withAuth<T>(
         )
       }
     }
-    return await fn(createAuth(env, db))
+    return result
   } finally {
     const ending = close()
     if (waitUntil) waitUntil(ending)

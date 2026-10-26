@@ -27,6 +27,13 @@ import { spawnSync } from 'node:child_process'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import {
+  BETTER_AUTH_TABLES_SQL,
+  STUB_AUTH_SQL,
+  assertNoEmailDupes,
+  loadAuthUsersSql,
+  parseAuthUsersCsv,
+} from './migrate-users.lib.mjs'
 
 const dryRun = process.argv.includes('--dry-run')
 const relaxTargetRls = process.argv.includes('--relax-target-rls')
@@ -46,70 +53,6 @@ function needBin(name) {
   const res = spawnSync(name, ['--version'], { encoding: 'utf8' })
   if (res.status !== 0) throw new Error(`Missing ${name}. Install PostgreSQL client tools.`)
 }
-
-/** Created on the Neon target only, before pg_restore, so public FKs can land. */
-const STUB_AUTH_SQL = `
-CREATE SCHEMA IF NOT EXISTS auth;
-CREATE TABLE IF NOT EXISTS auth.users (
-  id UUID PRIMARY KEY,
-  email TEXT,
-  raw_user_meta_data JSONB,
-  email_confirmed_at TIMESTAMPTZ,
-  created_at TIMESTAMPTZ,
-  updated_at TIMESTAMPTZ
-);
-`
-
-const BETTER_AUTH_SQL = `
--- Better Auth tables (ids are text so we can keep the Supabase UUIDs).
-CREATE TABLE IF NOT EXISTS "user" (
-  id TEXT PRIMARY KEY,
-  name TEXT NOT NULL DEFAULT '',
-  email TEXT NOT NULL UNIQUE,
-  email_verified BOOLEAN NOT NULL DEFAULT FALSE,
-  image TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS session (
-  id TEXT PRIMARY KEY,
-  expires_at TIMESTAMPTZ NOT NULL,
-  token TEXT NOT NULL UNIQUE,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  ip_address TEXT,
-  user_agent TEXT,
-  user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS account (
-  id TEXT PRIMARY KEY,
-  account_id TEXT NOT NULL,
-  provider_id TEXT NOT NULL,
-  user_id TEXT NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
-  access_token TEXT,
-  refresh_token TEXT,
-  id_token TEXT,
-  access_token_expires_at TIMESTAMPTZ,
-  refresh_token_expires_at TIMESTAMPTZ,
-  scope TEXT,
-  password TEXT,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS verification (
-  id TEXT PRIMARY KEY,
-  identifier TEXT NOT NULL,
-  value TEXT NOT NULL,
-  expires_at TIMESTAMPTZ NOT NULL,
-  created_at TIMESTAMPTZ DEFAULT NOW(),
-  updated_at TIMESTAMPTZ DEFAULT NOW()
-);
-
-CREATE UNIQUE INDEX IF NOT EXISTS user_email_lower_uidx ON "user" (lower(email));
-`
 
 /** Neon target only. Never concatenated into a source session. */
 const RELAX_TARGET_SQL = `
@@ -164,8 +107,9 @@ function parseCounts(text) {
 
 if (dryRun && !source && !target) {
   console.log('dry-run: would pg_dump public + auth.users from SUPABASE_DB_URL (read-only)')
+  console.log('dry-run: would abort before any Neon write if lower(email) is duplicated (ids + emails listed)')
   console.log('dry-run: would create stub auth.users on NEON_DB_URL, then pg_restore')
-  console.log('dry-run: would insert auth.users into Better Auth "user" (and stub auth.users) with the same ids')
+  console.log('dry-run: would insert auth.users into Better Auth "user" (and stub auth.users) with the same ids in one transaction')
   console.log(relaxTargetRls
     ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
     : 'dry-run: would leave RLS / athlete_select / get_current_athlete_id / auth_user_id FK on Neon (pass --relax-target-rls to drop them on the target)')
@@ -194,10 +138,9 @@ const usersPath = join(dir, 'auth_users.csv')
 const stubAuthPath = join(dir, 'stub_auth.sql')
 const betterAuthPath = join(dir, 'better_auth.sql')
 const relaxPath = join(dir, 'relax_target.sql')
-
 try {
   writeFileSync(stubAuthPath, STUB_AUTH_SQL)
-  writeFileSync(betterAuthPath, BETTER_AUTH_SQL)
+  writeFileSync(betterAuthPath, BETTER_AUTH_TABLES_SQL)
   writeFileSync(relaxPath, RELAX_TARGET_SQL)
 
   console.log('dumping public schema + data (no-owner, no-acl)…')
@@ -222,6 +165,9 @@ try {
   const csv = run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', source, '-c', usersCopy])
   writeFileSync(usersPath, csv)
 
+  console.log('pre-checking source emails (read-only)…')
+  assertNoEmailDupes(parseAuthUsersCsv(csv))
+
   if (dryRun) {
     console.log(`dry-run: dump at ${dumpPath} (${readFileSync(dumpPath).length} bytes)`)
     console.log(`dry-run: ${csv.trim().split('\n').filter(Boolean).length} auth.users rows`)
@@ -244,27 +190,10 @@ try {
     console.log('keeping RLS / auth helpers on Neon (pass --relax-target-rls to drop them on the target)')
   }
 
-  console.log('mapping auth.users → "user" + stub auth.users…')
-  const loadUsers = `
-    CREATE TEMP TABLE auth_users_import (
-      id TEXT, name TEXT, email TEXT, email_verified BOOLEAN,
-      created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
-    );
-    \\copy auth_users_import FROM '${usersPath}' WITH CSV
-    INSERT INTO auth.users (id, email, created_at, updated_at)
-    SELECT id::uuid, email, created_at, COALESCE(updated_at, created_at)
-    FROM auth_users_import
-    ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email;
-    INSERT INTO "user" (id, name, email, email_verified, created_at, updated_at)
-    SELECT id, name, lower(email), email_verified, created_at, COALESCE(updated_at, created_at)
-    FROM auth_users_import
-    ON CONFLICT (id) DO UPDATE SET
-      email = lower(EXCLUDED.email),
-      name = EXCLUDED.name,
-      email_verified = EXCLUDED.email_verified;
-  `
-  writeFileSync(join(dir, 'load_users.sql'), loadUsers)
-  run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(dir, 'load_users.sql')])
+  console.log('mapping auth.users → "user" + stub auth.users (one transaction)…')
+  const loadPath = join(dir, 'load_users.sql')
+  writeFileSync(loadPath, loadAuthUsersSql(usersPath))
+  run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', loadPath])
 
   const srcCounts = parseCounts(run('psql', ['-d', source, '-c', checksumQuery()]))
   const dstCounts = parseCounts(run('psql', ['-d', target, '-c', checksumQuery()]))

@@ -83,6 +83,14 @@ async function runFlow(email, { reset = true } = {}) {
     const signIn = await post('/api/auth/sign-in/email-otp', { email, otp })
     const signText = await signIn.text()
     if (!signIn.ok) throw new Error(`sign-in ${signIn.status}: ${signText.slice(0, 240)}`)
+    let signBody
+    try { signBody = JSON.parse(signText) } catch { signBody = null }
+    if (signBody && 'token' in signBody) {
+      throw new Error('sign-in body leaked a top-level raw token')
+    }
+    if (signBody?.session && 'token' in signBody.session) {
+      throw new Error('sign-in body leaked session.token')
+    }
     const cookie = signIn.headers.getSetCookie?.().find((c) => c.includes('session_token'))
       ?? signIn.headers.get('set-cookie')
     if (!cookie) throw new Error('sign-in did not set a session cookie')
@@ -228,6 +236,26 @@ const migratedId = crypto.randomUUID()
     [migratedId, 'Phillip@Example.com'],
   )
   await client.end()
+}
+{
+  const cap = captureOtp()
+  try {
+    const send = await post('/api/auth/email-otp/send-verification-otp', {
+      email: 'phillip@example.com',
+      type: 'sign-in',
+    })
+    if (!send.ok) throw new Error(`unauth send otp ${send.status}`)
+    if (!cap.otps.at(-1)) throw new Error('unauth send otp was not logged')
+  } finally {
+    cap.restore()
+  }
+  const client = new Client({ connectionString: url })
+  await client.connect()
+  const before = await client.query('SELECT email FROM "user" WHERE id = $1', [migratedId])
+  await client.end()
+  if (before.rows[0]?.email !== 'Phillip@Example.com') {
+    throw new Error(`send-code wrote the user row (email=${before.rows[0]?.email})`)
+  }
 }
 const adoptedId = await runFlow('phillip@example.com', { reset: false })
 if (adoptedId !== migratedId) {

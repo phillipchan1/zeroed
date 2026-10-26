@@ -42,6 +42,10 @@ run(
   ['--experimental-strip-types', 'scripts/prove-better-auth-schema.mjs'],
 )
 run(
+  'migrate users',
+  ['--experimental-strip-types', 'scripts/prove-migrate-users.mjs'],
+)
+run(
   'workerd get-session',
   ['--experimental-strip-types', 'scripts/prove-workerd-auth.mjs'],
 )
