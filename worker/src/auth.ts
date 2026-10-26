@@ -56,6 +56,10 @@ export function createAuth(env: Env) {
       ...NATIVE_APP_ORIGINS,
     ],
     advanced: {
+      database: {
+        // athlete.auth_user_id is UUID (auth.users). Default nanoid breaks inserts.
+        generateId: 'uuid',
+      },
       defaultCookieAttributes: {
         sameSite: 'lax',
         secure: authCookieSecure(baseURL),

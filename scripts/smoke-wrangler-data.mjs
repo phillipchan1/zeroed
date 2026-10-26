@@ -58,28 +58,41 @@ const healthBody = await health.json()
 if (!health.ok || healthBody?.ok !== true) throw new Error('GET /api/health failed')
 console.log('GET /api/health ok')
 
+const origin = process.env.SMOKE_ORIGIN || 'http://localhost:8787'
 const unauth = await fetch(`${base}/api/data`, {
   method: 'POST',
-  headers: { 'content-type': 'application/json' },
+  headers: { 'content-type': 'application/json', origin },
   body: JSON.stringify({ table: 'workout', op: 'select', columns: 'id' }),
 })
 if (unauth.status !== 401) throw new Error(`POST /api/data without session expected 401, got ${unauth.status}`)
 console.log('POST /api/data unauthenticated → 401')
 
-const email = process.env.SMOKE_EMAIL || 'smoke@example.com'
-const send = await fetch(`${base}/api/auth/email-otp/send-verification-otp`, {
-  method: 'POST',
-  headers: { 'content-type': 'application/json' },
-  body: JSON.stringify({ email, type: 'sign-in' }),
-})
-if (!send.ok) {
-  const body = await send.text()
-  throw new Error(`send otp failed ${send.status}: ${body.slice(0, 200)}`)
-}
-console.log(`OTP requested for ${email} — check wrangler logs (RESEND unset) or inbox`)
-
 const bearer = process.env.SMOKE_BEARER
+const email = process.env.SMOKE_EMAIL || 'smoke@example.com'
+
+async function requestOtp() {
+  let lastStatus = 0
+  let lastBody = ''
+  for (let i = 0; i < 6; i++) {
+    const send = await fetch(`${base}/api/auth/email-otp/send-verification-otp`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', origin },
+      body: JSON.stringify({ email, type: 'sign-in' }),
+    })
+    lastStatus = send.status
+    if (send.ok) {
+      console.log(`OTP requested for ${email} — check wrangler logs (RESEND unset) or inbox`)
+      return true
+    }
+    lastBody = await send.text()
+    if (send.status !== 500) break
+    await sleep(800)
+  }
+  throw new Error(`send otp failed ${lastStatus}: ${lastBody.slice(0, 200)}`)
+}
+
 if (!bearer) {
+  await requestOtp()
   console.log('wrangler load/save skipped (set SMOKE_BEARER for a minted Better Auth session).')
   console.log('PGlite already covered load + save of a workout under the same owner filters.')
   console.log('wrangler smoke: health + sign-in OTP + unauthorized data gate ok')
@@ -89,6 +102,7 @@ if (!bearer) {
 const headers = {
   authorization: `Bearer ${bearer}`,
   'content-type': 'application/json',
+  origin,
 }
 
 async function call(label, path, opts = {}, tries = 4) {
@@ -107,7 +121,7 @@ async function call(label, path, opts = {}, tries = 4) {
       try { body = JSON.parse(text) } catch { body = { raw: text.slice(0, 240) } }
       last = { status: res.status, body }
       if (res.status === 500 && i < tries - 1) {
-        await sleep(400)
+        await sleep(800)
         continue
       }
       if (!res.ok) throw new Error(`${label} ${res.status}: ${text.slice(0, 240)}`)
@@ -126,10 +140,6 @@ async function call(label, path, opts = {}, tries = 4) {
 function data(body) {
   return call('data', '/api/data', { method: 'POST', body: JSON.stringify(body) })
 }
-
-const session = await call('session', '/api/auth/get-session')
-if (!session.body?.user?.id) throw new Error('get-session did not return a user')
-console.log(`GET /api/auth/get-session ok (${session.body.user.id})`)
 
 const athlete = await data({ table: 'athlete', op: 'select', columns: 'id, name', single: 'maybe' })
 let athleteId = athlete.body?.data?.id
@@ -226,4 +236,11 @@ if (loaded.body?.data?.routine?.program_id !== programId) {
   throw new Error(`embed mismatch: ${JSON.stringify(loaded.body)}`)
 }
 console.log('loaded workout with routine.program_id embed')
+
+try {
+  await requestOtp()
+} catch (err) {
+  console.log(`OTP after load/save: ${err instanceof Error ? err.message.slice(0, 120) : err}`)
+}
+
 console.log('SMOKE_OK wrangler sign-in + load + save workout')

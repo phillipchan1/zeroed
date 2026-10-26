@@ -5,7 +5,6 @@
  * the store/edits paths use, and runs one parameterized SQL. Keep this file
  * small: Free-plan CPU is 10ms/request.
  */
-import { sessionUser } from './auth.ts'
 import { beginAuthCors, json } from './cors.ts'
 import { withSql, type Sql } from './db.ts'
 import type { Env } from './env.ts'
@@ -257,6 +256,41 @@ export async function runSql<T extends object>(sql: Sql, text: string, params: u
 export async function resolveAthleteId(sql: Sql, userId: string): Promise<string | null> {
   const rows = await runSql<{ id: string }>(sql, 'SELECT id FROM athlete WHERE auth_user_id = $1 LIMIT 1', [userId])
   return rows[0]?.id ?? null
+}
+
+function bearerToken(req: Request): string | null {
+  const header = req.headers.get('authorization')
+  if (header && header.slice(0, 7).toLowerCase() === 'bearer ') {
+    const token = header.slice(7).trim()
+    return token || null
+  }
+  const cookie = req.headers.get('cookie') ?? ''
+  const match = cookie.match(/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=([^;]+)/)
+  if (!match?.[1]) return null
+  try {
+    return decodeURIComponent(match[1])
+  } catch {
+    return match[1]
+  }
+}
+
+/** Session lookup in the same SQL as the query — avoids Better Auth's cached pool. */
+export async function sessionFromRequest(
+  sql: Sql,
+  req: Request,
+): Promise<{ id: string; email?: string | null } | null> {
+  const token = bearerToken(req)
+  if (!token) return null
+  const rows = await runSql<{ id: string; email: string | null }>(
+    sql,
+    `SELECT u.id, u.email
+       FROM session s
+       JOIN "user" u ON u.id = s."userId"
+      WHERE s.token = $1 AND s."expiresAt" > NOW()
+      LIMIT 1`,
+    [token],
+  )
+  return rows[0] ?? null
 }
 
 function ident(name: string): string {
@@ -734,9 +768,6 @@ export async function handleData(req: Request, env: Env): Promise<Response> {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors })
   if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405, cors)
 
-  const user = await sessionUser(env, req)
-  if (!user) return json({ data: null, error: { message: 'unauthorized' }, count: null }, 401, cors)
-
   let body: DataQuery
   try {
     body = await req.json() as DataQuery
@@ -746,6 +777,8 @@ export async function handleData(req: Request, env: Env): Promise<Response> {
 
   try {
     return await withSql(env, async (sql) => {
+      const user = await sessionFromRequest(sql, req)
+      if (!user) return json({ data: null, error: { message: 'unauthorized' }, count: null }, 401, cors)
       const athleteId = await resolveAthleteId(sql, user.id)
       const result = await executeDataQuery(sql, { userId: user.id, athleteId, email: user.email }, body)
       return json(
