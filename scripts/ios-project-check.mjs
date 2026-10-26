@@ -44,13 +44,12 @@ if (pbx) {
   if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (CI uses cloud-managed ASC signing)')
   else fail('pbxproj CODE_SIGN_STYLE')
 
-  // Release must not inherit "iPhone Developer" — that makes `xcodebuild archive`
-  // request a development profile and mint a cert on every CI runner.
-  const releaseIdentity = pbx.split('name = Release;').slice(0, 2).every((block) =>
-    /CODE_SIGN_IDENTITY = "Apple Distribution";/.test(block),
-  )
-  if (releaseIdentity) ok('Release CODE_SIGN_IDENTITY is Apple Distribution')
-  else fail('Release CODE_SIGN_IDENTITY', 'expected Apple Distribution (iPhone Developer fills the development-cert cap)')
+  // A forced identity makes `xcodebuild archive` request a development
+  // profile (iPhone Developer) or fight automatic signing (Apple Distribution).
+  const releaseBlocks = [...pbx.matchAll(/\/\* Release \*\/ = \{[\s\S]*?name = Release;\n\t\t\};/g)].map((m) => m[0])
+  if (releaseBlocks.length >= 2 && releaseBlocks.every((b) => !b.includes('CODE_SIGN_IDENTITY'))) {
+    ok('Release does not force CODE_SIGN_IDENTITY')
+  } else fail('Release CODE_SIGN_IDENTITY', 'leave it unset so archive can select the App Store certificate')
 
   const deployTargets = [...pbx.matchAll(/IPHONEOS_DEPLOYMENT_TARGET = ([^;]+);/g)].map((m) => m[1])
   if (deployTargets.length && deployTargets.every((t) => t === '15.0')) {
@@ -172,9 +171,9 @@ if (workflow) {
     ok('workflow uses automatic signing with ASC API key')
   } else fail('workflow automatic signing / authenticationKey flags')
 
-  if (workflow.includes('CODE_SIGN_IDENTITY=Apple Distribution')) {
-    ok('workflow archives with Apple Distribution, not a development identity')
-  } else fail('workflow CODE_SIGN_IDENTITY', 'archive must not request an iOS Development certificate')
+  if (!/CODE_SIGN_STYLE=Automatic/.test(workflow) && !/CODE_SIGN_IDENTITY=/.test(workflow)) {
+    ok('workflow does not force development signing on the xcodebuild command line')
+  } else fail('workflow signing overrides', 'do not pass CODE_SIGN_STYLE or CODE_SIGN_IDENTITY to xcodebuild')
 
   if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete App Store Connect API key')) {
     ok('workflow deletes the .p8 in an always() step')

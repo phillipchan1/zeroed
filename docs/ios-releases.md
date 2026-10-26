@@ -76,9 +76,11 @@ On every push to `master` (and **Run workflow**):
    to `~/.appstoreconnect/private_keys/AuthKey_<id>.p8` for `altool`.
 6. Resolve the build number against App Store Connect, then
    `xcodebuild archive` + `-exportArchive` with `method=app-store-connect`,
-   `CODE_SIGN_STYLE=Automatic`, `-allowProvisioningUpdates`, and the API
-   key (`-authenticationKeyPath` / `-authenticationKeyID` /
-   `-authenticationKeyIssuerID`). Cloud-managed distribution signing —
+   `-allowProvisioningUpdates`, and the API key (`-authenticationKeyPath`
+   / `-authenticationKeyID` / `-authenticationKeyIssuerID`). Release does
+   not set a code-sign identity: `iPhone Developer` makes the archive
+   request a development certificate, and passing `CODE_SIGN_STYLE` on
+   the command line does the same. Cloud-managed distribution signing —
    no `.p12`, no hand-made provisioning profile.
 7. `xcrun altool --upload-app` → App Store Connect → **Internal** TestFlight.
    The workflow does not submit for App Review and does not add external testers.
@@ -208,7 +210,7 @@ python3 scripts/gen-icons.py
 | Workflow skips (green) | Missing secrets listed in the **Check TestFlight secrets** notice |
 | Workflow fails at signing | Check `ASC_API_KEY_*`, `APPLE_TEAM_ID`, and that the key is Admin / App Manager |
 | `No profiles for app.zeroed.app` | Register the App ID, then re-run — automatic signing creates the App Store profile |
-| `Choose a certificate to revoke` / `iOS App Development provisioning profiles` | Release was signing as iPhone Developer, so each CI runner minted a development certificate until the account cap (shared with Nuvo) blocked the archive. Release now uses **Apple Distribution**, and pod targets do not sign themselves. If a run still asks for a development profile, revoke stale **Apple Development: Created via API** certs in [Certificates](https://developer.apple.com/account/resources/certificates/list) — leave Apple Distribution certs in place |
+| `Choose a certificate to revoke` / `iOS App Development provisioning profiles` | The archive was signing for development (`CODE_SIGN_IDENTITY = iPhone Developer`, or `CODE_SIGN_STYLE=Automatic` passed to `xcodebuild`), so each runner minted an Apple Development cert until the account cap blocked uploads. Release no longer sets an identity, and pod targets do not sign themselves. If a run still asks for a development profile, revoke stale **Apple Development: Created via API** certs in [Certificates](https://developer.apple.com/account/resources/certificates/list) — leave Apple Distribution certs in place |
 | Upload rejected (SDK too old) | Bump `runs-on:` to a newer `macos-*` in `ios-release.yml` |
 | ITMS-90685 CFBundleIdentifier collision | Do not pass `PRODUCT_BUNDLE_IDENTIFIER` to `xcodebuild`. Pod frameworks (`Capacitor`, `CapacitorCordova`, `Pods_App`) inherit it. The Podfile pins them to `org.cocoapods.*`; CI unzips the IPA and fails on a duplicate. |
 | ITMS-90474 iPad orientations | `UIRequiresFullScreen=true` in `Info.plist` (portrait-only). |

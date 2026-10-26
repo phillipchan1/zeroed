@@ -5,11 +5,12 @@ name: iOS TestFlight
 # One-time Apple + GitHub secrets setup: docs/ios-releases.md
 #
 # Signing is automatic + cloud-managed via an App Store Connect API key
-# (no .p12, no hand-made provisioning profile). The archive identity is
-# Apple Distribution — "iPhone Developer" makes every runner mint a
-# development certificate until the account hits Apple's cap.
+# (no .p12, no hand-made provisioning profile). Release does not set
+# CODE_SIGN_IDENTITY, and the archive command does not pass
+# CODE_SIGN_STYLE — a command-line Automatic style forces development
+# signing, which mints a new Apple Development cert on every runner
+# until the account cap blocks the upload.
 #   xcodebuild archive / -exportArchive
-#     CODE_SIGN_IDENTITY=Apple Distribution
 #     -allowProvisioningUpdates
 #     -authenticationKeyPath / -authenticationKeyID / -authenticationKeyIssuerID
 #
@@ -186,12 +187,10 @@ jobs:
           # it to every target, so Capacitor.framework / CapacitorCordova.framework
           # inherit app.zeroed.app and App Store rejects the IPA (ITMS-90685).
           # The App target already has PRODUCT_BUNDLE_IDENTIFIER in pbxproj.
-          # Apple Distribution, not "iPhone Developer". The project used to
-          # inherit iPhone Developer for Release, so every archive asked for an
-          # iOS App Development profile and -allowProvisioningUpdates minted a
-          # new development certificate on the ephemeral runner. That filled
-          # the account cap ("Choose a certificate to revoke") and the upload
-          # never started. Distribution reuses the cloud-managed App Store cert.
+          # Do not pass CODE_SIGN_STYLE or CODE_SIGN_IDENTITY. Command-line
+          # Automatic signing forces an iOS Development identity, and naming
+          # Apple Distribution on top of that conflicts. Release leaves the
+          # identity unset so archive selects the App Store certificate.
           COMMON=(
             -workspace App.xcworkspace
             -scheme App
@@ -200,8 +199,6 @@ jobs:
             MARKETING_VERSION="$APP_VERSION"
             CURRENT_PROJECT_VERSION="$BUILD_NUMBER"
             DEVELOPMENT_TEAM="$APPLE_DEVELOPMENT_TEAM"
-            CODE_SIGN_STYLE=Automatic
-            "CODE_SIGN_IDENTITY=Apple Distribution"
           )
 
           xcodebuild archive \
