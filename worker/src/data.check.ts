@@ -16,8 +16,12 @@ import {
   stripSessionToken,
 } from './auth.ts'
 import {
+  assertNoBlankEmails,
   assertNoEmailDupes,
+  assertSourceUsersReady,
+  findBlankEmails,
   findCaseInsensitiveEmailDupes,
+  formatBlankEmailAbort,
   formatEmailDupeAbort,
   migrateAuthUsers,
 } from '../../scripts/migrate-users.lib.mjs'
@@ -195,14 +199,52 @@ try {
 }
 ok(migrateWrites === 0, 'source dupe pre-check writes nothing')
 
+const blankUsers = [
+  { id: 'id-null', email: null },
+  { id: 'id-empty', email: '' },
+  { id: 'id-ws', email: '  \t' },
+]
+ok(findBlankEmails(blankUsers).length === 3, 'pre-check finds null, empty, and whitespace emails')
+try {
+  assertNoBlankEmails(blankUsers)
+  ok(false, 'assertNoBlankEmails must abort on null/empty/whitespace')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  ok(msg.includes('id-null') && msg.includes('id-empty') && msg.includes('id-ws'), 'blank abort lists ids')
+  ok(msg.includes('wrote nothing'), 'blank abort says it wrote nothing')
+}
+ok(formatBlankEmailAbort(blankUsers).includes('id-null'), 'blank abort formatter lists ids')
+try {
+  assertSourceUsersReady([{ id: 'ok', email: 'ok@example.com' }, { id: 'id-null', email: null }])
+  ok(false, 'assertSourceUsersReady must abort on a null email')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  ok(!/must abort on a null/.test(msg), 'assertSourceUsersReady aborted on a null email')
+  ok(msg.includes('id-null'), 'source ready abort lists the blank id')
+}
+let blankWrites = 0
+try {
+  await migrateAuthUsers(async () => {
+    blankWrites += 1
+    return { rows: [] }
+  }, blankUsers)
+  ok(false, 'migrateAuthUsers must abort before writing blank emails')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  ok(!/must abort before writing blank/.test(msg), 'migrateAuthUsers aborted on blank emails')
+}
+ok(blankWrites === 0, 'blank email pre-check writes nothing')
+
 const schemaSql = readFileSync(join(here, '../schema/better-auth.sql'), 'utf8')
 ok(schemaSql.includes('email_verified') && schemaSql.includes('user_id') && schemaSql.includes('expires_at'), 'better-auth.sql is snake_case')
 ok(!schemaSql.includes('emailVerified') && !schemaSql.includes('"userId"'), 'better-auth.sql is not camelCase')
 ok(schemaSql.includes('user_email_lower_uidx') && schemaSql.includes('lower(email)'), 'better-auth.sql has case-insensitive email uniqueness')
 ok(schemaSql.includes('cannot create unique index user_email_lower_uidx'), 'better-auth.sql index migration names existing dupes')
 const migrateSrc = readFileSync(join(here, '../../scripts/migrate-supabase-to-neon.mjs'), 'utf8')
-ok(migrateSrc.includes('assertNoEmailDupes'), 'migrate pre-checks source emails before any target write')
+ok(migrateSrc.includes('assertSourceUsersReady'), 'migrate pre-checks source emails before any target write')
+ok(migrateSrc.includes('CLEANUP_FAILED_TARGET_SQL'), 'migrate drops restored tables if a later step fails')
 ok(migrateSrc.includes('loadAuthUsersSql'), 'migrate user/auth load is one transaction')
+ok(migrateSrc.indexOf('assertSourceUsersReady') < migrateSrc.indexOf('creating stub auth.users'), 'source validation runs before the first target write')
 const migrateLib = readFileSync(join(here, '../../scripts/migrate-users.lib.mjs'), 'utf8')
 ok(migrateLib.includes('email_verified BOOLEAN') && migrateLib.includes('user_id TEXT'), 'migrate lib Better Auth SQL is snake_case')
 ok(migrateLib.includes('user_email_lower_uidx'), 'migrate lib adds case-insensitive email uniqueness')

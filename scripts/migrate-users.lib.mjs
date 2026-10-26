@@ -1,6 +1,7 @@
 /**
  * Auth-user cutover helpers. Source is read-only. Target writes happen only
- * after a case-insensitive email pre-check; the load itself is one transaction.
+ * after a source-user pre-check (blank emails + case-insensitive dupes). The
+ * user/auth load is one transaction; a later failure drops restored tables.
  */
 export const STUB_AUTH_SQL = `
 CREATE SCHEMA IF NOT EXISTS auth;
@@ -102,21 +103,62 @@ export const SOURCE_EMAIL_DUPE_SQL = `
 SELECT id::text AS id, email
 FROM auth.users
 WHERE email IS NOT NULL
+  AND btrim(email) <> ''
   AND lower(email) IN (
     SELECT lower(email) FROM auth.users
-    WHERE email IS NOT NULL
+    WHERE email IS NOT NULL AND btrim(email) <> ''
     GROUP BY lower(email)
     HAVING count(*) > 1
   )
 ORDER BY lower(email), id
 `
 
+export const SOURCE_BLANK_EMAIL_SQL = `
+SELECT id::text AS id, email
+FROM auth.users
+WHERE email IS NULL OR btrim(email) = ''
+ORDER BY id
+`
+
+/** Drop restored public tables (skip extension-owned) plus the auth stub. */
+export const DROP_RESTORED_PUBLIC_SQL = `
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT c.relname AS tablename
+    FROM pg_class c
+    JOIN pg_namespace n ON n.oid = c.relnamespace
+    WHERE n.nspname = 'public'
+      AND c.relkind = 'r'
+      AND c.relpersistence = 'p'
+      AND NOT EXISTS (
+        SELECT 1 FROM pg_depend d
+        JOIN pg_extension e ON d.refobjid = e.oid
+        WHERE d.objid = c.oid AND d.deptype = 'e'
+      )
+  LOOP
+    EXECUTE format('DROP TABLE IF EXISTS public.%I CASCADE', r.tablename);
+  END LOOP;
+END $$;
+`
+
+export const DROP_AUTH_STUB_SQL = `DROP TABLE IF EXISTS auth.users CASCADE;`
+
+export const CLEANUP_FAILED_TARGET_SQL =
+  `${DROP_RESTORED_PUBLIC_SQL}\n${DROP_AUTH_STUB_SQL}\n`
+
+export async function cleanupFailedTarget(query) {
+  await query(DROP_RESTORED_PUBLIC_SQL)
+  await query(DROP_AUTH_STUB_SQL)
+}
+
 export function parseAuthUsersCsv(csv) {
   const users = []
   for (const line of String(csv).split(/\r?\n/)) {
     if (!line.trim()) continue
     const cols = parseCsvLine(line)
-    if (cols.length < 3) continue
+    if (!cols[0]) continue
     users.push({
       id: cols[0],
       name: cols[1] ?? '',
@@ -163,12 +205,39 @@ function parseCsvLine(line) {
   return out
 }
 
+export function emailIsBlank(email) {
+  if (email == null) return true
+  if (typeof email !== 'string') return true
+  return email.trim() === ''
+}
+
+export function describeSourceEmail(email) {
+  if (email == null) return '<null>'
+  if (typeof email !== 'string') return `<${typeof email}>`
+  if (email === '') return '<empty>'
+  if (email.trim() === '') return '<whitespace>'
+  return email
+}
+
+export function findBlankEmails(users) {
+  return users.filter((user) => emailIsBlank(user.email))
+}
+
+export function formatBlankEmailAbort(rows) {
+  const lines = rows.map((row) => `  ${row.id} ${describeSourceEmail(row.email)}`)
+  return `blank source emails — abort, wrote nothing:\n${lines.join('\n')}`
+}
+
+export function assertNoBlankEmails(users) {
+  const blanks = findBlankEmails(users)
+  if (blanks.length) throw new Error(formatBlankEmailAbort(blanks))
+}
+
 export function findCaseInsensitiveEmailDupes(users) {
   const groups = new Map()
   for (const user of users) {
-    const email = typeof user.email === 'string' ? user.email : ''
-    const key = email.toLowerCase()
-    if (!key) continue
+    if (emailIsBlank(user.email)) continue
+    const key = String(user.email).toLowerCase()
     const list = groups.get(key) ?? []
     list.push(user)
     groups.set(key, list)
@@ -188,6 +257,12 @@ export function formatEmailDupeAbort(dupes) {
 export function assertNoEmailDupes(users) {
   const dupes = findCaseInsensitiveEmailDupes(users)
   if (dupes.length) throw new Error(formatEmailDupeAbort(dupes))
+}
+
+/** All source-user checks. Throws before the caller may write the target. */
+export function assertSourceUsersReady(users) {
+  assertNoBlankEmails(users)
+  assertNoEmailDupes(users)
 }
 
 export function loadAuthUsersSql(csvPath) {
@@ -251,10 +326,34 @@ export async function loadAuthUsersInTransaction(query, rows) {
 }
 
 /**
- * Pre-check, then load. If dupes exist this throws and `query` is never
+ * Pre-check, then load. Blank emails or dupes throw and `query` is never
  * called — the target is not written.
  */
 export async function migrateAuthUsers(query, rows) {
-  assertNoEmailDupes(rows)
+  assertSourceUsersReady(rows)
   return loadAuthUsersInTransaction(query, rows)
+}
+
+/** Run target writes; on failure drop restored public tables and the auth stub. */
+export async function writeTargetOrCleanup(query, work) {
+  try {
+    await work()
+  } catch (err) {
+    try { await cleanupFailedTarget(query) } catch { /* still surface the load error */ }
+    throw err
+  }
+}
+
+/**
+ * Target writes after validation. On any failure after writes start, drop
+ * restored public tables and the auth stub so the target is not left dirty.
+ */
+export async function migrateTarget(query, rows, afterStub) {
+  assertSourceUsersReady(rows)
+  return writeTargetOrCleanup(query, async () => {
+    await query(STUB_AUTH_SQL)
+    if (afterStub) await afterStub(query)
+    await query(BETTER_AUTH_TABLES_SQL)
+    await loadAuthUsersInTransaction(query, rows)
+  })
 }
