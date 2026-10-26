@@ -141,7 +141,19 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 5. Apply `worker/schema/app.sql` then `worker/schema/better-auth.sql` on an
    empty Neon (or let the migrate script do it). Then
    `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --dry-run --skip-auth-users --auth-users-file=users.json`
-   (read-only source is enough for dry-run). The migration role cannot read
+   (read-only source is enough for dry-run). The dump and the source
+   counts/hashes share one `REPEATABLE READ` transaction:
+   `BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ`,
+   `pg_export_snapshot()`, `pg_dump --snapshot=<id>`, then `COUNT(*)` plus
+   a per-table content md5 (`md5(to_jsonb(t))` aggregated `ORDER BY t.id`)
+   on the same snapshot. Live writes on Supabase cannot make the dump and
+   the checksums diverge, so a mismatch is a real restore problem, not
+   snapshot skew. Dry-run prints those counts and hashes only (the dump
+   file is discarded, never uploaded) and **exits non-zero on any
+   mismatch** — including an empty Neon vs a populated source. It also
+   refuses if a `public` table is missing from the coverage list (Better
+   Auth `user` / `session` / `account` / `verification` stay excluded on
+   purpose). The migration role cannot read
    `auth.users` — provide a CSV/JSON of `(id, email, created_at)`. A live
    restore without that mapping exits 2. A live restore also requires
    `--confirm-drop=<target dbname>` and a `*.neon.tech` target. The script
@@ -171,7 +183,9 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 
 1. Write-freeze is optional here; run it anyway so the template is exercised.
 2. `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --confirm-drop=neondb --skip-auth-users --auth-users-file=users.json`
-   — abort on a row-count mismatch, a mapping that is missing any
+   — abort on a row-count or content-hash mismatch (Neon is compared
+   to the same source snapshot the dump used, not a later read), a
+   mapping that is missing any
    source `athlete.auth_user_id` (ids, not counts), or an athlete
    whose `auth_user_id` has no Better Auth `"user"`. A live run
    without `--auth-users-file` exits 2. A live run without

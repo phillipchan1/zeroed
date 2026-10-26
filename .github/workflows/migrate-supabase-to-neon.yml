@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Dump source and compare row counts without writing Neon
+        description: Snapshot dump + compare counts/hashes (exit 1 on mismatch; no Neon writes)
         type: boolean
         default: true
       confirm_drop:
