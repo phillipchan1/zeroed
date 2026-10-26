@@ -44,6 +44,14 @@ if (pbx) {
   if (/CODE_SIGN_STYLE = Automatic;/.test(pbx)) ok('pbxproj automatic signing (CI uses cloud-managed ASC signing)')
   else fail('pbxproj CODE_SIGN_STYLE')
 
+  // Release must not inherit "iPhone Developer" — that makes `xcodebuild archive`
+  // request a development profile and mint a cert on every CI runner.
+  const releaseIdentity = pbx.split('name = Release;').slice(0, 2).every((block) =>
+    /CODE_SIGN_IDENTITY = "Apple Distribution";/.test(block),
+  )
+  if (releaseIdentity) ok('Release CODE_SIGN_IDENTITY is Apple Distribution')
+  else fail('Release CODE_SIGN_IDENTITY', 'expected Apple Distribution (iPhone Developer fills the development-cert cap)')
+
   const deployTargets = [...pbx.matchAll(/IPHONEOS_DEPLOYMENT_TARGET = ([^;]+);/g)].map((m) => m[1])
   if (deployTargets.length && deployTargets.every((t) => t === '15.0')) {
     ok(`pbxproj IPHONEOS_DEPLOYMENT_TARGET 15.0 (${deployTargets.length} configs)`)
@@ -80,6 +88,9 @@ if (podfile) {
   if (podfile.includes("org.cocoapods.") && podfile.includes('PRODUCT_BUNDLE_IDENTIFIER')) {
     ok('Podfile assigns unique PRODUCT_BUNDLE_IDENTIFIER to pod targets')
   } else fail('Podfile pod bundle ids')
+  if (podfile.includes("CODE_SIGNING_ALLOWED'] = 'NO'")) {
+    ok('Podfile does not let pod targets sign themselves')
+  } else fail('Podfile CODE_SIGNING_ALLOWED', 'pod targets must not request their own certificate')
 }
 
 const cap = read('capacitor.config.ts')
@@ -160,6 +171,10 @@ if (workflow) {
   if (workflow.includes('-allowProvisioningUpdates') && workflow.includes('-authenticationKeyPath')) {
     ok('workflow uses automatic signing with ASC API key')
   } else fail('workflow automatic signing / authenticationKey flags')
+
+  if (workflow.includes('CODE_SIGN_IDENTITY=Apple Distribution')) {
+    ok('workflow archives with Apple Distribution, not a development identity')
+  } else fail('workflow CODE_SIGN_IDENTITY', 'archive must not request an iOS Development certificate')
 
   if (/if:\s*always\(\)/.test(workflow) && workflow.includes('Delete App Store Connect API key')) {
     ok('workflow deletes the .p8 in an always() step')

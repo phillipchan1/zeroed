@@ -207,7 +207,8 @@ python3 scripts/gen-icons.py
 |---|---|
 | Workflow skips (green) | Missing secrets listed in the **Check TestFlight secrets** notice |
 | Workflow fails at signing | Check `ASC_API_KEY_*`, `APPLE_TEAM_ID`, and that the key is Admin / App Manager |
-| `No profiles for app.zeroed.app` | Register the App ID, then re-run — automatic signing creates the profile |
+| `No profiles for app.zeroed.app` | Register the App ID, then re-run — automatic signing creates the App Store profile |
+| `Choose a certificate to revoke` / `iOS App Development provisioning profiles` | Release was signing as iPhone Developer, so each CI runner minted a development certificate until the account cap (shared with Nuvo) blocked the archive. Release now uses **Apple Distribution**, and pod targets do not sign themselves. If a run still asks for a development profile, revoke stale **Apple Development: Created via API** certs in [Certificates](https://developer.apple.com/account/resources/certificates/list) — leave Apple Distribution certs in place |
 | Upload rejected (SDK too old) | Bump `runs-on:` to a newer `macos-*` in `ios-release.yml` |
 | ITMS-90685 CFBundleIdentifier collision | Do not pass `PRODUCT_BUNDLE_IDENTIFIER` to `xcodebuild`. Pod frameworks (`Capacitor`, `CapacitorCordova`, `Pods_App`) inherit it. The Podfile pins them to `org.cocoapods.*`; CI unzips the IPA and fails on a duplicate. |
 | ITMS-90474 iPad orientations | `UIRequiresFullScreen=true` in `Info.plist` (portrait-only). |

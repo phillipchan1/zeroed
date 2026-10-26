@@ -27,6 +27,10 @@ post_install do |installer|
     target.build_configurations.each do |config|
       config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
       config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] = "org.cocoapods.#{slug}"
+      # Pods are re-signed when the app embeds them. Letting them sign
+      # themselves makes a fresh CI runner ask for an iOS Development
+      # certificate, and that account is already at Apple's cap.
+      config.build_settings['CODE_SIGNING_ALLOWED'] = 'NO'
     end
   end
 end
