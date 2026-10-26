@@ -315,8 +315,8 @@ ok(dataSrc.includes("from 'better-auth/crypto'"), 'session HMAC reuses better-au
 ok(dataSrc.includes('STANDARD_PADDED_HMAC') && dataSrc.includes('atob(signature)'), 'session HMAC verifies standard padded base64')
 ok(!dataSrc.includes('bytesToBase64UrlNoPad'), 'session HMAC does not use unpadded url-safe encoding')
 const workflow = readFileSync(join(here, '../../.github/workflows/checks.yml'), 'utf8')
-ok(workflow.includes('postgres:17'), 'CI postgres service is 17')
-ok(!workflow.includes('postgres:16'), 'CI postgres service is not 16')
+ok(workflow.includes('postgres:17'), 'CI postgres/isolation services are 17')
+ok(/migrate-pg:[\s\S]*image: postgres:16/.test(workflow), 'migrate-pg uses Postgres 16 to match the runner client')
 ok(workflow.includes('/usr/lib/postgresql/17/bin'), 'CI puts the Postgres 17 client first on PATH')
 
 const secret = 's'.repeat(32)
