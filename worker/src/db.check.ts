@@ -72,7 +72,8 @@ const authSrc = readFileSync(join(here, 'auth.ts'), 'utf8')
 ok(!authSrc.includes('allowExitOnIdle'), 'auth.ts has no allowExitOnIdle (workerd tid.unref)')
 ok(authSrc.includes('new Client('), 'auth.ts opens a Workers-safe Client per request')
 ok(authSrc.includes('waitUntil'), 'auth.ts closes the client via waitUntil')
-ok(authSrc.includes('lower("email") = lower($1)'), 'auth.ts adoption lookup is lower(email)')
+ok(authSrc.includes('lower(${col}) = lower(${param})'), 'auth.ts adoption lookup is lower(email)')
+ok(authSrc.includes('"user"."email"'), 'auth.ts rewrite handles Better Auth 1.7 qualified email')
 
 const uuid = '11111111-1111-1111-1111-111111111111'
 const compiled = compileTagged(

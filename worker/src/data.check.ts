@@ -72,6 +72,15 @@ ok(authSrc.includes('bearer({ requireSignature: true })'), 'auth.ts requires sig
 ok(!authSrc.includes('allowExitOnIdle'), 'auth.ts does not use pg-pool allowExitOnIdle')
 ok(authSrc.includes('installEmailAdoption'), 'auth.ts installs case-insensitive email adoption')
 ok(rewriteUserEmailLookup('select * from "user" where "email" = $1') === 'select * from "user" where lower("email") = lower($1)', 'adoption lookup uses lower(email)')
+ok(
+  rewriteUserEmailLookup('select "primary".* from (select * from "user" where "user"."email" = $1) as "primary"')
+    === 'select "primary".* from (select * from "user" where lower("user"."email") = lower($1)) as "primary"',
+  'Better Auth 1.7 qualified "user"."email" is wrapped in lower()',
+)
+ok(
+  !rewriteUserEmailLookup('select * from "user" where "user"."email" = $1').includes('"user".lower'),
+  'qualified rewrite does not produce schema "user".lower',
+)
 ok(rewriteUserEmailLookup('select * from session where token = $1') === 'select * from session where token = $1', 'adoption rewrite leaves session SQL alone')
 
 const schemaSql = readFileSync(join(here, '../schema/better-auth.sql'), 'utf8')

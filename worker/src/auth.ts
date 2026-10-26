@@ -98,10 +98,20 @@ async function sendOtpEmail(env: Env, email: string, otp: string, type: string):
  * Better Auth findUserByEmail compares the lowercased input to the stored
  * email as-is. Migrated users can have mixed-case emails, so a new row would
  * be created. Rewrite equality lookups to lower() so we adopt the existing user.
+ *
+ * Better Auth 1.7 qualifies the column as `"user"."email"`. Rewriting only
+ * `"email" = $n` produces `"user".lower("email")`, which Postgres reads as
+ * schema "user" and fails with `schema "user" does not exist`.
  */
 export function rewriteUserEmailLookup(text: string): string {
   if (!/"user"/.test(text)) return text
-  return text.replace(/"email"\s*=\s*(\$\d+)/g, 'lower("email") = lower($1)')
+  return text.replace(
+    /(?:"user"\.)?"email"\s*=\s*(\$\d+)/g,
+    (match, param: string) => {
+      const col = match.includes('"user"') ? '"user"."email"' : '"email"'
+      return `lower(${col}) = lower(${param})`
+    },
+  )
 }
 
 export function installEmailAdoption<T extends { query: Client['query'] }>(db: T): T {
