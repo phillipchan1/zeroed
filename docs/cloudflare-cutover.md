@@ -94,15 +94,31 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 - If agent or MCP start 1102/1101 CPU-time errors, the honest fix is Workers
   Paid ($5/mo), not rewriting the port.
 
+## Known limits (Worker MCP)
+
+- **Token expiry is not enforced in prod after #17.** `resolveMcpToken` only
+  checks `expires_at` when that column exists. The live `mcp_token` table
+  copied by #17 has no expiry column, so existing tokens stay valid until
+  revoked. The isolation seed adds the column so checks can cover expiry.
+- **Rate limit is per isolate.** The in-memory `hits` map in `mcp.ts` is not
+  shared across Worker isolates or regions. A client can see a higher
+  effective limit under load. This is an acknowledged bound, not a
+  distributed limiter.
+- Isolation and mutation proofs run against **real Postgres 17** in CI
+  (`ZEROED_TEST_DATABASE_URL` on a service container — never `DATABASE_URL`).
+  Locally they fall back to PGlite when that URL is unset.
+
 ## Pre-checks (T-24h)
 
 1. Phil sign-off recorded. No deploy happens without it.
 2. `npm run type-check && npm run lint && npm run check && npm run check:isolation-mutation`
    green on this branch. Isolation applies `supabase/migrations` onto
-   PGlite, then seeds two athletes. The mutation script first asserts the
-   unmutated check is green, then deletes each derived owner filter
-   (`athlete_id =` and `id =`, including the phase-rollback owner clause)
-   on its own and expects at least one failure. `worker/src/mcp.check.ts`
+   real Postgres 17 in CI (`ZEROED_TEST_DATABASE_URL`; PGlite locally when
+   that URL is unset), then seeds two athletes. The mutation script first
+   asserts the unmutated check is green, then deletes each derived owner
+   filter (`athlete_id =` and `id =`, including the phase-rollback owner
+   clause) on its own and expects at least one failure — CI fails if the
+   URL is missing so those mutations are not PGlite-only. `worker/src/mcp.check.ts`
    (picked up by `npm run check`) is the MCP parity + token isolation +
    revoked 401 + load-a-full-program gate.
 3. `npm run build && npx wrangler dev` serves `/` and `/api/health`.

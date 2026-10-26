@@ -1,16 +1,16 @@
-// Parity, token isolation, revoked 401, and "load a full program" against PGlite.
+// Parity, token isolation, revoked 401, and "load a full program".
+// Uses throwaway Postgres when ZEROED_TEST_DATABASE_URL is set, else PGlite.
 // Run: node --experimental-strip-types worker/src/mcp.check.ts
 
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { PGlite } from '@electric-sql/pglite'
 import type { Env } from './env.ts'
-import { applyIsolationSchema } from './isolationDb.ts'
+import { openIsolationHarness } from './isolationDb.ts'
 import { handleMcp, publicMcpError } from './mcp.ts'
 import { resolveMcpToken, sha256Hex, timingSafeEqualHex } from './mcpToken.ts'
-import { makePgliteSql } from './pgliteSql.ts'
 import { ZEROED_TOOLS } from './tools.ts'
+import { McpUserError } from './userError.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -63,11 +63,13 @@ ok(timingSafeEqualHex('abc', 'abc'), 'timingSafeEqualHex: equal')
 ok(!timingSafeEqualHex('abc', 'abd'), 'timingSafeEqualHex: differs')
 ok(!timingSafeEqualHex('ab', 'abc'), 'timingSafeEqualHex: length differs')
 ok(publicMcpError(new Error('relation "routine" does not exist')) === 'request failed', 'publicMcpError: SQL is generic')
-ok(publicMcpError(new Error('workout_id is required')) === 'workout_id is required', 'publicMcpError: tool message kept')
+ok(publicMcpError(new Error('workout_id is required')) === 'request failed', 'publicMcpError: generic Error is hidden')
+ok(publicMcpError(new Error('malformed array literal: "33333333-3333-3333-3333-333333333333"')) === 'request failed', 'publicMcpError: PG array error is hidden')
+ok(publicMcpError(new Error('invalid byte sequence for encoding "UTF8": 0x00')) === 'request failed', 'publicMcpError: UTF8 NUL is hidden')
+ok(publicMcpError(new McpUserError('workout_id is required')) === 'workout_id is required', 'publicMcpError: McpUserError kept')
 
-const db = new PGlite()
-await applyIsolationSchema(db)
-const sql = makePgliteSql(db)
+const harness = await openIsolationHarness()
+const sql = harness.sql
 const env = {} as Env
 
 await sql`UPDATE mcp_token SET token_hash = ${await sha256Hex(TOKEN_A)} WHERE name = ${'claude-a'}`
@@ -92,7 +94,7 @@ async function mcp(
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-  }), env, sql)
+  }), env, { sql })
 }
 
 async function rpc(token: string, method: string, params: unknown = {}, id: number | string = 1) {
@@ -127,7 +129,7 @@ const viaHeader = await handleMcp(new Request('https://zeroed.test/api/mcp', {
     'x-zeroed-token': TOKEN_A,
   },
   body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'ping' }),
-}), env, sql)
+}), env, { sql })
 ok(viaHeader.status === 200, 'HTTP: x-zeroed-token is accepted')
 
 const listed = await rpc(TOKEN_A, 'tools/list')
@@ -196,9 +198,38 @@ ok(aName?.name === 'A day from MCP', 'isolation: A own apply via token wrote')
 
 ok((await resolveMcpToken(sql, TOKEN_A))?.athlete_id === A, 'token: A still resolves after use')
 
-console.log(`${checks} checks, ${fails.length} failed`)
+const notes = await rpc(TOKEN_A, 'tools/call', { name: 'get_coach_notes', arguments: {} })
+ok(notes.status === 200, 'e2e: get_coach_notes is 200')
+const notesText = toolText(notes.body)
+ok(
+  (notesText.includes('A weekly note') || notesText.includes('private A'))
+    && !notesText.includes('malformed array'),
+  'e2e: get_coach_notes returns A notes without array-bind error',
+)
+ok(!notesText.includes('B weekly note') && !notesText.includes('private B'), 'isolation: get_coach_notes hides B')
+
+const nul = await mcp(TOKEN_A, {
+  jsonrpc: '2.0',
+  id: 1,
+  method: 'tools/call',
+  params: {
+    name: 'apply_program_edits',
+    arguments: {
+      confirm: true,
+      edits: [{ type: 'add_note', note: 'a\u0000b', rationale: 'nul' }],
+    },
+  },
+})
+ok(nul.status === 400, 'HTTP: NUL in body is 400')
+const nulBody = await nul.json() as { error?: string }
+ok(nulBody.error === 'invalid input', 'HTTP: NUL message is generic')
+ok(!JSON.stringify(nulBody).includes('UTF8') && !JSON.stringify(nulBody).includes('0x00'), 'HTTP: NUL response does not leak PG encoding')
+
+await harness.close()
+
+console.log(`${checks} checks, ${fails.length} failed (${harness.backend})`)
 if (fails.length) {
   for (const f of fails) console.error('  FAIL', f)
   process.exit(1)
 }
-console.log('mcp port: ok')
+console.log(`mcp port: ok (${harness.backend})`)

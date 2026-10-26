@@ -1,9 +1,9 @@
-// Standalone access-isolation check against a real Postgres (PGlite).
+// Standalone access-isolation check against throwaway Postgres
+// (ZEROED_TEST_DATABASE_URL) or PGlite when that URL is unset.
 // Run: node --experimental-strip-types worker/src/access.check.ts
 // Proves: athlete A cannot read, edit, or delete athlete B's rows on every
 // store / edits query path. Mutating those SQL filters must make this fail.
 
-import { PGlite } from '@electric-sql/pglite'
 import {
   applyEdits,
   assertOwnedForeignKeys,
@@ -20,9 +20,8 @@ import {
   writeDraftInPlace,
   type EditInput,
 } from './edits.ts'
-import { applyIsolationSchema } from './isolationDb.ts'
+import { openIsolationHarness } from './isolationDb.ts'
 import { resolveMcpToken, sha256Hex } from './mcpToken.ts'
-import { makePgliteSql } from './pgliteSql.ts'
 import {
   loadAthlete,
   loadInsights,
@@ -71,20 +70,19 @@ const WORKOUT_A = '99999999-9999-9999-9999-999999999999'
 const WORKOUT_B = 'bbbb9999-9999-4999-8999-999999999999'
 const INSIGHT_B = 'bbbb2222-0000-4000-8000-000000000001'
 
-const db = new PGlite()
-await applyIsolationSchema(db)
-const sql = makePgliteSql(db)
+const harness = await openIsolationHarness()
+const sql = harness.sql
 const storeA = makeStore(sql, A)
 const storeB = makeStore(sql, B)
 
 async function count(table: string, where: string, params: unknown[]): Promise<number> {
-  const result = await db.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ${table} WHERE ${where}`, params)
-  return Number(result.rows[0]?.n ?? 0)
+  const rows = await harness.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ${table} WHERE ${where}`, params)
+  return Number(rows[0]?.n ?? 0)
 }
 
 async function scalar<T>(text: string, params: unknown[] = []): Promise<T | undefined> {
-  const result = await db.query<Record<string, T>>(text, params)
-  const row = result.rows[0]
+  const rows = await harness.query<Record<string, T>>(text, params)
+  const row = rows[0]
   if (!row) return undefined
   return Object.values(row)[0]
 }
@@ -490,9 +488,11 @@ ok((await count('insight', 'athlete_id = $1', [B])) === 1, 'DELETE insight: B in
 ok((await loadWorkout(storeA, WORKOUT_A))?.workout.routine_id === ROUTINE_A, 'post-write: A workout still readable')
 ok((await loadWorkout(storeA, WORKOUT_B)) === null, 'post-write: B workout still hidden from A')
 
-console.log(`${checks} checks, ${fails.length} failed`)
+await harness.close()
+
+console.log(`${checks} checks, ${fails.length} failed (${harness.backend})`)
 if (fails.length) {
   for (const f of fails) console.error('  FAIL', f)
   process.exit(1)
 }
-console.log('access isolation: ok')
+console.log(`access isolation: ok (${harness.backend})`)

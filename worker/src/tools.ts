@@ -19,6 +19,7 @@ import {
   type ConnectedStore,
 } from './store.ts'
 import type { Sql } from './db.ts'
+import { McpUserError } from './userError.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -282,7 +283,7 @@ export async function executeZeroedTool(
     }
     case 'get_workout': {
       const workoutId = asString(args.workout_id)
-      if (!workoutId) throw new Error('workout_id is required')
+      if (!workoutId) throw new McpUserError('workout_id is required')
       const row = await loadWorkout(store, workoutId)
       if (!row) return `No workout ${workoutId} on this athlete.`
       const obs = row.observations.length
@@ -292,7 +293,7 @@ export async function executeZeroedTool(
     }
     case 'search_lifts': {
       const exercise = asString(args.exercise)
-      if (!exercise) throw new Error('exercise is required')
+      if (!exercise) throw new McpUserError('exercise is required')
       return renderLift(await loadLiftHistory(store, exercise), store.unit)
     }
     case 'get_program_journey':
@@ -301,7 +302,7 @@ export async function executeZeroedTool(
       return renderNotes(await loadNotes(store, asInt(args.limit) ?? 12))
     case 'preview_program_edits': {
       const edits = args.edits
-      if (!Array.isArray(edits) || !edits.length) throw new Error('edits is required')
+      if (!Array.isArray(edits) || !edits.length) throw new McpUserError('edits is required')
       const live = await loadLiveProgram(store)
       if (!live) return 'No active program/phase to edit.'
       return previewEdits(live, edits as EditInput[]).text
@@ -311,7 +312,7 @@ export async function executeZeroedTool(
         return 'Refused: apply_program_edits requires confirm=true. Call preview_program_edits first, then apply with confirm=true.'
       }
       const edits = args.edits
-      if (!Array.isArray(edits) || !edits.length) throw new Error('edits is required')
+      if (!Array.isArray(edits) || !edits.length) throw new McpUserError('edits is required')
       const timing = args.timing === 'next_week' ? 'next_week' : 'now'
       return applyEdits(store, edits as EditInput[], {
         confirm: true,
@@ -320,6 +321,6 @@ export async function executeZeroedTool(
       })
     }
     default:
-      throw new Error(`Unknown tool: ${name}`)
+      throw new McpUserError(`Unknown tool: ${name}`)
   }
 }
