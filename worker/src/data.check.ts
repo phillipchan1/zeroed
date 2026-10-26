@@ -16,14 +16,16 @@ import {
   stripSessionToken,
 } from './auth.ts'
 import {
+  assertCountsMatch,
   assertNoBlankEmails,
   assertNoEmailDupes,
   assertSourceUsersReady,
   findBlankEmails,
   findCaseInsensitiveEmailDupes,
   formatBlankEmailAbort,
-  formatEmailDupeAbort,
+  formatSourceUsersAbort,
   migrateAuthUsers,
+  parseCounts,
 } from '../../scripts/migrate-users.lib.mjs'
 import {
   bindOwner,
@@ -185,7 +187,7 @@ try {
   ok(msg.includes('dup@example.com') && msg.includes('DUP@example.com'), 'dupe abort lists emails')
   ok(msg.includes('wrote nothing'), 'dupe abort says it wrote nothing')
 }
-ok(formatEmailDupeAbort(dupeGroups).includes('wrote nothing'), 'dupe abort formatter is explicit')
+ok(formatSourceUsersAbort({ blanks: [], dupes: dupeGroups }).includes('wrote nothing'), 'dupe abort formatter is explicit')
 let migrateWrites = 0
 try {
   await migrateAuthUsers(async () => {
@@ -235,6 +237,34 @@ try {
 }
 ok(blankWrites === 0, 'blank email pre-check writes nothing')
 
+try {
+  assertSourceUsersReady([...dupeUsers, ...blankUsers])
+  ok(false, 'assertSourceUsersReady must report blanks and dupes together')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  ok(!/must report blanks/.test(msg), 'mixed source abort threw')
+  ok(msg.includes('id-dup') && msg.includes('id-null'), 'mixed abort lists dupe and blank ids')
+  ok(msg.includes('blank source emails') && msg.includes('case-insensitive email duplicates'), 'mixed abort lists both checks')
+}
+
+const spaced = parseCounts(' athlete   |     2\n program    |     0\n')
+ok(spaced.athlete === 2 && spaced.program === 0, 'parseCounts reads leading-space psql output')
+ok(parseCounts('athlete|2\ninsight|3').insight === 3, 'parseCounts reads psql -tA output')
+try {
+  assertCountsMatch({}, { athlete: 1 }, ['athlete'])
+  ok(false, 'assertCountsMatch must fail when a count is missing')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  ok(msg.includes('missing or unparsable'), 'missing count is a hard fail')
+}
+try {
+  assertCountsMatch({ athlete: 2 }, { athlete: 0 }, ['athlete'])
+  ok(false, 'assertCountsMatch must fail on a mismatch')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  ok(msg.includes('source=2') && msg.includes('target=0'), 'mismatch lists both counts')
+}
+
 const schemaSql = readFileSync(join(here, '../schema/better-auth.sql'), 'utf8')
 ok(schemaSql.includes('email_verified') && schemaSql.includes('user_id') && schemaSql.includes('expires_at'), 'better-auth.sql is snake_case')
 ok(!schemaSql.includes('emailVerified') && !schemaSql.includes('"userId"'), 'better-auth.sql is not camelCase')
@@ -242,14 +272,24 @@ ok(schemaSql.includes('user_email_lower_uidx') && schemaSql.includes('lower(emai
 ok(schemaSql.includes('cannot create unique index user_email_lower_uidx'), 'better-auth.sql index migration names existing dupes')
 const migrateSrc = readFileSync(join(here, '../../scripts/migrate-supabase-to-neon.mjs'), 'utf8')
 ok(migrateSrc.includes('assertSourceUsersReady'), 'migrate pre-checks source emails before any target write')
-ok(migrateSrc.includes('CLEANUP_FAILED_TARGET_SQL'), 'migrate drops restored tables if a later step fails')
-ok(migrateSrc.includes('loadAuthUsersSql'), 'migrate user/auth load is one transaction')
+ok(migrateSrc.includes('formatNonEmptyTargetAbort'), 'migrate refuses a non-empty target')
+ok(migrateSrc.includes('dropCreatedSql'), 'migrate drops only objects this run created')
+ok(migrateSrc.includes('--exit-on-error'), 'migrate pg_restore is not error-tolerant')
+ok(migrateSrc.includes("'-tA'"), 'migrate counts use psql -tA')
+ok(migrateSrc.includes('assertCountsMatch'), 'migrate fails when a row count is missing or differs')
+ok(migrateSrc.includes('loadStubAuthUsersSql'), 'migrate loads auth.users before pg_restore')
+ok(migrateSrc.includes('loadBetterAuthUsersSql'), 'migrate user load is one transaction')
+ok(migrateSrc.indexOf('load_stub_users.sql') < migrateSrc.lastIndexOf("'--exit-on-error'"), 'stub users land before restore FKs')
 ok(migrateSrc.indexOf('assertSourceUsersReady') < migrateSrc.indexOf('creating stub auth.users'), 'source validation runs before the first target write')
+ok(migrateSrc.indexOf('checking target is empty') < migrateSrc.indexOf('creating stub auth.users'), 'empty-target check runs before the first target write')
 const migrateLib = readFileSync(join(here, '../../scripts/migrate-users.lib.mjs'), 'utf8')
 ok(migrateLib.includes('email_verified BOOLEAN') && migrateLib.includes('user_id TEXT'), 'migrate lib Better Auth SQL is snake_case')
 ok(migrateLib.includes('user_email_lower_uidx'), 'migrate lib adds case-insensitive email uniqueness')
 ok(migrateLib.includes('lower(email)'), 'migrate lib lowercases adopted emails')
 ok(migrateLib.includes('BEGIN'), 'migrate lib wraps the user load in a transaction')
+ok(!migrateLib.includes('pg_tables'), 'cleanup does not walk every public table')
+ok(migrateLib.includes('dropCreatedSql'), 'cleanup lists only objects this run created')
+ok(migrateLib.includes('auth.uid()'), 'auth stub includes auth.uid() for a fresh restore')
 const corsSrc = readFileSync(join(here, 'cors.ts'), 'utf8')
 ok(corsSrc.includes("'Access-Control-Expose-Headers': 'set-auth-token'"), 'CORS exposes set-auth-token')
 const dataSrc = readFileSync(join(here, 'data.ts'), 'utf8')

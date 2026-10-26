@@ -11,8 +11,8 @@
  * athlete_select / get_current_athlete_id() / athlete_auth_user_id_fkey on
  * the Neon database after restore. Off by default — the Worker connects as
  * the table owner (RLS does not apply unless FORCE ROW LEVEL SECURITY).
- * A stub `auth.users` is created on the target before restore so the dumped
- * FK can land without pointing at a missing catalog.
+ * A stub `auth.users` + `auth.uid()` is created on the target before restore
+ * so dumped FKs and SQL functions can land on a fresh Postgres.
  *
  * Usage:
  *   SUPABASE_DB_URL=postgres://... NEON_DB_URL=postgres://... \
@@ -29,11 +29,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   BETTER_AUTH_TABLES_SQL,
-  CLEANUP_FAILED_TARGET_SQL,
+  CHECKSUM_TABLES,
+  LIST_USER_OBJECTS_TEXT_SQL,
   STUB_AUTH_SQL,
+  assertCountsMatch,
   assertSourceUsersReady,
-  loadAuthUsersSql,
+  checksumQuery,
+  createdSince,
+  dropCreatedSql,
+  filterRestoreToc,
+  formatNonEmptyTargetAbort,
+  loadBetterAuthUsersSql,
+  loadStubAuthUsersSql,
   parseAuthUsersCsv,
+  parseCounts,
+  parseObjectList,
 } from './migrate-users.lib.mjs'
 
 const dryRun = process.argv.includes('--dry-run')
@@ -53,6 +63,10 @@ function run(cmd, args, opts = {}) {
 function needBin(name) {
   const res = spawnSync(name, ['--version'], { encoding: 'utf8' })
   if (res.status !== 0) throw new Error(`Missing ${name}. Install PostgreSQL client tools.`)
+}
+
+function psql(url, extraArgs, sql) {
+  return run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', url, ...extraArgs, '-c', sql])
 }
 
 /** Neon target only. Never concatenated into a source session. */
@@ -84,37 +98,16 @@ BEGIN
 END $$;
 `
 
-function checksumQuery() {
-  return `
-    SELECT 'athlete' AS t, COUNT(*)::bigint AS n FROM public.athlete
-    UNION ALL SELECT 'program', COUNT(*) FROM public.program
-    UNION ALL SELECT 'phase', COUNT(*) FROM public.phase
-    UNION ALL SELECT 'routine', COUNT(*) FROM public.routine
-    UNION ALL SELECT 'workout', COUNT(*) FROM public.workout
-    UNION ALL SELECT 'insight', COUNT(*) FROM public.insight
-    UNION ALL SELECT 'mcp_token', COUNT(*) FROM public.mcp_token
-    ORDER BY 1;
-  `
-}
-
-function parseCounts(text) {
-  const out = {}
-  for (const line of text.split('\n')) {
-    const m = line.match(/^(\w+)\s*\|\s*(\d+)/)
-    if (m) out[m[1]] = Number(m[2])
-  }
-  return out
-}
-
 if (dryRun && !source && !target) {
   console.log('dry-run: would pg_dump public + auth.users from SUPABASE_DB_URL (read-only)')
-  console.log('dry-run: would abort before any Neon write if an email is blank or lower(email) is duplicated (ids listed)')
-  console.log('dry-run: would create stub auth.users on NEON_DB_URL, then pg_restore')
+  console.log('dry-run: would abort before any Neon write if an email is blank or lower(email) is duplicated (both lists)')
+  console.log('dry-run: would refuse a non-empty target (any user object in public or auth)')
+  console.log('dry-run: would create stub auth.users + auth.uid() on NEON_DB_URL, then pg_restore --exit-on-error')
   console.log('dry-run: would insert auth.users into Better Auth "user" (and stub auth.users) with the same ids in one transaction')
   console.log(relaxTargetRls
     ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
     : 'dry-run: would leave RLS / athlete_select / get_current_athlete_id / auth_user_id FK on Neon (pass --relax-target-rls to drop them on the target)')
-  console.log('dry-run: would compare row counts per table and abort on mismatch')
+  console.log('dry-run: would compare row counts per table with psql -tA and abort on mismatch or unparsable counts')
   console.log('tools required: pg_dump, pg_restore, psql')
   process.exit(0)
 }
@@ -178,16 +171,32 @@ try {
     process.exit(0)
   }
 
-  const cleanupPath = join(dir, 'cleanup_failed_target.sql')
-  writeFileSync(cleanupPath, CLEANUP_FAILED_TARGET_SQL)
+  console.log('checking target is empty…')
+  const before = parseObjectList(psql(target, ['-tA'], LIST_USER_OBJECTS_TEXT_SQL))
+  if (before.length) throw new Error(formatNonEmptyTargetAbort(before))
+
   let wroteTarget = false
   try {
-    console.log('creating stub auth.users on Neon (target only)…')
+    console.log('creating stub auth.users + auth.uid() on Neon (target only)…')
     wroteTarget = true
     run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', stubAuthPath])
+    const stubUsersPath = join(dir, 'load_stub_users.sql')
+    writeFileSync(stubUsersPath, loadStubAuthUsersSql(usersPath))
+    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', stubUsersPath])
 
     console.log('restoring into Neon…')
-    run('pg_restore', ['--no-owner', '--no-acl', '--dbname', target, dumpPath])
+    const tocPath = join(dir, 'restore.toc')
+    const filteredTocPath = join(dir, 'restore.filtered.toc')
+    writeFileSync(tocPath, run('pg_restore', ['-l', dumpPath]))
+    writeFileSync(filteredTocPath, filterRestoreToc(readFileSync(tocPath, 'utf8')))
+    run('pg_restore', [
+      '--no-owner',
+      '--no-acl',
+      '--exit-on-error',
+      '-L', filteredTocPath,
+      '--dbname', target,
+      dumpPath,
+    ])
     run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', betterAuthPath])
     if (relaxTargetRls) {
       console.log('relaxing RLS / auth helpers on Neon (--relax-target-rls)…')
@@ -196,33 +205,27 @@ try {
       console.log('keeping RLS / auth helpers on Neon (pass --relax-target-rls to drop them on the target)')
     }
 
-    console.log('mapping auth.users → "user" + stub auth.users (one transaction)…')
+    console.log('mapping auth.users → "user" (one transaction)…')
     const loadPath = join(dir, 'load_users.sql')
-    writeFileSync(loadPath, loadAuthUsersSql(usersPath))
+    writeFileSync(loadPath, loadBetterAuthUsersSql(usersPath))
     run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', loadPath])
 
-    const srcCounts = parseCounts(run('psql', ['-d', source, '-c', checksumQuery()]))
-    const dstCounts = parseCounts(run('psql', ['-d', target, '-c', checksumQuery()]))
-    let mismatch = false
-    for (const table of Object.keys(srcCounts)) {
-      const a = srcCounts[table]
-      const b = dstCounts[table] ?? -1
-      const mark = a === b ? 'ok' : 'MISMATCH'
-      console.log(`  ${table}: source=${a} neon=${b} ${mark}`)
-      if (a !== b) mismatch = true
+    const srcCounts = parseCounts(psql(source, ['-tA'], checksumQuery()))
+    const dstCounts = parseCounts(psql(target, ['-tA'], checksumQuery()))
+    for (const table of CHECKSUM_TABLES) {
+      console.log(`  ${table}: source=${srcCounts[table]} neon=${dstCounts[table]}`)
     }
-    if (mismatch) {
-      throw new Error('Row-count mismatch — abort. Cleaning the target.')
-    }
+    assertCountsMatch(srcCounts, dstCounts)
     console.log('migration ok')
   } catch (err) {
     if (wroteTarget) {
-      console.error('load failed — dropping restored tables and the auth stub…')
-      try {
+      console.error('load failed — dropping objects this run created…')
+      const after = parseObjectList(psql(target, ['-tA'], LIST_USER_OBJECTS_TEXT_SQL))
+      const created = createdSince(before, after)
+      const cleanupPath = join(dir, 'cleanup_this_run.sql')
+      writeFileSync(cleanupPath, dropCreatedSql(created))
+      if (readFileSync(cleanupPath, 'utf8').trim()) {
         run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', cleanupPath])
-      } catch (cleanupErr) {
-        const extra = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr)
-        console.error(`cleanup after failed load also failed: ${extra}`)
       }
     }
     throw err

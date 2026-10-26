@@ -46,6 +46,10 @@ run(
   ['--experimental-strip-types', 'scripts/prove-migrate-users.mjs'],
 )
 run(
+  'migrate e2e',
+  ['--experimental-strip-types', 'scripts/prove-migrate-e2e.mjs'],
+)
+run(
   'workerd get-session',
   ['--experimental-strip-types', 'scripts/prove-workerd-auth.mjs'],
 )

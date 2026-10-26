@@ -1,7 +1,7 @@
 /**
  * Auth-user cutover helpers. Source is read-only. Target writes happen only
- * after a source-user pre-check (blank emails + case-insensitive dupes). The
- * user/auth load is one transaction; a later failure drops restored tables.
+ * after source-user validation and a non-empty-target refusal. Created objects
+ * are tracked; failure drops only those. Never DROP SCHEMA public.
  */
 export const STUB_AUTH_SQL = `
 CREATE SCHEMA IF NOT EXISTS auth;
@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS auth.users (
   created_at TIMESTAMPTZ,
   updated_at TIMESTAMPTZ
 );
+CREATE OR REPLACE FUNCTION auth.uid()
+RETURNS UUID LANGUAGE sql STABLE AS $$ SELECT NULL::uuid $$;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 `
 
 export const BETTER_AUTH_TABLES_SQL = `
@@ -89,68 +92,204 @@ END $$;
 export const CREATE_LOWER_EMAIL_INDEX_ONLY_SQL =
   `CREATE UNIQUE INDEX IF NOT EXISTS user_email_lower_uidx ON "user" (lower(email));`
 
-/** psql script: clear error if dupes exist, then create the index. */
 export const CREATE_LOWER_EMAIL_INDEX_SQL =
   `${CHECK_LOWER_EMAIL_DUPES_SQL}\n${CREATE_LOWER_EMAIL_INDEX_ONLY_SQL}\n`
 
-/** pg client cannot run two statements in one query. */
 export async function applyLowerEmailUniqueIndex(query) {
   await query(CHECK_LOWER_EMAIL_DUPES_SQL)
   await query(CREATE_LOWER_EMAIL_INDEX_ONLY_SQL)
 }
 
-export const SOURCE_EMAIL_DUPE_SQL = `
-SELECT id::text AS id, email
-FROM auth.users
-WHERE email IS NOT NULL
-  AND btrim(email) <> ''
-  AND lower(email) IN (
-    SELECT lower(email) FROM auth.users
-    WHERE email IS NOT NULL AND btrim(email) <> ''
-    GROUP BY lower(email)
-    HAVING count(*) > 1
+export const CHECKSUM_TABLES = [
+  'athlete',
+  'insight',
+  'mcp_token',
+  'phase',
+  'program',
+  'routine',
+  'workout',
+]
+
+export function checksumQuery() {
+  return CHECKSUM_TABLES
+    .map((table, i) => (
+      i === 0
+        ? `SELECT '${table}' AS t, COUNT(*)::bigint AS n FROM public.${table}`
+        : `UNION ALL SELECT '${table}', COUNT(*) FROM public.${table}`
+    ))
+    .join('\n')
+    + '\nORDER BY 1'
+}
+
+export function parseCountLine(line) {
+  const trimmed = String(line).trim()
+  if (!trimmed || trimmed.startsWith('-') || trimmed.startsWith('(')) return null
+  const pipe = trimmed.match(/^(\w+)\s*\|\s*(-?\d+)\s*$/)
+  if (pipe && pipe[1] !== 't') return { table: pipe[1], n: Number(pipe[2]) }
+  const ta = trimmed.match(/^(\w+)\|(-?\d+)$/)
+  if (ta && ta[1] !== 't') return { table: ta[1], n: Number(ta[2]) }
+  return null
+}
+
+export function parseCounts(text) {
+  const out = {}
+  for (const line of String(text).split('\n')) {
+    const parsed = parseCountLine(line)
+    if (parsed) out[parsed.table] = parsed.n
+  }
+  return out
+}
+
+export function assertCountsMatch(src, dst, tables = CHECKSUM_TABLES) {
+  const problems = []
+  for (const table of tables) {
+    const a = src?.[table]
+    const b = dst?.[table]
+    if (!Number.isFinite(a)) problems.push(`${table}: source count missing or unparsable`)
+    if (!Number.isFinite(b)) problems.push(`${table}: target count missing or unparsable`)
+    if (Number.isFinite(a) && Number.isFinite(b) && a !== b) {
+      problems.push(`${table}: source=${a} target=${b}`)
+    }
+  }
+  if (problems.length) {
+    throw new Error(`row-count mismatch — abort:\n${problems.map((p) => `  ${p}`).join('\n')}`)
+  }
+}
+
+const USER_OBJECT_FROM = `
+SELECT n.nspname AS schema, c.relname AS name, c.relkind::text AS kind, '' AS args
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname IN ('public', 'auth')
+  AND c.relkind IN ('r', 'p', 'v', 'm', 'S')
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    JOIN pg_extension e ON e.oid = d.refobjid
+    WHERE d.objid = c.oid AND d.deptype = 'e'
   )
-ORDER BY lower(email), id
+UNION ALL
+SELECT n.nspname, p.proname, 'f', pg_get_function_identity_arguments(p.oid)
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname IN ('public', 'auth')
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    JOIN pg_extension e ON e.oid = d.refobjid
+    WHERE d.objid = p.oid AND d.deptype = 'e'
+  )
+UNION ALL
+SELECT n.nspname, n.nspname, 'n', ''
+FROM pg_namespace n
+WHERE n.nspname = 'auth'
 `
 
-export const SOURCE_BLANK_EMAIL_SQL = `
-SELECT id::text AS id, email
-FROM auth.users
-WHERE email IS NULL OR btrim(email) = ''
-ORDER BY id
+export const LIST_USER_OBJECTS_SQL = `
+SELECT schema, name, kind, args FROM (${USER_OBJECT_FROM}) list
+ORDER BY schema, kind, name, args
 `
 
-/** Drop restored public tables (skip extension-owned) plus the auth stub. */
-export const DROP_RESTORED_PUBLIC_SQL = `
-DO $$
-DECLARE r record;
-BEGIN
-  FOR r IN
-    SELECT c.relname AS tablename
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public'
-      AND c.relkind = 'r'
-      AND c.relpersistence = 'p'
-      AND NOT EXISTS (
-        SELECT 1 FROM pg_depend d
-        JOIN pg_extension e ON d.refobjid = e.oid
-        WHERE d.objid = c.oid AND d.deptype = 'e'
+export const LIST_USER_OBJECTS_TEXT_SQL = `
+SELECT schema || E'\\t' || kind || E'\\t' || name || E'\\t' || COALESCE(args, '')
+FROM (${USER_OBJECT_FROM}) list
+ORDER BY schema, kind, name, args
+`
+
+export function parseObjectList(text) {
+  const rows = []
+  for (const raw of String(text).split('\n')) {
+    const line = raw.trim()
+    if (!line) continue
+    const [schema, kind, name, ...rest] = line.split('\t')
+    if (!schema || !kind || !name) continue
+    rows.push({ schema, kind, name, args: rest.join('\t') })
+  }
+  return rows
+}
+
+export function objectKey(row) {
+  return `${row.schema}\0${row.kind}\0${row.name}\0${row.args ?? ''}`
+}
+
+export function createdSince(before, after) {
+  const keys = new Set((before ?? []).map(objectKey))
+  return (after ?? []).filter((row) => !keys.has(objectKey(row)))
+}
+
+export function quoteIdent(ident) {
+  return `"${String(ident).replaceAll('"', '""')}"`
+}
+
+export function dropCreatedSql(created) {
+  const lines = []
+  for (const row of created) {
+    if (row.kind === 'r' || row.kind === 'p') {
+      lines.push(`DROP TABLE IF EXISTS ${quoteIdent(row.schema)}.${quoteIdent(row.name)} CASCADE;`)
+    }
+  }
+  for (const row of created) {
+    if (row.kind === 'v') {
+      lines.push(`DROP VIEW IF EXISTS ${quoteIdent(row.schema)}.${quoteIdent(row.name)} CASCADE;`)
+    }
+    if (row.kind === 'm') {
+      lines.push(`DROP MATERIALIZED VIEW IF EXISTS ${quoteIdent(row.schema)}.${quoteIdent(row.name)} CASCADE;`)
+    }
+  }
+  for (const row of created) {
+    if (row.kind === 'S') {
+      lines.push(`DROP SEQUENCE IF EXISTS ${quoteIdent(row.schema)}.${quoteIdent(row.name)} CASCADE;`)
+    }
+  }
+  for (const row of created) {
+    if (row.kind === 'f') {
+      lines.push(
+        `DROP FUNCTION IF EXISTS ${quoteIdent(row.schema)}.${quoteIdent(row.name)}(${row.args ?? ''}) CASCADE;`,
       )
-  LOOP
-    EXECUTE format('DROP TABLE IF EXISTS public.%I CASCADE', r.tablename);
-  END LOOP;
-END $$;
-`
+    }
+  }
+  if (created.some((row) => row.kind === 'n' && row.name === 'auth')) {
+    lines.push('DROP SCHEMA IF EXISTS auth CASCADE;')
+  }
+  return lines.join('\n') + (lines.length ? '\n' : '')
+}
 
-export const DROP_AUTH_STUB_SQL = `DROP TABLE IF EXISTS auth.users CASCADE;`
+export async function listUserObjects(query) {
+  const res = await query(LIST_USER_OBJECTS_SQL)
+  return res.rows.map((row) => ({
+    schema: row.schema,
+    name: row.name,
+    kind: row.kind,
+    args: row.args ?? '',
+  }))
+}
 
-export const CLEANUP_FAILED_TARGET_SQL =
-  `${DROP_RESTORED_PUBLIC_SQL}\n${DROP_AUTH_STUB_SQL}\n`
+export async function dropCreatedObjects(query, created) {
+  const sql = dropCreatedSql(created)
+  if (!sql.trim()) return
+  for (const statement of sql.split('\n').map((s) => s.trim()).filter(Boolean)) {
+    await query(statement)
+  }
+}
 
-export async function cleanupFailedTarget(query) {
-  await query(DROP_RESTORED_PUBLIC_SQL)
-  await query(DROP_AUTH_STUB_SQL)
+export function formatNonEmptyTargetAbort(objects) {
+  const lines = objects.map((row) => `  ${row.schema}.${row.name} (${row.kind})`)
+  return `target is not empty — abort, wrote nothing:\n${lines.join('\n')}`
+}
+
+export async function assertTargetEmpty(query) {
+  const objects = await listUserObjects(query)
+  if (objects.length) throw new Error(formatNonEmptyTargetAbort(objects))
+}
+
+export function filterRestoreToc(listText) {
+  return String(listText)
+    .split('\n')
+    .filter((line) => {
+      if (line.trimStart().startsWith(';')) return true
+      if (/\bSCHEMA - public\b/.test(line) || /\bSCHEMA public\b/.test(line)) return false
+      if (/\bCOMMENT\b/.test(line) && /\bSCHEMA public\b/.test(line)) return false
+      return true
+    })
+    .join('\n')
 }
 
 export function parseAuthUsersCsv(csv) {
@@ -225,12 +364,14 @@ export function findBlankEmails(users) {
 
 export function formatBlankEmailAbort(rows) {
   const lines = rows.map((row) => `  ${row.id} ${describeSourceEmail(row.email)}`)
-  return `blank source emails — abort, wrote nothing:\n${lines.join('\n')}`
+  return `blank source emails:\n${lines.join('\n')}`
 }
 
 export function assertNoBlankEmails(users) {
   const blanks = findBlankEmails(users)
-  if (blanks.length) throw new Error(formatBlankEmailAbort(blanks))
+  if (blanks.length) {
+    throw new Error(`source users invalid — abort, wrote nothing:\n${formatBlankEmailAbort(blanks)}`)
+  }
 }
 
 export function findCaseInsensitiveEmailDupes(users) {
@@ -251,21 +392,31 @@ export function formatEmailDupeAbort(dupes) {
   const lines = dupes.flatMap((group) =>
     group.rows.map((row) => `  ${row.id} ${row.email}`),
   )
-  return `case-insensitive email duplicates — abort, wrote nothing:\n${lines.join('\n')}`
+  return `case-insensitive email duplicates:\n${lines.join('\n')}`
 }
 
 export function assertNoEmailDupes(users) {
   const dupes = findCaseInsensitiveEmailDupes(users)
-  if (dupes.length) throw new Error(formatEmailDupeAbort(dupes))
+  if (dupes.length) {
+    throw new Error(`source users invalid — abort, wrote nothing:\n${formatEmailDupeAbort(dupes)}`)
+  }
 }
 
-/** All source-user checks. Throws before the caller may write the target. */
+export function formatSourceUsersAbort({ blanks, dupes }) {
+  const parts = ['source users invalid — abort, wrote nothing:']
+  if (blanks.length) parts.push(formatBlankEmailAbort(blanks))
+  if (dupes.length) parts.push(formatEmailDupeAbort(dupes))
+  return parts.join('\n')
+}
+
+/** All source-user checks. Reports blank emails and dupes together. */
 export function assertSourceUsersReady(users) {
-  assertNoBlankEmails(users)
-  assertNoEmailDupes(users)
+  const blanks = findBlankEmails(users)
+  const dupes = findCaseInsensitiveEmailDupes(users)
+  if (blanks.length || dupes.length) throw new Error(formatSourceUsersAbort({ blanks, dupes }))
 }
 
-export function loadAuthUsersSql(csvPath) {
+function authUsersImportSql(csvPath, extraInserts) {
   return `
 BEGIN;
 CREATE TEMP TABLE auth_users_import (
@@ -273,6 +424,36 @@ CREATE TEMP TABLE auth_users_import (
   created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
 ) ON COMMIT DROP;
 \\copy auth_users_import FROM '${csvPath}' WITH CSV
+${extraInserts}
+COMMIT;
+`
+}
+
+/** Load the stub before pg_restore so public FKs to auth.users can land. */
+export function loadStubAuthUsersSql(csvPath) {
+  return authUsersImportSql(csvPath, `
+INSERT INTO auth.users (id, email, created_at, updated_at)
+SELECT id::uuid, email, created_at, COALESCE(updated_at, created_at)
+FROM auth_users_import
+ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email;
+`)
+}
+
+export function loadBetterAuthUsersSql(csvPath) {
+  return authUsersImportSql(csvPath, `
+INSERT INTO "user" (id, name, email, email_verified, created_at, updated_at)
+SELECT id, name, lower(email), email_verified, created_at, COALESCE(updated_at, created_at)
+FROM auth_users_import
+ON CONFLICT (id) DO UPDATE SET
+  email = lower(EXCLUDED.email),
+  name = EXCLUDED.name,
+  email_verified = EXCLUDED.email_verified;
+${CREATE_LOWER_EMAIL_INDEX_SQL}
+`)
+}
+
+export function loadAuthUsersSql(csvPath) {
+  return authUsersImportSql(csvPath, `
 INSERT INTO auth.users (id, email, created_at, updated_at)
 SELECT id::uuid, email, created_at, COALESCE(updated_at, created_at)
 FROM auth_users_import
@@ -285,11 +466,9 @@ ON CONFLICT (id) DO UPDATE SET
   name = EXCLUDED.name,
   email_verified = EXCLUDED.email_verified;
 ${CREATE_LOWER_EMAIL_INDEX_SQL}
-COMMIT;
-`
+`)
 }
 
-/** Target writes. Caller must have already run assertNoEmailDupes. */
 export async function loadAuthUsersInTransaction(query, rows) {
   await query('BEGIN')
   try {
@@ -325,31 +504,26 @@ export async function loadAuthUsersInTransaction(query, rows) {
   }
 }
 
-/**
- * Pre-check, then load. Blank emails or dupes throw and `query` is never
- * called — the target is not written.
- */
 export async function migrateAuthUsers(query, rows) {
   assertSourceUsersReady(rows)
   return loadAuthUsersInTransaction(query, rows)
 }
 
-/** Run target writes; on failure drop restored public tables and the auth stub. */
-export async function writeTargetOrCleanup(query, work) {
+/** Run target writes; on failure drop only objects created since `before`. */
+export async function writeTargetOrCleanup(query, work, before = null) {
+  const snapshot = before ?? await listUserObjects(query)
   try {
     await work()
   } catch (err) {
-    try { await cleanupFailedTarget(query) } catch { /* still surface the load error */ }
+    const after = await listUserObjects(query)
+    try { await dropCreatedObjects(query, createdSince(snapshot, after)) } catch { /* still surface the load error */ }
     throw err
   }
 }
 
-/**
- * Target writes after validation. On any failure after writes start, drop
- * restored public tables and the auth stub so the target is not left dirty.
- */
 export async function migrateTarget(query, rows, afterStub) {
   assertSourceUsersReady(rows)
+  await assertTargetEmpty(query)
   return writeTargetOrCleanup(query, async () => {
     await query(STUB_AUTH_SQL)
     if (afterStub) await afterStub(query)

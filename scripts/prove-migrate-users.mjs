@@ -8,16 +8,21 @@ import {
   BETTER_AUTH_TABLES_SQL,
   applyLowerEmailUniqueIndex,
   STUB_AUTH_SQL,
+  assertCountsMatch,
   assertNoBlankEmails,
   assertNoEmailDupes,
   assertSourceUsersReady,
+  assertTargetEmpty,
   findBlankEmails,
   findCaseInsensitiveEmailDupes,
   formatBlankEmailAbort,
-  formatEmailDupeAbort,
+  formatSourceUsersAbort,
   loadAuthUsersInTransaction,
+  dropCreatedObjects,
+  listUserObjects,
   migrateAuthUsers,
   migrateTarget,
+  parseCounts,
   writeTargetOrCleanup,
 } from './migrate-users.lib.mjs'
 
@@ -50,8 +55,8 @@ try {
   }
   if (!msg.includes('wrote nothing')) throw new Error(`dupe abort missing wrote-nothing: ${msg}`)
 }
-if (!formatEmailDupeAbort(found).includes('wrote nothing')) {
-  throw new Error('formatEmailDupeAbort must say wrote nothing')
+if (!formatSourceUsersAbort({ blanks: [], dupes: found }).includes('wrote nothing')) {
+  throw new Error('source abort must say wrote nothing')
 }
 
 let writes = 0
@@ -115,6 +120,50 @@ try {
 if (blankWrites !== 0) throw new Error(`blank abort wrote to the target (${blankWrites} query calls)`)
 console.log('migrate users: blank email pre-check aborts and writes nothing')
 
+const mixedSource = [...sourceDupes, ...sourceBlanks]
+try {
+  assertSourceUsersReady(mixedSource)
+  throw new Error('assertSourceUsersReady accepted mixed dupes and blanks')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/accepted mixed/.test(msg)) throw err
+  for (const id of [dupA, dupB, blankNullId, blankEmptyId, blankWsId]) {
+    if (!msg.includes(id)) throw new Error(`mixed abort missing ${id}: ${msg}`)
+  }
+  if (!msg.includes('blank source emails') || !msg.includes('case-insensitive email duplicates')) {
+    throw new Error(`mixed abort must list both checks: ${msg}`)
+  }
+}
+console.log('migrate users: mixed blank + dupe abort lists both')
+
+const spacedCounts = parseCounts(' athlete   |     2\n program    |     0\n')
+if (spacedCounts.athlete !== 2 || spacedCounts.program !== 0) {
+  throw new Error(`parseCounts missed aligned psql output: ${JSON.stringify(spacedCounts)}`)
+}
+const taCounts = parseCounts('athlete|2\ninsight|3\n')
+if (taCounts.athlete !== 2 || taCounts.insight !== 3) {
+  throw new Error(`parseCounts missed -tA output: ${JSON.stringify(taCounts)}`)
+}
+try {
+  assertCountsMatch({}, { athlete: 1 }, ['athlete'])
+  throw new Error('assertCountsMatch accepted a missing source count')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/accepted a missing/.test(msg)) throw err
+  if (!/missing or unparsable/.test(msg)) throw new Error(`count abort missing unparsable: ${msg}`)
+}
+try {
+  assertCountsMatch({ athlete: 2 }, { athlete: 1 }, ['athlete'])
+  throw new Error('assertCountsMatch accepted a mismatch')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/accepted a mismatch/.test(msg)) throw err
+  if (!msg.includes('athlete') || !msg.includes('source=2') || !msg.includes('target=1')) {
+    throw new Error(`count abort missing values: ${msg}`)
+  }
+}
+console.log('migrate users: count parse and mismatch abort')
+
 const client = new Client({ connectionString: url })
 await client.connect()
 const query = (text, params) => client.query(text, params)
@@ -124,6 +173,10 @@ async function resetTarget() {
   await client.query('DROP TABLE IF EXISTS auth.users CASCADE')
   await client.query(STUB_AUTH_SQL)
   await client.query(BETTER_AUTH_TABLES_SQL)
+}
+
+async function emptyTarget() {
+  await dropCreatedObjects(query, await listUserObjects(query))
 }
 
 try {
@@ -173,9 +226,7 @@ try {
   }
   console.log('migrate users: clean load ok')
 
-  await client.query('DROP TABLE IF EXISTS verification, session, account, "user" CASCADE')
-  await client.query('DROP TABLE IF EXISTS auth.users CASCADE')
-  await client.query('DROP TABLE IF EXISTS public.athlete CASCADE')
+  await emptyTarget()
   try {
     await writeTargetOrCleanup(query, async () => {
       await client.query(STUB_AUTH_SQL)
@@ -204,9 +255,7 @@ try {
   }
   console.log('migrate users: failed load after restore drops public tables and auth stub')
 
-  await client.query('DROP TABLE IF EXISTS verification, session, account, "user" CASCADE')
-  await client.query('DROP TABLE IF EXISTS auth.users CASCADE')
-  await client.query('DROP TABLE IF EXISTS public.athlete CASCADE')
+  await emptyTarget()
   try {
     await migrateTarget(query, [
       { id: okId, name: 'Ok', email: 'ok@example.com', email_verified: true },
@@ -222,8 +271,64 @@ try {
     throw new Error('clean migrateTarget dropped a successful restore')
   }
   console.log('migrate users: successful restore is kept')
+
+  await emptyTarget()
+  await client.query('CREATE TABLE public.keep_me (id int PRIMARY KEY)')
+  try {
+    await migrateTarget(query, [
+      { id: okId, name: 'Ok', email: 'ok@example.com', email_verified: true },
+    ])
+    throw new Error('migrateTarget accepted a non-empty target')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/accepted a non-empty/.test(msg)) throw err
+    if (!/not empty/.test(msg) || !msg.includes('keep_me')) {
+      throw new Error(`non-empty abort missing keep_me: ${msg}`)
+    }
+  }
+  const keptUnrelated = await client.query('SELECT count(*)::int AS n FROM public.keep_me')
+  if (Number(keptUnrelated.rows[0].n) !== 0) {
+    throw new Error('non-empty refuse wrote into keep_me')
+  }
+  const leftoverUser = await client.query(
+    `SELECT count(*)::int AS n FROM information_schema.tables
+     WHERE table_schema = 'public' AND table_name = 'user'`,
+  )
+  if (Number(leftoverUser.rows[0].n) !== 0) {
+    throw new Error('non-empty refuse still created "user"')
+  }
+  console.log('migrate users: non-empty target is refused and left intact')
+
+  await emptyTarget()
+  await assertTargetEmpty(query)
+  try {
+    await writeTargetOrCleanup(query, async () => {
+      await client.query(STUB_AUTH_SQL)
+      await client.query('CREATE TABLE public.athlete (id TEXT PRIMARY KEY, name TEXT)')
+      await client.query(`CREATE OR REPLACE FUNCTION public.this_run_fn() RETURNS int LANGUAGE sql AS $$ SELECT 1 $$`)
+      throw new Error('simulated later-step failure')
+    })
+    throw new Error('later-step failure was swallowed')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/swallowed/.test(msg)) throw err
+    if (!/simulated later-step/.test(msg)) throw err
+  }
+  const afterFail = await listUserObjects(query)
+  if (afterFail.length) {
+    throw new Error(`rerun leftover after failure: ${afterFail.map((o) => `${o.schema}.${o.name}`).join(',')}`)
+  }
+  await migrateTarget(query, [
+    { id: okId, name: 'Ok', email: 'ok@example.com', email_verified: true },
+  ])
+  const rerun = await client.query('SELECT email FROM "user" WHERE id = $1', [okId])
+  if (rerun.rows[0]?.email !== 'ok@example.com') {
+    throw new Error(`rerun after failure did not load (got ${rerun.rows[0]?.email})`)
+  }
+  console.log('migrate users: rerun after failure succeeds on a cleaned target')
 } finally {
-  await client.query('DROP TABLE IF EXISTS verification, session, account, "user", public.athlete CASCADE').catch(() => {})
-  await client.query('DROP TABLE IF EXISTS auth.users CASCADE').catch(() => {})
+  await client.query('DROP TABLE IF EXISTS verification, session, account, "user", public.athlete, public.keep_me CASCADE').catch(() => {})
+  await client.query('DROP FUNCTION IF EXISTS public.this_run_fn() CASCADE').catch(() => {})
+  await client.query('DROP SCHEMA IF EXISTS auth CASCADE').catch(() => {})
   await client.end()
 }
