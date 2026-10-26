@@ -16,10 +16,12 @@ import {
   stripSessionToken,
 } from './auth.ts'
 import {
+  CHECKSUM_TABLES,
   assertCountsMatch,
   assertNoBlankEmails,
   assertNoEmailDupes,
   assertSourceUsersReady,
+  filterRestoreToc,
   findBlankEmails,
   findCaseInsensitiveEmailDupes,
   formatBlankEmailAbort,
@@ -280,9 +282,18 @@ ok(migrateSrc.includes("'-tA'"), 'migrate counts use psql -tA')
 ok(migrateSrc.includes('assertCountsMatch'), 'migrate fails when a row count is missing or differs')
 ok(migrateSrc.includes('loadStubAuthUsersSql'), 'migrate loads auth.users before pg_restore')
 ok(migrateSrc.includes('loadBetterAuthUsersSql'), 'migrate user load is one transaction')
+ok(migrateSrc.includes('runToFile'), 'auth.users export streams to a file')
+ok(migrateSrc.includes('maxBuffer'), 'spawnSync raises maxBuffer for large COPY leftovers')
+ok(migrateSrc.includes('REQUIRED_EXTENSIONS_SQL'), 'migrate creates required extensions itself')
+ok(migrateSrc.includes('ZEROED_MIGRATE_FAIL_AFTER'), 'migrate supports a forced-failure hook for e2e')
+ok(migrateSrc.indexOf('required_ext.sql') < migrateSrc.lastIndexOf("'--exit-on-error'"), 'pgcrypto is created before restore')
 ok(migrateSrc.indexOf('load_stub_users.sql') < migrateSrc.lastIndexOf("'--exit-on-error'"), 'stub users land before restore FKs')
 ok(migrateSrc.indexOf('assertSourceUsersReady') < migrateSrc.indexOf('creating stub auth.users'), 'source validation runs before the first target write')
-ok(migrateSrc.indexOf('checking target is empty') < migrateSrc.indexOf('creating stub auth.users'), 'empty-target check runs before the first target write')
+ok(migrateSrc.indexOf('checking target is empty') < migrateSrc.indexOf('ensuring pgcrypto'), 'empty-target check runs before the first target write')
+ok(CHECKSUM_TABLES.length === 16, 'checksum covers all 16 public tables')
+ok(CHECKSUM_TABLES.includes('coach_message') && CHECKSUM_TABLES.includes('weekly_review'), 'checksum includes coach_message and weekly_review')
+const toc = '1; 3079 1 EXTENSION - pgcrypto\n2; 1259 2 TABLE public athlete\n'
+ok(!filterRestoreToc(toc).includes('EXTENSION') && filterRestoreToc(toc).includes('TABLE public athlete'), 'restore TOC drops EXTENSION')
 const migrateLib = readFileSync(join(here, '../../scripts/migrate-users.lib.mjs'), 'utf8')
 ok(migrateLib.includes('email_verified BOOLEAN') && migrateLib.includes('user_id TEXT'), 'migrate lib Better Auth SQL is snake_case')
 ok(migrateLib.includes('user_email_lower_uidx'), 'migrate lib adds case-insensitive email uniqueness')
@@ -290,6 +301,9 @@ ok(migrateLib.includes('lower(email)'), 'migrate lib lowercases adopted emails')
 ok(migrateLib.includes('BEGIN'), 'migrate lib wraps the user load in a transaction')
 ok(!migrateLib.includes('pg_tables'), 'cleanup does not walk every public table')
 ok(migrateLib.includes('dropCreatedSql'), 'cleanup lists only objects this run created')
+ok(migrateLib.includes('DROP EXTENSION'), 'cleanup can drop an extension this run created')
+ok(migrateLib.includes('typtype'), 'empty-target check treats public enums/types as dirty')
+ok(migrateLib.includes('objectHash'), 'cleanup proves the object hash is unchanged')
 ok(migrateLib.includes('auth.uid()'), 'auth stub includes auth.uid() for a fresh restore')
 const corsSrc = readFileSync(join(here, 'cors.ts'), 'utf8')
 ok(corsSrc.includes("'Access-Control-Expose-Headers': 'set-auth-token'"), 'CORS exposes set-auth-token')

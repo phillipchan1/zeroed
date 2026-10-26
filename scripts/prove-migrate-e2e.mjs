@@ -8,7 +8,14 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
 import { applyIsolationSchemaPg } from '../worker/src/isolationDb.ts'
-import { CHECKSUM_TABLES, checksumQuery, parseCounts } from './migrate-users.lib.mjs'
+import {
+  CHECKSUM_TABLES,
+  LIST_USER_OBJECTS_TEXT_SQL,
+  checksumQuery,
+  objectHash,
+  parseCounts,
+  parseObjectList,
+} from './migrate-users.lib.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '..')
@@ -59,6 +66,34 @@ try {
   await src.end()
 }
 console.log('migrate e2e: seeded source')
+
+function listDst() {
+  return parseObjectList(run('psql', ['-v', 'ON_ERROR_STOP=1', '-tA', '-d', dstUrl, '-c', LIST_USER_OBJECTS_TEXT_SQL]))
+}
+
+const beforeFail = listDst()
+const beforeHash = objectHash(beforeFail)
+try {
+  run(process.execPath, [join(here, 'migrate-supabase-to-neon.mjs')], {
+    SUPABASE_DB_URL: srcUrl,
+    NEON_DB_URL: dstUrl,
+    ZEROED_MIGRATE_FAIL_AFTER: 'restore',
+  })
+  throw new Error('forced migrate failure succeeded')
+} catch (err) {
+  const msg = err instanceof Error ? err.message : String(err)
+  if (/forced migrate failure succeeded/.test(msg)) throw err
+  if (!/forced migrate failure after restore/.test(msg)) {
+    throw new Error(`expected forced restore failure, got: ${msg}`)
+  }
+}
+const afterFail = listDst()
+const afterHash = objectHash(afterFail)
+if (afterHash !== beforeHash) {
+  const leftover = afterFail.map((row) => `${row.schema}.${row.name} (${row.kind})`).join(', ')
+  throw new Error(`failed migrate changed the target object hash (${leftover || 'hash-only drift'})`)
+}
+console.log('migrate e2e: forced failure left the object hash unchanged')
 
 const migrateOut = run(process.execPath, [join(here, 'migrate-supabase-to-neon.mjs')], {
   SUPABASE_DB_URL: srcUrl,

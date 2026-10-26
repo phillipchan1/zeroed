@@ -8,6 +8,8 @@ import {
   BETTER_AUTH_TABLES_SQL,
   applyLowerEmailUniqueIndex,
   STUB_AUTH_SQL,
+  filterRestoreToc,
+  objectHash,
   assertCountsMatch,
   assertNoBlankEmails,
   assertNoEmailDupes,
@@ -300,6 +302,81 @@ try {
   console.log('migrate users: non-empty target is refused and left intact')
 
   await emptyTarget()
+  await client.query(`CREATE TYPE public.keep_status AS ENUM ('open', 'closed')`)
+  try {
+    await migrateTarget(query, [
+      { id: okId, name: 'Ok', email: 'ok@example.com', email_verified: true },
+    ])
+    throw new Error('migrateTarget accepted a target with a public enum')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/accepted a target with a public enum/.test(msg)) throw err
+    if (!/not empty/.test(msg) || !msg.includes('keep_status')) {
+      throw new Error(`enum abort missing keep_status: ${msg}`)
+    }
+  }
+  const keptEnum = await client.query(
+    `SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid = t.typnamespace
+     WHERE n.nspname = 'public' AND t.typname = 'keep_status'`,
+  )
+  if (!keptEnum.rows.length) throw new Error('enum refuse dropped keep_status')
+  console.log('migrate users: public enum makes the target non-empty')
+
+  await emptyTarget()
+  await client.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
+  const preExt = await listUserObjects(query)
+  const preExtHash = objectHash(preExt)
+  try {
+    await writeTargetOrCleanup(query, async () => {
+      await client.query(STUB_AUTH_SQL)
+      await client.query('CREATE TABLE public.athlete (id TEXT PRIMARY KEY, name TEXT)')
+      throw new Error('simulated fail with pre-existing pgcrypto')
+    }, preExt)
+    throw new Error('pre-existing pgcrypto fail was swallowed')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/swallowed/.test(msg)) throw err
+    if (!/pre-existing pgcrypto/.test(msg)) throw err
+  }
+  const keptExt = await client.query(`SELECT extname FROM pg_extension WHERE extname = 'pgcrypto'`)
+  if (!keptExt.rows.length) throw new Error('cleanup dropped a pre-existing pgcrypto')
+  if (objectHash(await listUserObjects(query)) !== preExtHash) {
+    throw new Error('pre-existing pgcrypto run changed the object hash')
+  }
+  console.log('migrate users: pre-existing pgcrypto is preserved on failure')
+
+  await emptyTarget()
+  const freshHash = objectHash(await listUserObjects(query))
+  try {
+    await writeTargetOrCleanup(query, async () => {
+      await client.query('CREATE EXTENSION IF NOT EXISTS pgcrypto')
+      await client.query(STUB_AUTH_SQL)
+      throw new Error('simulated fail after creating pgcrypto')
+    })
+    throw new Error('this-run pgcrypto fail was swallowed')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/swallowed/.test(msg)) throw err
+    if (!/after creating pgcrypto/.test(msg)) throw err
+  }
+  const leftoverExt = await client.query(`SELECT extname FROM pg_extension WHERE extname = 'pgcrypto'`)
+  if (leftoverExt.rows.length) throw new Error('this-run pgcrypto was left behind')
+  if (objectHash(await listUserObjects(query)) !== freshHash) {
+    throw new Error('this-run pgcrypto cleanup changed the object hash')
+  }
+  console.log('migrate users: this-run pgcrypto is dropped on failure')
+
+  const toc = [
+    '1234; 3079 1 EXTENSION - pgcrypto',
+    '1235; 0 0 COMMENT - EXTENSION pgcrypto',
+    '1236; 1259 2 TABLE public athlete',
+  ].join('\n')
+  const filtered = filterRestoreToc(toc)
+  if (filtered.includes('EXTENSION')) throw new Error('restore TOC still has EXTENSION')
+  if (!filtered.includes('TABLE public athlete')) throw new Error('restore TOC dropped TABLE athlete')
+  console.log('migrate users: restore TOC excludes extensions')
+
+  await emptyTarget()
   await assertTargetEmpty(query)
   try {
     await writeTargetOrCleanup(query, async () => {
@@ -329,6 +406,7 @@ try {
 } finally {
   await client.query('DROP TABLE IF EXISTS verification, session, account, "user", public.athlete, public.keep_me CASCADE').catch(() => {})
   await client.query('DROP FUNCTION IF EXISTS public.this_run_fn() CASCADE').catch(() => {})
+  await client.query('DROP TYPE IF EXISTS public.keep_status CASCADE').catch(() => {})
   await client.query('DROP SCHEMA IF EXISTS auth CASCADE').catch(() => {})
   await client.end()
 }

@@ -12,7 +12,10 @@
  * the Neon database after restore. Off by default — the Worker connects as
  * the table owner (RLS does not apply unless FORCE ROW LEVEL SECURITY).
  * A stub `auth.users` + `auth.uid()` is created on the target before restore
- * so dumped FKs and SQL functions can land on a fresh Postgres.
+ * so dumped FKs and SQL functions can land on a fresh Postgres. Extensions
+ * are excluded from dump/restore; `CREATE EXTENSION IF NOT EXISTS pgcrypto`
+ * runs as the first target write (works as a Neon non-superuser). A
+ * this-run extension is dropped on failure; a pre-existing one is kept.
  *
  * Usage:
  *   SUPABASE_DB_URL=postgres://... NEON_DB_URL=postgres://... \
@@ -24,13 +27,14 @@
  * Requires: pg_dump, psql, pg_restore (PostgreSQL client tools).
  */
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
+import { closeSync, existsSync, mkdtempSync, openSync, writeFileSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   BETTER_AUTH_TABLES_SQL,
   CHECKSUM_TABLES,
   LIST_USER_OBJECTS_TEXT_SQL,
+  REQUIRED_EXTENSIONS_SQL,
   STUB_AUTH_SQL,
   assertCountsMatch,
   assertSourceUsersReady,
@@ -39,6 +43,7 @@ import {
   dropCreatedSql,
   filterRestoreToc,
   formatNonEmptyTargetAbort,
+  isNonEmptyTargetObject,
   loadBetterAuthUsersSql,
   loadStubAuthUsersSql,
   parseAuthUsersCsv,
@@ -52,12 +57,37 @@ const source = process.env.SUPABASE_DB_URL || process.env.SOURCE_DATABASE_URL ||
 const target = process.env.NEON_DB_URL || process.env.TARGET_DATABASE_URL || ''
 
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], ...opts })
+  const res = spawnSync(cmd, args, {
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    maxBuffer: 64 * 1024 * 1024,
+    ...opts,
+  })
   if (res.status !== 0) {
     const err = (res.stderr || res.stdout || '').trim()
     throw new Error(`${cmd} ${args.join(' ')} failed (${res.status}): ${err}`)
   }
   return res.stdout
+}
+
+/** Stream stdout to a file so a large COPY cannot hit spawnSync maxBuffer. */
+function runToFile(cmd, args, file) {
+  const fd = openSync(file, 'w')
+  try {
+    const res = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['ignore', fd, 'pipe'] })
+    if (res.status !== 0) {
+      const err = (res.stderr || '').trim()
+      throw new Error(`${cmd} ${args.join(' ')} failed (${res.status}): ${err}`)
+    }
+  } finally {
+    closeSync(fd)
+  }
+}
+
+function maybeFailAfter(step) {
+  if (process.env.ZEROED_MIGRATE_FAIL_AFTER === step) {
+    throw new Error(`forced migrate failure after ${step}`)
+  }
 }
 
 function toolMajor(bin) {
@@ -132,8 +162,9 @@ END $$;
 if (dryRun && !source && !target) {
   console.log('dry-run: would pg_dump public + auth.users from SUPABASE_DB_URL (read-only)')
   console.log('dry-run: would abort before any Neon write if an email is blank or lower(email) is duplicated (both lists)')
-  console.log('dry-run: would refuse a non-empty target (any user object in public or auth)')
-  console.log('dry-run: would create stub auth.users + auth.uid() on NEON_DB_URL, then pg_restore --exit-on-error')
+  console.log('dry-run: would refuse a non-empty target (any user table/function/enum/type in public or auth)')
+  console.log('dry-run: would CREATE EXTENSION IF NOT EXISTS pgcrypto, then stub auth.users + auth.uid() on NEON_DB_URL')
+  console.log('dry-run: would pg_restore --exit-on-error with EXTENSION entries filtered out')
   console.log('dry-run: would insert auth.users into Better Auth "user" (and stub auth.users) with the same ids in one transaction')
   console.log(relaxTargetRls
     ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
@@ -189,8 +220,8 @@ try {
       FROM auth.users
     ) TO STDOUT WITH CSV
   `
-  const csv = run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', source, '-c', usersCopy])
-  writeFileSync(usersPath, csv)
+  runToFile('psql', ['-v', 'ON_ERROR_STOP=1', '-d', source, '-c', usersCopy], usersPath)
+  const csv = readFileSync(usersPath, 'utf8')
 
   console.log('pre-checking source emails (read-only)…')
   assertSourceUsersReady(parseAuthUsersCsv(csv))
@@ -206,12 +237,18 @@ try {
 
   console.log('checking target is empty…')
   const before = parseObjectList(psql(target, ['-tA'], LIST_USER_OBJECTS_TEXT_SQL))
-  if (before.length) throw new Error(formatNonEmptyTargetAbort(before))
+  const dirty = before.filter(isNonEmptyTargetObject)
+  if (dirty.length) throw new Error(formatNonEmptyTargetAbort(dirty))
 
   let wroteTarget = false
   try {
-    console.log('creating stub auth.users + auth.uid() on Neon (target only)…')
+    console.log('ensuring pgcrypto on Neon (target only)…')
     wroteTarget = true
+    writeFileSync(join(dir, 'required_ext.sql'), REQUIRED_EXTENSIONS_SQL)
+    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(dir, 'required_ext.sql')])
+    maybeFailAfter('extension')
+
+    console.log('creating stub auth.users + auth.uid() on Neon (target only)…')
     run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', stubAuthPath])
     const stubUsersPath = join(dir, 'load_stub_users.sql')
     writeFileSync(stubUsersPath, loadStubAuthUsersSql(usersPath))
@@ -230,6 +267,7 @@ try {
       '--dbname', target,
       dumpPath,
     ])
+    maybeFailAfter('restore')
     run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', betterAuthPath])
     if (relaxTargetRls) {
       console.log('relaxing RLS / auth helpers on Neon (--relax-target-rls)…')

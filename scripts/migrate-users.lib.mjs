@@ -3,6 +3,8 @@
  * after source-user validation and a non-empty-target refusal. Created objects
  * are tracked; failure drops only those. Never DROP SCHEMA public.
  */
+import { createHash } from 'node:crypto'
+
 export const STUB_AUTH_SQL = `
 CREATE SCHEMA IF NOT EXISTS auth;
 CREATE TABLE IF NOT EXISTS auth.users (
@@ -15,7 +17,10 @@ CREATE TABLE IF NOT EXISTS auth.users (
 );
 CREATE OR REPLACE FUNCTION auth.uid()
 RETURNS UUID LANGUAGE sql STABLE AS $$ SELECT NULL::uuid $$;
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+`
+
+/** First target write. Snapshot first so a this-run CREATE is in the cleanup diff. */
+export const REQUIRED_EXTENSIONS_SQL = `CREATE EXTENSION IF NOT EXISTS pgcrypto;
 `
 
 export const BETTER_AUTH_TABLES_SQL = `
@@ -102,12 +107,21 @@ export async function applyLowerEmailUniqueIndex(query) {
 
 export const CHECKSUM_TABLES = [
   'athlete',
+  'athlete_profile',
+  'coach_message',
+  'diagnostic',
   'insight',
+  'insight_draft',
   'mcp_token',
   'phase',
+  'probe_throttle',
   'program',
+  'program_revision',
   'routine',
+  'session_observation',
+  'weekly_review',
   'workout',
+  'workout_draft',
 ]
 
 export function checksumQuery() {
@@ -178,6 +192,26 @@ WHERE n.nspname IN ('public', 'auth')
     WHERE d.objid = p.oid AND d.deptype = 'e'
   )
 UNION ALL
+SELECT n.nspname, t.typname, 't', ''
+FROM pg_type t
+JOIN pg_namespace n ON n.oid = t.typnamespace
+WHERE n.nspname IN ('public', 'auth')
+  AND t.typtype IN ('e', 'c', 'd')
+  AND (t.typrelid = 0 OR NOT EXISTS (
+    SELECT 1 FROM pg_class c
+    WHERE c.oid = t.typrelid AND c.relkind IN ('r', 'p', 'v', 'm')
+  ))
+  AND NOT EXISTS (
+    SELECT 1 FROM pg_depend d
+    JOIN pg_extension e ON e.oid = d.refobjid
+    WHERE d.objid = t.oid AND d.deptype = 'e'
+  )
+UNION ALL
+SELECT n.nspname, e.extname, 'e', ''
+FROM pg_extension e
+JOIN pg_namespace n ON n.oid = e.extnamespace
+WHERE n.nspname IN ('public', 'auth')
+UNION ALL
 SELECT n.nspname, n.nspname, 'n', ''
 FROM pg_namespace n
 WHERE n.nspname = 'auth'
@@ -215,6 +249,20 @@ export function createdSince(before, after) {
   return (after ?? []).filter((row) => !keys.has(objectKey(row)))
 }
 
+/** Stable fingerprint of tracked objects. Used to prove a failed run is a no-op. */
+export function objectHash(objects) {
+  const payload = (objects ?? [])
+    .map((row) => `${row.schema}\t${row.kind}\t${row.name}\t${row.args ?? ''}`)
+    .sort()
+    .join('\n')
+  return createHash('sha256').update(payload).digest('hex')
+}
+
+/** Extensions may already exist on a fresh Neon DB; they do not make it dirty. */
+export function isNonEmptyTargetObject(row) {
+  return row.kind !== 'e'
+}
+
 export function quoteIdent(ident) {
   return `"${String(ident).replaceAll('"', '""')}"`
 }
@@ -244,6 +292,16 @@ export function dropCreatedSql(created) {
       lines.push(
         `DROP FUNCTION IF EXISTS ${quoteIdent(row.schema)}.${quoteIdent(row.name)}(${row.args ?? ''}) CASCADE;`,
       )
+    }
+  }
+  for (const row of created) {
+    if (row.kind === 't') {
+      lines.push(`DROP TYPE IF EXISTS ${quoteIdent(row.schema)}.${quoteIdent(row.name)} CASCADE;`)
+    }
+  }
+  for (const row of created) {
+    if (row.kind === 'e') {
+      lines.push(`DROP EXTENSION IF EXISTS ${quoteIdent(row.name)};`)
     }
   }
   if (created.some((row) => row.kind === 'n' && row.name === 'auth')) {
@@ -276,7 +334,7 @@ export function formatNonEmptyTargetAbort(objects) {
 }
 
 export async function assertTargetEmpty(query) {
-  const objects = await listUserObjects(query)
+  const objects = (await listUserObjects(query)).filter(isNonEmptyTargetObject)
   if (objects.length) throw new Error(formatNonEmptyTargetAbort(objects))
 }
 
@@ -287,6 +345,7 @@ export function filterRestoreToc(listText) {
       if (line.trimStart().startsWith(';')) return true
       if (/\bSCHEMA - public\b/.test(line) || /\bSCHEMA public\b/.test(line)) return false
       if (/\bCOMMENT\b/.test(line) && /\bSCHEMA public\b/.test(line)) return false
+      if (/\bEXTENSION\b/.test(line)) return false
       return true
     })
     .join('\n')
@@ -525,6 +584,7 @@ export async function migrateTarget(query, rows, afterStub) {
   assertSourceUsersReady(rows)
   await assertTargetEmpty(query)
   return writeTargetOrCleanup(query, async () => {
+    await query(REQUIRED_EXTENSIONS_SQL)
     await query(STUB_AUTH_SQL)
     if (afterStub) await afterStub(query)
     await query(BETTER_AUTH_TABLES_SQL)
