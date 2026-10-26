@@ -29,6 +29,8 @@ jobs:
         run: npm run lint
       - name: Engine / lib / access checks
         run: npm run check
+      - name: Isolation mutation proof
+        run: npm run check:isolation-mutation
       - name: MCP checks
         run: |
           npm --prefix mcp ci --no-audit --no-fund

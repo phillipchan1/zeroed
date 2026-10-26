@@ -2,15 +2,24 @@
 /**
  * Dump a Zeroed Supabase project into Neon (schema + data) and map
  * auth.users → Better Auth `user` with the same UUIDs so athlete.auth_user_id
- * foreign keys still hold.
+ * still matches.
  *
- * Does NOT run against prod unless you pass real URLs. Never deletes the source.
+ * SOURCE IS READ-ONLY. The script only runs pg_dump and COPY … TO STDOUT
+ * against SUPABASE_DB_URL. It never ALTER/DROP/DISABLE anything on the source.
+ *
+ * Target-only optional relax (`--relax-target-rls`): disable RLS, drop
+ * athlete_select / get_current_athlete_id() / athlete_auth_user_id_fkey on
+ * the Neon database after restore. Off by default — the Worker connects as
+ * the table owner (RLS does not apply unless FORCE ROW LEVEL SECURITY).
+ * A stub `auth.users` is created on the target before restore so the dumped
+ * FK can land without pointing at a missing catalog.
  *
  * Usage:
  *   SUPABASE_DB_URL=postgres://... NEON_DB_URL=postgres://... \
  *     node scripts/migrate-supabase-to-neon.mjs
  *
  *   node scripts/migrate-supabase-to-neon.mjs --dry-run
+ *   node scripts/migrate-supabase-to-neon.mjs --relax-target-rls
  *
  * Requires: pg_dump, psql, pg_restore (PostgreSQL client tools).
  */
@@ -20,6 +29,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const dryRun = process.argv.includes('--dry-run')
+const relaxTargetRls = process.argv.includes('--relax-target-rls')
 const source = process.env.SUPABASE_DB_URL || process.env.SOURCE_DATABASE_URL || ''
 const target = process.env.NEON_DB_URL || process.env.TARGET_DATABASE_URL || ''
 
@@ -37,22 +47,20 @@ function needBin(name) {
   if (res.status !== 0) throw new Error(`Missing ${name}. Install PostgreSQL client tools.`)
 }
 
-const TRANSFORM_SQL = `
--- Drop Supabase-only RLS / auth helpers. Access is enforced in the Worker.
-DO $$
-DECLARE r record;
-BEGIN
-  FOR r IN
-    SELECT schemaname, tablename FROM pg_tables
-    WHERE schemaname = 'public'
-  LOOP
-    EXECUTE format('ALTER TABLE %I.%I DISABLE ROW LEVEL SECURITY', r.schemaname, r.tablename);
-  END LOOP;
-END $$;
+/** Created on the Neon target only, before pg_restore, so public FKs can land. */
+const STUB_AUTH_SQL = `
+CREATE SCHEMA IF NOT EXISTS auth;
+CREATE TABLE IF NOT EXISTS auth.users (
+  id UUID PRIMARY KEY,
+  email TEXT,
+  raw_user_meta_data JSONB,
+  email_confirmed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ
+);
+`
 
-DROP POLICY IF EXISTS athlete_select ON public.athlete;
-DROP FUNCTION IF EXISTS public.get_current_athlete_id();
-
+const BETTER_AUTH_SQL = `
 -- Better Auth tables (ids are text so we can keep the Supabase UUIDs).
 CREATE TABLE IF NOT EXISTS "user" (
   id TEXT PRIMARY KEY,
@@ -99,8 +107,25 @@ CREATE TABLE IF NOT EXISTS verification (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+`
 
--- athlete.auth_user_id pointed at auth.users. After the dump it is a bare UUID.
+/** Neon target only. Never concatenated into a source session. */
+const RELAX_TARGET_SQL = `
+-- TARGET ONLY (--relax-target-rls). Access is enforced in the Worker.
+DO $$
+DECLARE r record;
+BEGIN
+  FOR r IN
+    SELECT schemaname, tablename FROM pg_tables
+    WHERE schemaname = 'public'
+  LOOP
+    EXECUTE format('ALTER TABLE %I.%I DISABLE ROW LEVEL SECURITY', r.schemaname, r.tablename);
+  END LOOP;
+END $$;
+
+DROP POLICY IF EXISTS athlete_select ON public.athlete;
+DROP FUNCTION IF EXISTS public.get_current_athlete_id();
+
 DO $$
 BEGIN
   IF EXISTS (
@@ -136,10 +161,12 @@ function parseCounts(text) {
 }
 
 if (dryRun && !source && !target) {
-  console.log('dry-run: would pg_dump public + auth.users from SUPABASE_DB_URL')
-  console.log('dry-run: would pg_restore into NEON_DB_URL')
-  console.log('dry-run: would insert auth.users into Better Auth "user" with the same ids')
-  console.log('dry-run: would disable RLS and drop auth.users FKs')
+  console.log('dry-run: would pg_dump public + auth.users from SUPABASE_DB_URL (read-only)')
+  console.log('dry-run: would create stub auth.users on NEON_DB_URL, then pg_restore')
+  console.log('dry-run: would insert auth.users into Better Auth "user" (and stub auth.users) with the same ids')
+  console.log(relaxTargetRls
+    ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
+    : 'dry-run: would leave RLS / athlete_select / get_current_athlete_id / auth_user_id FK on Neon (pass --relax-target-rls to drop them on the target)')
   console.log('dry-run: would compare row counts per table and abort on mismatch')
   console.log('tools required: pg_dump, pg_restore, psql')
   process.exit(0)
@@ -150,6 +177,11 @@ if (!source || !target) {
   process.exit(2)
 }
 
+if (source === target) {
+  console.error('SUPABASE_DB_URL and NEON_DB_URL must be different. Source is read-only.')
+  process.exit(2)
+}
+
 needBin('pg_dump')
 needBin('pg_restore')
 needBin('psql')
@@ -157,10 +189,15 @@ needBin('psql')
 const dir = mkdtempSync(join(tmpdir(), 'zeroed-migrate-'))
 const dumpPath = join(dir, 'public.dump')
 const usersPath = join(dir, 'auth_users.csv')
-const transformPath = join(dir, 'transform.sql')
+const stubAuthPath = join(dir, 'stub_auth.sql')
+const betterAuthPath = join(dir, 'better_auth.sql')
+const relaxPath = join(dir, 'relax_target.sql')
 
 try {
-  writeFileSync(transformPath, TRANSFORM_SQL)
+  writeFileSync(stubAuthPath, STUB_AUTH_SQL)
+  writeFileSync(betterAuthPath, BETTER_AUTH_SQL)
+  writeFileSync(relaxPath, RELAX_TARGET_SQL)
+
   console.log('dumping public schema + data (no-owner, no-acl)…')
   run('pg_dump', [
     '--format=custom',
@@ -186,20 +223,36 @@ try {
   if (dryRun) {
     console.log(`dry-run: dump at ${dumpPath} (${readFileSync(dumpPath).length} bytes)`)
     console.log(`dry-run: ${csv.trim().split('\n').filter(Boolean).length} auth.users rows`)
+    console.log(relaxTargetRls
+      ? 'dry-run: would apply --relax-target-rls on Neon only'
+      : 'dry-run: would keep RLS artifacts on Neon')
     process.exit(0)
   }
 
+  console.log('creating stub auth.users on Neon (target only)…')
+  run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', stubAuthPath])
+
   console.log('restoring into Neon…')
   run('pg_restore', ['--no-owner', '--no-acl', '--dbname', target, dumpPath])
-  run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', transformPath])
+  run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', betterAuthPath])
+  if (relaxTargetRls) {
+    console.log('relaxing RLS / auth helpers on Neon (--relax-target-rls)…')
+    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', relaxPath])
+  } else {
+    console.log('keeping RLS / auth helpers on Neon (pass --relax-target-rls to drop them on the target)')
+  }
 
-  console.log('mapping auth.users → "user"…')
+  console.log('mapping auth.users → "user" + stub auth.users…')
   const loadUsers = `
     CREATE TEMP TABLE auth_users_import (
       id TEXT, name TEXT, email TEXT, email_verified BOOLEAN,
       created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
     );
     \\copy auth_users_import FROM '${usersPath}' WITH CSV
+    INSERT INTO auth.users (id, email, created_at, updated_at)
+    SELECT id::uuid, email, created_at, COALESCE(updated_at, created_at)
+    FROM auth_users_import
+    ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email;
     INSERT INTO "user" (id, name, email, email_verified, created_at, updated_at)
     SELECT id, name, email, email_verified, created_at, COALESCE(updated_at, created_at)
     FROM auth_users_import

@@ -32,8 +32,11 @@ export function useAuth(): AuthState {
       setLoading(false)
     })
 
-    const unsubscribe = subscribeAuth((next) => {
-      if (!next) {
+    const unsubscribe = subscribeAuth((next, event) => {
+      // Drop cached views and local workout drafts only on an explicit
+      // sign-out. TOKEN_REFRESHED / INITIAL_SESSION / a dead session probe
+      // must not wipe in-progress drafts on this device.
+      if (event === 'SIGNED_OUT') {
         clearAllCache()
         clearAllDraftsLocal()
         persistAuthUser(null)

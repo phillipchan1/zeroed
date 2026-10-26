@@ -72,11 +72,18 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 ## Pre-checks (T-24h)
 
 1. Phil sign-off recorded. No deploy happens without it.
-2. `npm run type-check && npm run lint && npm run check` green on this branch.
+2. `npm run type-check && npm run lint && npm run check && npm run check:isolation-mutation`
+   green on this branch. Isolation checks run store/edits against PGlite
+   seeded with two athletes. The mutation script must fail (and restore)
+   when the `loadWorkout` `athlete_id` filter is deleted or every
+   `athlete_id` filter is replaced with `TRUE`.
 3. `npm run build && npx wrangler dev` serves `/` and `/api/health`.
+   `POST /functions/v1/agent` reaches the Worker (not a 405 from assets).
+   Missing `/assets/*` is 404 text/plain, not `index.html`.
 4. Fresh Supabase backup. Neon project created, empty or schema-only.
 5. `node scripts/migrate-supabase-to-neon.mjs --dry-run` with the dump URLs
-   (read-only source is enough for dry-run).
+   (read-only source is enough for dry-run). Do not pass `--relax-target-rls`
+   unless you intend to drop RLS on the Neon target.
 6. Worker deployed to `*.workers.dev` only (not the production hostname).
 7. Rollback values written down: current Vercel URL, `VITE_SUPABASE_*`,
    Supabase functions base `https://<project>.supabase.co/functions/v1`.
@@ -85,7 +92,14 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
 
 1. Write-freeze is optional here; run it anyway so the template is exercised.
 2. `SUPABASE_DB_URL=… NEON_DB_URL=… node scripts/migrate-supabase-to-neon.mjs`
-   — abort on a row-count mismatch.
+   — abort on a row-count mismatch. The source URL is **read-only**
+   (`pg_dump` + `COPY … TO STDOUT`). RLS, `athlete_select`,
+   `get_current_athlete_id()`, and `athlete_auth_user_id_fkey` are left
+   intact on Supabase. The script stubs `auth.users` on Neon so the dumped
+   FK can restore. Pass `--relax-target-rls` only if you want those
+   Supabase RLS artifacts dropped **on Neon** (the Worker already scopes
+   every query; the table owner bypasses RLS unless `FORCE ROW LEVEL
+   SECURITY`).
 3. Apply `worker/schema/better-auth.sql` only if the script did not already
    create those tables.
 4. Point the Worker Hyperdrive config at the Neon connection string.

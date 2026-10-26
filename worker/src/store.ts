@@ -1,7 +1,6 @@
 import type { ExerciseTemplate } from '../../supabase/functions/_shared/engine/types.ts'
 import { readLoggedExercises, type LoggedWorkoutLike } from '../../supabase/functions/_shared/engine/loggedSets.ts'
 import { formatSet, isoDay, shortDate, topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
-import { takeOwned, type OwnershipIndex } from './access.ts'
 import { asJson, type Sql } from './db.ts'
 
 export interface ConnectedStore {
@@ -68,31 +67,6 @@ export interface InsightView {
 
 export function makeStore(sql: Sql, athleteId: string, unit = 'lb'): ConnectedStore {
   return { sql, athleteId, unit: unit === 'kg' ? 'kg' : 'lb' }
-}
-
-async function ownershipIndex(sql: Sql, athleteId: string): Promise<OwnershipIndex> {
-  const [athletes, programs, routines, workouts] = await Promise.all([
-    sql<{ id: string; auth_user_id: string }[]>`
-      SELECT id, auth_user_id FROM athlete WHERE id = ${athleteId}
-    `,
-    sql<{ id: string; athlete_id: string }[]>`
-      SELECT id, athlete_id FROM program WHERE athlete_id = ${athleteId}
-    `,
-    sql<{ id: string; program_id: string }[]>`
-      SELECT r.id, r.program_id
-      FROM routine r
-      JOIN program p ON p.id = r.program_id
-      WHERE p.athlete_id = ${athleteId}
-    `,
-    sql<{ id: string; routine_id: string }[]>`
-      SELECT w.id, w.routine_id
-      FROM workout w
-      JOIN routine r ON r.id = w.routine_id
-      JOIN program p ON p.id = r.program_id
-      WHERE p.athlete_id = ${athleteId}
-    `,
-  ])
-  return { athletes, programs, routines, workouts }
 }
 
 export async function programIds(store: ConnectedStore): Promise<string[]> {
@@ -290,7 +264,6 @@ export async function loadWorkout(store: ConnectedStore, workoutId: string): Pro
   workout: WorkoutRowView
   observations: Array<{ category: string; signal: string; severity: number }>
 } | null> {
-  const index = await ownershipIndex(store.sql, store.athleteId)
   const [row] = await store.sql<{
     id: string
     routine_id: string
@@ -314,8 +287,7 @@ export async function loadWorkout(store: ConnectedStore, workoutId: string): Pro
       AND p.athlete_id = ${store.athleteId}
     LIMIT 1
   `
-  const owned = takeOwned(store.athleteId, 'workout', row ? { id: row.id, routine_id: row.routine_id } : null, index)
-  if (!row || !owned) return null
+  if (!row) return null
   const obs = await store.sql<{ category: string; signal: string; severity: number }[]>`
     SELECT category, signal, severity
     FROM session_observation

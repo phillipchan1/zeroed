@@ -148,7 +148,7 @@ export function previewEdits(live: LiveProgram, inputs: EditInput[]): {
   }
 }
 
-async function writeDraftInPlace(
+export async function writeDraftInPlace(
   store: ConnectedStore, live: LiveProgram, draft: ProgramDraft, errors: string[],
 ): Promise<number> {
   let written = 0

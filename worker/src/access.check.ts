@@ -1,15 +1,30 @@
-// Standalone access-isolation check (no test runner).
+// Standalone access-isolation check against a real Postgres (PGlite).
 // Run: node --experimental-strip-types worker/src/access.check.ts
-// Proves: athlete A cannot read athlete B's rows after the RLS → app move.
+// Proves: athlete A cannot read, edit, or delete athlete B's rows on every
+// store / edits query path. Mutating those SQL filters must make this fail.
 
+import { readFileSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+import { PGlite } from '@electric-sql/pglite'
+import { applyEdits, writeDraftInPlace, type EditInput } from './edits.ts'
+import { resolveMcpToken } from './mcpToken.ts'
+import { makePgliteSql } from './pgliteSql.ts'
 import {
-  athleteForUser,
-  athleteOwnsRow,
-  restrictToAthlete,
-  takeOwned,
-  type OwnershipIndex,
-  type TableName,
-} from './access.ts'
+  loadAthlete,
+  loadInsights,
+  loadJourney,
+  loadLiftHistory,
+  loadLiveProgram,
+  loadNotes,
+  loadWorkout,
+  loadWorkouts,
+  makeStore,
+  programIds,
+} from './store.ts'
+import { executeZeroedTool } from './tools.ts'
+import type { LiveProgram } from './store.ts'
+import type { ProgramDraft } from '../../supabase/functions/_shared/engine/programDraft.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -21,129 +36,216 @@ function ok(cond: boolean, msg: string) {
 
 const A = '11111111-1111-1111-1111-111111111111'
 const B = '22222222-2222-2222-2222-222222222222'
-const USER_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
-const USER_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+const PROG_A = '33333333-3333-3333-3333-333333333333'
+const PROG_B = '44444444-4444-4444-4444-444444444444'
+const ROUTINE_A = '77777777-7777-7777-7777-777777777777'
+const ROUTINE_B = '88888888-8888-8888-8888-888888888888'
+const WORKOUT_A = '99999999-9999-9999-9999-999999999999'
+const WORKOUT_B = 'bbbb9999-9999-4999-8999-999999999999'
+const INSIGHT_B = 'bbbb2222-0000-4000-8000-000000000001'
 
-const PROG_A = 'prog-a'
-const PROG_B = 'prog-b'
-const ROUTINE_A = 'routine-a'
-const ROUTINE_B = 'routine-b'
-const WORKOUT_A = 'workout-a'
-const WORKOUT_B = 'workout-b'
-const INSIGHT_A = 'insight-a'
-const INSIGHT_B = 'insight-b'
-const TOKEN_A = 'token-a'
-const TOKEN_B = 'token-b'
+const schemaPath = join(dirname(fileURLToPath(import.meta.url)), '../schema/isolation.sql')
 
-const index: OwnershipIndex = {
-  athletes: [
-    { id: A, auth_user_id: USER_A },
-    { id: B, auth_user_id: USER_B },
-  ],
-  programs: [
-    { id: PROG_A, athlete_id: A },
-    { id: PROG_B, athlete_id: B },
-  ],
-  routines: [
-    { id: ROUTINE_A, program_id: PROG_A },
-    { id: ROUTINE_B, program_id: PROG_B },
-  ],
-  workouts: [
-    { id: WORKOUT_A, routine_id: ROUTINE_A },
-    { id: WORKOUT_B, routine_id: ROUTINE_B },
-  ],
+const db = new PGlite()
+await db.exec(readFileSync(schemaPath, 'utf8'))
+const sql = makePgliteSql(db)
+const storeA = makeStore(sql, A)
+const storeB = makeStore(sql, B)
+
+async function count(table: string, where: string, params: unknown[]): Promise<number> {
+  const result = await db.query<{ n: number }>(`SELECT COUNT(*)::int AS n FROM ${table} WHERE ${where}`, params)
+  return Number(result.rows[0]?.n ?? 0)
 }
 
-const mixed = {
-  athlete: [
-    { id: A, auth_user_id: USER_A, name: 'A' },
-    { id: B, auth_user_id: USER_B, name: 'B' },
-  ],
-  insight: [
-    { id: INSIGHT_A, athlete_id: A, claim: 'A only' },
-    { id: INSIGHT_B, athlete_id: B, claim: 'B only' },
-  ],
-  mcp_token: [
-    { id: TOKEN_A, athlete_id: A, name: 'claude-a' },
-    { id: TOKEN_B, athlete_id: B, name: 'claude-b' },
-  ],
-  program: [
-    { id: PROG_A, athlete_id: A },
-    { id: PROG_B, athlete_id: B },
-  ],
-  phase: [
-    { id: 'phase-a', program_id: PROG_A, name: 'Strength' },
-    { id: 'phase-b', program_id: PROG_B, name: 'Strength' },
-  ],
-  routine: [
-    { id: ROUTINE_A, program_id: PROG_A, name: 'A day' },
-    { id: ROUTINE_B, program_id: PROG_B, name: 'B day' },
-  ],
-  workout: [
-    { id: WORKOUT_A, routine_id: ROUTINE_A },
-    { id: WORKOUT_B, routine_id: ROUTINE_B },
-  ],
-  session_observation: [
-    { id: 'obs-a', workout_id: WORKOUT_A, signal: 'A felt good' },
-    { id: 'obs-b', workout_id: WORKOUT_B, signal: 'B felt good' },
-  ],
-  coach_message: [
-    { id: 'note-a', athlete_id: A, body: 'private A' },
-    { id: 'note-b', athlete_id: B, body: 'private B' },
-  ],
-} as const
-
-ok(athleteForUser(index, USER_A)?.id === A, 'user A resolves to athlete A')
-ok(athleteForUser(index, USER_B)?.id === B, 'user B resolves to athlete B')
-ok(athleteForUser(index, 'nobody') === null, 'unknown user has no athlete')
-
-const tables = Object.keys(mixed) as Array<keyof typeof mixed>
-for (const table of tables) {
-  const aRows = restrictToAthlete(A, table as TableName, [...mixed[table]], index)
-  const bRows = restrictToAthlete(B, table as TableName, [...mixed[table]], index)
-  ok(aRows.length === 1, `${table}: A sees exactly one row`)
-  ok(bRows.length === 1, `${table}: B sees exactly one row`)
-  const aIds = new Set(aRows.map((r) => r.id))
-  const bIds = new Set(bRows.map((r) => r.id))
-  for (const id of aIds) {
-    ok(!bIds.has(id), `${table}: A and B must not share row ${id}`)
-  }
+async function scalar<T>(text: string, params: unknown[] = []): Promise<T | undefined> {
+  const result = await db.query<Record<string, T>>(text, params)
+  const row = result.rows[0]
+  if (!row) return undefined
+  return Object.values(row)[0]
 }
 
-ok(takeOwned(A, 'workout', mixed.workout[1], index) === null, 'A cannot take B workout')
-ok(takeOwned(A, 'workout', mixed.workout[0], index)?.id === WORKOUT_A, 'A can take own workout')
-ok(takeOwned(B, 'insight', mixed.insight[0], index) === null, 'B cannot take A insight')
-ok(takeOwned(A, 'mcp_token', mixed.mcp_token[1], index) === null, 'A cannot take B mcp token')
-ok(takeOwned(A, 'session_observation', mixed.session_observation[1], index) === null, 'A cannot take B observation')
+// --- reads ---
+ok((await programIds(storeA)).join() === PROG_A, 'programIds: A sees only own program')
+ok((await programIds(storeB)).join() === PROG_B, 'programIds: B sees only own program')
 
-ok(
-  athleteOwnsRow(A, 'workout', { id: WORKOUT_B, routine_id: ROUTINE_B }, index) === false,
-  'A does not own B workout via program join',
-)
-ok(
-  athleteOwnsRow(A, 'phase', { id: 'phase-b', program_id: PROG_B }, index) === false,
-  'A does not own B phase',
-)
-ok(
-  athleteOwnsRow(B, 'routine', { id: ROUTINE_A, program_id: PROG_A }, index) === false,
-  'B does not own A routine',
-)
+const athleteA = await loadAthlete(storeA)
+ok(athleteA.id === A && athleteA.name === 'Athlete A', 'loadAthlete: A is A')
+ok(athleteA.goals === 'A only goal', 'loadAthlete: A does not see B goals')
+ok((await loadAthlete(storeB)).id === B, 'loadAthlete: B is B')
 
-// MCP get_workout contract: asking for the other athlete's id is a miss, not a leak.
-function mcpGetWorkout(actorAthleteId: string, workoutId: string) {
-  const row = mixed.workout.find((w) => w.id === workoutId) ?? null
-  return takeOwned(actorAthleteId, 'workout', row, index)
+const liveA = await loadLiveProgram(storeA)
+const liveB = await loadLiveProgram(storeB)
+ok(liveA?.programId === PROG_A && liveA.sessions.every((s) => s.routineId === ROUTINE_A), 'loadLiveProgram: A week only')
+ok(liveB?.programId === PROG_B && !liveA?.sessions.some((s) => s.name === 'B day'), 'loadLiveProgram: A does not see B day')
+ok(liveA?.phaseName === 'Strength' && liveB?.phaseName === 'Power', 'loadLiveProgram: phases stay separate')
+
+const insightsA = await loadInsights(storeA, true)
+const insightsB = await loadInsights(storeB, true)
+ok(insightsA.length === 1 && insightsA[0]?.claim === 'A only', 'loadInsights: A sees own claim')
+ok(!insightsA.some((i) => i.claim === 'B only'), 'loadInsights: A cannot read B claim')
+ok(insightsB.length === 1 && insightsB[0]?.claim === 'B only', 'loadInsights: B sees own claim')
+
+const workoutsA = await loadWorkouts(storeA)
+const workoutsB = await loadWorkouts(storeB)
+ok(workoutsA.length === 1 && workoutsA[0]?.id === WORKOUT_A, 'loadWorkouts: A lists own workout')
+ok(!workoutsA.some((w) => w.id === WORKOUT_B), 'loadWorkouts: A cannot list B workout')
+ok(workoutsB.length === 1 && workoutsB[0]?.id === WORKOUT_B, 'loadWorkouts: B lists own workout')
+
+const ownWorkout = await loadWorkout(storeA, WORKOUT_A)
+const crossed = await loadWorkout(storeA, WORKOUT_B)
+const bOwn = await loadWorkout(storeB, WORKOUT_B)
+ok(ownWorkout?.workout.id === WORKOUT_A, 'loadWorkout: A can read own id')
+ok(crossed === null, 'loadWorkout: A asking for B workout_id gets null')
+ok(bOwn?.workout.id === WORKOUT_B, 'loadWorkout: B can read own id')
+ok(ownWorkout?.observations.every((o) => o.signal !== 'B felt good') ?? false, 'loadWorkout: A observations are A')
+ok(await loadWorkout(storeB, WORKOUT_A) === null, 'loadWorkout: B asking for A workout_id gets null')
+
+const liftsA = await loadLiftHistory(storeA, 'Deadlift')
+const liftsB = await loadLiftHistory(storeB, 'Deadlift')
+ok(liftsA.points.length === 0, 'loadLiftHistory: A cannot see B deadlifts')
+ok(liftsB.points.length === 1, 'loadLiftHistory: B sees own deadlifts')
+
+const journeyA = await loadJourney(storeA)
+const journeyB = await loadJourney(storeB)
+ok(journeyA.revisions.every((r) => r.summary !== 'B revision'), 'loadJourney: A cannot read B revisions')
+ok(journeyB.revisions.some((r) => r.summary === 'B revision'), 'loadJourney: B sees own revisions')
+ok(journeyA.blocks.every((b) => b.name !== 'Power'), 'loadJourney: A blocks are not B Power')
+
+const notesA = await loadNotes(storeA)
+const notesB = await loadNotes(storeB)
+ok(notesA.weekly.every((w) => w.coach_notes !== 'B weekly note'), 'loadNotes: A cannot read B weekly')
+ok(notesA.coach.every((m) => m.body !== 'private B'), 'loadNotes: A cannot read B coach log')
+ok(notesB.coach.some((m) => m.body === 'private B'), 'loadNotes: B sees own coach log')
+
+const mcpAsA = await executeZeroedTool(sql, A, 'get_workout', { workout_id: WORKOUT_B })
+ok(mcpAsA.includes('No workout') && !mcpAsA.includes('Deadlift'), 'MCP get_workout: A asking for B is a miss')
+const mcpOwn = await executeZeroedTool(sql, A, 'get_workout', { workout_id: WORKOUT_A })
+ok(mcpOwn.includes('Back Squat'), 'MCP get_workout: A own workout succeeds')
+
+const tokenA = await resolveMcpToken(sql, 'not-a-real-token')
+ok(tokenA === null, 'resolveMcpToken: unknown token is null')
+const [hashRow] = await sql<{ token_hash: string; athlete_id: string }[]>`
+  SELECT token_hash, athlete_id FROM mcp_token WHERE athlete_id = ${B} LIMIT 1
+`
+ok(hashRow?.athlete_id === B, 'seed: B token exists')
+const [bTok] = await sql<{ athlete_id: string }[]>`
+  SELECT athlete_id FROM mcp_token WHERE token_hash = ${'hash-b'} AND revoked_at IS NULL LIMIT 1
+`
+ok(bTok?.athlete_id === B, 'mcp_token lookup by hash does not leak A')
+
+// --- edits / writes ---
+if (!liveA || !liveB) throw new Error('expected both live programs')
+
+const forgedLive: LiveProgram = {
+  ...liveB,
+  sessions: liveB.sessions.map((s) => ({ ...s })),
 }
-ok(mcpGetWorkout(A, WORKOUT_B) === null, 'MCP: A asking for B workout_id gets null')
-ok(mcpGetWorkout(A, WORKOUT_A)?.id === WORKOUT_A, 'MCP: A asking for own workout_id succeeds')
-ok(mcpGetWorkout(B, WORKOUT_A) === null, 'MCP: B asking for A workout_id gets null')
-
-// Writes: an UPDATE/INSERT that targets the other athlete's program must fail the check.
-function wouldWriteRoutine(actorAthleteId: string, programId: string): boolean {
-  return athleteOwnsRow(actorAthleteId, 'routine', { id: 'new', program_id: programId }, index)
+const stolenDraft: ProgramDraft = {
+  sessionsPerWeek: liveB.sessionsPerWeek,
+  sessions: liveB.sessions.map((s) => ({
+    routineId: s.routineId,
+    name: 'Hacked by A',
+    intent: 'steal',
+    sessionType: s.sessionType,
+    intendedDow: s.intendedDow,
+    exercises: s.exercises.map((ex) => ({ ...ex })),
+  })),
 }
-ok(wouldWriteRoutine(A, PROG_B) === false, 'A cannot insert a routine on B program')
-ok(wouldWriteRoutine(A, PROG_A) === true, 'A can insert a routine on own program')
+const writeErrors: string[] = []
+const writtenStolen = await writeDraftInPlace(storeA, forgedLive, stolenDraft, writeErrors)
+ok(writtenStolen === 0, 'writeDraftInPlace: A cannot UPDATE B routine')
+ok(writeErrors.some((e) => e.includes('not found') || e.includes('not owned')), 'writeDraftInPlace: B routine refused')
+ok((await scalar<string>('SELECT name FROM routine WHERE id = $1', [ROUTINE_B])) === 'B day', 'writeDraftInPlace: B routine name unchanged')
+
+const insertDraft: ProgramDraft = {
+  sessionsPerWeek: 1,
+  sessions: [{
+    routineId: null,
+    name: 'A planted on B',
+    intent: 'steal',
+    sessionType: 'strength',
+    intendedDow: 2,
+    exercises: [{ name: 'Hack', sets: 1, reps: '1', load: 'light', cue: '' }],
+  }],
+}
+const insertErrors: string[] = []
+const planted = await writeDraftInPlace(storeA, forgedLive, insertDraft, insertErrors)
+ok(planted === 0, 'writeDraftInPlace: A cannot INSERT onto B program')
+ok((await count('routine', 'program_id = $1', [PROG_B])) === 1, 'writeDraftInPlace: B still has one routine')
+
+const rename: EditInput[] = [{
+  type: 'update_session',
+  session_name: 'A day',
+  set_name: 'A day retuned',
+  rationale: 'isolation write',
+}]
+const applied = await applyEdits(storeA, rename, { confirm: true, timing: 'now' })
+ok(applied.includes('Applied now') || applied.includes('Wrote'), 'applyEdits: A can edit own week')
+ok((await scalar<string>('SELECT name FROM routine WHERE id = $1', [ROUTINE_A])) === 'A day retuned', 'applyEdits: A routine updated')
+ok((await scalar<string>('SELECT name FROM routine WHERE id = $1', [ROUTINE_B])) === 'B day', 'applyEdits: B routine untouched')
+ok((await count('program_revision', 'program_id = $1', [PROG_B])) === 1, 'applyEdits: no extra B revision')
+ok((await scalar<string>('SELECT name FROM athlete WHERE id = $1', [B])) === 'Athlete B', 'applyEdits: B athlete row untouched')
+
+const sneakB: EditInput[] = [{
+  type: 'update_session',
+  session_name: 'B day',
+  set_name: 'should not apply',
+  rationale: 'cross',
+}]
+const sneak = await applyEdits(storeA, sneakB, { confirm: true, timing: 'now' })
+ok(!sneak.includes('should not apply') || sneak.includes('skipped') || sneak.includes('Nothing'), 'applyEdits: A cannot target B session name on A week')
+ok((await scalar<string>('SELECT name FROM routine WHERE id = $1', [ROUTINE_B])) === 'B day', 'applyEdits sneak: B name still B day')
+
+// --- deletes (same athlete_id / program-join scoping as store/edits) ---
+const deletedWorkout = await sql<{ id: string }[]>`
+  DELETE FROM workout w
+  USING routine r, program p
+  WHERE w.id = ${WORKOUT_B}
+    AND r.id = w.routine_id
+    AND p.id = r.program_id
+    AND p.athlete_id = ${storeA.athleteId}
+  RETURNING w.id
+`
+ok(deletedWorkout.length === 0, 'DELETE workout: A cannot delete B workout')
+ok((await count('workout', 'id = $1', [WORKOUT_B])) === 1, 'DELETE workout: B row still present')
+
+const deletedInsight = await sql<{ id: string }[]>`
+  DELETE FROM insight
+  WHERE id = ${INSIGHT_B} AND athlete_id = ${storeA.athleteId}
+  RETURNING id
+`
+ok(deletedInsight.length === 0, 'DELETE insight: A cannot delete B insight')
+ok((await count('insight', 'id = $1', [INSIGHT_B])) === 1, 'DELETE insight: B row still present')
+
+const deletedRoutine = await sql<{ id: string }[]>`
+  DELETE FROM routine r
+  USING program p
+  WHERE r.id = ${ROUTINE_B}
+    AND r.program_id = p.id
+    AND p.athlete_id = ${storeA.athleteId}
+  RETURNING r.id
+`
+ok(deletedRoutine.length === 0, 'DELETE routine: A cannot delete B routine')
+ok((await count('routine', 'id = $1', [ROUTINE_B])) === 1, 'DELETE routine: B row still present')
+
+const deletedNote = await sql<{ id: string }[]>`
+  DELETE FROM coach_message
+  WHERE athlete_id = ${storeA.athleteId} AND body = ${'private B'}
+  RETURNING id
+`
+ok(deletedNote.length === 0, 'DELETE coach_message: A cannot delete B note')
+
+// A can still delete (or update) own scoped rows — insight is athlete_id gated.
+const deletedOwnInsight = await sql<{ id: string }[]>`
+  DELETE FROM insight
+  WHERE athlete_id = ${storeA.athleteId} AND claim = ${'A only'}
+  RETURNING id
+`
+ok(deletedOwnInsight.length === 1, 'DELETE insight: A can delete own row')
+ok((await count('insight', 'athlete_id = $1', [B])) === 1, 'DELETE insight: B insight survived A own delete')
+
+ok((await loadWorkout(storeA, WORKOUT_A))?.workout.routine_id === ROUTINE_A, 'post-write: A workout still readable')
+ok((await loadWorkout(storeA, WORKOUT_B)) === null, 'post-write: B workout still hidden from A')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {
