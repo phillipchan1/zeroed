@@ -7,7 +7,7 @@ import { spawnSync } from 'node:child_process'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
-import { refuseUnsafeTestUrl } from '../worker/src/authUrl.ts'
+import { refuseUnsafeTestUrl } from '../worker/src/refuseTestUrl.ts'
 import { applyIsolationSchemaPg } from '../worker/src/isolationDb.ts'
 import {
   CHECKSUM_TABLES,

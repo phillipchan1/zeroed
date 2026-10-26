@@ -9,7 +9,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
 import { Client } from 'pg'
-import { refuseUnsafeTestUrl } from './authUrl.ts'
+import { refuseUnsafeTestUrl } from './refuseTestUrl.ts'
 import { makeClientSql, type Sql } from './db.ts'
 import { makePgliteSql } from './pgliteSql.ts'
 
@@ -77,7 +77,7 @@ export function assertCiUsesRealPostgres(): void {
   )
 }
 
-export { refuseUnsafeTestUrl } from './authUrl.ts'
+export { refuseUnsafeTestUrl } from './refuseTestUrl.ts'
 
 function migrationFiles(): string[] {
   const files = readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort()

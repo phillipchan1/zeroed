@@ -14,24 +14,6 @@ export function isLoopbackHostname(hostname: string): boolean {
   return host === 'localhost' || host === '::1' || isIpv4Loopback(host)
 }
 
-/** Throw before any connect/query when a wipe/test URL is not loopback. */
-export function refuseUnsafeTestUrl(
-  url: string,
-  label = 'ZEROED_TEST_DATABASE_URL',
-): void {
-  let parsed: URL
-  try {
-    parsed = new URL(url)
-  } catch {
-    throw new Error(`${label} is not a valid URL`)
-  }
-  if (!isLoopbackHostname(parsed.hostname)) {
-    throw new Error(
-      `${label} host "${parsed.hostname}" is not loopback — refusing to wipe`,
-    )
-  }
-}
-
 export function isLocalAuthHost(url: string): boolean {
   try {
     return isLoopbackHostname(new URL(url).hostname)

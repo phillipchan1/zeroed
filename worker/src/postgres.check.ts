@@ -16,12 +16,19 @@ function ok(cond: boolean, msg: string) {
 const here = dirname(fileURLToPath(import.meta.url))
 const root = join(here, '../..')
 const isolationSrc = readFileSync(join(here, 'isolationDb.ts'), 'utf8')
+const refuseSrc = readFileSync(join(here, 'refuseTestUrl.ts'), 'utf8')
 
 ok(!/\bopenIsolationSql\b/.test(isolationSrc), 'isolationDb has no openIsolationSql wipe path')
 ok(
   !/process\.env\.DATABASE_URL/.test(isolationSrc),
   'isolationDb never reads DATABASE_URL',
 )
+ok(refuseSrc.includes('pg-connection-string'), 'refuseUnsafeTestUrl runs pg-connection-string')
+ok(refuseSrc.includes('PGHOST'), 'refuseUnsafeTestUrl checks PGHOST')
+ok(refuseSrc.includes('PGHOSTADDR'), 'refuseUnsafeTestUrl checks PGHOSTADDR')
+ok(refuseSrc.includes('hostaddr'), 'refuseUnsafeTestUrl rejects hostaddr')
+ok(refuseSrc.includes('service'), 'refuseUnsafeTestUrl rejects service')
+ok(refuseSrc.includes('multi-host'), 'refuseUnsafeTestUrl rejects multi-host lists')
 
 const MIGRATE_ALLOWLIST = new Set([
   'migrate-supabase-to-neon.mjs',
@@ -45,6 +52,7 @@ const CONNECT_MARKERS = [
   'workerd auth:',
   'migrate users:',
   'migrate e2e:',
+  'harness opened',
   'UNEXPECTED_CONNECT',
   'connect E',
   'getaddrinfo',
@@ -58,12 +66,20 @@ const neon = 'postgresql://neondb@ep-prod.us-east-1.aws.neon.tech/zeroed'
 const lookalike = 'postgresql://app@127.0.0.1.example.com/zeroed'
 const prodLocalUser = 'postgresql://localhost_admin@ep-prod.neon.tech/zeroed'
 const nonLoopback = 'postgresql://postgres@db.example.com:5432/zeroed'
+const loopback = 'postgresql://postgres@127.0.0.1:5432/zeroed'
+const hostBypass = 'postgres://u:x@localhost:55440/db?host=ep-x.neon.tech'
+const hostaddrBypass = 'postgres://u:x@localhost:55440/db?sslmode=disable&hostaddr=1.2.3.4'
+const multiHost = 'postgresql://localhost,ep-x.neon.tech/zeroed'
 
 const URL_CASES = [
-  { label: 'non-loopback', url: nonLoopback, host: 'db.example.com' },
-  { label: 'Neon', url: neon, host: 'ep-prod.us-east-1.aws.neon.tech' },
-  { label: 'lookalike', url: lookalike, host: '127.0.0.1.example.com' },
-  { label: 'localhost-in-userinfo', url: prodLocalUser, host: 'ep-prod.neon.tech' },
+  { label: 'non-loopback', url: nonLoopback, evidence: 'db.example.com" is not loopback', env: {} },
+  { label: 'Neon', url: neon, evidence: 'ep-prod.us-east-1.aws.neon.tech" is not loopback', env: {} },
+  { label: 'lookalike', url: lookalike, evidence: '127.0.0.1.example.com" is not loopback', env: {} },
+  { label: 'localhost-in-userinfo', url: prodLocalUser, evidence: 'ep-prod.neon.tech" is not loopback', env: {} },
+  { label: '?host=', url: hostBypass, evidence: 'query param "host"', env: {} },
+  { label: '&hostaddr=', url: hostaddrBypass, evidence: 'query param "hostaddr"', env: {} },
+  { label: 'multi-host', url: multiHost, evidence: 'multi-host', env: {} },
+  { label: 'PGHOST', url: loopback, evidence: 'PGHOST host "ep-x.neon.tech"', env: { PGHOST: 'ep-x.neon.tech' } },
 ] as const
 
 for (const { file, varName } of GUARDED_SCRIPTS) {
@@ -76,8 +92,8 @@ for (const { file, varName } of GUARDED_SCRIPTS) {
   )
   ok(immediate.test(src), `${name} calls refuseUnsafeTestUrl right after reading DATABASE_URL`)
   ok(
-    src.includes("from '../worker/src/authUrl.ts'"),
-    `${name} imports refuseUnsafeTestUrl from authUrl.ts`,
+    src.includes("from '../worker/src/refuseTestUrl.ts'"),
+    `${name} imports refuseUnsafeTestUrl from refuseTestUrl.ts`,
   )
 }
 
@@ -130,7 +146,17 @@ tls.connect = function (...args) {
 `,
 )
 
-function runScript(script: string, databaseUrl: string, extraEnv: NodeJS.ProcessEnv = {}) {
+const harnessProbe = join(tmpdir(), `zeroed-harness-${process.pid}.ts`)
+writeFileSync(
+  harnessProbe,
+  `import { openIsolationHarness } from ${JSON.stringify(join(root, 'worker/src/isolationDb.ts'))}
+const h = await openIsolationHarness()
+console.log('harness opened (' + h.backend + ')')
+await h.close()
+`,
+)
+
+function spawnNode(script: string, extraEnv: NodeJS.ProcessEnv) {
   const res = spawnSync(
     process.execPath,
     ['--import', preloadPath, '--experimental-strip-types', script],
@@ -141,7 +167,8 @@ function runScript(script: string, databaseUrl: string, extraEnv: NodeJS.Process
       env: {
         ...process.env,
         NODE_NO_WARNINGS: '1',
-        DATABASE_URL: databaseUrl,
+        PGHOST: '',
+        PGHOSTADDR: '',
         ...extraEnv,
       },
     },
@@ -153,19 +180,26 @@ function runScript(script: string, databaseUrl: string, extraEnv: NodeJS.Process
   }
 }
 
+function runScript(script: string, databaseUrl: string, extraEnv: NodeJS.ProcessEnv = {}) {
+  return spawnNode(script, { DATABASE_URL: databaseUrl, ...extraEnv })
+}
+
+function runHarness(databaseUrl: string, extraEnv: NodeJS.ProcessEnv = {}) {
+  return spawnNode(harnessProbe, { ZEROED_TEST_DATABASE_URL: databaseUrl, ...extraEnv })
+}
+
 function refusedWithoutConnect(
-  script: string,
+  name: string,
   caseLabel: string,
-  result: ReturnType<typeof runScript>,
-  host: string,
+  result: ReturnType<typeof spawnNode>,
+  evidence: string,
 ) {
-  const name = script.replace(/^scripts\//, '')
   const label = `${name} ${caseLabel}`
   ok(result.status !== 0, `${label}: exits non-zero`)
   ok(!result.timedOut, `${label}: does not wait on a remote connect`)
   ok(
-    result.out.includes(`${host}" is not loopback`) && result.out.includes('refusing to wipe'),
-    `${label}: names the non-loopback host and refuses`,
+    result.out.includes(evidence) && result.out.includes('refusing to wipe'),
+    `${label}: refuses with ${JSON.stringify(evidence)}`,
   )
   ok(
     CONNECT_MARKERS.every((marker) => !result.out.includes(marker)),
@@ -174,16 +208,31 @@ function refusedWithoutConnect(
 }
 
 for (const { file } of GUARDED_SCRIPTS) {
+  const name = file.replace(/^scripts\//, '')
   for (const urlCase of URL_CASES) {
-    refusedWithoutConnect(file, urlCase.label, runScript(file, urlCase.url), urlCase.host)
+    refusedWithoutConnect(
+      name,
+      urlCase.label,
+      runScript(file, urlCase.url, urlCase.env),
+      urlCase.evidence,
+    )
   }
 }
 
+for (const urlCase of URL_CASES) {
+  refusedWithoutConnect(
+    'isolation harness',
+    urlCase.label,
+    runHarness(urlCase.url, urlCase.env),
+    urlCase.evidence,
+  )
+}
+
 refusedWithoutConnect(
-  'scripts/prove-postgres.mjs',
+  'prove-postgres.mjs',
   'ENVIRONMENT=local + Neon',
   runScript('scripts/prove-postgres.mjs', neon, { ENVIRONMENT: 'local', ZEROED_REAL_PG: '1' }),
-  'ep-prod.us-east-1.aws.neon.tech',
+  'ep-prod.us-east-1.aws.neon.tech" is not loopback',
 )
 
 console.log(`${checks} checks, ${fails.length} failed`)

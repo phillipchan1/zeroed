@@ -7,7 +7,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { Client } from 'pg'
-import { refuseUnsafeTestUrl } from '../worker/src/authUrl.ts'
+import { refuseUnsafeTestUrl } from '../worker/src/refuseTestUrl.ts'
 import { unstable_dev } from 'wrangler'
 
 const here = dirname(fileURLToPath(import.meta.url))

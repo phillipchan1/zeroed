@@ -11,9 +11,9 @@ import {
   isLocalAuthHost,
   isLocalAuthRuntime,
   isLoopbackHostname,
-  refuseUnsafeTestUrl,
   resolveAuthBaseURL,
 } from './authUrl.ts'
+import { refuseUnsafeTestUrl } from './refuseTestUrl.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -61,6 +61,25 @@ function throwsRefuse(url: string, label?: string): string | false {
   }
 }
 
+function throwsRefuseEnv(
+  url: string,
+  env: { PGHOST?: string; PGHOSTADDR?: string },
+): string | false {
+  const prev = { PGHOST: process.env.PGHOST, PGHOSTADDR: process.env.PGHOSTADDR }
+  try {
+    if (env.PGHOST === undefined) delete process.env.PGHOST
+    else process.env.PGHOST = env.PGHOST
+    if (env.PGHOSTADDR === undefined) delete process.env.PGHOSTADDR
+    else process.env.PGHOSTADDR = env.PGHOSTADDR
+    return throwsRefuse(url)
+  } finally {
+    if (prev.PGHOST === undefined) delete process.env.PGHOST
+    else process.env.PGHOST = prev.PGHOST
+    if (prev.PGHOSTADDR === undefined) delete process.env.PGHOSTADDR
+    else process.env.PGHOSTADDR = prev.PGHOSTADDR
+  }
+}
+
 ok(throwsRefuse(neon) !== false && String(throwsRefuse(neon)).includes('not loopback'), 'refuseUnsafeTestUrl: Neon throws')
 ok(
   String(throwsRefuse(neon, 'DATABASE_URL')).includes('DATABASE_URL host "ep-prod.us-east-1.aws.neon.tech"'),
@@ -72,6 +91,32 @@ ok(throwsRefuse('postgresql://app@127.0.0.1.example.com/zeroed') !== false, 'ref
 ok(throwsRefuse(loopbackPg) === false, 'refuseUnsafeTestUrl: localhost URL is allowed')
 ok(throwsRefuse(loopbackV4) === false, 'refuseUnsafeTestUrl: 127.0.0.1 URL is allowed')
 ok(throwsRefuse(loopbackV6) === false, 'refuseUnsafeTestUrl: [::1] URL is allowed')
+ok(throwsRefuse('postgresql://postgres@127.1:5432/zeroed') !== false, 'refuseUnsafeTestUrl: 127.1 is not an allowed test host')
+
+const hostBypass = 'postgres://u:x@localhost:55440/db?host=ep-x.neon.tech'
+const hostaddrBypass = 'postgres://u:x@localhost:55440/db?sslmode=disable&hostaddr=1.2.3.4'
+const serviceBypass = 'postgres://u:x@localhost:5432/db?service=neon'
+const multiHost = 'postgresql://localhost,ep-x.neon.tech/zeroed'
+ok(
+  String(throwsRefuse(hostBypass)).includes('query param "host"') && String(throwsRefuse(hostBypass)).includes('refusing to wipe'),
+  'refuseUnsafeTestUrl: ?host= redirect is refused',
+)
+ok(
+  String(throwsRefuse(hostaddrBypass)).includes('query param "hostaddr"'),
+  'refuseUnsafeTestUrl: &hostaddr= redirect is refused',
+)
+ok(String(throwsRefuse(serviceBypass)).includes('query param "service"'), 'refuseUnsafeTestUrl: ?service= is refused')
+ok(String(throwsRefuse(multiHost)).includes('multi-host'), 'refuseUnsafeTestUrl: multi-host list is refused')
+ok(
+  String(throwsRefuseEnv(loopbackV4, { PGHOST: 'ep-x.neon.tech' })).includes('PGHOST host "ep-x.neon.tech"'),
+  'refuseUnsafeTestUrl: PGHOST override is refused',
+)
+ok(
+  String(throwsRefuseEnv(loopbackV4, { PGHOSTADDR: '1.2.3.4' })).includes('PGHOSTADDR host "1.2.3.4"'),
+  'refuseUnsafeTestUrl: PGHOSTADDR override is refused',
+)
+ok(throwsRefuseEnv(loopbackV4, { PGHOST: '127.0.0.1' }) === false, 'refuseUnsafeTestUrl: loopback PGHOST is allowed')
+ok(throwsRefuse('/var/run/postgresql zeroed') !== false, 'refuseUnsafeTestUrl: unix socket path is not a URL / not loopback')
 
 ok(!isLocalAuthRuntime({ DATABASE_URL: neon }), 'Neon URL is not local')
 ok(!isLocalAuthRuntime({}), 'empty env is not local')

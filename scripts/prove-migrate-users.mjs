@@ -27,7 +27,7 @@ import {
   parseCounts,
   writeTargetOrCleanup,
 } from './migrate-users.lib.mjs'
-import { refuseUnsafeTestUrl } from '../worker/src/authUrl.ts'
+import { refuseUnsafeTestUrl } from '../worker/src/refuseTestUrl.ts'
 
 const url = process.env.DATABASE_URL?.trim()
 if (!url) throw new Error('DATABASE_URL is required for check:migrate-users')
