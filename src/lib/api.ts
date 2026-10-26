@@ -25,15 +25,19 @@ export function resolveApiBaseUrl(raw: string | undefined, native = false): {
   return { url: trimmed, needsAbsolute: native && relative }
 }
 
-export function apiBaseUrl(): string | null {
-  const { url, needsAbsolute } = resolveApiBaseUrl(import.meta.env.VITE_API_BASE_URL, isNativeShell())
+export function resolvedApiBase(raw: string | undefined, native = false): string | null {
+  const { url, needsAbsolute } = resolveApiBaseUrl(raw, native)
   if (needsAbsolute) {
-    console.error(
+    throw new Error(
       '[zeroed] VITE_API_BASE_URL must be absolute on iOS (https://<worker>/api). ' +
       'A relative /api cannot reach the Worker from Capacitor.',
     )
   }
   return url
+}
+
+export function apiBaseUrl(): string | null {
+  return resolvedApiBase(import.meta.env.VITE_API_BASE_URL, isNativeShell())
 }
 
 /** True when the build talks to the Cloudflare Worker, not Supabase functions. */

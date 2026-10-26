@@ -632,6 +632,123 @@ ok((await count('insight', 'athlete_id = $1', [B])) === 1, 'DELETE insight: B in
 ok((await loadWorkout(storeA, WORKOUT_A))?.workout.routine_id === ROUTINE_A, 'post-write: A workout still readable')
 ok((await loadWorkout(storeA, WORKOUT_B)) === null, 'post-write: B workout still hidden from A')
 
+// --- B1 cross-user upsert (must fail before owner WHERE on DO UPDATE) ---
+const stealProgram = await executeDataQuery(sql, ctxA, {
+  table: 'program',
+  op: 'upsert',
+  values: { id: PROG_B, goal: 'stolen-by-A', status: 'active' },
+  onConflict: 'id',
+  returning: '*',
+  single: 'maybe',
+})
+ok(
+  Boolean(stealProgram.error) || stealProgram.data == null || (stealProgram.data as { id?: string }).id !== PROG_B,
+  'data upsert: A cannot take B program id',
+)
+ok((await scalar<string>('SELECT athlete_id::text FROM program WHERE id = $1', [PROG_B])) === B, 'data upsert: B program athlete_id unchanged')
+ok((await count('workout', 'id = $1', [WORKOUT_B])) === 1, 'data upsert: B workout still on B tree')
+
+const stealWorkout = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'upsert',
+  values: { id: WORKOUT_B, routine_id: ROUTINE_A, rpe: 1, performed_at: '2026-10-23T12:00:00Z' },
+  onConflict: 'id',
+  returning: '*',
+  single: 'maybe',
+})
+ok(Boolean(stealWorkout.error) || stealWorkout.data == null, 'data upsert: A cannot take B workout id')
+ok((await scalar<string>('SELECT routine_id::text FROM workout WHERE id = $1', [WORKOUT_B])) === ROUTINE_B, 'data upsert: B workout routine unchanged')
+
+// --- B2 FK repoint into B's tree ---
+const plantedDraft = await executeDataQuery(sql, ctxA, {
+  table: 'workout_draft',
+  op: 'upsert',
+  values: {
+    routine_id: ROUTINE_A,
+    set_logs: {},
+    feedback: {},
+    elapsed_seconds: 1,
+    started_at: '2026-10-21T12:00:00Z',
+    updated_at: '2026-10-21T12:00:00Z',
+  },
+  onConflict: 'athlete_id,routine_id',
+  returning: '*',
+  single: 'one',
+})
+const draftId = (plantedDraft.data as { id: string } | null)?.id
+ok(draftId != null && plantedDraft.error == null, 'data draft: A can upsert own draft')
+
+const repointObs = await executeDataQuery(sql, ctxA, {
+  table: 'session_observation',
+  op: 'update',
+  values: { workout_id: WORKOUT_B },
+  filters: [{ column: 'id', op: 'eq', value: 'aaaa1111-0000-4000-8000-000000000001' }],
+  returning: '*',
+})
+ok(
+  Boolean(repointObs.error) || Number(repointObs.count ?? 0) === 0,
+  'data update: A cannot repoint observation onto B workout',
+)
+ok(
+  (await scalar<string>('SELECT workout_id::text FROM session_observation WHERE id = $1', ['aaaa1111-0000-4000-8000-000000000001'])) === WORKOUT_A,
+  'data update: A observation still on A workout',
+)
+
+const aRoutinePhase = await scalar<string>('SELECT phase_id::text FROM routine WHERE id = $1', [ROUTINE_A])
+const repointPhase = await executeDataQuery(sql, ctxA, {
+  table: 'routine',
+  op: 'update',
+  values: { phase_id: PHASE_B },
+  filters: [{ column: 'id', op: 'eq', value: ROUTINE_A }],
+  returning: '*',
+})
+ok(
+  Boolean(repointPhase.error) || Number(repointPhase.count ?? 0) === 0,
+  'data update: A cannot repoint routine onto B phase',
+)
+ok((await scalar<string>('SELECT phase_id::text FROM routine WHERE id = $1', [ROUTINE_A])) === aRoutinePhase, 'data update: A routine phase unchanged')
+
+const repointDraft = await executeDataQuery(sql, ctxA, {
+  table: 'workout_draft',
+  op: 'update',
+  values: { routine_id: ROUTINE_B },
+  filters: [{ column: 'id', op: 'eq', value: draftId }],
+})
+ok(
+  Boolean(repointDraft.error) || Number(repointDraft.count ?? 0) === 0,
+  'data update: A cannot repoint draft onto B routine',
+)
+ok((await scalar<string>('SELECT routine_id::text FROM workout_draft WHERE id = $1', [draftId])) === ROUTINE_A, 'data update: A draft still on A routine')
+
+// --- B3 embed must not leak B's child after a repoint attempt ---
+const embedDraft = await executeDataQuery(sql, ctxA, {
+  table: 'workout_draft',
+  op: 'select',
+  columns: 'id, routine:routine_id(name,exercises,program_id)',
+  filters: [{ column: 'id', op: 'eq', value: draftId }],
+  single: 'maybe',
+})
+const embedRoutine = (embedDraft.data as { routine?: { name?: string; program_id?: string } } | null)?.routine
+ok(embedRoutine?.name !== 'B day', 'data embed: A draft does not leak B routine name')
+ok(embedRoutine?.program_id !== PROG_B, 'data embed: A draft does not leak B program_id')
+
+const xminEmbed = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'select',
+  columns: 'id, routine!inner(xmin)',
+})
+ok(Boolean(xminEmbed.error), 'data embed: xmin is not an allowed column')
+ok(!String(xminEmbed.error?.message ?? '').includes('does not exist'), 'data embed: xmin error is generic')
+
+const deleteProgram = await executeDataQuery(sql, ctxA, {
+  table: 'program',
+  op: 'delete',
+  filters: [{ column: 'id', op: 'eq', value: PROG_A }],
+})
+ok(Boolean(deleteProgram.error), 'data delete: program is not deletable')
+ok((await count('program', 'id = $1', [PROG_A])) === 1, 'data delete: A program still present')
+ok((await count('program', 'id = $1', [PROG_B])) === 1, 'data delete: B program still present')
+
 await harness.close()
 
 console.log(`${checks} checks, ${fails.length} failed (${harness.backend})`)

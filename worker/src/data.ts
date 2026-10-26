@@ -164,6 +164,41 @@ const FK_TO_TABLE: Record<string, string> = {
   athlete_id: 'athlete',
 }
 
+/** Child FK → parent table. Re-checked on insert, update, and upsert. */
+const FOREIGN_KEYS: Record<string, readonly { column: string; parent: string; required?: boolean }[]> = {
+  athlete_profile: [{ column: 'athlete_id', parent: 'athlete' }],
+  diagnostic: [{ column: 'athlete_id', parent: 'athlete' }],
+  insight: [{ column: 'athlete_id', parent: 'athlete' }],
+  insight_draft: [{ column: 'athlete_id', parent: 'athlete' }],
+  program: [{ column: 'athlete_id', parent: 'athlete' }],
+  coach_message: [{ column: 'athlete_id', parent: 'athlete' }],
+  mcp_token: [{ column: 'athlete_id', parent: 'athlete' }],
+  workout_draft: [
+    { column: 'athlete_id', parent: 'athlete' },
+    { column: 'routine_id', parent: 'routine' },
+  ],
+  phase: [{ column: 'program_id', parent: 'program', required: true }],
+  routine: [
+    { column: 'program_id', parent: 'program', required: true },
+    { column: 'phase_id', parent: 'phase' },
+  ],
+  weekly_review: [{ column: 'program_id', parent: 'program', required: true }],
+  program_revision: [
+    { column: 'program_id', parent: 'program', required: true },
+    { column: 'phase_id', parent: 'phase' },
+  ],
+  workout: [{ column: 'routine_id', parent: 'routine', required: true }],
+  session_observation: [{ column: 'workout_id', parent: 'workout', required: true }],
+}
+
+const DELETABLE = new Set(['workout_draft', 'mcp_token', 'session_observation'])
+
+export const SESSION_LOOKUP_SQL =
+  `SELECT u.id, u.email FROM session s JOIN "user" u ON u.id = s.user_id WHERE s.token = $1 AND s.expires_at > NOW() LIMIT 1`
+
+const SESSION_LOOKUP_CAMEL =
+  `SELECT u.id, u.email FROM session s JOIN "user" u ON u.id = s."userId" WHERE s.token = $1 AND s."expiresAt" > NOW() LIMIT 1`
+
 export type SelectItem =
   | { kind: 'star' }
   | { kind: 'col'; name: string }
@@ -241,9 +276,24 @@ export function ownerPredicate(table: string): string {
   }
 }
 
-export function bindOwner(table: string, athleteId: string, start = 1): { text: string; params: unknown[] } {
+function qualifyOwnerText(text: string, alias: string): string {
+  return text
+    .replace(/^id =/, `${alias}.id =`)
+    .replace(/^athlete_id =/, `${alias}.athlete_id =`)
+    .replace(/^program_id IN/, `${alias}.program_id IN`)
+    .replace(/^routine_id IN/, `${alias}.routine_id IN`)
+    .replace(/^workout_id IN/, `${alias}.workout_id IN`)
+}
+
+export function bindOwner(
+  table: string,
+  athleteId: string,
+  start = 1,
+  alias?: string,
+): { text: string; params: unknown[] } {
   const raw = ownerPredicate(table)
-  const text = raw.replace(/\$\{athleteId\}/g, `$${start}`)
+  let text = raw.replace(/\$\{athleteId\}/g, `$${start}`)
+  if (alias) text = qualifyOwnerText(text, alias)
   return { text, params: [athleteId] }
 }
 
@@ -258,20 +308,28 @@ export async function resolveAthleteId(sql: Sql, userId: string): Promise<string
   return rows[0]?.id ?? null
 }
 
+/** Better Auth cookie/bearer is `token.signature`. Look up the unsigned token. */
+export function unsignedSessionToken(raw: string | null | undefined): string | null {
+  if (!raw) return null
+  let value = raw.trim()
+  if (!value) return null
+  try {
+    value = decodeURIComponent(value)
+  } catch {
+    /* already decoded */
+  }
+  const dot = value.indexOf('.')
+  return dot === -1 ? value : value.slice(0, dot)
+}
+
 function bearerToken(req: Request): string | null {
   const header = req.headers.get('authorization')
   if (header && header.slice(0, 7).toLowerCase() === 'bearer ') {
-    const token = header.slice(7).trim()
-    return token || null
+    return unsignedSessionToken(header.slice(7))
   }
   const cookie = req.headers.get('cookie') ?? ''
   const match = cookie.match(/(?:^|;\s*)(?:__Secure-)?better-auth\.session_token=([^;]+)/)
-  if (!match?.[1]) return null
-  try {
-    return decodeURIComponent(match[1])
-  } catch {
-    return match[1]
-  }
+  return unsignedSessionToken(match?.[1] ?? null)
 }
 
 /** Session lookup in the same SQL as the query — avoids Better Auth's cached pool. */
@@ -281,16 +339,13 @@ export async function sessionFromRequest(
 ): Promise<{ id: string; email?: string | null } | null> {
   const token = bearerToken(req)
   if (!token) return null
-  const rows = await runSql<{ id: string; email: string | null }>(
-    sql,
-    `SELECT u.id, u.email
-       FROM session s
-       JOIN "user" u ON u.id = s."userId"
-      WHERE s.token = $1 AND s."expiresAt" > NOW()
-      LIMIT 1`,
-    [token],
-  )
-  return rows[0] ?? null
+  try {
+    const rows = await runSql<{ id: string; email: string | null }>(sql, SESSION_LOOKUP_SQL, [token])
+    return rows[0] ?? null
+  } catch {
+    const rows = await runSql<{ id: string; email: string | null }>(sql, SESSION_LOOKUP_CAMEL, [token])
+    return rows[0] ?? null
+  }
 }
 
 function ident(name: string): string {
@@ -314,11 +369,11 @@ function colOk(table: string, name: string): string {
 function qualifyCol(table: string, column: string, joins: Map<string, string>): string {
   if (column.includes('.')) {
     const parts = column.split('.')
-    const field = ident(parts[parts.length - 1])
     const alias = ident(parts[parts.length - 2])
     if (!joins.has(alias) && alias !== table) {
       throw new Error(`unknown filter path: ${column}`)
     }
+    const field = colOk(alias, parts[parts.length - 1])
     return `${alias}.${field}`
   }
   return `${table}.${colOk(table, column)}`
@@ -371,7 +426,7 @@ function embedJson(alias: string, items: SelectItem[]): string {
       throw new Error('embedded * is not supported')
     }
     if (item.kind === 'col') {
-      fields.push(`'${item.name}', ${alias}.${ident(item.name)}`)
+      fields.push(`'${item.name}', ${alias}.${colOk(alias, item.name)}`)
     } else {
       const childAlias = item.fkHint ? (FK_TO_TABLE[item.rel] ?? item.alias) : (REL[alias]?.[item.rel]?.table ?? item.alias)
       fields.push(`'${item.alias}', ${embedJson(childAlias, item.items)}`)
@@ -462,10 +517,14 @@ function whereClause(
   const params: unknown[] = []
   let n = start
   if (athleteId) {
-    const owner = bindOwner(table, athleteId, n)
+    const ownerSlot = n
+    const owner = bindOwner(table, athleteId, ownerSlot, table)
     parts.push(owner.text)
-    params.push(...owner.params)
-    n += owner.params.length
+    for (const alias of joins.keys()) {
+      parts.push(bindOwner(alias, athleteId, ownerSlot, alias).text)
+    }
+    params.push(athleteId)
+    n++
   } else if (table === 'athlete') {
     parts.push(`auth_user_id = $${n}`)
     params.push(userId)
@@ -527,11 +586,31 @@ function rowsOf(values: DataQuery['values']): Record<string, unknown>[] {
   return Array.isArray(values) ? values : [values]
 }
 
+async function assertOwnedParent(
+  sql: Sql,
+  parent: string,
+  id: string,
+  athleteId: string,
+): Promise<DataResult | null> {
+  if (parent === 'athlete') {
+    return id === athleteId ? null : fail('not found', 404)
+  }
+  const owner = bindOwner(parent, athleteId, 1, parent)
+  const ok = await runSql<{ id: string }>(
+    sql,
+    `SELECT ${parent}.id FROM ${parent} WHERE ${owner.text} AND ${parent}.id = $2 LIMIT 1`,
+    [...owner.params, id],
+  )
+  if (!ok[0]) return fail('not found', 404)
+  return null
+}
+
 async function assertWritableRow(
   sql: Sql,
   table: string,
   row: Record<string, unknown>,
   ctx: DataContext,
+  requireMissing = true,
 ): Promise<DataResult | null> {
   if (!ctx.athleteId) {
     if (table === 'athlete') {
@@ -541,60 +620,25 @@ async function assertWritableRow(
     return fail('not signed in as an athlete', 401)
   }
   const athleteId = ctx.athleteId
-  if (ATHLETE_COL.has(table)) {
-    row.athlete_id = athleteId
-    if (table === 'workout_draft' && typeof row.routine_id === 'string') {
-      const owner = bindOwner('routine', athleteId, 1)
-      const ok = await runSql<{ id: string }>(
-        sql,
-        `SELECT id FROM routine WHERE ${owner.text} AND id = $2 LIMIT 1`,
-        [...owner.params, row.routine_id],
-      )
-      if (!ok[0]) return fail('not found', 404)
-    }
-    return null
-  }
   if (table === 'athlete') {
     row.auth_user_id = ctx.userId
     return null
   }
-  if (VIA_PROGRAM.has(table)) {
-    const programId = row.program_id
-    if (typeof programId !== 'string') return fail('program_id required', 400)
-    const owner = bindOwner('program', athleteId, 1)
-    const ok = await runSql<{ id: string }>(
-      sql,
-      `SELECT id FROM program WHERE ${owner.text} AND id = $2 LIMIT 1`,
-      [...owner.params, programId],
-    )
-    if (!ok[0]) return fail('not found', 404)
-    return null
+  if (ATHLETE_COL.has(table)) row.athlete_id = athleteId
+
+  const fks = FOREIGN_KEYS[table] ?? []
+  for (const fk of fks) {
+    if (fk.column === 'athlete_id') continue
+    const value = row[fk.column]
+    if (value == null || value === '') {
+      if (requireMissing && fk.required) return fail(`${fk.column} required`, 400)
+      continue
+    }
+    if (typeof value !== 'string') return fail(`${fk.column} required`, 400)
+    const blocked = await assertOwnedParent(sql, fk.parent, value, athleteId)
+    if (blocked) return blocked
   }
-  if (table === 'workout') {
-    const routineId = row.routine_id
-    if (typeof routineId !== 'string') return fail('routine_id required', 400)
-    const owner = bindOwner('routine', athleteId, 1)
-    const ok = await runSql<{ id: string }>(
-      sql,
-      `SELECT id FROM routine WHERE ${owner.text} AND id = $2 LIMIT 1`,
-      [...owner.params, routineId],
-    )
-    if (!ok[0]) return fail('not found', 404)
-    return null
-  }
-  if (table === 'session_observation') {
-    const workoutId = row.workout_id
-    if (typeof workoutId !== 'string') return fail('workout_id required', 400)
-    const owner = bindOwner('workout', athleteId, 1)
-    const ok = await runSql<{ id: string }>(
-      sql,
-      `SELECT id FROM workout WHERE ${owner.text} AND id = $2 LIMIT 1`,
-      [...owner.params, workoutId],
-    )
-    if (!ok[0]) return fail('not found', 404)
-    return null
-  }
-  return fail('unknown table', 400)
+  return null
 }
 
 async function resetOrientation(sql: Sql, athleteId: string): Promise<DataResult> {
@@ -699,10 +743,19 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
         if (conflict.length === 0) return fail('upsert requires onConflict', 400)
         const conflictCols = conflict.map((c) => colOk(table, c))
         const updates = cols.filter((c) => !conflictCols.includes(c)).map((c) => `${c} = EXCLUDED.${c}`)
-        text += ` ON CONFLICT (${conflictCols.join(', ')}) DO ${updates.length ? `UPDATE SET ${updates.join(', ')}` : 'NOTHING'}`
+        if (!updates.length) {
+          text += ` ON CONFLICT (${conflictCols.join(', ')}) DO NOTHING`
+        } else if (ctx.athleteId) {
+          const owner = bindOwner(table, ctx.athleteId, params.length + 1, table)
+          text += ` ON CONFLICT (${conflictCols.join(', ')}) DO UPDATE SET ${updates.join(', ')} WHERE ${owner.text}`
+          params.push(...owner.params)
+        } else {
+          text += ` ON CONFLICT (${conflictCols.join(', ')}) DO UPDATE SET ${updates.join(', ')}`
+        }
       }
       text += ` ${returningSql(table, query.returning)}`
       const rows = await runSql<object>(sql, text, params)
+      if (query.op === 'upsert' && rows.length === 0 && ctx.athleteId) return fail('not found', 404)
       if (!query.returning) return { data: null, error: null, count: rows.length, status: 201 }
       return shapeResult(rows, query, rows.length)
     }
@@ -716,14 +769,8 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       delete row.auth_user_id
       if (ATHLETE_COL.has(table)) row.athlete_id = ctx.athleteId
       if (table === 'athlete') delete row.athlete_id
-      if (table === 'workout' && row.routine_id) {
-        const blocked = await assertWritableRow(sql, table, { routine_id: row.routine_id }, ctx)
-        if (blocked) return blocked
-      }
-      if (VIA_PROGRAM.has(table) && row.program_id) {
-        const blocked = await assertWritableRow(sql, table, { program_id: row.program_id }, ctx)
-        if (blocked) return blocked
-      }
+      const blocked = await assertWritableRow(sql, table, row, ctx, false)
+      if (blocked) return blocked
       const cols = Object.keys(row).filter((k) => row[k] !== undefined)
       if (cols.length === 0) return fail('update requires columns', 400)
       const params: unknown[] = []
@@ -744,6 +791,7 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
 
     if (query.op === 'delete') {
       if (!ctx.athleteId) return fail('not signed in as an athlete', 401)
+      if (!DELETABLE.has(table)) return fail('not found', 404)
       const joins = new Map<string, string>()
       for (const filter of query.filters ?? []) walkFilterPath(table, filter.column, joins)
       if (joins.size > 0) return fail('delete with embeds is not supported', 400)
@@ -756,9 +804,24 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
 
     return fail('unknown op', 400)
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    return fail(message, 400)
+    return fail(safeClientMessage(err), 400)
   }
+}
+
+export function safeClientMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err)
+  if (
+    /^(unknown |bad identifier|unsupported |not signed|insert requires|update requires|upsert requires|refusing |embedded |not found)/i.test(message)
+    || message.includes('unknown column')
+    || message.includes('unknown table')
+    || message.includes('unknown fk')
+    || message.includes('unknown relation')
+    || message.includes('unknown filter')
+    || message.includes('unknown rpc')
+    || message.includes('unknown op')
+    || message.includes('unknown select')
+  ) return message
+  return 'request failed'
 }
 
 export async function handleData(req: Request, env: Env): Promise<Response> {
@@ -787,8 +850,7 @@ export async function handleData(req: Request, env: Env): Promise<Response> {
         cors,
       )
     })
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    return json({ data: null, error: { message }, count: null }, 500, cors)
+  } catch {
+    return json({ data: null, error: { message: 'request failed' }, count: null }, 500, cors)
   }
 }

@@ -1,5 +1,12 @@
 // Run: node --experimental-strip-types worker/src/data.check.ts
-import { bindOwner, ownerPredicate, parseSelectList } from './data.ts'
+import {
+  bindOwner,
+  ownerPredicate,
+  parseSelectList,
+  SESSION_LOOKUP_SQL,
+  safeClientMessage,
+  unsignedSessionToken,
+} from './data.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -29,6 +36,15 @@ ok(ownerPredicate('session_observation').includes('p.athlete_id = ${athleteId}')
 const bound = bindOwner('insight', '11111111-1111-1111-1111-111111111111', 3)
 ok(bound.text === 'athlete_id = $3', 'bindOwner: $n replacement')
 ok(bound.params[0] === '11111111-1111-1111-1111-111111111111', 'bindOwner: athlete id param')
+const qualified = bindOwner('phase', '11111111-1111-1111-1111-111111111111', 1, 'phase')
+ok(qualified.text.startsWith('phase.program_id IN'), 'bindOwner: qualify program_id for joins')
+ok(unsignedSessionToken('tok.signature') === 'tok', 'cookie token strips Better Auth signature')
+ok(unsignedSessionToken('tok') === 'tok', 'unsigned bearer is unchanged')
+ok(unsignedSessionToken('tok%2Esig') === 'tok', 'url-encoded cookie signature is stripped')
+ok(SESSION_LOOKUP_SQL.includes('s.user_id') && SESSION_LOOKUP_SQL.includes('s.expires_at'), 'session SQL matches better-auth.sql')
+ok(!SESSION_LOOKUP_SQL.includes('"userId"') && !SESSION_LOOKUP_SQL.includes('"expiresAt"'), 'session SQL is not camelCase')
+ok(safeClientMessage(new Error('column xmin does not exist')) === 'request failed', 'raw DB errors are generic')
+ok(safeClientMessage(new Error('unknown column routine.xmin')) === 'unknown column routine.xmin', 'allowlist errors stay specific')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {

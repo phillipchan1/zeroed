@@ -1,5 +1,5 @@
 // Run: node --experimental-strip-types src/lib/api.check.ts
-import { resolveApiBaseUrl } from './api.ts'
+import { resolveApiBaseUrl, resolvedApiBase } from './api.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -16,6 +16,15 @@ ok(resolveApiBaseUrl('/api', true).needsAbsolute === true, 'iOS relative /api is
 ok(resolveApiBaseUrl('https://zeroed.example.workers.dev/api', true).needsAbsolute === false, 'iOS absolute worker URL is ok')
 ok(resolveApiBaseUrl('https://zeroed.example.workers.dev/api/', true).url === 'https://zeroed.example.workers.dev/api', 'trailing slash stripped')
 ok(resolveApiBaseUrl('"https://zeroed.example.workers.dev/api"').url === 'https://zeroed.example.workers.dev/api', 'quoted paste is cleaned')
+ok(resolvedApiBase('/api', false) === '/api', 'web runtime accepts relative /api')
+ok(resolvedApiBase('https://zeroed.example.workers.dev/api', true) === 'https://zeroed.example.workers.dev/api', 'iOS absolute runtime is ok')
+let threw = false
+try {
+  resolvedApiBase('/api', true)
+} catch {
+  threw = true
+}
+ok(threw, 'iOS relative /api throws at runtime')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {
