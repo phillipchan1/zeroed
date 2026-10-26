@@ -16,6 +16,7 @@ name: iOS TestFlight
 #   - scripts/appstore-next-build-number.mjs so a re-run never collides
 #   - skip green when the ASC secrets are missing
 #   - VITE_API_BASE_URL from a repo variable; VITE_SUPABASE_* only when it is empty
+#   - .p8 written with umask 077 after cap sync, deleted via a fixed path/glob
 
 on:
   push:
@@ -74,16 +75,16 @@ jobs:
     if: needs.secrets-ready.outputs.ready == 'true'
     concurrency:
       group: ios-testflight
-      cancel-in-progress: true
+      cancel-in-progress: false
     runs-on: macos-latest
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
         with:
           fetch-depth: 0
 
       - name: Set up Node
-        uses: actions/setup-node@v5
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
           cache: npm
@@ -104,49 +105,6 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "Building iOS version $VERSION (build $BUILD_NUMBER)"
 
-      - name: Write App Store Connect API key
-        env:
-          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
-          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
-          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
-        run: |
-          set -euo pipefail
-          KEY_PATH="${RUNNER_TEMP}/AuthKey_${ASC_API_KEY_ID}.p8"
-          if printf '%s' "$ASC_API_KEY_P8" | grep -q -- '-----BEGIN'; then
-            printf '%s\n' "$ASC_API_KEY_P8" > "$KEY_PATH"
-          else
-            printf '%s' "$ASC_API_KEY_P8" | base64 --decode > "$KEY_PATH"
-            if ! grep -q -- '-----BEGIN' "$KEY_PATH"; then
-              echo "::error::ASC_API_KEY_P8 is neither a PEM .p8 nor valid base64 of one."
-              exit 1
-            fi
-          fi
-          chmod 600 "$KEY_PATH"
-          # altool looks up AuthKey_<id>.p8 under ~/.appstoreconnect/private_keys
-          ALTOOL_DIR="${HOME}/.appstoreconnect/private_keys"
-          mkdir -p "$ALTOOL_DIR"
-          cp "$KEY_PATH" "${ALTOOL_DIR}/AuthKey_${ASC_API_KEY_ID}.p8"
-          chmod 600 "${ALTOOL_DIR}/AuthKey_${ASC_API_KEY_ID}.p8"
-          {
-            echo "APPLE_API_KEY=${ASC_API_KEY_ID}"
-            echo "APPLE_API_ISSUER=${ASC_API_ISSUER_ID}"
-            echo "APPLE_API_KEY_PATH=${KEY_PATH}"
-            echo "APPLE_API_KEY_ALTOOL_PATH=${ALTOOL_DIR}/AuthKey_${ASC_API_KEY_ID}.p8"
-          } >> "$GITHUB_ENV"
-
-      - name: Resolve build number against App Store Connect
-        run: |
-          set -euo pipefail
-          RESOLVED=$(node scripts/appstore-next-build-number.mjs \
-            --bundle-id "$IOS_BUNDLE_ID" \
-            --version "$APP_VERSION" \
-            --proposed "$BUILD_NUMBER" \
-            --key-id "$APPLE_API_KEY" \
-            --issuer-id "$APPLE_API_ISSUER" \
-            --key-path "$APPLE_API_KEY_PATH")
-          echo "BUILD_NUMBER=$RESOLVED" >> "$GITHUB_ENV"
-          echo "Resolved iOS build number: $RESOLVED"
-
       - name: Build web assets and sync Capacitor iOS
         env:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
@@ -163,6 +121,47 @@ jobs:
           npm run build
           npx cap sync ios
 
+      - name: Write App Store Connect API key
+        env:
+          ASC_API_KEY_ID: ${{ secrets.ASC_API_KEY_ID }}
+          ASC_API_ISSUER_ID: ${{ secrets.ASC_API_ISSUER_ID }}
+          ASC_API_KEY_P8: ${{ secrets.ASC_API_KEY_P8 }}
+        run: |
+          set -euo pipefail
+          umask 077
+          KEY_PATH="${{ runner.temp }}/zeroed-asc.p8"
+          ALTOOL_DIR="${HOME}/.appstoreconnect/private_keys"
+          mkdir -p "$ALTOOL_DIR"
+          if printf '%s' "$ASC_API_KEY_P8" | grep -q -- '-----BEGIN'; then
+            printf '%s\n' "$ASC_API_KEY_P8" > "$KEY_PATH"
+          else
+            printf '%s' "$ASC_API_KEY_P8" | base64 --decode > "$KEY_PATH"
+            if ! grep -q -- '-----BEGIN' "$KEY_PATH"; then
+              echo "::error::ASC_API_KEY_P8 is neither a PEM .p8 nor valid base64 of one."
+              exit 1
+            fi
+          fi
+          # altool looks up AuthKey_<id>.p8 under ~/.appstoreconnect/private_keys
+          cp "$KEY_PATH" "${ALTOOL_DIR}/AuthKey_${ASC_API_KEY_ID}.p8"
+          {
+            echo "APPLE_API_KEY=${ASC_API_KEY_ID}"
+            echo "APPLE_API_ISSUER=${ASC_API_ISSUER_ID}"
+            echo "APPLE_API_KEY_PATH=${KEY_PATH}"
+          } >> "$GITHUB_ENV"
+
+      - name: Resolve build number against App Store Connect
+        run: |
+          set -euo pipefail
+          RESOLVED=$(node scripts/appstore-next-build-number.mjs \
+            --bundle-id "$IOS_BUNDLE_ID" \
+            --version "$APP_VERSION" \
+            --proposed "$BUILD_NUMBER" \
+            --key-id "$APPLE_API_KEY" \
+            --issuer-id "$APPLE_API_ISSUER" \
+            --key-path "${{ runner.temp }}/zeroed-asc.p8")
+          echo "BUILD_NUMBER=$RESOLVED" >> "$GITHUB_ENV"
+          echo "Resolved iOS build number: $RESOLVED"
+
       - name: Build signed IPA
         env:
           APPLE_DEVELOPMENT_TEAM: ${{ secrets.APPLE_TEAM_ID }}
@@ -176,7 +175,7 @@ jobs:
           cd ios/App
           AUTH=(
             -allowProvisioningUpdates
-            -authenticationKeyPath "$APPLE_API_KEY_PATH"
+            -authenticationKeyPath "${{ runner.temp }}/zeroed-asc.p8"
             -authenticationKeyID "$APPLE_API_KEY"
             -authenticationKeyIssuerID "$APPLE_API_ISSUER"
           )
@@ -229,5 +228,6 @@ jobs:
         if: always()
         run: |
           set -euo pipefail
-          rm -f "${APPLE_API_KEY_PATH:-}" "${APPLE_API_KEY_ALTOOL_PATH:-}"
+          rm -f "${{ runner.temp }}/zeroed-asc.p8"
+          rm -f "${HOME}/.appstoreconnect/private_keys/AuthKey_"*.p8
           echo "Removed App Store Connect API key files."
