@@ -6,7 +6,7 @@
  *
  * Run: node scripts/migrate-supabase-to-neon.check.mjs
  */
-import { spawnSync } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -14,14 +14,19 @@ import { fileURLToPath } from 'node:url'
 import { PGlite } from '@electric-sql/pglite'
 import {
   addMaskLines,
+  advisoryLockParts,
+  advisoryLockVisibleSql,
   argValue,
   authUsersToCopyCsv,
+  canExecutePgControlSystemQuery,
+  checkSourceLockAbsentOnTarget,
   confirmDropMismatchReason,
   fingerprintQuery,
   formatCountComparison,
   isNeonHost,
   isSocketHost,
   isSupabaseHost,
+  libpqCleanEnv,
   loadUsersSql,
   main,
   missingMappedAuthUserIds,
@@ -34,12 +39,15 @@ import {
   parseOrphanIds,
   parseMigrateArgs,
   postgresUrlParts,
+  readFingerprint,
   redactSecrets,
   refuseSourceWipeReason,
+  releaseHeldAdvisoryLocks,
   refuseTargetFingerprintReason,
   requireCounts,
   resolveSourceUrl,
   resolveTargetUrl,
+  systemIdentifierQuery,
   wrapRestoreTransaction,
 } from './migrate-supabase-to-neon.mjs'
 
@@ -357,11 +365,18 @@ eq(confirmDropMismatchReason('NEONDB', neonDirect), '', '--confirm-drop matches 
 
 ok(fingerprintQuery().includes('to_regnamespace'), 'fingerprint query checks storage schema')
 ok(fingerprintQuery().includes('pg_policies'), 'fingerprint query checks pg_policies')
-ok(fingerprintQuery().includes('pg_control_system'), 'fingerprint query reads system_identifier when permitted')
-ok(fingerprintQuery().includes('has_function_privilege'), 'fingerprint query does not require pg_control_system')
+ok(!fingerprintQuery().includes('pg_control_system'), 'fingerprint query does not call pg_control_system')
+ok(
+  canExecutePgControlSystemQuery().includes("has_function_privilege('pg_control_system()', 'EXECUTE')"),
+  'privilege check is its own query',
+)
+ok(systemIdentifierQuery().includes('pg_control_system()'), 'sysid query is separate and only used when allowed')
 ok(fingerprintQuery().includes('inet_server_addr'), 'fingerprint query reads inet_server_addr')
 ok(fingerprintQuery().includes('inet_server_port'), 'fingerprint query reads inet_server_port')
 ok(fingerprintQuery().includes('pg_postmaster_start_time'), 'fingerprint query reads postmaster start time')
+eq(advisoryLockParts('1').objid, 1, 'advisoryLockParts low bits of 1')
+ok(advisoryLockVisibleSql('1').includes('pg_locks'), 'lock visibility query reads pg_locks')
+ok(advisoryLockVisibleSql('1').includes('objsubid = 1'), 'lock visibility query uses the bigint form')
 
 const fp = parseFingerprint('{"db":"neondb","addr":"","port":"","start":"t0","sysid":"1","has_storage":false,"has_policies":false}\n')
 eq(fp.db, 'neondb', 'parseFingerprint reads db')
@@ -473,6 +488,7 @@ ok(/one transaction/.test(drySkip.stdout), 'dry-run documents a single restore t
 ok(/--confirm-drop=<target dbname>/.test(drySkip.stdout), 'dry-run documents --confirm-drop')
 ok(/\.neon\.tech/.test(drySkip.stdout), 'dry-run documents a .neon.tech target')
 ok(/unreadable fingerprint/.test(drySkip.stdout), 'dry-run documents fail-closed fingerprints')
+ok(/advisory lock/.test(drySkip.stdout), 'dry-run documents the advisory-lock same-server check')
 ok(!/would COPY auth\.users from source/.test(drySkip.stdout), 'skip path does not COPY auth.users')
 
 const liveNoConfirm = spawnMigrate(['--skip-auth-users'], {
@@ -552,8 +568,8 @@ try {
   const dryBad = spawnMigrate(['--dry-run', '--auth-users-file', badJson])
   ok(dryBad.status !== 0, 'invalid mapping JSON fails')
 
-  let dropAttempted = false
-  const unreadFp = main(
+  let lockAttempted = false
+  const unreadFp = await main(
     ['--skip-auth-users', '--confirm-drop=neondb', '--auth-users-file', mapPath],
     {
       SUPABASE_READONLY_URL: supabaseDirect,
@@ -572,14 +588,14 @@ try {
           has_policies: false,
         }
       },
-      checkSourceMarker() {
-        dropAttempted = true
+      checkSourceLock() {
+        lockAttempted = true
         return ''
       },
     },
   )
   eq(unreadFp, 2, 'unreadable source fingerprint exits 2')
-  ok(!dropAttempted, 'unreadable source fingerprint does not write a marker or drop')
+  ok(!lockAttempted, 'unreadable source fingerprint does not take a lock or drop')
 } finally {
   rmSync(tmp, { recursive: true, force: true })
 }
@@ -624,6 +640,12 @@ ok(/umask 077/.test(workflow), 'workflow writes the mapping under umask 077')
 ok(/if: always\(\)/.test(workflow), 'workflow deletes the mapping in always()')
 ok(/Recommended/.test(workflow) && /Environment/.test(workflow), 'workflow documents a GitHub Environment as recommended')
 ok(!/^\s+environment:/.test(workflow), 'workflow does not add a protected environment key')
+const checksYml = readFileSync(join(root, '.github/workflows/checks.yml'), 'utf8')
+ok(/pg-source:/.test(checksYml), 'CI has a source Postgres service')
+ok(/pg-target:/.test(checksYml), 'CI has a target Postgres service')
+ok(/ZEROED_PG_SOURCE_URL/.test(checksYml), 'CI passes a source URL to live migrate checks')
+ok(/ZEROED_PG_TARGET_URL/.test(checksYml), 'CI passes a target URL to live migrate checks')
+ok(/ZEROED_PG_ALIAS_URL/.test(checksYml), 'CI passes an alias URL to live migrate checks')
 const migrateSrc = readFileSync(join(root, 'scripts/migrate-supabase-to-neon.mjs'), 'utf8')
 ok(!/disable-triggers/.test(migrateSrc), 'migrate script does not use --disable-triggers')
 ok(/DROP SCHEMA IF EXISTS public CASCADE/.test(migrateSrc), 'live restore drops public so a rerun starts empty')
@@ -633,7 +655,9 @@ ok(/refuseTargetFingerprintReason/.test(migrateSrc), 'live restore fingerprints 
 ok(/confirmDropMismatchReason/.test(migrateSrc), 'live restore requires --confirm-drop')
 ok(/probing target identity before drop/.test(migrateSrc), 'fingerprint probe is logged before DROP')
 ok(/could not read source fingerprint/.test(migrateSrc), 'unreadable source fingerprint fails closed')
-ok(/source marker is visible on the target/.test(migrateSrc), 'source marker visible on target is refused')
+ok(/source advisory lock is visible on the target/.test(migrateSrc), 'source lock visible on target is refused')
+ok(!/zeroed_cutover_guard/.test(migrateSrc), 'migrate script does not write a source marker schema')
+ok(/SIGINT/.test(migrateSrc) && /SIGTERM/.test(migrateSrc), 'lock session is released on SIGINT/SIGTERM')
 ok(/hostaddr/.test(migrateSrc) && /dbname/.test(migrateSrc), 'URL parser honors libpq hostaddr and dbname')
 ok(
   /INSERT INTO "user" \(id, name, email, email_verified, created_at, updated_at\)/.test(migrateSrc),
@@ -691,18 +715,204 @@ const afterReset = await db.query(`SELECT onboarding_step, obstacle FROM public.
 eq(afterReset.rows[0]?.onboarding_step, 'hook', 'reset_athlete_orientation returns the athlete to hook')
 eq(Number((await db.query(`SELECT COUNT(*)::int AS n FROM public.workout`)).rows[0]?.n ?? -1), 0, 'reset_athlete_orientation clears workouts')
 
-const livePsql = spawnSync('psql', [
-  '-c',
-  `SELECT 'athlete' AS t, 3::bigint AS n UNION ALL SELECT 'insight', 0 UNION ALL SELECT 'mcp_token', 1 UNION ALL SELECT 'phase', 1 UNION ALL SELECT 'program', 1 UNION ALL SELECT 'routine', 1 UNION ALL SELECT 'workout', 1 ORDER BY 1;`,
-], { encoding: 'utf8' })
-if (livePsql.status === 0 && livePsql.stdout) {
+const livePsqlUrl = process.env.ZEROED_CHECK_PSQL_URL || ''
+const livePsql = livePsqlUrl
+  ? spawnSync('psql', [
+    '-d',
+    livePsqlUrl,
+    '-c',
+    `SELECT 'athlete' AS t, 3::bigint AS n UNION ALL SELECT 'insight', 0 UNION ALL SELECT 'mcp_token', 1 UNION ALL SELECT 'phase', 1 UNION ALL SELECT 'program', 1 UNION ALL SELECT 'routine', 1 UNION ALL SELECT 'workout', 1 ORDER BY 1;`,
+  ], {
+    encoding: 'utf8',
+    env: { PATH: process.env.PATH || '/usr/bin', HOME: process.env.HOME || '', LANG: 'C' },
+  })
+  : { status: 1, stdout: '' }
+if (livePsqlUrl && livePsql.status === 0 && livePsql.stdout) {
   const live = parseCounts(livePsql.stdout)
   eq(live.athlete, 3, 'parseCounts reads a live psql aligned session')
   requireCounts(live, 'live-psql')
 } else {
   requireCounts(aligned, 'captured-psql-aligned')
   ok(PSQL_ALIGNED.startsWith('     t     | n'), 'captured fixture is real padded psql aligned output')
+  ok(!livePsqlUrl || livePsql.status !== 0, 'pinned live psql uses ZEROED_CHECK_PSQL_URL only')
 }
+
+function pinnedPsql(url, sql, extraArgs = []) {
+  const res = spawnSync('psql', ['-v', 'ON_ERROR_STOP=1', '-At', '-d', url, ...extraArgs, ...(sql ? ['-c', sql] : [])], {
+    encoding: 'utf8',
+    env: libpqCleanEnv({ PATH: process.env.PATH || '/usr/bin', HOME: process.env.HOME || '', LANG: 'C' }),
+  })
+  if (res.status !== 0) {
+    throw new Error(redactSecrets((res.stderr || res.stdout || `psql ${res.status}`).trim()))
+  }
+  return res.stdout
+}
+
+function pinnedPsqlFile(url, filePath) {
+  return pinnedPsql(url, '', ['-f', filePath])
+}
+
+function sourceResidue(url) {
+  const schemas = pinnedPsql(url, `SELECT COUNT(*) FROM pg_namespace WHERE nspname = 'zeroed_cutover_guard'`)
+  const locks = pinnedPsql(url, `SELECT COUNT(*) FROM pg_locks WHERE locktype = 'advisory' AND granted`)
+  return { schemas: Number(schemas.trim()), locks: Number(locks.trim()) }
+}
+
+async function runLivePostgresChecks() {
+  const sourceUrl = process.env.ZEROED_PG_SOURCE_URL || ''
+  const targetUrl = process.env.ZEROED_PG_TARGET_URL || ''
+  const aliasUrl = process.env.ZEROED_PG_ALIAS_URL || ''
+  if (process.env.ZEROED_REQUIRE_PG === '1' && (!sourceUrl || !targetUrl || !aliasUrl)) {
+    ok(false, 'ZEROED_REQUIRE_PG=1 needs ZEROED_PG_SOURCE_URL, ZEROED_PG_TARGET_URL, ZEROED_PG_ALIAS_URL')
+    return
+  }
+  if (!sourceUrl || !targetUrl || !aliasUrl) {
+    ok(true, 'live Postgres checks skipped (no ZEROED_PG_* URLs)')
+    return
+  }
+
+  pinnedPsql(sourceUrl, `
+    SELECT pg_terminate_backend(pid)
+    FROM pg_stat_activity
+    WHERE pid <> pg_backend_pid()
+      AND query ILIKE '%advisory_lock%'
+  `)
+  pinnedPsqlFile(sourceUrl, join(root, 'worker/schema/app.sql'))
+  pinnedPsqlFile(sourceUrl, join(root, 'worker/schema/better-auth.sql'))
+  pinnedPsqlFile(sourceUrl, join(root, 'worker/schema/preview-seed.sql'))
+
+  const tmpPg = mkdtempSync(join(tmpdir(), 'zeroed-migrate-pg-'))
+  const mapPath = join(tmpPg, 'users.json')
+  writeFileSync(mapPath, JSON.stringify([
+    { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', email: 'preview.athlete@zeroed.invalid', created_at: '2026-01-15' },
+  ]))
+
+  const athletesBefore = Number(pinnedPsql(sourceUrl, 'SELECT COUNT(*) FROM public.athlete').trim())
+  const nspBefore = pinnedPsql(sourceUrl, `SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' ORDER BY 1`)
+
+  const srcFp = readFingerprint(sourceUrl)
+  const dstFp = readFingerprint(targetUrl)
+  eq(refuseTargetFingerprintReason(dstFp, srcFp), '', 'different-server fingerprints are allowed')
+  eq(await checkSourceLockAbsentOnTarget(sourceUrl, targetUrl), '', 'different-server advisory lock is not visible')
+  releaseHeldAdvisoryLocks()
+
+  const proceed = spawnMigrate([
+    '--skip-auth-users',
+    `--confirm-drop=${postgresUrlParts(targetUrl).dbname}`,
+    '--auth-users-file',
+    mapPath,
+  ], {
+    SUPABASE_READONLY_URL: sourceUrl,
+    NEON_DIRECT_URL: targetUrl,
+  })
+  const proceedOut = `${proceed.stdout}\n${proceed.stderr}`
+  eq(proceed.status, 0, 'different server live restore proceeds')
+  ok(/migration ok/.test(proceedOut), 'different server prints migration ok')
+  eq(
+    Number(pinnedPsql(sourceUrl, 'SELECT COUNT(*) FROM public.athlete').trim()),
+    athletesBefore,
+    'different-server restore leaves source athlete rows unchanged',
+  )
+
+  const alias = spawnMigrate([
+    '--skip-auth-users',
+    `--confirm-drop=${postgresUrlParts(aliasUrl).dbname}`,
+    '--auth-users-file',
+    mapPath,
+  ], {
+    SUPABASE_READONLY_URL: sourceUrl,
+    NEON_DIRECT_URL: aliasUrl,
+  })
+  const aliasOut = `${alias.stdout}\n${alias.stderr}`
+  eq(alias.status, 2, 'same server via alias exits 2')
+  ok(!/resetting/i.test(aliasOut), 'same-server alias does not reset')
+  eq((aliasOut.match(/DROP SCHEMA/gi) || []).length, 0, 'same-server alias emits 0 DROPs')
+  eq(
+    Number(pinnedPsql(sourceUrl, 'SELECT COUNT(*) FROM public.athlete').trim()),
+    athletesBefore,
+    'same-server alias leaves source athlete rows unchanged',
+  )
+
+  const errored = spawnMigrate([
+    '--skip-auth-users',
+    `--confirm-drop=${postgresUrlParts(targetUrl).dbname}`,
+    '--auth-users-file',
+    mapPath,
+  ], {
+    SUPABASE_READONLY_URL: sourceUrl.replace(/\/[^/]+$/, '/no_such_db'),
+    NEON_DIRECT_URL: targetUrl,
+  })
+  eq(errored.status, 2, 'errored fingerprint exits 2')
+  ok(
+    /could not read source fingerprint/.test(`${errored.stdout}\n${errored.stderr}`),
+    'errored fingerprint says the source could not be read',
+  )
+  ok(!/resetting/i.test(`${errored.stdout}\n${errored.stderr}`), 'errored fingerprint does not reset')
+
+  pinnedPsql(sourceUrl, `
+    DO $$
+    BEGIN
+      IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'src_ro') THEN
+        CREATE ROLE src_ro LOGIN PASSWORD 'dummy';
+      END IF;
+    END $$;
+    GRANT CONNECT ON DATABASE ${postgresUrlParts(sourceUrl).dbname} TO src_ro;
+    GRANT USAGE ON SCHEMA public TO src_ro;
+    GRANT SELECT ON ALL TABLES IN SCHEMA public TO src_ro;
+    REVOKE EXECUTE ON FUNCTION pg_control_system() FROM PUBLIC;
+    REVOKE EXECUTE ON FUNCTION pg_control_system() FROM src_ro;
+  `)
+  const roUrl = sourceUrl.replace(/\/\/[^@]+@/, '//src_ro:dummy@')
+  const roFp = readFingerprint(roUrl)
+  eq(roFp.sysid, '', 'revoked pg_control_system leaves sysid empty')
+  eq(refuseTargetFingerprintReason(dstFp, roFp), '', 'no pg_control_system privilege still allows a different server')
+  eq(await checkSourceLockAbsentOnTarget(roUrl, targetUrl), '', 'no pg_control_system privilege still passes the lock check')
+  releaseHeldAdvisoryLocks()
+
+  const sig = spawn(process.execPath, [
+    'scripts/migrate-supabase-to-neon.mjs',
+    '--skip-auth-users',
+    `--confirm-drop=${postgresUrlParts(targetUrl).dbname}`,
+    '--auth-users-file',
+    mapPath,
+  ], {
+    cwd: root,
+    env: {
+      PATH: process.env.PATH || '/usr/bin',
+      HOME: process.env.HOME || '',
+      SUPABASE_READONLY_URL: sourceUrl,
+      NEON_DIRECT_URL: targetUrl,
+      ZEROED_TEST_HOLD_LOCK_MS: '12000',
+    },
+  })
+  let sigOut = ''
+  sig.stdout.on('data', (c) => { sigOut += c })
+  sig.stderr.on('data', (c) => { sigOut += c })
+  const started = Date.now()
+  while (!/probing target identity/.test(sigOut) && Date.now() - started < 15000) {
+    await new Promise((r) => setTimeout(r, 50))
+  }
+  await new Promise((r) => setTimeout(r, 1500))
+  ok(/probing target identity/.test(sigOut), 'SIGINT test reached the identity probe')
+  sig.kill('SIGINT')
+  const sigCode = await new Promise((resolve) => sig.on('close', resolve))
+  ok(sigCode === 130 || sigCode === 2, `SIGINT exits 130 (got ${sigCode})`)
+  const afterSig = sourceResidue(sourceUrl)
+  eq(afterSig.schemas, 0, 'SIGINT leaves no zeroed_cutover_guard schema')
+  eq(afterSig.locks, 0, 'SIGINT leaves no advisory lock residue')
+
+  const after = sourceResidue(sourceUrl)
+  eq(after.schemas, 0, 'source has no zeroed_cutover_guard schema afterward')
+  eq(after.locks, 0, 'source has no advisory lock residue afterward')
+  eq(
+    pinnedPsql(sourceUrl, `SELECT nspname FROM pg_namespace WHERE nspname NOT LIKE 'pg_%' ORDER BY 1`),
+    nspBefore,
+    'source namespaces are unchanged afterward',
+  )
+  rmSync(tmpPg, { recursive: true, force: true })
+}
+
+await runLivePostgresChecks()
 
 if (fails.length) {
   console.error(`✗ ${fails.length} of ${checks} migrate checks failed:`)

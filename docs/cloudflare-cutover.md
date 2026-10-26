@@ -153,7 +153,9 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    pre-DROP probe cannot read either fingerprint (fail closed), finds a
    `storage` schema, any `pg_policies` row, a matching
    `current_database()` plus `inet_server_addr()` / port / start time /
-   `system_identifier`, or a source marker visible on the target. Do not pass
+   `system_identifier`, or a source session advisory lock visible in the
+   target's `pg_locks`. The source is never written (no marker DDL/DML).
+   Do not pass
    `--relax-target-rls` unless you intend to drop leftover RLS on Neon.
    Manual GitHub Action: `migrate-supabase-to-neon` (`workflow_dispatch` only,
    `dry_run` defaults to true). Secrets: `SUPABASE_READONLY_URL`,

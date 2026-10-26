@@ -38,7 +38,8 @@
  *   - target has a storage schema, any pg_policies row, or the same
  *     current_database() plus inet_server_addr()/port/start time/system_identifier
  *   - either fingerprint is unreadable (fail closed, no DROP)
- *   - a source marker is visible on the target (same server/db)
+ *   - a session advisory lock held on the source is visible in the
+ *     target's pg_locks (same server)
  *   - target ?host= / hostaddr= is a socket or does not end in .neon.tech
  *
  * Env aliases: SUPABASE_DB_URL / SOURCE_DATABASE_URL,
@@ -49,6 +50,7 @@
  */
 import { randomBytes } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
+import pg from 'pg'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
@@ -136,6 +138,15 @@ export function refuseSourceWipeReason(source, target) {
   return ''
 }
 
+/** Its own query — do not fold into fingerprintQuery. */
+export function canExecutePgControlSystemQuery() {
+  return `SELECT has_function_privilege('pg_control_system()', 'EXECUTE')`
+}
+
+export function systemIdentifierQuery() {
+  return `SELECT system_identifier::text FROM pg_control_system()`
+}
+
 export function fingerprintQuery() {
   return `
     SELECT json_build_object(
@@ -143,17 +154,6 @@ export function fingerprintQuery() {
       'addr', COALESCE(host(inet_server_addr()), ''),
       'port', COALESCE(inet_server_port()::text, ''),
       'start', COALESCE(pg_postmaster_start_time()::text, ''),
-      'sysid', CASE
-        WHEN EXISTS (
-          SELECT 1
-          FROM pg_proc p
-          JOIN pg_namespace n ON n.oid = p.pronamespace
-          WHERE n.nspname = 'pg_catalog'
-            AND p.proname = 'pg_control_system'
-            AND has_function_privilege(p.oid, 'EXECUTE')
-        ) THEN (SELECT system_identifier::text FROM pg_control_system())
-        ELSE ''
-      END,
       'has_storage', to_regnamespace('storage') IS NOT NULL,
       'has_policies', EXISTS (SELECT 1 FROM pg_policies)
     )
@@ -176,7 +176,12 @@ export function parseFingerprint(text) {
 }
 
 export function readFingerprint(url) {
-  return parseFingerprint(psqlTuples(url, fingerprintQuery()))
+  const fp = parseFingerprint(psqlTuples(url, fingerprintQuery()))
+  const allowed = String(psqlTuples(url, canExecutePgControlSystemQuery()) || '').trim()
+  if (allowed === 't' || allowed === 'true') {
+    fp.sysid = String(psqlTuples(url, systemIdentifierQuery()) || '').trim()
+  }
+  return fp
 }
 
 /** Fail closed: unreadable either side, same server/db, or no proof they differ. */
@@ -210,56 +215,133 @@ export function refuseTargetFingerprintReason(targetFp, sourceFp) {
   return 'could not prove target is a different server from the source'
 }
 
-export function newSourceMarkerToken() {
-  return randomBytes(16).toString('hex')
+/** Strip inherited libpq env so a URL is the only connection target. */
+export function libpqCleanEnv(base = process.env) {
+  const env = { ...base }
+  for (const key of Object.keys(env)) {
+    if (key === 'PGPASSWORD' || (key.startsWith('PG') && key !== 'PATH')) delete env[key]
+  }
+  return env
 }
 
-export function sourceMarkerWriteSql(token) {
-  const id = String(token || '')
-  if (!/^[0-9a-f]+$/i.test(id)) throw new Error('invalid source marker token')
+export function newAdvisoryLockKey() {
+  const buf = randomBytes(8)
+  let key = buf.readBigInt64BE()
+  if (key === 0n) key = 1n
+  return key.toString()
+}
+
+export function advisoryLockParts(key) {
+  const k = BigInt(key)
+  return {
+    classid: Number(BigInt.asIntN(32, k >> 32n)),
+    objid: Number(BigInt.asIntN(32, k & 0xffffffffn)),
+  }
+}
+
+export function advisoryLockAcquireSql(key) {
+  return `SELECT pg_try_advisory_lock(${String(key)}::bigint)`
+}
+
+export function advisoryUnlockSql(key) {
+  return `SELECT pg_advisory_unlock(${String(key)}::bigint)`
+}
+
+export function advisoryLockVisibleSql(key) {
+  const { classid, objid } = advisoryLockParts(key)
   return `
-    CREATE SCHEMA IF NOT EXISTS zeroed_cutover_guard;
-    CREATE TABLE IF NOT EXISTS zeroed_cutover_guard.marker (
-      id text PRIMARY KEY,
-      created_at timestamptz NOT NULL DEFAULT now()
-    );
-    INSERT INTO zeroed_cutover_guard.marker (id) VALUES ('${id}');
+    SELECT EXISTS (
+      SELECT 1 FROM pg_locks
+      WHERE locktype = 'advisory'
+        AND granted
+        AND objsubid = 1
+        AND classid = ${classid}
+        AND objid = ${objid}
+    )
   `
 }
 
-export function sourceMarkerVisibleSql(token) {
-  const id = String(token || '')
-  if (!/^[0-9a-f]+$/i.test(id)) throw new Error('invalid source marker token')
-  return `SELECT id FROM zeroed_cutover_guard.marker WHERE id = '${id}'`
+const heldLockSessions = []
+let lockSignalHandlersInstalled = false
+
+export function releaseHeldAdvisoryLocks() {
+  while (heldLockSessions.length) {
+    const session = heldLockSessions.pop()
+    try { session.release() } catch { /* already closed */ }
+  }
 }
 
-export function sourceMarkerCleanupSql(token) {
-  const id = String(token || '')
-  if (!/^[0-9a-f]+$/i.test(id)) throw new Error('invalid source marker token')
-  return `DELETE FROM zeroed_cutover_guard.marker WHERE id = '${id}';`
+function installLockSignalHandlers() {
+  if (lockSignalHandlersInstalled) return
+  lockSignalHandlersInstalled = true
+  const onSignal = (sig) => {
+    releaseHeldAdvisoryLocks()
+    process.exit(sig === 'SIGINT' ? 130 : 143)
+  }
+  process.on('SIGINT', onSignal)
+  process.on('SIGTERM', onSignal)
+}
+
+export async function holdSourceAdvisoryLock(sourceUrl, key) {
+  installLockSignalHandlers()
+  const client = new pg.Client({
+    connectionString: sourceUrl,
+    connectionTimeoutMillis: 10000,
+  })
+  const session = {
+    client,
+    key: String(key),
+    released: false,
+    release() {
+      if (this.released) return
+      this.released = true
+      try {
+        const stream = this.client.connection?.stream
+        if (stream && typeof stream.destroy === 'function') stream.destroy()
+      } catch { /* already closed */ }
+      try { this.client.end().catch(() => {}) } catch { /* ignore */ }
+    },
+  }
+  heldLockSessions.push(session)
+  try {
+    await client.connect()
+    const got = await client.query('SELECT pg_try_advisory_lock($1::bigint) AS got', [key])
+    if (!got.rows[0]?.got) {
+      session.release()
+      throw new Error('could not acquire source advisory lock')
+    }
+    return session
+  } catch (err) {
+    session.release()
+    throw err
+  }
 }
 
 /**
- * Positive proof they are not the same database: a token written on the
- * source must not be readable from the target. Read-only sources skip this
- * (fingerprint comparison is the equivalent proof).
+ * Write-free same-server proof: hold a session advisory lock on the source,
+ * then look for that objid in the target's pg_locks. Visible → same server.
+ * A target query error fails closed.
  */
-export function checkSourceMarkerAbsentOnTarget(sourceUrl, targetUrl, token = newSourceMarkerToken()) {
+export async function checkSourceLockAbsentOnTarget(sourceUrl, targetUrl, key = newAdvisoryLockKey(), opts = {}) {
+  let session
   try {
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', sourceUrl, '-c', sourceMarkerWriteSql(token)])
+    session = await holdSourceAdvisoryLock(sourceUrl, key)
   } catch {
-    return ''
+    return 'could not acquire source advisory lock'
   }
   try {
-    const seen = String(psqlTuples(targetUrl, sourceMarkerVisibleSql(token)) || '').trim()
-    if (seen) return 'source marker is visible on the target'
+    const holdMs = Number(opts.holdMs || 0)
+    if (holdMs > 0) await new Promise((resolve) => setTimeout(resolve, holdMs))
+    let visible
+    try {
+      visible = String(psqlTuples(targetUrl, advisoryLockVisibleSql(key)) || '').trim()
+    } catch {
+      return 'could not query target pg_locks'
+    }
+    if (visible === 't' || visible === 'true') return 'source advisory lock is visible on the target'
     return ''
   } finally {
-    try {
-      run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', sourceUrl, '-c', sourceMarkerCleanupSql(token)])
-    } catch {
-      // best-effort cleanup
-    }
+    try { session?.release() } catch { /* ignore */ }
   }
 }
 
@@ -590,7 +672,13 @@ export function orderRestoreList(tocText) {
 }
 
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'], ...opts })
+  const { env, ...rest } = opts
+  const res = spawnSync(cmd, args, {
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+    env: env || libpqCleanEnv(),
+    ...rest,
+  })
   if (res.status !== 0) {
     const err = (res.stderr || res.stdout || '').trim()
     const safeArgs = args.map((a) => (/postgres(?:ql)?:\/\//i.test(a) ? '[redacted-url]' : a))
@@ -681,7 +769,7 @@ function printOfflineDryRun(args) {
   console.log('dry-run: live restore drops and recreates public/auth, then restores in one transaction')
   console.log('dry-run: live restore without --auth-users-file exits 2')
   console.log('dry-run: live restore requires --confirm-drop=<target dbname> and a .neon.tech target')
-  console.log('dry-run: live restore refuses an unreadable fingerprint or a source marker visible on the target')
+  console.log('dry-run: live restore refuses an unreadable fingerprint or a source advisory lock visible on the target')
   console.log('tools required: pg_dump, pg_restore, psql')
 }
 
@@ -716,14 +804,14 @@ export function loadUsersSql(usersPath) {
   `
 }
 
-export function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
+export async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const args = parseMigrateArgs(argv, env)
   const source = resolveSourceUrl(env)
   const target = resolveTargetUrl(env)
   const readFp = typeof deps.readFingerprint === 'function' ? deps.readFingerprint : readFingerprint
-  const checkMarker = typeof deps.checkSourceMarker === 'function'
-    ? deps.checkSourceMarker
-    : checkSourceMarkerAbsentOnTarget
+  const checkLock = typeof deps.checkSourceLock === 'function'
+    ? deps.checkSourceLock
+    : checkSourceLockAbsentOnTarget
 
   if (args.dryRun && !source && !target) {
     printOfflineDryRun(args)
@@ -759,29 +847,34 @@ export function main(argv = process.argv.slice(2), env = process.env, deps = {})
   if (!args.dryRun) {
     if (typeof deps.readFingerprint !== 'function') needBin('psql')
     console.log('probing target identity before drop…')
-    let targetFp
-    let sourceFp
     try {
-      targetFp = readFp(target)
-    } catch {
-      console.error('Refusing to drop target: could not read target fingerprint. Source is read-only.')
-      return 2
-    }
-    try {
-      sourceFp = readFp(source)
-    } catch {
-      console.error('Refusing to drop target: could not read source fingerprint. Source is read-only.')
-      return 2
-    }
-    const fpReason = refuseTargetFingerprintReason(targetFp, sourceFp)
-    if (fpReason) {
-      console.error(`Refusing to drop target: ${fpReason}. Source is read-only.`)
-      return 2
-    }
-    const markerReason = checkMarker(source, target)
-    if (markerReason) {
-      console.error(`Refusing to drop target: ${markerReason}. Source is read-only.`)
-      return 2
+      let targetFp
+      let sourceFp
+      try {
+        targetFp = readFp(target)
+      } catch {
+        console.error('Refusing to drop target: could not read target fingerprint. Source is read-only.')
+        return 2
+      }
+      try {
+        sourceFp = readFp(source)
+      } catch {
+        console.error('Refusing to drop target: could not read source fingerprint. Source is read-only.')
+        return 2
+      }
+      const fpReason = refuseTargetFingerprintReason(targetFp, sourceFp)
+      if (fpReason) {
+        console.error(`Refusing to drop target: ${fpReason}. Source is read-only.`)
+        return 2
+      }
+      const holdMs = Number(env.ZEROED_TEST_HOLD_LOCK_MS || 0)
+      const lockReason = await checkLock(source, target, newAdvisoryLockKey(), { holdMs })
+      if (lockReason) {
+        console.error(`Refusing to drop target: ${lockReason}. Source is read-only.`)
+        return 2
+      }
+    } finally {
+      releaseHeldAdvisoryLocks()
     }
   }
 
@@ -925,8 +1018,9 @@ export function main(argv = process.argv.slice(2), env = process.env, deps = {})
 
 if (isExecutedDirectly(import.meta.url, process.argv[1])) {
   try {
-    process.exit(main())
+    process.exit(await main())
   } catch (err) {
+    releaseHeldAdvisoryLocks()
     const message = err instanceof Error ? err.message : String(err)
     console.error(redactSecrets(message))
     process.exit(1)
