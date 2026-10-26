@@ -53,8 +53,8 @@ function captureOtp() {
 }
 
 async function withAuthHandler(req) {
-  const { withAuth } = await import('../worker/src/auth.ts')
-  return withAuth(env, (auth) => auth.handler(req))
+  const { handleAuthRequest } = await import('../worker/src/auth.ts')
+  return handleAuthRequest(env, req)
 }
 
 async function post(path, body, headers = {}) {
@@ -98,6 +98,9 @@ async function runFlow(email, { reset = true } = {}) {
     if (!session.ok) throw new Error(`get-session ${session.status}: ${(await session.text()).slice(0, 240)}`)
     const body = await session.json()
     if (!body?.user?.id) throw new Error('get-session missing user')
+    if (body?.session && 'token' in body.session) {
+      throw new Error('get-session body leaked session.token')
+    }
 
     const viaSigned = await withAuthHandler(new Request('http://localhost:8787/api/auth/get-session', {
       headers: { authorization: `Bearer ${signed}`, origin },
@@ -105,6 +108,9 @@ async function runFlow(email, { reset = true } = {}) {
     if (!viaSigned.ok) throw new Error(`signed bearer get-session ${viaSigned.status}`)
     const viaSignedBody = await viaSigned.json()
     if (!viaSignedBody?.user?.id) throw new Error('signed bearer get-session missing user')
+    if (viaSignedBody?.session && 'token' in viaSignedBody.session) {
+      throw new Error('signed bearer get-session leaked session.token')
+    }
 
     const client = new Client({ connectionString: url })
     await client.connect()
@@ -231,10 +237,26 @@ if (adoptedId !== migratedId) {
   const client = new Client({ connectionString: url })
   await client.connect()
   const count = await client.query('SELECT count(*)::int AS n FROM "user"')
-  await client.end()
   if (Number(count.rows[0].n) !== 1) {
     throw new Error(`adoption duplicated the user (count=${count.rows[0].n})`)
   }
+  const persisted = await client.query('SELECT id, email FROM "user" WHERE id = $1', [migratedId])
+  if (persisted.rows[0]?.email !== 'phillip@example.com') {
+    throw new Error(`adoption did not persist lowercase email (got ${persisted.rows[0]?.email})`)
+  }
+  try {
+    await client.query(
+      `INSERT INTO "user" (id, name, email, email_verified, created_at, updated_at)
+       VALUES ($1, 'Dup', $2, true, NOW(), NOW())`,
+      [crypto.randomUUID(), 'Phillip@Example.com'],
+    )
+    throw new Error('dup@ and DUP@ both claimed a user row')
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (/both claimed/.test(msg)) throw err
+    if (!/unique|duplicate/i.test(msg)) throw new Error(`email uniqueness failed for the wrong reason: ${msg}`)
+  }
+  await client.end()
 }
 console.log(`better-auth schema: mixed-case email adoption ok (user ${migratedId})`)
 

@@ -107,6 +107,8 @@ CREATE TABLE IF NOT EXISTS verification (
   created_at TIMESTAMPTZ DEFAULT NOW(),
   updated_at TIMESTAMPTZ DEFAULT NOW()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS user_email_lower_uidx ON "user" (lower(email));
 `
 
 /** Neon target only. Never concatenated into a source session. */
@@ -254,10 +256,10 @@ try {
     FROM auth_users_import
     ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email;
     INSERT INTO "user" (id, name, email, email_verified, created_at, updated_at)
-    SELECT id, name, email, email_verified, created_at, COALESCE(updated_at, created_at)
+    SELECT id, name, lower(email), email_verified, created_at, COALESCE(updated_at, created_at)
     FROM auth_users_import
     ON CONFLICT (id) DO UPDATE SET
-      email = EXCLUDED.email,
+      email = lower(EXCLUDED.email),
       name = EXCLUDED.name,
       email_verified = EXCLUDED.email_verified;
   `

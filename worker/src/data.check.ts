@@ -4,7 +4,16 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { makeSignature } from 'better-auth/crypto'
 import { serializeSignedCookie } from 'better-call'
-import { BETTER_AUTH_SNAKE_CASE, rewriteUserEmailLookup } from './auth.ts'
+import {
+  BETTER_AUTH_SNAKE_CASE,
+  FIND_ADOPTED_USER_SQL,
+  FIND_MIXED_CASE_USER_SQL,
+  PERSIST_ADOPTED_EMAIL_SQL,
+  authFailureMessage,
+  persistAdoptedUserEmail,
+  rewriteUserEmailLookup,
+  stripSessionToken,
+} from './auth.ts'
 import {
   bindOwner,
   ownerPredicate,
@@ -71,6 +80,8 @@ ok(authSrc.includes('verification: BETTER_AUTH_SNAKE_CASE.verification'), 'auth.
 ok(authSrc.includes('bearer({ requireSignature: true })'), 'auth.ts requires signed bearers')
 ok(!authSrc.includes('allowExitOnIdle'), 'auth.ts does not use pg-pool allowExitOnIdle')
 ok(authSrc.includes('installEmailAdoption'), 'auth.ts installs case-insensitive email adoption')
+ok(authSrc.includes('persistAdoptedUserEmail'), 'auth.ts persists the BA user id before rewrite')
+ok(authSrc.includes('FIND_ADOPTED_USER_SQL'), 'auth.ts looks up the persisted BA user id first')
 ok(rewriteUserEmailLookup('select * from "user" where "email" = $1') === 'select * from "user" where lower("email") = lower($1)', 'adoption lookup uses lower(email)')
 ok(
   rewriteUserEmailLookup('select "primary".* from (select * from "user" where "user"."email" = $1) as "primary"')
@@ -82,12 +93,49 @@ ok(
   'qualified rewrite does not produce schema "user".lower',
 )
 ok(rewriteUserEmailLookup('select * from session where token = $1') === 'select * from session where token = $1', 'adoption rewrite leaves session SQL alone')
+const updateEmailSql = 'update "user" set "email" = $1 where id = $2'
+ok(rewriteUserEmailLookup(updateEmailSql) === updateEmailSql, 'email rewrite does not break UPDATE email SQL')
+ok(
+  rewriteUserEmailLookup('UPDATE "user" SET "email" = $1 WHERE "email" = $2') === 'UPDATE "user" SET "email" = $1 WHERE "email" = $2',
+  'email rewrite skips UPDATE even when WHERE mentions email',
+)
+const stripped = stripSessionToken({ session: { id: 's', token: 'raw-db-token', userId: 'u' }, user: { id: 'u' } }) as { session: { token?: string }; user: { id: string } }
+ok(stripped.user.id === 'u' && stripped.session.token === undefined, 'get-session body strips session.token')
+ok(authFailureMessage(new Error('The server does not support SSL connections')) === 'request failed', 'ssl errors stay generic')
+ok(authFailureMessage(new Error('BETTER_AUTH_SECRET is not set')) === 'BETTER_AUTH_SECRET is not set', 'auth config errors stay specific')
+
+const persistCalls: string[] = []
+const exactId = await persistAdoptedUserEmail(async (text) => {
+  persistCalls.push(text)
+  if (text === FIND_ADOPTED_USER_SQL) return { rows: [{ id: 'persisted-ba-id' }] }
+  return { rows: [] }
+}, 'Phil@Example.com')
+ok(exactId === 'persisted-ba-id', 'adoption looks up the persisted BA user id first')
+ok(persistCalls[0] === FIND_ADOPTED_USER_SQL, 'exact lowercase email is queried first')
+ok(!persistCalls.includes(PERSIST_ADOPTED_EMAIL_SQL), 'exact hit does not rewrite the row')
+
+const mixedCalls: string[] = []
+const mixedId = await persistAdoptedUserEmail(async (text, params) => {
+  mixedCalls.push(text)
+  if (text === FIND_ADOPTED_USER_SQL) return { rows: [] }
+  if (text === FIND_MIXED_CASE_USER_SQL) return { rows: [{ id: 'migrated-id' }] }
+  if (text === PERSIST_ADOPTED_EMAIL_SQL) {
+    ok(params[0] === 'migrated-id', 'persist writes lowercase email onto the BA user id row')
+    return { rows: [] }
+  }
+  return { rows: [] }
+}, 'phillip@example.com')
+ok(mixedId === 'migrated-id', 'mixed-case email adopts the existing BA user id')
+ok(mixedCalls.includes(PERSIST_ADOPTED_EMAIL_SQL), 'first-time adoption persists lowercase email')
 
 const schemaSql = readFileSync(join(here, '../schema/better-auth.sql'), 'utf8')
 ok(schemaSql.includes('email_verified') && schemaSql.includes('user_id') && schemaSql.includes('expires_at'), 'better-auth.sql is snake_case')
 ok(!schemaSql.includes('emailVerified') && !schemaSql.includes('"userId"'), 'better-auth.sql is not camelCase')
+ok(schemaSql.includes('user_email_lower_uidx') && schemaSql.includes('lower(email)'), 'better-auth.sql has case-insensitive email uniqueness')
 const migrateSrc = readFileSync(join(here, '../../scripts/migrate-supabase-to-neon.mjs'), 'utf8')
 ok(migrateSrc.includes('email_verified BOOLEAN') && migrateSrc.includes('user_id TEXT'), 'migrate script Better Auth SQL is snake_case')
+ok(migrateSrc.includes('user_email_lower_uidx'), 'migrate script adds case-insensitive email uniqueness')
+ok(migrateSrc.includes('lower(email)'), 'migrate script lowercases adopted emails')
 const corsSrc = readFileSync(join(here, 'cors.ts'), 'utf8')
 ok(corsSrc.includes("'Access-Control-Expose-Headers': 'set-auth-token'"), 'CORS exposes set-auth-token')
 const dataSrc = readFileSync(join(here, 'data.ts'), 'utf8')

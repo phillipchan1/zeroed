@@ -4,7 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import app from './index.ts'
 import { authConfigErrorResponse, beginAuthCors } from './cors.ts'
-import { databaseUrl, useDatabaseSsl } from './env.ts'
+import { databaseUrl, pgClientSsl, useDatabaseSsl } from './env.ts'
 import {
   authCookieSecure,
   connectionHostname,
@@ -60,6 +60,26 @@ ok(!useDatabaseSsl(neon, { ENVIRONMENT: 'local' }), 'local env disables postgres
 ok(useDatabaseSsl(neon), 'Neon URL uses ssl')
 ok(!useDatabaseSsl(loopbackPg), 'loopback postgres URL disables ssl')
 ok(!useDatabaseSsl('postgresql://u:p@hyperdrive.internal/db?sslmode=disable'), 'sslmode=disable is not require')
+const hyperdriveLocal = 'postgresql://u:p@abc123def456.hyperdrive.local:5432/db'
+ok(useDatabaseSsl(hyperdriveLocal), 'unbound hyperdrive.local URL keeps ssl')
+ok(
+  !useDatabaseSsl(hyperdriveLocal, { HYPERDRIVE: { connectionString: hyperdriveLocal } }),
+  'bound Hyperdrive connectionString disables ssl',
+)
+ok(
+  useDatabaseSsl(neon, { HYPERDRIVE: { connectionString: hyperdriveLocal } }),
+  'remote URL stays ssl even when Hyperdrive is bound',
+)
+ok(
+  useDatabaseSsl(hyperdriveLocal, { HYPERDRIVE: { connectionString: `${hyperdriveLocal}?sslmode=require` } }),
+  'hyperdrive.local that is not the bound connectionString stays ssl',
+)
+ok(pgClientSsl(hyperdriveLocal) !== false, 'unbound hyperdrive.local applies ssl on the client')
+ok(
+  pgClientSsl(hyperdriveLocal, { HYPERDRIVE: { connectionString: hyperdriveLocal } }) === false,
+  'bound Hyperdrive client ssl is false',
+)
+ok(pgClientSsl(neon) !== false, 'remote URL client ssl stays on')
 ok(
   databaseUrl({ ENVIRONMENT: 'local', DATABASE_URL: loopbackPg, HYPERDRIVE: { connectionString: neon } }) === loopbackPg,
   'local DATABASE_URL beats Hyperdrive',

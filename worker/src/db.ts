@@ -1,7 +1,7 @@
 import { Client } from 'pg'
 import { isLoopbackHostname } from './authUrl.ts'
 import type { Env } from './env.ts'
-import { databaseUrl, useDatabaseSsl } from './env.ts'
+import { databaseUrl, pgClientSsl } from './env.ts'
 
 export type WaitUntil = (task: Promise<unknown>) => void
 
@@ -132,7 +132,7 @@ function createClient(env: Env): Client {
   if (!url) throw new Error('database is not configured (HYPERDRIVE or DATABASE_URL)')
   return new Client({
     connectionString: url,
-    ssl: useDatabaseSsl(url, env) ? { rejectUnauthorized: false } : false,
+    ssl: pgClientSsl(url, env),
     connectionTimeoutMillis: 5_000,
     keepAlive: false,
   })

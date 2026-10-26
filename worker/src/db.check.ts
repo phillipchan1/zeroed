@@ -74,6 +74,10 @@ ok(authSrc.includes('new Client('), 'auth.ts opens a Workers-safe Client per req
 ok(authSrc.includes('waitUntil'), 'auth.ts closes the client via waitUntil')
 ok(authSrc.includes('lower(${col}) = lower(${param})'), 'auth.ts adoption lookup is lower(email)')
 ok(authSrc.includes('"user"."email"'), 'auth.ts rewrite handles Better Auth 1.7 qualified email')
+ok(authSrc.includes('pgClientSsl'), 'auth.ts uses pgClientSsl for the auth client')
+ok(authSrc.includes('!/^\\s*select\\b/i.test(text)'), 'auth.ts email rewrite is SELECT-only')
+ok(dbSrc.includes('pgClientSsl'), 'db.ts uses pgClientSsl for the data client')
+ok(authSrc.includes('stripSessionToken'), 'auth.ts strips session.token from get-session')
 
 const uuid = '11111111-1111-1111-1111-111111111111'
 const compiled = compileTagged(

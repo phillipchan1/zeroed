@@ -2,7 +2,7 @@ import { Hono } from 'hono'
 import { handleAgent } from './agent.ts'
 import { API_SECURITY, beginAuthCors } from './cors.ts'
 import { handleData } from './data.ts'
-import { withAuth } from './auth.ts'
+import { authFailureMessage, handleAuthRequest } from './auth.ts'
 import type { Env } from './env.ts'
 import { handleMcp } from './mcp.ts'
 import type { WaitUntil } from './db.ts'
@@ -49,7 +49,7 @@ app.all('/api/auth/*', async (c) => {
   const cors = started.cors
   if (c.req.method === 'OPTIONS') return new Response('ok', { headers: cors })
   try {
-    const res = await withAuth(c.env, (auth) => auth.handler(c.req.raw), waitUntilOf(c))
+    const res = await handleAuthRequest(c.env, c.req.raw, waitUntilOf(c))
     const headers = new Headers(res.headers)
     for (const [k, v] of Object.entries(cors)) {
       if (k === 'Access-Control-Allow-Origin' || !headers.has(k)) headers.set(k, v)
@@ -63,8 +63,7 @@ app.all('/api/auth/*', async (c) => {
     }
     return new Response(res.body, { status: res.status, headers })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    return new Response(JSON.stringify({ error: message }), {
+    return new Response(JSON.stringify({ error: authFailureMessage(err) }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', ...cors },
     })
