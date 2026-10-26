@@ -21,7 +21,8 @@
     "check:isolation-mutation": "node scripts/prove-isolation-mutation.mjs",
     "check:layout": "node scripts/check-layout.mjs",
     "ios:sync": "npm run build && npx cap sync ios",
-    "ios:check": "node scripts/ios-project-check.mjs"
+    "ios:check": "node scripts/ios-project-check.mjs",
+    "ios:check:ipa": "node scripts/ios-check-ipa-bundle-ids.mjs --self-test"
   },
   "dependencies": {
     "@capacitor/core": "^6.2.0",

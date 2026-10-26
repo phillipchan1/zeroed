@@ -1,6 +1,6 @@
 require_relative '../../node_modules/@capacitor/ios/scripts/pods_helpers'
 
-platform :ios, '13.0'
+platform :ios, '15.0'
 use_frameworks!
 
 # workaround to avoid Xcode caching of Pods that requires
@@ -21,4 +21,14 @@ end
 
 post_install do |installer|
   assertDeploymentTarget(installer)
+  # xcodebuild command-line PRODUCT_BUNDLE_IDENTIFIER applies to every target.
+  # Give each pod its own id so Capacitor.framework / CapacitorCordova.framework
+  # / Pods_App.framework cannot reuse app.zeroed.app (ITMS-90685).
+  installer.pods_project.targets.each do |target|
+    slug = target.name.gsub(/[^A-Za-z0-9.-]/, '-')
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.0'
+      config.build_settings['PRODUCT_BUNDLE_IDENTIFIER'] = "org.cocoapods.#{slug}"
+    end
+  end
 end

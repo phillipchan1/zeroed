@@ -62,7 +62,9 @@ jobs:
       - name: Capacitor iOS sync (no CocoaPods / Xcode on Linux)
         run: npx cap sync ios
       - name: iOS project structure
-        run: node scripts/ios-project-check.mjs
+        run: |
+          node scripts/ios-project-check.mjs
+          npm run ios:check:ipa
 
   isolation-mutation:
     name: isolation-mutation
