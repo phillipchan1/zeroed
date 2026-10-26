@@ -1,10 +1,11 @@
 import { Hono } from 'hono'
 import { handleAgent } from './agent.ts'
 import { API_SECURITY, beginAuthCors } from './cors.ts'
-import { getAuth } from './auth.ts'
+import { handleData } from './data.ts'
+import { authFailureMessage, handleAuthRequest } from './auth.ts'
 import type { Env } from './env.ts'
 import { handleMcp } from './mcp.ts'
-import type { WaitUntilCtx } from './db.ts'
+import type { WaitUntil } from './db.ts'
 
 const app = new Hono<{ Bindings: Env }>()
 
@@ -37,14 +38,18 @@ app.get('/api/health', (c) =>
   }),
 )
 
+function waitUntilOf(c: { executionCtx?: { waitUntil?: WaitUntil } }): WaitUntil | undefined {
+  const wait = c.executionCtx?.waitUntil
+  return wait ? (task) => wait.call(c.executionCtx, task) : undefined
+}
+
 app.all('/api/auth/*', async (c) => {
   const started = beginAuthCors(c.req.header('Origin'), c.env)
   if (!started.ok) return started.response
   const cors = started.cors
   if (c.req.method === 'OPTIONS') return new Response('ok', { headers: cors })
   try {
-    const auth = getAuth(c.env)
-    const res = await auth.handler(c.req.raw)
+    const res = await handleAuthRequest(c.env, c.req.raw, waitUntilOf(c))
     const headers = new Headers(res.headers)
     for (const [k, v] of Object.entries(cors)) {
       if (k === 'Access-Control-Allow-Origin' || !headers.has(k)) headers.set(k, v)
@@ -58,32 +63,22 @@ app.all('/api/auth/*', async (c) => {
     }
     return new Response(res.body, { status: res.status, headers })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    return new Response(JSON.stringify({ error: message }), {
+    return new Response(JSON.stringify({ error: authFailureMessage(err) }), {
       status: 500,
       headers: { 'Content-Type': 'application/json', ...cors },
     })
   }
 })
 
-function waitUntilCtx(c: { executionCtx?: WaitUntilCtx }): WaitUntilCtx | undefined {
-  try {
-    const ctx = c.executionCtx
-    if (ctx && typeof ctx.waitUntil === 'function') return ctx
-  } catch {
-    /* app.request() in Node has no ExecutionContext */
-  }
-  return undefined
-}
-
-app.all('/api/agent', (c) => handleAgent(c.req.raw, c.env, waitUntilCtx(c)))
-app.all('/api/mcp', (c) => handleMcp(c.req.raw, c.env, { ctx: waitUntilCtx(c) }))
-app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, { ctx: waitUntilCtx(c) }))
+app.all('/api/agent', (c) => handleAgent(c.req.raw, c.env, waitUntilOf(c)))
+app.all('/api/mcp', (c) => handleMcp(c.req.raw, c.env, waitUntilOf(c)))
+app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, waitUntilOf(c)))
+app.all('/api/data', (c) => handleData(c.req.raw, c.env, waitUntilOf(c)))
 
 // Compatibility aliases so VITE_API_BASE_URL can point at either
 // `https://<worker>/api` or the old `/functions/v1` prefix.
-app.all('/functions/v1/agent', (c) => handleAgent(c.req.raw, c.env, waitUntilCtx(c)))
-app.all('/functions/v1/mcp', (c) => handleMcp(c.req.raw, c.env, { ctx: waitUntilCtx(c) }))
+app.all('/functions/v1/agent', (c) => handleAgent(c.req.raw, c.env, waitUntilOf(c)))
+app.all('/functions/v1/mcp', (c) => handleMcp(c.req.raw, c.env, waitUntilOf(c)))
 
 // Hashed Vite assets must 404 when missing — SPA fallback would serve
 // index.html and the browser would try to execute HTML as JS.

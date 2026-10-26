@@ -28,12 +28,20 @@ const AUTH_CORS_ALLOW = {
     'authorization, content-type, cookie, x-zeroed-token',
   'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
   'Access-Control-Allow-Credentials': 'true',
+  'Access-Control-Expose-Headers': 'set-auth-token',
   Vary: 'Origin',
 } as const
 
+/** Capacitor / Ionic WebView origins. Relative `/api` does not work there. */
+export const NATIVE_APP_ORIGINS = [
+  'capacitor://localhost',
+  'ionic://localhost',
+] as const
+
 export function trustedAuthOrigins(env: Env): string[] {
   const base = resolveAuthBaseURL(env)
-  if (!isLocalAuthHost(base)) return [base]
+  const native = [...NATIVE_APP_ORIGINS]
+  if (!isLocalAuthHost(base)) return [...new Set([base, ...native])]
   return [...new Set([
     base,
     'http://localhost:5173',
@@ -42,6 +50,7 @@ export function trustedAuthOrigins(env: Env): string[] {
     'http://127.0.0.1:8787',
     'http://[::1]:5173',
     'http://[::1]:8787',
+    ...native,
   ])]
 }
 

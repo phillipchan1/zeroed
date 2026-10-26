@@ -15,5 +15,5 @@
     "types": ["@cloudflare/workers-types"]
   },
   "include": ["src"],
-  "exclude": ["src/**/*.check.ts", "src/pgliteSql.ts", "src/isolationDb.ts"]
+  "exclude": ["src/**/*.check.ts", "src/pgliteSql.ts", "src/isolationDb.ts", "src/refuseTestUrl.ts"]
 }

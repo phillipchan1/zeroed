@@ -38,6 +38,7 @@ import {
   workoutProgramOwned,
 } from './store.ts'
 import { executeZeroedTool } from './tools.ts'
+import { executeDataQuery } from './data.ts'
 import type { LiveProgram } from './store.ts'
 import type { ProgramDraft } from '../../supabase/functions/_shared/engine/programDraft.ts'
 
@@ -437,6 +438,149 @@ ok(stolenRev === 0, 'insertProgramRevision: A cannot write B revision')
 ok((await count('program_revision', 'program_id = $1', [PROG_B])) === bRevs, 'insertProgramRevision: B revision count unchanged')
 ok((await count('program_revision', 'summary = $1', ['stolen'])) === 0, 'insertProgramRevision: stolen summary absent')
 
+// --- client data plane (/api/data) — same owner predicates, no RLS ---
+const AUTH_A = 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa'
+const AUTH_B = 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb'
+const ctxA = { userId: AUTH_A, athleteId: A }
+const ctxB = { userId: AUTH_B, athleteId: B }
+
+const dataAthletes = await executeDataQuery(sql, ctxA, { table: 'athlete', op: 'select', columns: 'id, name' })
+ok(
+  Array.isArray(dataAthletes.data)
+    && (dataAthletes.data as { id: string }[]).every((r) => r.id === A)
+    && (dataAthletes.data as { id: string }[]).length === 1,
+  'data athlete: A lists only self',
+)
+
+const dataInsights = await executeDataQuery(sql, ctxA, { table: 'insight', op: 'select', columns: 'claim' })
+ok(
+  Array.isArray(dataInsights.data)
+    && (dataInsights.data as { claim: string }[]).every((r) => r.claim !== 'B only')
+    && (dataInsights.data as { claim: string }[]).some((r) => r.claim === 'A only'),
+  'data insight: A cannot list B claims',
+)
+
+const dataPhases = await executeDataQuery(sql, ctxA, { table: 'phase', op: 'select', columns: 'name' })
+ok(
+  Array.isArray(dataPhases.data)
+    && (dataPhases.data as { name: string }[]).every((r) => r.name !== 'Power'),
+  'data phase: A cannot list B Power',
+)
+
+const dataWorkouts = await executeDataQuery(sql, ctxA, { table: 'workout', op: 'select', columns: 'id' })
+ok(
+  Array.isArray(dataWorkouts.data)
+    && (dataWorkouts.data as { id: string }[]).every((r) => r.id === WORKOUT_A)
+    && !(dataWorkouts.data as { id: string }[]).some((r) => r.id === WORKOUT_B),
+  'data workout: A lists only own',
+)
+
+const dataObs = await executeDataQuery(sql, ctxA, { table: 'session_observation', op: 'select', columns: 'signal' })
+ok(
+  Array.isArray(dataObs.data)
+    && (dataObs.data as { signal: string }[]).every((r) => r.signal !== 'B felt good'),
+  'data observation: A cannot list B signal',
+)
+
+const loadedOwn = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'select',
+  columns: 'id, rpe, routine!inner(program_id)',
+  filters: [{ column: 'id', op: 'eq', value: WORKOUT_A }],
+  single: 'maybe',
+})
+ok((loadedOwn.data as { id: string } | null)?.id === WORKOUT_A, 'smoke load workout: A reads own row')
+ok((loadedOwn.data as { routine?: { program_id: string } } | null)?.routine?.program_id === PROG_A, 'data workout embed: routine.program_id is A')
+
+const loadedB = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'select',
+  columns: '*',
+  filters: [{ column: 'id', op: 'eq', value: WORKOUT_B }],
+  single: 'maybe',
+})
+ok(loadedB.data == null, 'data workout: A asking for B id is empty')
+
+const plantedWorkout = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: { routine_id: ROUTINE_B, rpe: 5, performed_at: '2026-10-23T12:00:00Z' },
+  returning: '*',
+  single: 'one',
+})
+ok(Boolean(plantedWorkout.error) || plantedWorkout.data == null, 'data insert: A cannot save onto B routine')
+ok((await count('workout', 'routine_id = $1', [ROUTINE_B])) === 1, 'data insert: B still has one workout')
+
+const savedWorkout = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: { routine_id: ROUTINE_A, rpe: 6, performed_at: '2026-10-23T15:00:00Z' },
+  returning: '*',
+  single: 'one',
+})
+const savedId = (savedWorkout.data as { id: string } | null)?.id
+ok(savedId != null && savedWorkout.error == null, 'smoke save workout: A insert succeeds')
+ok((await count('workout', 'id = $1 AND routine_id = $2', [savedId, ROUTINE_A])) === 1, 'smoke save workout: row landed on A routine')
+
+const savedAgain = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'update',
+  values: { rpe: 7 },
+  filters: [{ column: 'id', op: 'eq', value: savedId }],
+  returning: '*',
+  single: 'maybe',
+})
+ok((savedAgain.data as { rpe: number } | null)?.rpe === 7, 'smoke save workout: A update succeeds')
+
+const stealUpdate = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'update',
+  values: { rpe: 1 },
+  filters: [{ column: 'id', op: 'eq', value: WORKOUT_B }],
+})
+ok(stealUpdate.error == null, 'data update: forged B id is not an error')
+ok(Number(await scalar<number | string>('SELECT rpe FROM workout WHERE id = $1', [WORKOUT_B])) === 9, 'data update: B rpe unchanged')
+
+const stealProfile = await executeDataQuery(sql, ctxA, {
+  table: 'athlete_profile',
+  op: 'update',
+  values: { current_phase: 'Hacked' },
+  filters: [{ column: 'athlete_id', op: 'eq', value: B }],
+})
+ok((await scalar<string>('SELECT current_phase FROM athlete_profile WHERE athlete_id = $1', [B])) === 'Power', 'data profile: B phase unchanged')
+ok(stealProfile.error == null, 'data profile: forged B athlete_id update is a no-op')
+
+const ownDraft = await executeDataQuery(sql, ctxA, {
+  table: 'workout_draft',
+  op: 'upsert',
+  values: {
+    athlete_id: B,
+    routine_id: ROUTINE_A,
+    set_logs: { '0': [] },
+    feedback: {},
+    elapsed_seconds: 12,
+    started_at: '2026-10-21T12:00:00Z',
+    updated_at: '2026-10-21T12:00:00Z',
+  },
+  onConflict: 'athlete_id,routine_id',
+  returning: '*',
+  single: 'maybe',
+})
+ok((ownDraft.data as { athlete_id: string } | null)?.athlete_id === A, 'data draft: insert forces A athlete_id')
+ok((await count('workout_draft', 'athlete_id = $1', [B])) === 0, 'data draft: B has no planted draft')
+
+const bDraft = await executeDataQuery(sql, ctxB, { table: 'workout_draft', op: 'select', columns: 'athlete_id' })
+ok(Array.isArray(bDraft.data) && (bDraft.data as unknown[]).length === 0, 'data draft: B cannot read A draft')
+
+const stealToken = await executeDataQuery(sql, ctxA, {
+  table: 'mcp_token',
+  op: 'update',
+  values: { revoked_at: '2026-10-21T00:00:00Z' },
+  filters: [{ column: 'athlete_id', op: 'eq', value: B }],
+})
+ok((await count('mcp_token', 'athlete_id = $1 AND revoked_at IS NOT NULL', [B])) === 0, 'data mcp_token: B token not revoked by A')
+ok(stealToken.error == null, 'data mcp_token: forged update is a no-op')
+
 // --- deletes (same athlete_id / program-join scoping as store/edits) ---
 const deletedWorkout = await sql<{ id: string }[]>`
   DELETE FROM workout w
@@ -487,6 +631,172 @@ ok((await count('insight', 'athlete_id = $1', [B])) === 1, 'DELETE insight: B in
 
 ok((await loadWorkout(storeA, WORKOUT_A))?.workout.routine_id === ROUTINE_A, 'post-write: A workout still readable')
 ok((await loadWorkout(storeA, WORKOUT_B)) === null, 'post-write: B workout still hidden from A')
+
+// --- B1 cross-user upsert (must fail before owner WHERE on DO UPDATE) ---
+const stealProgram = await executeDataQuery(sql, ctxA, {
+  table: 'program',
+  op: 'upsert',
+  values: { id: PROG_B, goal: 'stolen-by-A', status: 'active' },
+  onConflict: 'id',
+  returning: '*',
+  single: 'maybe',
+})
+ok(stealProgram.status === 404, 'data upsert: stealing B program is 404')
+ok(
+  Boolean(stealProgram.error) || stealProgram.data == null || (stealProgram.data as { id?: string }).id !== PROG_B,
+  'data upsert: A cannot take B program id',
+)
+ok((await scalar<string>('SELECT athlete_id::text FROM program WHERE id = $1', [PROG_B])) === B, 'data upsert: B program athlete_id unchanged')
+ok((await count('workout', 'id = $1', [WORKOUT_B])) === 1, 'data upsert: B workout still on B tree')
+
+const stealWorkout = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'upsert',
+  values: { id: WORKOUT_B, routine_id: ROUTINE_A, rpe: 1, performed_at: '2026-10-23T12:00:00Z' },
+  onConflict: 'id',
+  returning: '*',
+  single: 'maybe',
+})
+ok(stealWorkout.status === 404, 'data upsert: stealing B workout is 404')
+ok(Boolean(stealWorkout.error) || stealWorkout.data == null, 'data upsert: A cannot take B workout id')
+ok((await scalar<string>('SELECT routine_id::text FROM workout WHERE id = $1', [WORKOUT_B])) === ROUTINE_B, 'data upsert: B workout routine unchanged')
+
+// --- B2 FK repoint into B's tree ---
+const plantedDraft = await executeDataQuery(sql, ctxA, {
+  table: 'workout_draft',
+  op: 'upsert',
+  values: {
+    routine_id: ROUTINE_A,
+    set_logs: {},
+    feedback: {},
+    elapsed_seconds: 1,
+    started_at: '2026-10-21T12:00:00Z',
+    updated_at: '2026-10-21T12:00:00Z',
+  },
+  onConflict: 'athlete_id,routine_id',
+  returning: '*',
+  single: 'one',
+})
+const draftId = (plantedDraft.data as { id: string } | null)?.id
+ok(draftId != null && plantedDraft.error == null, 'data draft: A can upsert own draft')
+
+const repointObs = await executeDataQuery(sql, ctxA, {
+  table: 'session_observation',
+  op: 'update',
+  values: { workout_id: WORKOUT_B },
+  filters: [{ column: 'id', op: 'eq', value: 'aaaa1111-0000-4000-8000-000000000001' }],
+  returning: '*',
+})
+ok(
+  Boolean(repointObs.error) || Number(repointObs.count ?? 0) === 0,
+  'data update: A cannot repoint observation onto B workout',
+)
+ok(
+  (await scalar<string>('SELECT workout_id::text FROM session_observation WHERE id = $1', ['aaaa1111-0000-4000-8000-000000000001'])) === WORKOUT_A,
+  'data update: A observation still on A workout',
+)
+
+const aRoutinePhase = await scalar<string>('SELECT phase_id::text FROM routine WHERE id = $1', [ROUTINE_A])
+const repointPhase = await executeDataQuery(sql, ctxA, {
+  table: 'routine',
+  op: 'update',
+  values: { phase_id: PHASE_B },
+  filters: [{ column: 'id', op: 'eq', value: ROUTINE_A }],
+  returning: '*',
+})
+ok(
+  Boolean(repointPhase.error) || Number(repointPhase.count ?? 0) === 0,
+  'data update: A cannot repoint routine onto B phase',
+)
+ok((await scalar<string>('SELECT phase_id::text FROM routine WHERE id = $1', [ROUTINE_A])) === aRoutinePhase, 'data update: A routine phase unchanged')
+
+const repointDraft = await executeDataQuery(sql, ctxA, {
+  table: 'workout_draft',
+  op: 'update',
+  values: { routine_id: ROUTINE_B },
+  filters: [{ column: 'id', op: 'eq', value: draftId }],
+})
+ok(
+  Boolean(repointDraft.error) || Number(repointDraft.count ?? 0) === 0,
+  'data update: A cannot repoint draft onto B routine',
+)
+ok((await scalar<string>('SELECT routine_id::text FROM workout_draft WHERE id = $1', [draftId])) === ROUTINE_A, 'data update: A draft still on A routine')
+
+// --- B3 embed must not leak B's child after a repoint attempt ---
+const embedDraft = await executeDataQuery(sql, ctxA, {
+  table: 'workout_draft',
+  op: 'select',
+  columns: 'id, routine:routine_id(name,exercises,program_id)',
+  filters: [{ column: 'id', op: 'eq', value: draftId }],
+  single: 'maybe',
+})
+const embedRoutine = (embedDraft.data as { routine?: { name?: string; program_id?: string } } | null)?.routine
+ok(embedRoutine?.name !== 'B day', 'data embed: A draft does not leak B routine name')
+ok(embedRoutine?.program_id !== PROG_B, 'data embed: A draft does not leak B program_id')
+
+const xminEmbed = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'select',
+  columns: 'id, routine!inner(xmin)',
+})
+ok(Boolean(xminEmbed.error), 'data embed: xmin is not an allowed column')
+ok(!String(xminEmbed.error?.message ?? '').includes('does not exist'), 'data embed: xmin error is generic')
+
+const deleteProgram = await executeDataQuery(sql, ctxA, {
+  table: 'program',
+  op: 'delete',
+  filters: [{ column: 'id', op: 'eq', value: PROG_A }],
+})
+ok(Boolean(deleteProgram.error), 'data delete: program is not deletable')
+ok((await count('program', 'id = $1', [PROG_A])) === 1, 'data delete: A program still present')
+ok((await count('program', 'id = $1', [PROG_B])) === 1, 'data delete: B program still present')
+
+const NOTE_A = 'aaaa5555-0000-4000-8000-000000000001'
+const deleteOwnNote = await executeDataQuery(sql, ctxA, {
+  table: 'coach_message',
+  op: 'delete',
+  filters: [{ column: 'id', op: 'eq', value: NOTE_A }],
+})
+ok(deleteOwnNote.status === 404, 'data delete: coach_message is not deletable')
+ok((await count('coach_message', 'id = $1', [NOTE_A])) === 1, 'data delete: A coach_message still present')
+
+const PLANTED_DRAFT = 'aaaa7777-0000-4000-8000-000000000001'
+await sql.unsafe(
+  `INSERT INTO workout_draft (id, athlete_id, routine_id, set_logs, feedback, elapsed_seconds, started_at, updated_at)
+   VALUES ($1, $2, $3, '{}'::jsonb, '{}'::jsonb, 1, '2026-10-21T12:00:00Z', '2026-10-21T12:00:00Z')`,
+  [PLANTED_DRAFT, A, ROUTINE_B],
+)
+const plantedEmbed = await executeDataQuery(sql, ctxA, {
+  table: 'workout_draft',
+  op: 'select',
+  columns: 'id, routine:routine_id(name,program_id)',
+  filters: [{ column: 'id', op: 'eq', value: PLANTED_DRAFT }],
+  single: 'maybe',
+})
+const plantedRoutine = (plantedEmbed.data as { routine?: { name?: string; program_id?: string } } | null)?.routine
+ok(plantedRoutine?.name !== 'B day', 'data embed: planted A draft does not leak B routine name')
+ok(plantedRoutine?.program_id !== PROG_B, 'data embed: planted A draft does not leak B program_id')
+
+const inFilter = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'select',
+  columns: 'id',
+  filters: [{ column: 'id', op: 'in', value: [WORKOUT_A, WORKOUT_B] }],
+})
+const inIds = Array.isArray(inFilter.data) ? (inFilter.data as { id: string }[]).map((r) => r.id) : []
+ok(inFilter.error == null, 'data in: uuid[] filter succeeds')
+ok(inIds.includes(WORKOUT_A) && !inIds.includes(WORKOUT_B), 'data in: A sees own id only from mixed list')
+
+const emptyIn = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'select',
+  columns: 'id',
+  filters: [{ column: 'id', op: 'in', value: [] }],
+})
+ok(emptyIn.error == null && emptyIn.status === 200, 'empty in[] on uuid does not 400')
+ok(Array.isArray(emptyIn.data) && (emptyIn.data as unknown[]).length === 0, 'empty in[] on uuid returns []')
+
+ok((await loadNotes(storeA)).weekly.length >= 1, 'loadNotes: ANY(uuid[]) returns A weekly reviews')
 
 await harness.close()
 
