@@ -197,23 +197,35 @@ jobs:
       - name: Start migrate Postgres with discarded logs
         run: |
           set -euo pipefail
+          # Pull first so docker run is not mixed with a layer download
+          # (that pairing has exited 2 on this runner after "Downloaded").
+          docker pull postgres:17 >/dev/null
           start_pg() {
             local name="$1" user="$2" db="$3" port="$4"
-            if ! docker run -d --name "${name}" --log-driver=none \
-              -e "POSTGRES_USER=${user}" \
-              -e POSTGRES_PASSWORD=dummy \
-              -e "POSTGRES_DB=${db}" \
-              -p "127.0.0.1:${port}:5432" \
-              postgres:17 \
-              postgres \
-              -c log_min_messages=panic \
-              -c log_min_error_statement=panic \
-              -c log_error_verbosity=terse \
-              >/dev/null
-            then
-              echo "::error::failed to start Postgres ${name}"
-              exit 1
-            fi
+            local attempt=0
+            while [ "${attempt}" -lt 3 ]; do
+              attempt=$((attempt + 1))
+              docker rm -f "${name}" >/dev/null 2>&1 || true
+              if docker run -d --name "${name}" --log-driver=none \
+                -e "POSTGRES_USER=${user}" \
+                -e POSTGRES_PASSWORD=dummy \
+                -e "POSTGRES_DB=${db}" \
+                -p "127.0.0.1:${port}:5432" \
+                postgres:17 \
+                postgres \
+                -c log_min_messages=panic \
+                -c log_min_error_statement=panic \
+                -c log_error_verbosity=terse \
+                >/dev/null
+              then
+                break
+              fi
+              if [ "${attempt}" -ge 3 ]; then
+                echo "::error::failed to start Postgres ${name}"
+                exit 1
+              fi
+              sleep 2
+            done
             n=0
             while [ "${n}" -lt 60 ]; do
               n=$((n + 1))
