@@ -238,7 +238,7 @@ function TrainingMaxSheet({ athleteId, unit, model, src, onClose, onSaved }: She
             )}
           </>
         ) : (
-          <span>No model number yet: no qualifying sets (1–6 reps at RPE 6–9.5, or a single at 10) in six weeks.</span>
+          <span>No model number yet: no qualifying sets (1–6 reps at RPE 7.5–9.5, or a single at 10) in six weeks.</span>
         )}
       </div>
       {isOverride && tm?.override?.setOn && (

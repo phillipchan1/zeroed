@@ -69,6 +69,7 @@ import {
   type WeeklyTally, type WeekWorkout, type WeekObservation, type LiftAttempt,
 } from './prescription'
 import { planPagerFutureWeeks, weekWindowInZone } from './weekDates'
+import { workoutRpeError } from './rpeScale'
 // Per-lift loads for the main lifts — working max, training max, push / hold /
 // drop, modifiers, the all-time-best ceiling and the reason line — are decided
 // in liftModel.ts. This file only reads the rows it needs.
@@ -3916,6 +3917,9 @@ export interface CommitResult {
 }
 
 export async function commitSession(p: PendingSession): Promise<CommitResult> {
+  const rpeErr = workoutRpeError({ rpe: p.rpe, actual_weights: p.actualWeights })
+  if (rpeErr) throw new Error(rpeErr)
+
   // 1. Promote to a real workout row — or update the one being edited. Editing
   //    rewrites the numbers (and clears the old observations) so re-running the
   //    coach reads the corrected session, not a duplicate of the original.

@@ -242,7 +242,7 @@ export function createZeroedServer(): McpServer {
 
   server.tool(
     'get_lift_model',
-    'One main lift\'s model from the whole log: working max (RPE-chart e1RM, qualifying sets, last 6 weeks, recency-weighted), training max, 4/8-week trend, all-time best, last qualifying sets, and this week\'s prescription with its reason line. lift: squat | bench | deadlift | ohp, or "all".',
+    'One main lift\'s model from the whole log: working max (RPE-chart e1RM; sets at RPE 7.5+ count fully, below 7 are ignored, 7–7.5 tapers; capped at the all-time best unless a new 1-rep @8+ beats it), training max, 4/8-week trend, all-time best, last qualifying sets, and this week\'s prescription with its reason line. lift: squat | bench | deadlift | ohp, or "all".',
     {
       lift: z.string().describe('squat | bench | deadlift | ohp | all'),
       sleep_hours: z.number().min(0).max(24).optional().describe('Last night\'s sleep, if the athlete said'),

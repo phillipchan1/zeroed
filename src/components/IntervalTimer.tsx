@@ -9,6 +9,7 @@ import {
   cueCount, cueGo, cueRest, cueDone, cueHalf, intervalSoundOn, setIntervalSound, releaseCueAudio, primeCueAudio,
 } from '../lib/intervalCues'
 import { useWakeLock } from '../lib/wakeLock'
+import { RPE_SCALE } from '../engine/rpeScale'
 
 // =============================================================================
 // The interval timer — HIIT inside the session, not in another app.
@@ -51,8 +52,6 @@ const PHASE_WORD: Record<PhaseKind, string> = {
   rest: 'Rest',
   break: 'Set break',
 }
-
-const RPE_SCALE = [6, 7, 8, 9, 10]
 
 // The ring. Big enough to read from across a turf lane, inside a 320px phone.
 const R = 128

@@ -21,6 +21,7 @@ import {
 } from '../../engine'
 import { isUpperBody } from '../../engine/liftModel'
 import { rpeContract } from '../../engine/prescription'
+import { RPE_SCALE, roundLoggedRpe } from '../../engine/rpeScale'
 import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
 import { isSetLogged, tallySession } from '../../engine/volume'
 import {
@@ -61,8 +62,6 @@ function leadingInt(s: string | undefined): number | null {
   const m = s.match(/\d+/)
   return m ? parseInt(m[0], 10) : null
 }
-
-const RPE_SCALE = [6, 7, 8, 9, 10]
 
 // "285lb", "127.5lb" — a load as the athlete reads it.
 function fmtLoadUnit(x: number, unit: string): string {
@@ -2267,7 +2266,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       actualReps[idx]    = logs.map((l) => l.reps ?? 0)
     })
     const rpeValues = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
-    const avgRpe    = rpeValues.length ? Math.round(rpeValues.reduce((a, b) => a + b, 0) / rpeValues.length) : null
+    const avgRpe    = rpeValues.length ? roundLoggedRpe(rpeValues.reduce((a, b) => a + b, 0) / rpeValues.length) : null
 
     const onboardingTransition =
       onboardingStep === 'first_session_pending'
@@ -2537,7 +2536,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // belongs at the moment the session is being looked back on — the debrief.
   const sessionVolume = tallySession(setLogs)
   const rpeLive   = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
-  const avgRpeLive = rpeLive.length ? Math.round(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length) : null
+  const avgRpeLive = rpeLive.length ? roundLoggedRpe(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length) : null
 
   const restLeft = restEndsAt ? Math.max(0, Math.ceil((restEndsAt - Date.now()) / 1000)) : 0
 
