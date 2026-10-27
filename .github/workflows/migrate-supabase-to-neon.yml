@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Snapshot dump + compare counts/hashes (exit 1 on mismatch; no Neon writes)
+        description: Source-only snapshot dump + counts/md5s (exit 0; no Neon compare)
         type: boolean
         default: true
       confirm_drop:
@@ -154,7 +154,7 @@ jobs:
             echo "::error::Missing repository secret SUPABASE_READONLY_URL"
             exit 1
           fi
-          if [ -z "${NEON_DIRECT_URL}" ]; then
+          if [ "${DRY_RUN}" != "true" ] && [ -z "${NEON_DIRECT_URL}" ]; then
             echo "::error::Missing repository secret NEON_DIRECT_URL"
             exit 1
           fi
@@ -162,15 +162,15 @@ jobs:
 
           ARGS=(--skip-auth-users)
           if [ "${DRY_RUN}" = "true" ]; then
-            ARGS+=(--dry-run)
-            echo "Mode: dry-run (no writes to Neon)"
+            ARGS+=(--dry-run "--report=${RUNNER_TEMP}/source-counts.json")
+            echo "Mode: dry-run (source-only; no Neon compare)"
           else
             echo "Mode: live data-only restore to Neon"
             if [ -z "${CONFIRM_DROP}" ]; then
               echo "::error::Live restore requires the confirm_drop input (target dbname)"
               exit 1
             fi
-            ARGS+=(--confirm-drop="${CONFIRM_DROP}")
+            ARGS+=(--confirm-drop="${CONFIRM_DROP}" "--report=${RUNNER_TEMP}/source-counts.json")
           fi
 
           if [ -n "${AUTH_FILE:-}" ] && [ -f "${AUTH_FILE}" ] && [ -s "${AUTH_FILE}" ]; then

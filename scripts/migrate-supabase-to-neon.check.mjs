@@ -7,7 +7,7 @@
  * Run: node --experimental-strip-types scripts/migrate-supabase-to-neon.check.mjs
  */
 import { spawn, spawnSync } from 'node:child_process'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -18,6 +18,7 @@ import {
   advisoryLockParts,
   advisoryLockVisibleSql,
   argValue,
+  assertSourcePgSsl,
   authUsersToCopyCsv,
   canExecutePgControlSystemQuery,
   checkSourceLockAbsentOnTarget,
@@ -31,10 +32,13 @@ import {
   EXCLUDED_PUBLIC_TABLES,
   fingerprintQuery,
   formatCountComparison,
+  formatSourceCountLines,
+  isLoopbackHost,
   isNeonHost,
   isSocketHost,
   isSupabaseHost,
   libpqCleanEnv,
+  loadSourceCa,
   loadUsersSql,
   main,
   maxCreatedAtQuery,
@@ -64,6 +68,14 @@ import {
   requireHashes,
   resolveSourceUrl,
   resolveTargetUrl,
+  restoreListSanityReason,
+  sourceCaFile,
+  sourceCountsReport,
+  sourcePgClientConfig,
+  sourcePgSsl,
+  stripSslMode,
+  SUPABASE_SOURCE_CA_FILE,
+  targetPgClientConfig,
   SNAPSHOT_BEGIN_SQL,
   SNAPSHOT_EXPORT_SQL,
   SNAPSHOT_TIMEOUT_SQL,
@@ -283,6 +295,44 @@ ok(checksumSessionSetSql().includes('SET extra_float_digits = 1'), 'snapshot cli
 ok(checksumSessionSetSql().includes("SET IntervalStyle = 'postgres'"), 'snapshot client SET pins IntervalStyle')
 ok(SNAPSHOT_TIMEOUT_SQL.includes('statement_timeout = 0'), 'snapshot session disables statement_timeout')
 ok(SNAPSHOT_TIMEOUT_SQL.includes('idle_in_transaction_session_timeout = 0'), 'snapshot session disables idle-in-transaction timeout')
+ok(isLoopbackHost('127.0.0.1'), 'isLoopbackHost matches 127.0.0.1')
+ok(!stripSslMode('postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?sslmode=require').includes('sslmode='), 'stripSslMode drops sslmode')
+ok(existsSync(SUPABASE_SOURCE_CA_FILE), 'Supabase prod-ca-2021.crt is committed')
+ok(loadSourceCa().includes('BEGIN CERTIFICATE'), 'committed source CA is a PEM certificate')
+eq(sourceCaFile(), SUPABASE_SOURCE_CA_FILE, 'default source CA is the committed file')
+const supabaseTlsUrl = 'postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?sslmode=require'
+const srcCfg = sourcePgClientConfig(supabaseTlsUrl)
+assertSourcePgSsl(srcCfg)
+ok(srcCfg.ssl.rejectUnauthorized === true, 'source client sets rejectUnauthorized: true')
+ok(String(srcCfg.ssl.ca).includes('BEGIN CERTIFICATE'), 'source client is built with the CA')
+ok(!String(srcCfg.connectionString).includes('sslmode='), 'source client URL has sslmode stripped')
+eq(sourcePgSsl(supabaseTlsUrl).rejectUnauthorized, true, 'sourcePgSsl verifies remote Supabase')
+let missingCaFailed = false
+try {
+  assertSourcePgSsl({ connectionString: stripSslMode(supabaseTlsUrl), ssl: { rejectUnauthorized: true } })
+} catch (err) {
+  missingCaFailed = /must be built with a CA/.test(err instanceof Error ? err.message : '')
+}
+ok(missingCaFailed, 'source pg client built without a CA is refused')
+let noVerifyFailed = false
+try {
+  assertSourcePgSsl({ connectionString: stripSslMode(supabaseTlsUrl), ssl: { ca: loadSourceCa(), rejectUnauthorized: false } })
+} catch {
+  noVerifyFailed = true
+}
+ok(noVerifyFailed, 'source pg client with rejectUnauthorized: false is refused')
+const neonCfg = targetPgClientConfig('postgresql://neondb_owner@ep-foo.us-east-2.aws.neon.tech/neondb?sslmode=require')
+ok(neonCfg.ssl.rejectUnauthorized === true, 'Neon client keeps verify-full')
+ok(!Object.hasOwn(neonCfg.ssl, 'ca'), 'Neon client uses the public CA store')
+ok(!String(neonCfg.connectionString).includes('sslmode='), 'Neon client URL has sslmode stripped')
+eq(sourcePgSsl('postgresql://src:dummy@127.0.0.1:55418/srcdb'), false, 'loopback migrate-pg source stays plaintext')
+const report = sourceCountsReport({ workout: 113, athlete: 2 }, { workout: 'a'.repeat(32) })
+eq(report.tables.workout.n, 113, 'source-counts report includes workout')
+ok(formatSourceCountLines({ workout: 113 }).some((l) => l.includes('workout: 113')), 'source count lines include workout')
+ok(
+  /workout/.test(restoreListSanityReason('211; 0 16410 TABLE DATA public athlete postgres\n')),
+  'restore-list sanity flags a missing workout table',
+)
 eq(
   refuseTransactionPoolerReason('postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres'),
   '',
@@ -700,8 +750,8 @@ ok(/pg_export_snapshot/.test(drySkip.stdout), 'offline dry-run documents the sna
 ok(/TimeZone=UTC/.test(drySkip.stdout) && /extra_float_digits=1/.test(drySkip.stdout), 'offline dry-run documents checksum GUC pins')
 ok(/idle_in_transaction_session_timeout=0/.test(drySkip.stdout), 'offline dry-run documents snapshot timeouts')
 ok(/transaction-pooler source/.test(drySkip.stdout), 'offline dry-run documents the transaction-pooler refuse')
-ok(/content md5/.test(drySkip.stdout), 'offline dry-run documents per-table content md5')
-ok(/exit non-zero on mismatch/.test(drySkip.stdout), 'offline dry-run documents mismatch abort')
+ok(/source-only/.test(drySkip.stdout), 'offline dry-run documents source-only semantics')
+ok(/no Neon compare/.test(drySkip.stdout), 'offline dry-run says it does not compare Neon')
 ok(/coverage list/.test(drySkip.stdout), 'offline dry-run documents the public-table coverage guard')
 ok(!/would COPY auth\.users from source/.test(drySkip.stdout), 'skip path does not COPY auth.users')
 
@@ -730,6 +780,14 @@ ok(
   'live run masks DB users before exiting',
 )
 ok(!/dumping/i.test(`${liveNoMap.stdout}\n${liveNoMap.stderr}`), 'live run without a mapping does not dump')
+
+const srcOnlyDry = spawnMigrate(['--dry-run', '--skip-auth-users'], {
+  SUPABASE_READONLY_URL: 'postgresql://reader@aws-0-us-east-1.pooler.supabase.com:6543/postgres',
+})
+const srcOnlyDryOut = `${srcOnlyDry.stdout}\n${srcOnlyDry.stderr}`
+eq(srcOnlyDry.status, 2, 'source-only dry-run still refuses the transaction pooler')
+ok(/transaction pooler/.test(srcOnlyDryOut), 'source-only dry-run does not require a Neon URL to refuse the pooler')
+ok(!/NEON_DIRECT_URL/.test(srcOnlyDryOut), 'source-only dry-run does not demand NEON_DIRECT_URL')
 
 const txnPooler = spawnMigrate(['--dry-run', '--skip-auth-users'], {
   SUPABASE_READONLY_URL: 'postgresql://reader@aws-0-us-east-1.pooler.supabase.com:6543/postgres',
@@ -891,12 +949,18 @@ ok(!/emailVerified|createdAt|updatedAt|userId|expiresAt/.test(loadUsersSql('/tmp
 ok(!/CREATE TABLE IF NOT EXISTS "user"[\s\S]*emailVerified/.test(readFileSync(join(root, 'worker/schema/better-auth.sql'), 'utf8')), 'better-auth.sql has no camelCase user table')
 ok(migrateSrc.includes('weekly_review') && migrateSrc.includes('coach_message'), 'migrate counts weekly_review and coach_message')
 ok(migrateSrc.includes('createdAtTablesQuery') || migrateSrc.includes("column_name = 'created_at'"), 'migrate looks up created_at columns')
-ok(/max\(created_at\)/.test(migrateSrc), 'dry-run prints max(created_at)')
+ok(/MAX\(created_at\)/.test(migrateSrc), 'maxCreatedAtQuery reads created_at')
 ok(/pg_export_snapshot/.test(migrateSrc), 'migrate exports a REPEATABLE READ snapshot')
 ok(/--snapshot=/.test(migrateSrc), 'migrate passes --snapshot to pg_dump')
 ok(/to_jsonb\(t\)/.test(migrateSrc), 'migrate hashes row content as to_jsonb')
 ok(/uncoveredPublicTablesQuery/.test(migrateSrc), 'migrate refuses uncovered public tables')
-ok(/count\/hash mismatch/.test(migrateSrc), 'dry-run aborts on a count/hash mismatch')
+ok(/source-only succeeded/.test(migrateSrc), 'dry-run is source-only and does not abort on empty Neon')
+ok(/sourcePgClientConfig/.test(migrateSrc), 'source pg clients go through sourcePgClientConfig')
+ok(!/new pg\.Client\(\{\s*connectionString:\s*sourceUrl/.test(migrateSrc), 'source pg clients are not built from a raw URL')
+ok(!/ssl:\s*\{[^}]*rejectUnauthorized:\s*false/.test(migrateSrc), 'migrate script never sets rejectUnauthorized: false')
+ok(!/uselibpqcompat/.test(migrateSrc), 'migrate script does not use uselibpqcompat')
+ok(/prod-ca-2021/.test(migrateSrc), 'migrate script references the committed Supabase CA')
+ok(/migrate-tls:/.test(checksYml), 'CI has a migrate-tls job')
 ok(/checksumPgOptions/.test(migrateSrc) && /PGOPTIONS/.test(migrateSrc), 'psqlTuples pins checksum GUCs via PGOPTIONS')
 ok(/checksumSessionSetSql/.test(migrateSrc), 'snapshot client applies checksum SET pins')
 ok(/refuseTransactionPoolerReason/.test(migrateSrc), 'migrate refuses a transaction-pooler source')
@@ -906,7 +970,8 @@ const runbook = readFileSync(join(root, 'docs/cloudflare-cutover.md'), 'utf8')
 ok(/pg_export_snapshot/.test(runbook), 'RUNBOOK documents pg_export_snapshot')
 ok(/pg_dump --snapshot/.test(runbook), 'RUNBOOK documents pg_dump --snapshot')
 ok(/REPEATABLE READ/.test(runbook), 'RUNBOOK documents the REPEATABLE READ snapshot')
-ok(/exits non-zero on any/.test(runbook), 'RUNBOOK documents dry-run mismatch abort')
+ok(/exits 0/.test(runbook) && /empty Neon is not a dry-run failure/.test(runbook), 'RUNBOOK documents source-only dry-run exit 0')
+ok(/prod-ca-2021/.test(runbook), 'RUNBOOK documents the committed Supabase CA')
 ok(/statement_timeout=0/.test(runbook) && /idle_in_transaction_session_timeout=0/.test(runbook), 'RUNBOOK documents snapshot timeouts')
 ok(/TimeZone=UTC/.test(runbook) && /extra_float_digits=1/.test(runbook), 'RUNBOOK documents checksum GUC pins')
 ok(/transaction pooler/.test(runbook), 'RUNBOOK documents the transaction-pooler refuse')
@@ -1097,13 +1162,13 @@ async function runLivePostgresChecks() {
     NEON_DIRECT_URL: targetUrl,
   })
   const dryLiveOut = `${dryLive.stdout}\n${dryLive.stderr}`
-  if (dryLive.status !== 1) console.error(redactSecrets(dryLiveOut))
-  eq(dryLive.status, 1, 'connected dry-run exits 1 when neon counts/hashes mismatch')
-  ok(/MISMATCH/.test(dryLiveOut), 'connected dry-run reports a mismatch')
-  ok(/src_md5=/.test(dryLiveOut), 'connected dry-run prints source content hashes')
-  ok(/pg_export_snapshot|snapshot /.test(dryLiveOut), 'connected dry-run uses a source snapshot')
-  ok(/max\(created_at\)/.test(dryLiveOut), 'connected dry-run prints max(created_at)')
-  ok(/athlete: source=/.test(dryLiveOut), 'connected dry-run prints athlete max(created_at)')
+  if (dryLive.status !== 0) console.error(redactSecrets(dryLiveOut))
+  eq(dryLive.status, 0, 'connected dry-run exits 0 (source-only; empty Neon is ok)')
+  ok(/source counts:/.test(dryLiveOut), 'connected dry-run prints source counts')
+  ok(/workout:/.test(dryLiveOut), 'connected dry-run reports the workout count')
+  ok(/pg_restore --list ok/.test(dryLiveOut), 'connected dry-run runs pg_restore --list sanity')
+  ok(!/src_md5=/.test(dryLiveOut), 'connected dry-run does not print hashes')
+  ok(!/postgresql:\/\//i.test(dryLiveOut), 'connected dry-run does not print a URL')
   eq(
     Number(pinnedPsql(sourceUrl, 'SELECT COUNT(*) FROM public.athlete').trim()),
     athletesBefore,
@@ -1129,7 +1194,8 @@ async function runLivePostgresChecks() {
   if (proceed.status !== 0) console.error(redactSecrets(proceedOut))
   eq(proceed.status, 0, 'different server live restore proceeds')
   ok(/migration ok/.test(proceedOut), 'different server prints migration ok')
-  ok(/src_md5=/.test(proceedOut) && /neon_md5=/.test(proceedOut), 'live restore prints source and neon content hashes')
+  ok(/workout: source=/.test(proceedOut), 'live restore reports workout counts')
+  ok(!/src_md5=/.test(proceedOut), 'live restore does not print hashes')
   eq(
     Number(pinnedPsql(sourceUrl, 'SELECT COUNT(*) FROM public.athlete').trim()),
     athletesBefore,
@@ -1142,8 +1208,8 @@ async function runLivePostgresChecks() {
   })
   const dryAfterOut = `${dryAfter.stdout}\n${dryAfter.stderr}`
   if (dryAfter.status !== 0) console.error(redactSecrets(dryAfterOut))
-  eq(dryAfter.status, 0, 'connected dry-run exits 0 when neon matches the source snapshot')
-  ok(/counts and hashes match/.test(dryAfterOut), 'matching dry-run says counts and hashes match')
+  eq(dryAfter.status, 0, 'connected dry-run still exits 0 after a live restore')
+  ok(/source-only succeeded/.test(dryAfterOut), 'post-restore dry-run stays source-only')
 
   const alias = spawnMigrate([
     '--skip-auth-users',

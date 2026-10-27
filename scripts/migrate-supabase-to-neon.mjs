@@ -16,7 +16,10 @@
  *      (failure rolls back to empty tables)
  *   4. Source dump + count/hash share one REPEATABLE READ snapshot
  *      (pg_export_snapshot + pg_dump --snapshot) so live writes cannot
- *      cause a false mismatch. Dry-run exits non-zero on any mismatch.
+ *      cause a false mismatch. Dry-run is source-only and exits 0 when
+ *      the snapshot dump, restore-list sanity, and source counts/md5s
+ *      succeed. Live restore still compares source vs Neon and aborts on
+ *      mismatch.
  *
  * The migration role often cannot read auth.users. In that case:
  *   --skip-auth-users --auth-users-file=users.json
@@ -110,6 +113,115 @@ export function isSupabaseHost(host) {
 
 export function isNeonHost(host) {
   return String(host || '').toLowerCase().endsWith('.neon.tech')
+}
+
+export function isLoopbackHost(host) {
+  const h = String(host || '').toLowerCase().replace(/^\[|\]$/g, '')
+  return h === 'localhost' || h === '127.0.0.1' || h === '::1'
+}
+
+export const SUPABASE_SOURCE_CA_FILE = join(here, 'certs/supabase-prod-ca-2021.crt')
+
+/** Strip sslmode so an explicit `ssl` object is what node-pg uses. */
+export function stripSslMode(url) {
+  const parsed = new URL(url)
+  parsed.searchParams.delete('sslmode')
+  return parsed.toString()
+}
+
+export function sourceCaFile(env = process.env) {
+  return env.ZEROED_SOURCE_CA_FILE || SUPABASE_SOURCE_CA_FILE
+}
+
+export function loadSourceCa(env = process.env) {
+  const file = sourceCaFile(env)
+  const pem = readFileSync(file, 'utf8')
+  if (!pem.includes('BEGIN CERTIFICATE')) {
+    throw new Error('source CA file is not a PEM certificate')
+  }
+  return pem
+}
+
+export function assertSourcePgSsl(config) {
+  const ssl = config?.ssl
+  if (!ssl || ssl === true || ssl === false) {
+    throw new Error('source pg client must verify TLS with a CA')
+  }
+  if (ssl.rejectUnauthorized !== true) {
+    throw new Error('source pg client must set rejectUnauthorized: true')
+  }
+  const ca = ssl.ca
+  const pem = Buffer.isBuffer(ca) ? ca.toString('utf8') : String(ca || '')
+  if (!pem.includes('BEGIN CERTIFICATE')) {
+    throw new Error('source pg client must be built with a CA')
+  }
+  if (String(config.connectionString || '').includes('sslmode=')) {
+    throw new Error('source pg client connection string must not include sslmode')
+  }
+  return config
+}
+
+/**
+ * TLS for a source (Supabase) node-pg client: bundled prod-ca-2021 (or
+ * ZEROED_SOURCE_CA_FILE) and rejectUnauthorized: true. Loopback without
+ * TLS (migrate-pg) stays plaintext. Remote hosts always verify.
+ */
+export function sourcePgSsl(url, env = process.env) {
+  const parts = postgresUrlParts(url)
+  let mode = ''
+  try {
+    mode = new URL(url).searchParams.get('sslmode')?.trim().toLowerCase() || ''
+  } catch {
+    mode = ''
+  }
+  const forceTls = Boolean(env.ZEROED_SOURCE_CA_FILE)
+    || mode === 'require'
+    || mode === 'verify-ca'
+    || mode === 'verify-full'
+  const remote = !parts.isSocket && !isLoopbackHost(parts.host) && !isLoopbackHost(parts.urlHost)
+  if (!forceTls && !remote) return false
+  return { ca: loadSourceCa(env), rejectUnauthorized: true }
+}
+
+/** Neon uses a public CA — verify-full via Node's default store. */
+export function targetPgSsl(url, env = process.env) {
+  const parts = postgresUrlParts(url)
+  let mode = ''
+  try {
+    mode = new URL(url).searchParams.get('sslmode')?.trim().toLowerCase() || ''
+  } catch {
+    mode = ''
+  }
+  const forceTls = Boolean(env.ZEROED_TARGET_CA_FILE)
+    || mode === 'require'
+    || mode === 'verify-ca'
+    || mode === 'verify-full'
+  const remote = !parts.isSocket && !isLoopbackHost(parts.host) && !isLoopbackHost(parts.urlHost)
+  if (!forceTls && !remote) return false
+  if (env.ZEROED_TARGET_CA_FILE) {
+    return { ca: readFileSync(env.ZEROED_TARGET_CA_FILE), rejectUnauthorized: true }
+  }
+  return { rejectUnauthorized: true }
+}
+
+export function sourcePgClientConfig(url, env = process.env) {
+  const ssl = sourcePgSsl(url, env)
+  const config = {
+    connectionString: stripSslMode(url),
+    connectionTimeoutMillis: 10000,
+    ssl,
+  }
+  if (ssl) assertSourcePgSsl(config)
+  return config
+}
+
+export function targetPgClientConfig(url, env = process.env) {
+  const ssl = targetPgSsl(url, env)
+  return {
+    connectionString: stripSslMode(url),
+    connectionTimeoutMillis: 10000,
+    ssl,
+  }
 }
 
 /** URL-only: same host+port+db, or a target that is not Neon / looks like Supabase. */
@@ -345,10 +457,7 @@ function installLockSignalHandlers() {
 
 export async function holdSourceAdvisoryLock(sourceUrl, key) {
   installLockSignalHandlers()
-  const client = new pg.Client({
-    connectionString: sourceUrl,
-    connectionTimeoutMillis: 10000,
-  })
+  const client = new pg.Client(sourcePgClientConfig(sourceUrl))
   const session = {
     client,
     key: String(key),
@@ -458,7 +567,8 @@ export function parseMigrateArgs(argv = [], env = process.env) {
   const authUsersFile = argValue(argv, '--auth-users-file') || env.AUTH_USERS_FILE || ''
   const skipAuthUsers = argv.includes('--skip-auth-users') || Boolean(authUsersFile)
   const confirmDrop = argValue(argv, '--confirm-drop') || env.CONFIRM_DROP || ''
-  return { dryRun, relaxTargetRls, skipAuthUsers, authUsersFile, confirmDrop }
+  const report = argValue(argv, '--report') || env.ZEROED_MIGRATE_REPORT || ''
+  return { dryRun, relaxTargetRls, skipAuthUsers, authUsersFile, confirmDrop, report }
 }
 
 export function resolveSourceUrl(env = process.env) {
@@ -709,11 +819,37 @@ export function checksumRowsToMaps(rows) {
   return { counts, hashes }
 }
 
-export async function withSourceSnapshot(sourceUrl, work) {
-  const client = new pg.Client({
-    connectionString: sourceUrl,
-    connectionTimeoutMillis: 10000,
+export function sourceCountsReport(counts, hashes = {}) {
+  const tables = {}
+  for (const table of REQUIRED_COUNT_TABLES) {
+    tables[table] = { n: counts?.[table] ?? null, h: hashes?.[table] || null }
+  }
+  return { tables }
+}
+
+export function formatSourceCountLines(counts) {
+  return REQUIRED_COUNT_TABLES.map((table) => {
+    const n = counts?.[table]
+    return `  ${table}: ${Number.isFinite(n) ? n : 'n/a'}`
   })
+}
+
+export function restoreListSanityReason(tocText, tables = REQUIRED_COUNT_TABLES) {
+  const missing = tables.filter((table) => {
+    const re = new RegExp(`TABLE DATA\\s+public\\s+("?${table}"?)\\s`)
+    return !re.test(String(tocText ?? ''))
+  })
+  if (missing.length) return `pg_restore --list is missing ${missing.join(', ')}`
+  return ''
+}
+
+export function migrateWorkDir(env = process.env) {
+  const base = env.RUNNER_TEMP || tmpdir()
+  return mkdtempSync(join(base, 'zeroed-migrate-'))
+}
+
+export async function withSourceSnapshot(sourceUrl, work) {
+  const client = new pg.Client(sourcePgClientConfig(sourceUrl))
   await client.connect()
   try {
     await client.query(checksumSessionSetSql())
@@ -921,26 +1057,6 @@ function psqlTuples(url, sql) {
   return run('psql', ['-v', 'ON_ERROR_STOP=1', '-At', '-F', ',', '-d', url, '-c', sql], { env })
 }
 
-function printDryRunCreatedAt(sourceUrl, targetUrl) {
-  const tables = parseIdList(psqlTuples(sourceUrl, createdAtTablesQuery()))
-    .filter((t) => REQUIRED_COUNT_TABLES.includes(t))
-  if (!tables.length) {
-    console.log('dry-run: no counted public table has created_at')
-    return
-  }
-  console.log('dry-run: max(created_at) per table (helps explain count drift):')
-  for (const table of tables) {
-    const src = String(psqlTuples(sourceUrl, maxCreatedAtQuery(table)) || '').trim() || 'n/a'
-    let dst = 'n/a'
-    try {
-      dst = String(psqlTuples(targetUrl, maxCreatedAtQuery(table)) || '').trim() || 'n/a'
-    } catch {
-      dst = 'n/a'
-    }
-    console.log(`  ${table}: source=${src} neon=${dst}`)
-  }
-}
-
 function readChecksums(url, label, { required = true } = {}) {
   try {
     const parsed = parseChecksums(psqlTuples(url, checksumQuery()))
@@ -1018,7 +1134,8 @@ function printOfflineDryRun(args) {
   console.log('dry-run: would pin TimeZone=UTC extra_float_digits=1 IntervalStyle=postgres on both checksum sessions')
   console.log('dry-run: would set statement_timeout=0 and idle_in_transaction_session_timeout=0 on the snapshot session')
   console.log('dry-run: would refuse a transaction-pooler source (port 6543 / mode=transaction); direct or session mode required')
-  console.log('dry-run: would compare row counts and per-table content md5 (PK-ordered) and exit non-zero on mismatch')
+  console.log('dry-run: source-only — snapshot, dump, pg_restore --list, source counts/md5s; exit 0 (no Neon compare)')
+  console.log('dry-run: live restore compares source snapshot vs Neon and aborts on mismatch')
   console.log('dry-run: would refuse if a public table is missing from the coverage list (Better Auth excluded on purpose)')
   console.log('dry-run: would require every source auth_user_id to appear in the mapping (ids, not counts)')
   console.log('dry-run: live restore drops and recreates public/auth, then restores in one transaction')
@@ -1073,17 +1190,24 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     return 0
   }
 
-  if (!source || !target) {
-    console.error('Set SUPABASE_READONLY_URL and NEON_DIRECT_URL (or pass --dry-run).')
+  if (!source) {
+    console.error('Set SUPABASE_READONLY_URL (or pass --dry-run).')
+    return 2
+  }
+
+  if (!args.dryRun && !target) {
+    console.error('Set SUPABASE_READONLY_URL and NEON_DIRECT_URL.')
     return 2
   }
 
   maskDatabaseUrls(source, target)
 
-  const wipeReason = refuseSourceWipeReason(source, target)
-  if (wipeReason) {
-    console.error(`Refusing to continue: ${wipeReason}. Source is read-only.`)
-    return 2
+  if (target) {
+    const wipeReason = refuseSourceWipeReason(source, target)
+    if (wipeReason) {
+      console.error(`Refusing to continue: ${wipeReason}. Source is read-only.`)
+      return 2
+    }
   }
 
   const poolerReason = refuseTransactionPoolerReason(source)
@@ -1143,10 +1267,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   needBin('pg_restore')
   needBin('psql')
 
-  const dir = mkdtempSync(join(tmpdir(), 'zeroed-migrate-'))
+  const dir = migrateWorkDir(env)
   const dumpPath = join(dir, 'public.dump')
   const usersPath = join(dir, 'auth_users.csv')
   const relaxPath = join(dir, 'relax_target.sql')
+  const reportPath = args.report || join(env.RUNNER_TEMP || dir, 'source-counts.json')
 
   try {
     writeFileSync(relaxPath, RELAX_TARGET_SQL)
@@ -1198,11 +1323,6 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       console.log(`exported ${mappedUsers} auth.users rows`)
     }
 
-    const dest = readChecksums(target, 'neon', { required: false })
-    const before = formatCountComparison(snap.srcCounts, dest.counts, snap.srcHashes, dest.hashes)
-    console.log('row counts and content hashes (source snapshot vs neon):')
-    for (const line of before.lines) console.log(line)
-
     if (args.skipAuthUsers && args.authUsersFile) {
       const missing = missingMappedAuthUserIds(snap.sourceAuthIds, mappingRows)
       if (missing.length) {
@@ -1211,20 +1331,31 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       }
     }
 
+    const tocText = run('pg_restore', ['-l', dumpPath])
+    const listReason = restoreListSanityReason(tocText)
+    if (listReason) {
+      console.error(listReason)
+      return 1
+    }
+
+    writeFileSync(reportPath, `${JSON.stringify(sourceCountsReport(snap.srcCounts, snap.srcHashes), null, 2)}\n`)
+    console.log('source counts:')
+    for (const line of formatSourceCountLines(snap.srcCounts)) console.log(line)
+    console.log(`source counts report written (${REQUIRED_COUNT_TABLES.length} tables, including workout)`)
+
     if (args.dryRun) {
-      console.log(`dry-run: snapshot ${snap.snapshotId}; dump discarded after compare (${readFileSync(dumpPath).length} bytes, not uploaded)`)
-      console.log(`dry-run: ${mappedUsers} auth users to map`)
-      console.log(args.relaxTargetRls
-        ? 'dry-run: would apply worker/schema/app.sql + data-only restore + --relax-target-rls on Neon only'
-        : 'dry-run: would apply worker/schema/app.sql + data-only restore (no Neon writes in this dry-run)')
-      printDryRunCreatedAt(source, target)
-      if (before.mismatch) {
-        console.error('dry-run: count/hash mismatch — abort (no Neon writes)')
-        return 1
-      }
-      console.log('dry-run: counts and hashes match')
+      console.log(`dry-run: snapshot dump + pg_restore --list ok (${readFileSync(dumpPath).length} bytes, not uploaded)`)
+      console.log(`dry-run: ${mappedUsers} auth users attached`)
+      console.log('dry-run: source-only succeeded (Neon compare skipped)')
       return 0
     }
+
+    const dest = readChecksums(target, 'neon', { required: false })
+    const before = formatCountComparison(snap.srcCounts, dest.counts, snap.srcHashes, dest.hashes)
+    console.log('row counts before restore:')
+    for (const line of formatSourceCountLines(snap.srcCounts)) console.log(`  source${line}`)
+    for (const line of formatSourceCountLines(dest.counts)) console.log(`  neon${line}`)
+    if (before.mismatch) console.log('source and neon counts/hashes differ before restore (expected on empty neon)')
 
     console.log('resetting Neon public/auth schemas so a rerun starts empty…')
     run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-c', `
@@ -1266,8 +1397,16 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
 
     const afterDst = readChecksums(target, 'neon', { required: true })
     const after = formatCountComparison(snap.srcCounts, afterDst.counts, snap.srcHashes, afterDst.hashes)
-    console.log('row counts and content hashes after restore (source snapshot vs neon):')
-    for (const line of after.lines) console.log(line)
+    console.log('row counts after restore:')
+    for (const table of REQUIRED_COUNT_TABLES) {
+      const a = snap.srcCounts[table]
+      const b = afterDst.counts[table]
+      const aDisp = Number.isFinite(a) ? a : 'n/a'
+      const bDisp = Number.isFinite(b) ? b : 'n/a'
+      const hashOk = snap.srcHashes[table] && snap.srcHashes[table] === afterDst.hashes[table]
+      const mark = a === b && Number.isFinite(a) && hashOk ? 'ok' : 'MISMATCH'
+      console.log(`  ${table}: source=${aDisp} neon=${bDisp} ${mark}`)
+    }
     if (after.mismatch) {
       console.error('Row-count or content-hash mismatch — abort. Neon was written but is not trusted.')
       return 1

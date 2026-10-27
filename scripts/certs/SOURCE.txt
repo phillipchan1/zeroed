@@ -1,0 +1,8 @@
+supabase-prod-ca-2021.crt is Supabase's public root CA (CN=Supabase Root 2021 CA).
+Downloaded over HTTPS from the URL documented with prod-ca-2021.crt:
+https://supabase-downloads.s3-ap-southeast-1.amazonaws.com/prod/ssl/prod-ca-2021.crt
+SHA256 fingerprint:
+80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA
+This is a public certificate, not a secret. Node pg source clients pass it as
+ssl.ca with rejectUnauthorized: true (verify-full). Do not set rejectUnauthorized
+to false and do not use uselibpqcompat.

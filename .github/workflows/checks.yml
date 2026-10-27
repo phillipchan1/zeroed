@@ -288,3 +288,19 @@ jobs:
           ZEROED_PG_ALIAS_URL: postgresql://src:dummy@ep-src.neon.tech:55418/srcdb
           ZEROED_CHECK_PSQL_URL: postgresql://src:dummy@127.0.0.1:55418/srcdb
         run: node --experimental-strip-types scripts/migrate-supabase-to-neon.check.mjs
+
+  migrate-tls:
+    name: migrate-tls
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Prove source pg TLS verification
+        env:
+          ZEROED_REQUIRE_TLS: "1"
+        run: node --experimental-strip-types scripts/migrate-supabase-to-neon.tls.check.mjs
