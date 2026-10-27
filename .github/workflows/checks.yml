@@ -36,6 +36,15 @@ jobs:
       ZEROED_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/zeroed_test
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Silence Postgres fixture logs
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --filter publish=5432 --format '{{.ID}}')"
+          if [ "$(printf '%s\n' "${cid}" | grep -c .)" -ne 1 ]; then
+            echo "::error::expected exactly one Postgres fixture container"
+            exit 1
+          fi
+          scripts/pin-postgres-container-logs.sh "${cid}" postgres
       - name: actionlint
         run: |
           set -euo pipefail
@@ -105,6 +114,15 @@ jobs:
       ZEROED_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/zeroed_test
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Silence Postgres fixture logs
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --filter publish=5432 --format '{{.ID}}')"
+          if [ "$(printf '%s\n' "${cid}" | grep -c .)" -ne 1 ]; then
+            echo "::error::expected exactly one Postgres fixture container"
+            exit 1
+          fi
+          scripts/pin-postgres-container-logs.sh "${cid}" postgres
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
@@ -134,6 +152,15 @@ jobs:
       ZEROED_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/zeroed
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Silence Postgres fixture logs
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --filter publish=5432 --format '{{.ID}}')"
+          if [ "$(printf '%s\n' "${cid}" | grep -c .)" -ne 1 ]; then
+            echo "::error::expected exactly one Postgres fixture container"
+            exit 1
+          fi
+          scripts/pin-postgres-container-logs.sh "${cid}" postgres
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
@@ -160,33 +187,6 @@ jobs:
   migrate-pg:
     name: migrate-pg
     runs-on: ubuntu-latest
-    services:
-      pg-source:
-        image: postgres:17
-        env:
-          POSTGRES_USER: src
-          POSTGRES_PASSWORD: dummy
-          POSTGRES_DB: srcdb
-        ports:
-          - 55418:5432
-        options: >-
-          --health-cmd "pg_isready -U src -d srcdb"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      pg-target:
-        image: postgres:17
-        env:
-          POSTGRES_USER: dst
-          POSTGRES_PASSWORD: dummy
-          POSTGRES_DB: dstdb
-        ports:
-          - 55419:5432
-        options: >-
-          --health-cmd "pg_isready -U dst -d dstdb"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -194,6 +194,36 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - name: Start migrate Postgres with discarded logs
+        run: |
+          set -euo pipefail
+          start_pg() {
+            local name="$1" user="$2" db="$3" port="$4"
+            docker run -d --name "${name}" --log-driver=none \
+              -e "POSTGRES_USER=${user}" \
+              -e POSTGRES_PASSWORD=dummy \
+              -e "POSTGRES_DB=${db}" \
+              -p "127.0.0.1:${port}:5432" \
+              postgres:17 \
+              postgres \
+              -c log_min_messages=panic \
+              -c log_min_error_statement=panic \
+              -c log_error_verbosity=terse \
+              >/dev/null
+            local i
+            for i in $(seq 1 60); do
+              if docker exec "${name}" pg_isready -U "${user}" -d "${db}" >/dev/null 2>&1; then
+                scripts/pin-postgres-container-logs.sh "${name}" "${user}"
+                return 0
+              fi
+              sleep 1
+            done
+            echo "::error::Postgres ${name} did not become ready"
+            exit 1
+          }
+          start_pg zeroed-pg-src src srcdb 55418
+          start_pg zeroed-pg-dst dst dstdb 55419
+          echo "127.0.0.1 ep-src.neon.tech ep-dst.neon.tech" | sudo tee -a /etc/hosts >/dev/null
       - name: Install PostgreSQL client tools
         env:
           ZEROED_PG_SOURCE_URL: postgresql://src:dummy@127.0.0.1:55418/srcdb
@@ -280,10 +310,6 @@ jobs:
           echo "/usr/lib/postgresql/${MAJOR}/bin" >> "${GITHUB_PATH}"
           "/usr/lib/postgresql/${MAJOR}/bin/pg_dump" --version
           "/usr/lib/postgresql/${MAJOR}/bin/psql" --version
-      - name: Map Neon-style aliases to the service containers
-        run: |
-          set -euo pipefail
-          echo "127.0.0.1 ep-src.neon.tech ep-dst.neon.tech" | sudo tee -a /etc/hosts
       - name: Live two-Postgres migrate guards
         env:
           ZEROED_REQUIRE_PG: "1"
@@ -292,6 +318,11 @@ jobs:
           ZEROED_PG_ALIAS_URL: postgresql://src:dummy@ep-src.neon.tech:55418/srcdb
           ZEROED_CHECK_PSQL_URL: postgresql://src:dummy@127.0.0.1:55418/srcdb
         run: node --experimental-strip-types scripts/migrate-supabase-to-neon.check.mjs
+      - name: Stop migrate Postgres without printing logs
+        if: always()
+        run: |
+          set -euo pipefail
+          docker rm -f zeroed-pg-src zeroed-pg-dst >/dev/null 2>&1 || true
 
   migrate-tls:
     name: migrate-tls
