@@ -7,7 +7,7 @@
 // mark this week's renamed session DONE, and must not pad adherence to 100%.
 // =============================================================================
 
-import { addDaysISO, isoDateInZone, isoInWeek, ATHLETE_TIME_ZONE } from './weekDates.ts'
+import { addDaysISO, isoDateInZone, isoInWeek, athleteTimeZone } from './weekDates.ts'
 
 export interface WeekWorkoutLike {
   routineId: string
@@ -26,7 +26,7 @@ export function workoutsInWeek(
   workouts: WeekWorkoutLike[],
   weekStart: string,
   weekEnd: string,
-  timeZone = ATHLETE_TIME_ZONE,
+  timeZone = athleteTimeZone(),
 ): WeekWorkoutLike[] {
   return workouts.filter((w) => isoInWeek(w.performedAt, weekStart, weekEnd, timeZone))
 }
@@ -36,7 +36,7 @@ export function weekLoggedDays(
   workouts: WeekWorkoutLike[],
   weekStart: string,
   weekEnd: string,
-  timeZone = ATHLETE_TIME_ZONE,
+  timeZone = athleteTimeZone(),
 ): number {
   const days = new Set<string>()
   for (const w of workoutsInWeek(workouts, weekStart, weekEnd, timeZone)) {
@@ -54,7 +54,7 @@ export function weekAdherence(
   workouts: WeekWorkoutLike[],
   weekStart: string,
   weekEnd: string,
-  timeZone = ATHLETE_TIME_ZONE,
+  timeZone = athleteTimeZone(),
 ): { done: number; adherence: number } {
   const done = weekLoggedDays(workouts, weekStart, weekEnd, timeZone)
   const adherence = planned > 0 ? Math.min(1, done / planned) : 0
@@ -69,7 +69,7 @@ export function sessionStateForWeek(opts: {
   draftStartedAt?: string | null
   timeZone?: string
 }): WeekSessionState {
-  const tz = opts.timeZone ?? ATHLETE_TIME_ZONE
+  const tz = opts.timeZone ?? athleteTimeZone()
   const logs = workoutsInWeek(opts.workouts, opts.weekStart, opts.weekEnd, tz)
     .filter((w) => w.routineId === opts.routineId)
     .sort((a, b) => b.performedAt.localeCompare(a.performedAt))

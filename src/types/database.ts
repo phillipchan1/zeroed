@@ -25,7 +25,10 @@ export type ArenaType =
 
 export type PhaseStatus = 'pending' | 'active' | 'completed' | 'skipped'
 
-export type ProgramStatus = 'draft' | 'active' | 'completed' | 'paused'
+// 'external' is the one per-athlete program that holds sessions logged outside
+// the plan (arc_load_v1). Every reader of "the program" filters on 'active', so
+// it never stands in for the athlete's real one.
+export type ProgramStatus = 'draft' | 'active' | 'completed' | 'paused' | 'external'
 
 // Onboarding state machine — Confidence-Driven Read (migration 20260601000001).
 // Gates the SESSION, not the read: no movement-screen gate. The probe is
@@ -68,6 +71,13 @@ export interface AthleteRow {
   // Hand-set training maxes by main lift ({"bench": 275, "ohp": 140}), in the
   // storage weight unit. A lift with no entry uses 90% of its working max.
   training_max_overrides?: Record<string, number> | null
+  // Runtime feature flags for this athlete ({"arc_load_v1": true}); only literal
+  // true counts (lib/flags.ts). Set by hand, never by the client. Migration
+  // 20261028000001, applied by hand — absent until then.
+  flags?: Record<string, unknown> | null
+  // The athlete's training calendar (IANA zone). Written by the client from the
+  // device while arc_load_v1 is on; servers read it, null means Los Angeles.
+  time_zone?: string | null
 }
 
 export interface DiagnosticRow {
@@ -164,7 +174,15 @@ export interface WorkoutRow {
   sleep_hours?: number | null
   readiness?: number | null     // 1–10
   bodyweight?: number | null    // storage weight unit
+  // arc_load_v1 (migration 20261028000001, applied by hand). session_rpe is
+  // Foster's session RPE: one 0–10 rating of the whole session, not the mean of
+  // the set RPEs that `rpe` holds. source is 'external' for a session logged
+  // outside the plan; null is a planned session.
+  session_rpe?: number | null
+  source?: WorkoutSource | null
 }
+
+export type WorkoutSource = 'plan' | 'external'
 
 /** How a reprogramming event came about. */
 export type RevisionTrigger = 'editor' | 'phase_boundary' | 'retest' | 'deload'
@@ -345,6 +363,17 @@ export interface ExerciseTemplate {
   // (fewer rounds today, a longer rest). Same movement, same slot; the snapshot
   // records the block as it was actually run.
   adjusted?: boolean
+  // A session logged outside the plan (arc_load_v1): what it did to the body.
+  // Lives on the session's own snapshot entry, never on a program.
+  exposure?: ExposureTags
+}
+
+// Three taps on a session the plan didn't write. Read later by the tissue
+// budgets (docs/one-athlete-one-arc.md §2.3); booleans until those need more.
+export interface ExposureTags {
+  impact?: boolean    // running, jumping, landing
+  sprint?: boolean
+  contact?: boolean   // tackling, grappling
 }
 
 export interface SetLog {

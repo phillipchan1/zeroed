@@ -489,6 +489,108 @@ textarea.input {
   color: var(--signal);
 }
 
+/* Pick chips: one choice from a short list (activity, minutes, when) or an
+   on/off tag. Quiet when chosen — text tone and a lit border — so the screen's
+   one signal stays the effort it's asking for. */
+.pick-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.pick {
+  min-height: 44px;
+  padding: 10px 14px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.pick--num { font-family: var(--font-mono); }
+.pick[aria-pressed='true'],
+.pick[aria-checked='true'] {
+  border-color: var(--text);
+  color: var(--text);
+}
+.pick:disabled { opacity: 0.45; cursor: default; }
+.field-label {
+  display: block;
+  margin: 18px 0 8px;
+}
+
+/* Today: the way off the plan, under the week's sessions. Quiet rows; the
+   lock-on line says a log landed without a banner shouting it. */
+.offplan {
+  margin: 16px 0 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.offplan__done {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 14px;
+  margin-bottom: 6px;
+}
+
+/* A one-off the coach planned: the session on the table, read at a glance
+   before Start. Names in the reading face, doses in mono. */
+.oneoff { margin-top: 12px; }
+.oneoff__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+}
+.oneoff__name { font-size: var(--fs-lg); font-weight: 700; min-width: 0; }
+.oneoff__list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.oneoff__row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  font-size: var(--fs-sm);
+}
+.oneoff__row .num { text-align: right; flex-shrink: 0; max-width: 55%; }
+
+/* Session effort (CR-10, 0–10): eleven choices in two rows of six, so each
+   still clears the 44px floor inside a 320px phone. */
+.effort { margin-bottom: 18px; }
+.effort__head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.effort__grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+}
+.effort__btn {
+  height: var(--tap);
+  font-size: var(--fs-lg);
+}
+/* Chosen in the quiet tone: the sheet's one yellow is the button that logs it. */
+.effort__btn[aria-checked='true'] {
+  border-color: var(--text);
+  color: var(--text);
+}
+
 /* --- Priority badges ------------------------------------------------------ */
 
 .badge {

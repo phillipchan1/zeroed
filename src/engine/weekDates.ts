@@ -45,6 +45,45 @@ export function weekEndingISO(monday: Date): string {
 /** The athlete's training calendar. Sunday 5pm here is still Sunday, even if UTC has rolled to Monday. */
 export const ATHLETE_TIME_ZONE = 'America/Los_Angeles'
 
+// The calendar every default above and below reads. It is ATHLETE_TIME_ZONE
+// until the app knows better: with arc_load_v1 on, the client sets it to the
+// device's zone at launch, so a London athlete's Monday starts at midnight in
+// London rather than at 08:00 when Los Angeles gets there.
+//
+// Module state, so client-only. A server handles many athletes in one isolate
+// and must pass each one's zone explicitly instead of calling the setter.
+let calendarZone = ATHLETE_TIME_ZONE
+
+export function athleteTimeZone(): string {
+  return calendarZone
+}
+
+export function isValidTimeZone(tz: string): boolean {
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: tz })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** Null (or anything Intl can't read) puts the calendar back on ATHLETE_TIME_ZONE. Returns whether it moved. */
+export function setAthleteTimeZone(tz: string | null | undefined): boolean {
+  const next = tz && isValidTimeZone(tz) ? tz : ATHLETE_TIME_ZONE
+  const moved = next !== calendarZone
+  calendarZone = next
+  return moved
+}
+
+/** The zone the device says it's in, or null when the runtime won't say. */
+export function deviceTimeZone(): string | null {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || null
+  } catch {
+    return null
+  }
+}
+
 const DOW_FROM_WEEKDAY: Record<string, number> = {
   Sun: 0, Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6,
 }
@@ -57,7 +96,7 @@ export interface ZonedDay {
 }
 
 /** Calendar Y/M/D and weekday as they are in `timeZone`. */
-export function zonedParts(d: Date, timeZone = ATHLETE_TIME_ZONE): ZonedDay {
+export function zonedParts(d: Date, timeZone = athleteTimeZone()): ZonedDay {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone,
     weekday: 'short',
@@ -74,7 +113,7 @@ export function zonedParts(d: Date, timeZone = ATHLETE_TIME_ZONE): ZonedDay {
   }
 }
 
-export function isoDateInZone(d: Date, timeZone = ATHLETE_TIME_ZONE): string {
+export function isoDateInZone(d: Date, timeZone = athleteTimeZone()): string {
   const { y, m, day } = zonedParts(d, timeZone)
   return `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`
 }
@@ -85,7 +124,7 @@ export interface WeekWindow {
 }
 
 /** Monday–Sunday containing `at` in `timeZone`. */
-export function weekWindowInZone(at: Date, timeZone = ATHLETE_TIME_ZONE): WeekWindow {
+export function weekWindowInZone(at: Date, timeZone = athleteTimeZone()): WeekWindow {
   const { y, m, day, dow } = zonedParts(at, timeZone)
   const weekStart = addDaysISO(
     `${y}-${String(m).padStart(2, '0')}-${String(day).padStart(2, '0')}`,
@@ -95,13 +134,13 @@ export function weekWindowInZone(at: Date, timeZone = ATHLETE_TIME_ZONE): WeekWi
 }
 
 /** The Mon–Sun week after the one containing `at`. */
-export function upcomingWeekWindow(at: Date, timeZone = ATHLETE_TIME_ZONE): WeekWindow {
+export function upcomingWeekWindow(at: Date, timeZone = athleteTimeZone()): WeekWindow {
   const { weekStart } = weekWindowInZone(at, timeZone)
   const next = addDaysISO(weekStart, 7)
   return { weekStart: next, weekEnd: addDaysISO(next, 6) }
 }
 
-export function isSundayInZone(at: Date, timeZone = ATHLETE_TIME_ZONE): boolean {
+export function isSundayInZone(at: Date, timeZone = athleteTimeZone()): boolean {
   return zonedParts(at, timeZone).dow === 0
 }
 
@@ -124,7 +163,7 @@ export function zonedCivilTime(
   dateStr: string,
   hour: number,
   minute = 0,
-  timeZone = ATHLETE_TIME_ZONE,
+  timeZone = athleteTimeZone(),
 ): Date {
   const hh = String(hour).padStart(2, '0')
   const mm = String(minute).padStart(2, '0')
@@ -152,7 +191,7 @@ export function logTimestampForWeek(
   at: Date,
   weekStart: string,
   weekEnd: string,
-  timeZone = ATHLETE_TIME_ZONE,
+  timeZone = athleteTimeZone(),
 ): Date {
   const day = isoDateInZone(at, timeZone)
   if (day >= weekStart && day <= weekEnd) return at
@@ -165,7 +204,7 @@ export function isoInWeek(
   iso: string,
   weekStart: string,
   weekEnd: string,
-  timeZone = ATHLETE_TIME_ZONE,
+  timeZone = athleteTimeZone(),
 ): boolean {
   const day = iso.includes('T') || iso.endsWith('Z')
     ? isoDateInZone(new Date(iso), timeZone)
@@ -174,7 +213,7 @@ export function isoInWeek(
 }
 
 /** The Monday a deferred change would land on, in the athlete's timezone. */
-export function nextMondayISO(from: Date = new Date(), timeZone = ATHLETE_TIME_ZONE): string {
+export function nextMondayISO(from: Date = new Date(), timeZone = athleteTimeZone()): string {
   return upcomingWeekWindow(from, timeZone).weekStart
 }
 

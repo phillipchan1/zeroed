@@ -39,6 +39,8 @@ import { tick, record } from '../../lib/haptics'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
 import { getMovementDemo, videoSearchUrl } from '../../engine/movementDemos'
 import { MovementDemo } from '../../components/MovementDemo'
+import { SessionEffort } from '../../components/SessionEffort'
+import { arcLoadOn } from '../../lib/arcLoad'
 import { IntervalTimer, type IntervalResult } from '../../components/IntervalTimer'
 import { IntervalBlock } from '../../components/IntervalBlock'
 import { AddToSessionSheet, AdjustIntervalsSheet } from '../../components/AddToSession'
@@ -1156,11 +1158,13 @@ interface DebriefSheetProps {
   // What was written the first time round, when this is an edit of a session
   // that hasn't synced — editing shouldn't ask for the story again.
   initial: { reflection: string; readingAnswer: string } | null
+  /** Session RPE for the whole session (arc_load_v1). Absent: not asked. */
+  effort?: { value: number | null; onChange: (rpe: number) => void }
   onSave: (reflection: string, readingAnswer: string) => void
   onSkip: () => void
 }
 
-function DebriefSheet({ reading, saving, tally, u, initial, onSave, onSkip }: DebriefSheetProps) {
+function DebriefSheet({ reading, saving, tally, u, initial, effort, onSave, onSkip }: DebriefSheetProps) {
   const [reflection, setReflection] = useState(initial?.reflection ?? '')
   const [readingAnswer, setReadingAnswer] = useState(initial?.readingAnswer ?? '')
   return (
@@ -1196,6 +1200,9 @@ function DebriefSheet({ reading, saving, tally, u, initial, onSave, onSkip }: De
         {tally.load > 0 ? ` · ${u.volume(tally.load)}${u.unit} moved` : ''}
         {tally.minutes > 0 ? ` · ${tally.minutes} min` : ''}
       </p>
+
+      {/* One tap, kept by Skip too: it's what turns these minutes into load. */}
+      {effort && <SessionEffort value={effort.value} onChange={effort.onChange} disabled={saving} />}
 
       {reading && (
         <div style={{ marginBottom: 18 }}>
@@ -1444,6 +1451,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   )
   const [showDebrief, setShowDebrief] = useState(false)
   const [savingDebrief, setSavingDebrief] = useState(false)
+  // Session RPE (CR-10) for the whole session, asked at the finish while
+  // arc_load_v1 is on. Unknown on an edit of a synced session, and null leaves
+  // the row's value alone, so an edit never blanks it.
+  const [sessionRpe, setSessionRpe] = useState<number | null>(() => seedPending?.sessionRpe ?? null)
   // Elapsed frozen at the moment "Complete" was tapped — the debrief sheet can
   // sit open for a while, so the committed duration is this, not the live clock.
   const finalElapsedRef = useRef(0)
@@ -2318,6 +2329,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       // Unknown (an edit whose check-in never loaded) → null, which leaves the
       // row's columns alone instead of blanking them.
       checkin: checkinKnownRef.current ? checkin : null,
+      // With the flag off the picker isn't shown, so a queued edit keeps the
+      // rating it already carried.
+      sessionRpe: arcLoadOn() ? sessionRpe : base?.sessionRpe ?? null,
+      // A one-off the coach planned outside the program: logged like any
+      // session, but never toward the planned week.
+      ...(routine?.session_type === 'adhoc' ? { source: 'external' as const } : {}),
     }
   }
 
@@ -3091,6 +3108,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           }}
           u={u}
           initial={priorDebrief ? { reflection: priorDebrief.reflection, readingAnswer: priorDebrief.readingAnswer } : null}
+          effort={arcLoadOn() ? { value: sessionRpe, onChange: setSessionRpe } : undefined}
           onSave={handleDebrief}
           onSkip={handleDebriefSkip}
         />

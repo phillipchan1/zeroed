@@ -244,6 +244,10 @@ COMMENT ON COLUMN public.workout.exercises_snapshot IS
 -- NUMERIC half-step RPE is NOT in this snapshot. migrate-supabase-to-neon
 -- applies this file to Neon; keep INTEGER CHECK 1–10 to match live Supabase.
 -- Hand-apply worker/schema/rpe-half-steps.sql only when flipping RPE_HALF_STEPS.
+--
+-- Nor are arc_load_v1's columns (workout.session_rpe / source, athlete.flags /
+-- time_zone, program status 'external'). Hand-apply worker/schema/arc-load-v1.sql
+-- before turning arc_load_v1 on for anyone.
 
 -- =============================================================================
 -- SESSION_OBSERVATION
