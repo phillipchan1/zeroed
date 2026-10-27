@@ -6,7 +6,7 @@
  * Run: ZEROED_REQUIRE_TLS=1 node --experimental-strip-types scripts/migrate-supabase-to-neon.tls.check.mjs
  */
 import { spawnSync } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import pg from 'pg'
@@ -40,8 +40,10 @@ function openssl(...args) {
 
 const required = process.env.ZEROED_REQUIRE_TLS === '1'
 const docker = spawnSync('docker', ['--version'], { encoding: 'utf8' })
-const psqlBin = spawnSync('psql', ['--version'], { encoding: 'utf8' })
-const dumpBin = spawnSync('pg_dump', ['--version'], { encoding: 'utf8' })
+const psqlProbe = existsSync('/usr/lib/postgresql/17/bin/psql') ? '/usr/lib/postgresql/17/bin/psql' : 'psql'
+const dumpProbe = existsSync('/usr/lib/postgresql/17/bin/pg_dump') ? '/usr/lib/postgresql/17/bin/pg_dump' : 'pg_dump'
+const psqlBin = spawnSync(psqlProbe, ['--version'], { encoding: 'utf8' })
+const dumpBin = spawnSync(dumpProbe, ['--version'], { encoding: 'utf8' })
 if (docker.status !== 0 || psqlBin.status !== 0 || dumpBin.status !== 0) {
   if (required) {
     console.error('migrate-tls requires docker, psql, and pg_dump')
@@ -202,13 +204,15 @@ try {
   ok(!Object.keys(goodLibpq).some((k) => k !== 'PGSSLMODE' && k !== 'PGSSLROOTCERT' && /^PGSSL/i.test(k)),
     'libpq env does not pass other PGSSL* settings')
 
-  const psqlGood = spawnSync('psql', ['-v', 'ON_ERROR_STOP=1', '-tA', '-d', libpqUrl, '-c', 'SELECT 1'], {
+  const psqlBinPath = existsSync('/usr/lib/postgresql/17/bin/psql') ? '/usr/lib/postgresql/17/bin/psql' : 'psql'
+  const dumpBinPath = existsSync('/usr/lib/postgresql/17/bin/pg_dump') ? '/usr/lib/postgresql/17/bin/pg_dump' : 'pg_dump'
+  const psqlGood = spawnSync(psqlBinPath, ['-v', 'ON_ERROR_STOP=1', '-tA', '-d', libpqUrl, '-c', 'SELECT 1'], {
     encoding: 'utf8',
     env: goodLibpq,
   })
   ok(psqlGood.status === 0 && String(psqlGood.stdout || '').trim() === '1', 'libpq matching CA verifies and connects')
 
-  const dumpGood = spawnSync('pg_dump', ['--schema-only', '--schema=public', '-d', libpqUrl], {
+  const dumpGood = spawnSync(dumpBinPath, ['--schema-only', '--schema=public', '-d', libpqUrl], {
     encoding: 'utf8',
     env: goodLibpq,
   })
@@ -217,7 +221,7 @@ try {
   const badLibpq = sourceLibpqSslEnv(url, { ...process.env, ...badEnv })
   ok(badLibpq.PGSSLMODE === 'verify-full', 'libpq wrong CA still sets verify-full')
   ok(badLibpq.PGSSLROOTCERT === join(dir, 'wrong.crt'), 'libpq wrong CA points at the wrong file')
-  const psqlBad = spawnSync('psql', ['-v', 'ON_ERROR_STOP=1', '-tA', '-d', libpqUrl, '-c', 'SELECT 1'], {
+  const psqlBad = spawnSync(psqlBinPath, ['-v', 'ON_ERROR_STOP=1', '-tA', '-d', libpqUrl, '-c', 'SELECT 1'], {
     encoding: 'utf8',
     env: badLibpq,
   })
@@ -226,7 +230,7 @@ try {
   ok(/certificate|self-signed|SSL|verify/i.test(psqlBadMsg), 'libpq wrong CA fails TLS verification')
   ok(!/postgresql:\/\//i.test(psqlBadMsg), 'libpq wrong-CA error does not print a URL')
 
-  const dumpBad = spawnSync('pg_dump', ['--schema-only', '--schema=public', '-d', libpqUrl], {
+  const dumpBad = spawnSync(dumpBinPath, ['--schema-only', '--schema=public', '-d', libpqUrl], {
     encoding: 'utf8',
     env: badLibpq,
   })

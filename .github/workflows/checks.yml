@@ -300,13 +300,18 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --no-audit --no-fund
-      - name: Install PostgreSQL client tools
+      - name: Install PostgreSQL 17 client
         run: |
           set -euo pipefail
           sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
-          command -v psql
-          command -v pg_dump
+          if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client-17; then
+            sudo apt-get install -y postgresql-common
+            sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client-17
+          fi
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/psql --version
+          /usr/lib/postgresql/17/bin/pg_dump --version
       - name: Prove source pg TLS verification
         env:
           ZEROED_REQUIRE_TLS: "1"
