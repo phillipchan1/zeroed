@@ -58,7 +58,7 @@ export function AddToSessionSheet({
 }: AddToSessionProps) {
   const [tab, setTab] = useState<Tab>(initialTab)
   return (
-    <Sheet title="Add to session" subtitle="Just for today — your program stays as it is" onClose={onClose}>
+    <Sheet title="Add to session" subtitle="Today only — your program stays as is" onClose={onClose}>
       <div className="tabseg" role="tablist" aria-label="What to add">
         <span className="tabseg__ind" style={{ transform: tab === 'intervals' ? 'translateX(100%)' : undefined }} aria-hidden />
         <button type="button" role="tab" aria-selected={tab === 'exercise'} className="tabseg__opt" onClick={() => setTab('exercise')}>

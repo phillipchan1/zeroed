@@ -3613,16 +3613,21 @@ textarea.input {
 /* --- Session check-in + the lift model's reason line ------------------------ */
 .checkin {
   margin-top: 16px;
-  padding: 10px 12px;
+  /* The toggle carries the height now, so the card closes at the same 52px it
+     always did — the tap area grew, the row didn't. */
+  padding: 4px 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
 }
+.checkin:has(.checkin__grid) { padding-bottom: 12px; }
 .checkin__toggle {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 32px;
+  /* 44px: tapped at the rack, often with chalk on the thumb. At 32 it was the
+     one control on the workout screen under the miss-tap floor. */
+  min-height: 44px;
   padding: 0;
   background: none;
   border: 0;

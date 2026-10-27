@@ -1820,7 +1820,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     // index keys line up with this session's exercises — unless a slot was
     // swapped that day, in which case its sets belong to the stand-in and are
     // no "previous" for the programmed lift. The snapshot says which.
-    let nextPrev: Record<number, SetLog[]> = {}
+    const nextPrev: Record<number, SetLog[]> = {}
     const { data: prevWorkout } = await supabase
       .from('workout')
       .select('actual_weights, exercises_snapshot')
@@ -1843,7 +1843,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       setPrevByExercise(nextPrev)
     }
 
-    let nextInsightMap: Record<string, InsightRow> = {}
+    const nextInsightMap: Record<string, InsightRow> = {}
     const insightIds = [...new Set(exs.map((ex) => ex.insight_id).filter(Boolean))] as string[]
     if (insightIds.length > 0) {
       const { data: insightRows } = await supabase
