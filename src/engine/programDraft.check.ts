@@ -11,6 +11,7 @@
 //   · a removal only happens when a removal was asked for
 //   · the minute estimate moves in the direction volume moves
 
+import { readFileSync } from 'node:fs'
 import {
   applyEditsToDraft, diffDraft, estimateSessionMinutes, summarizeEdit, mergePreferences,
   MAX_EXERCISES_PER_SESSION, MAX_SETS,
@@ -115,6 +116,42 @@ const fourth = applyEditsToDraft(withSession.draft, [
   }),
 ])
 ok(fourth.draft.sessionsPerWeek === 4, `days/week should follow session count, got ${fourth.draft.sessionsPerWeek}`)
+
+// ---- interval blocks land where the timer reads them ----------------------
+// Over MCP, a free-text coach wrote the dose into the name and "8 rounds" into
+// reps, so the app saw a lift. Code puts it back in the canonical shape.
+
+const finisher = applyEditsToDraft(base, [
+  edit({
+    type: 'add_exercise', session_name: 'Session A', exercise_name: 'Bike finisher 8x(15s hard / 45s easy)',
+    sets: 1, reps: '8 rounds', load: 'moderate',
+  }),
+])
+const finExs = finisher.draft.sessions[0].exercises
+const fin = finExs[finExs.length - 1]
+ok(fin.name === 'Bike finisher', `the block's name is the movement, got "${fin.name}"`)
+ok(fin.reps === '8 × 15s on / 45s off', `the dose moves to reps, got "${fin.reps}"`)
+ok(fin.tracking_type === 'time', `a block logs as time, got ${fin.tracking_type}`)
+ok(fin.load === 'bodyweight', `a block has no weight to find, got ${fin.load}`)
+
+const engineDay = applyEditsToDraft(base, [
+  edit({
+    type: 'add_session', session_name: 'Engine', set_session_type: 'conditioning',
+    exercises: [{ name: 'Assault Bike Tabata', sets: 1, reps: '1', load: 'heavy', cue: 'All out', target_rpe: 9 }],
+  }),
+])
+ok(engineDay.draft.sessions[engineDay.draft.sessions.length - 1].exercises[0].reps === '8 × 20s on / 10s off',
+  'a Tabata named in an add_session lands as its spec')
+
+const straight = applyEditsToDraft(base, [
+  edit({ type: 'add_exercise', session_name: 'Session A', exercise_name: 'Plank', sets: 3, reps: '30s', load: 'bodyweight' }),
+])
+const straightExs = straight.draft.sessions[0].exercises
+ok(straightExs[straightExs.length - 1].reps === '30s', 'straight sets are left exactly as written')
+
+// An 8 × 20s on / 40s off block is about eight minutes, not one set of twenty seconds.
+const blockMins = estimateSessionMinutes([{ name: 'Assault Bike', sets: 1, reps: '8 × 20s on / 40s off' }])
+ok(blockMins >= 15 && blockMins <= 17, `warm-up + an 8-minute block + transition ≈ 16 min, got ${blockMins}`)
 
 // ---- bounds ----------------------------------------------------------------
 
@@ -221,6 +258,17 @@ ok(many.split('\n')[0] === 'newest', 'the newest ask should lead')
 ok(mergePreferences(null, ['   ']) === null, 'blank input should not create a preference')
 
 // ---- report ----------------------------------------------------------------
+
+// ---- drift guard ----------------------------------------------------------------
+{
+  // The edge function and the Worker apply edits with a copy; it may differ only
+  // in its type imports. A drifted copy would read a block one way on the phone
+  // and write it another way over MCP.
+  const strip = (t: string) => t.replace(/^import type \{[^}]*\} from '[^']*'\n/gm, '')
+  const here = readFileSync(new URL('./programDraft.ts', import.meta.url), 'utf8')
+  const copy = readFileSync(new URL('../../supabase/functions/_shared/engine/programDraft.ts', import.meta.url), 'utf8')
+  ok(strip(here) === strip(copy), 'supabase/functions/_shared/engine/programDraft.ts is in sync with src/engine/programDraft.ts')
+}
 
 if (fails.length) {
   console.error(`programDraft.check: ${fails.length}/${checks} FAILED`)

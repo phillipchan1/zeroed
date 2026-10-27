@@ -51,6 +51,7 @@ export const SERVER_INSTRUCTIONS = [
   'Chat against the record: list_workouts, get_workout, search_lifts, get_program_journey, get_coach_notes.',
   'To change the program: propose surgical edits (add/update/remove exercise or session), call preview_program_edits, show the diff, then apply_program_edits with confirm=true only after the athlete agrees.',
   'Never dump a whole new week. Code — not you — clamps sets, loads, and tracking types. Sessions cannot be deleted; drop work by removing exercises.',
+  'Intervals / HIIT: put the whole block in reps ("8 × 15s on / 45s off", "Tabata", "EMOM 10 min"), sets 1, load bodyweight, and keep the exercise name to the movement ("Assault Bike", not "Bike finisher 8x15s") — the app runs it on a one-tap interval timer, and a logged block reads back as rounds of work.',
   'Use timing=next_week when sessions this week have already been logged and should stay as written.',
   'The bearer token selected this athlete; you cannot switch users or pass an athlete id.',
 ].join(' ')

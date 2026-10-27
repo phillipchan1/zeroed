@@ -502,7 +502,7 @@ If the input includes a "retest" object, a RETEST just ran and this block is its
 - "cleared" are weak links the retest retired. Stop programming around them — the corrective work that was serving them comes out, and the space goes to real training. Do not keep taxing a limiter that is gone.
 - "movement_gains" are pattern scores that improved. Treat a pattern that reached 2+ as no longer gating load on that chain.
 
-Each session has a short name, a one-sentence intent, and 3–8 exercises. sets is an integer 1–10; reps is a short string ("5", "4-6", "3", "30s"); load is one of "bodyweight", "light", "moderate", "heavy"; cue is one short coaching sentence. Produce one distinct session per the athlete's sessions_per_week, up to 7 distinct sessions — if they train six days a week, build six sessions.
+Each session has a short name, a one-sentence intent, and 3–8 exercises. sets is an integer 1–10; reps is a short string ("5", "4-6", "3", "30s"); load is one of "bodyweight", "light", "moderate", "heavy"; cue is one short coaching sentence. Intervals / HIIT: the name is the movement only ("Assault Bike", "Rowing Machine", "Sprint"); reps carries the whole block in exactly this shape — "8 × 20s on / 40s off", "Tabata", "EMOM 10 min"; sets 1 (2 runs the block twice); load "bodyweight". Written that way the app runs it on its interval timer with one tap. Produce one distinct session per the athlete's sessions_per_week, up to 7 distinct sessions — if they train six days a week, build six sessions.
 
 A deterministic validator resolves metrics, clamps volume, and is the last line of safety — design honestly within these bounds.`,
   schema: {
@@ -617,6 +617,7 @@ EDITS — every change is one of these. Set every field you are not using to nul
 - "add_note": note — a dated coach note recording a decision worth remembering.
 
 Fields: sets is an integer 1–10; reps is a short string ("5", "8-12", "3 each side", "30s", "8 × 20s on / 40s off"); load is one of "bodyweight", "light", "moderate", "heavy"; target_rpe is 1–10; cue is one short coaching sentence.
+Intervals / HIIT: the name is the movement only ("Assault Bike", "Rowing Machine", "Sprint"); reps carries the whole block in exactly this shape — "8 × 20s on / 40s off", "Tabata", "EMOM 10 min"; sets 1 (2 runs the block twice); load "bodyweight". Written that way the app runs it on its interval timer with one tap.
 
 Deterministic code applies these edits, clamps the numbers, and shows the athlete the exact diff. Nothing you return is written until they confirm it.`,
   schema: {

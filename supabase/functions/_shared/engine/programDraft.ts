@@ -16,6 +16,7 @@
 // `node --experimental-strip-types programDraft.check.ts`, and node resolves
 // specifiers literally. Vite is happy either way.
 import { resolveTrackingType } from './exerciseLibrary.ts'
+import { intervalPlanFor, blockSeconds, canonicalBlock } from './intervals.ts'
 import {
   diffSession, tallyChanges, normalizeExerciseName, MAIN_LIFT,
   type SessionDiff,
@@ -103,6 +104,10 @@ export function estimateSessionMinutes(exercises: ExerciseTemplate[]): number {
   if (!exercises.length) return 0
   let secs = 8 * 60   // warm-up + setup, the part that doesn't scale with volume
   for (const ex of exercises) {
+    // An interval block is exactly as long as its clock — "8 × 20s on / 40s
+    // off" is eight minutes, not one set of twenty seconds.
+    const block = intervalPlanFor(ex)
+    if (block) { secs += blockSeconds(block) + 60; continue }
     const sets = clampInt(ex.sets, 1, MAX_SETS, 3)
     const work = workSecondsFromReps(String(ex.reps ?? ''))
     const rest = REST_SECS[String(ex.load ?? 'light').toLowerCase()] ?? 65
@@ -153,14 +158,21 @@ function findExercise(exs: ExerciseTemplate[], name: string | null): number {
 
 /** Build a template from an edit's fields, with the metric resolved by code. */
 function buildExercise(
-  name: string,
+  rawName: string,
   sets: unknown, reps: unknown, load: unknown, cue: unknown, targetRpe: unknown,
 ): ExerciseTemplate {
-  const cleanReps = cleanText(reps, 40) || '8'
-  const cleanedLoad = cleanLoad(load)
+  const cleanSets = clampInt(sets, 1, MAX_SETS, 3)
+  // An interval block proposed with its dose in the name ("Bike finisher
+  // 8x(15s hard / 45s easy)", reps "8 rounds") lands in the canonical shape:
+  // the dose in reps, where the app's interval timer reads it.
+  const block = canonicalBlock({ name: rawName, reps: cleanText(reps, 40), sets: cleanSets })
+  const name = block?.name ?? rawName
+  const cleanReps = block?.reps ?? (cleanText(reps, 40) || '8')
+  // A block's "load" is the effort of the rounds, not a weight to find.
+  const cleanedLoad = block ? 'bodyweight' : cleanLoad(load)
   const ex: ExerciseTemplate = {
     name,
-    sets: clampInt(sets, 1, MAX_SETS, 3),
+    sets: cleanSets,
     reps: cleanReps,
     tracking_type: resolveTrackingType(name, cleanReps, cleanedLoad),
   }

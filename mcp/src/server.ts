@@ -29,7 +29,7 @@ import {
 const editExercise = z.object({
   name: z.string().describe('Exercise name'),
   sets: z.number().int().min(1).max(10).optional(),
-  reps: z.string().optional().describe('Rep spec, e.g. "5", "8-10", "30s"'),
+  reps: z.string().optional().describe('Rep spec, e.g. "5", "8-10", "30s". An interval/HIIT block goes here whole — "8 × 15s on / 45s off", "Tabata", "EMOM 10 min" — with sets 1 and the name just the movement ("Assault Bike"); the app runs it on its interval timer.'),
   load: z.string().optional().describe('bodyweight | light | moderate | heavy'),
   cue: z.string().optional(),
   target_rpe: z.number().min(1).max(10).nullable().optional(),
@@ -49,7 +49,7 @@ const editObject = z.object({
   set_session_type: z.string().nullable().optional().describe('strength | power | conditioning | mobility'),
   set_intended_dow: z.number().int().min(0).max(6).nullable().optional().describe('0=Mon … 6=Sun'),
   sets: z.number().int().min(1).max(10).nullable().optional(),
-  reps: z.string().nullable().optional(),
+  reps: z.string().nullable().optional().describe('Rep spec, e.g. "5", "8-10", "30s". An interval/HIIT block goes here whole — "8 × 15s on / 45s off", "Tabata", "EMOM 10 min" — with sets 1 and the name just the movement ("Assault Bike"); the app runs it on its interval timer.'),
   load: z.string().nullable().optional(),
   cue: z.string().nullable().optional(),
   target_rpe: z.number().min(1).max(10).nullable().optional(),
@@ -79,6 +79,7 @@ export const SERVER_INSTRUCTIONS = [
   'If the athlete tells you how they slept, how ready they feel, or how their knees are today, pass it to get_lift_model so the modifiers apply. A training-max change goes through set_training_max: preview first, confirm=true only after the athlete agrees.',
   'To change the program: propose surgical edits (add/update/remove exercise or session), call preview_program_edits, show the diff, then apply_program_edits with confirm=true only after the athlete agrees.',
   'Never dump a whole new week. Code — not you — clamps sets, loads, and tracking types. Sessions cannot be deleted; drop work by removing exercises.',
+  'Intervals / HIIT: put the whole block in reps ("8 × 15s on / 45s off", "Tabata", "EMOM 10 min"), sets 1, load bodyweight, and keep the exercise name to the movement ("Assault Bike", not "Bike finisher 8x15s") — the app runs it on a one-tap interval timer, and a logged block reads back as rounds of work.',
   'Use timing=next_week when sessions this week have already been logged and should stay as written.',
 ].join(' ')
 

@@ -2,6 +2,7 @@ import type { ExerciseTemplate, SetLog } from './engine/types.ts'
 import type { DraftDiff, DraftSession, ProgramDraft } from './engine/programDraft.ts'
 import { estimateSessionMinutes } from './engine/programDraft.ts'
 import { readLoggedExercises, type LoggedWorkoutLike } from './engine/loggedSets.ts'
+import { intervalPlanFor, roundsFromLogs, describePlan, blockSeconds, fmtClock } from './engine/intervals.ts'
 
 export function isoDay(value: string): string {
   if (!value) return value
@@ -31,6 +32,13 @@ export function topWorkingSet(sets: SetLog[] | undefined): SetLog | null {
 }
 
 export function formatPrescription(ex: ExerciseTemplate): string {
+  // An interval block reads as the block — and says it runs on the timer — so
+  // nobody mistakes "1×8 × 20s on / 40s off" for a set to load.
+  const block = intervalPlanFor(ex)
+  if (block) {
+    const rpe = ex.target_rpe != null ? ` · RPE ${ex.target_rpe}` : ''
+    return `interval block ${describePlan(block)} (${fmtClock(blockSeconds(block))})${rpe}`
+  }
   const bits = [`${ex.sets}×${ex.reps}`]
   if (ex.load) bits.push(ex.load)
   if (ex.target_rpe != null) bits.push(`RPE ${ex.target_rpe}`)
@@ -89,7 +97,18 @@ export function formatLoggedWorkout(
     w.id ? `id ${w.id}` : null,
   ].filter(Boolean)
   const lines = [`### ${title} — ${meta.join(' · ')}`]
-  for (const { name, sets } of readLoggedExercises(w)) {
+  for (const { name, exercise, sets } of readLoggedExercises(w)) {
+    const block = exercise ? intervalPlanFor(exercise) : null
+    if (block) {
+      // Each row holds the work of a set or a round, not a hold to compare —
+      // read back as what the timer did.
+      const rounds = roundsFromLogs(block, sets).reduce((a, b) => a + b, 0)
+      if (!rounds) continue
+      const rpes = sets.map((s) => s.rpe).filter((r): r is number => r != null)
+      const rpe = rpes.length ? ` @${Math.round(rpes.reduce((a, b) => a + b, 0) / rpes.length)}` : ''
+      lines.push(`- ${name}: ${rounds}/${block.rounds * block.sets} rounds of ${describePlan(block)} · ${fmtClock(rounds * block.work)} work${rpe}`)
+      continue
+    }
     const cells = sets.map((s) => formatSet(s, unit)).filter((c): c is string => c != null)
     if (cells.length) lines.push(`- ${name}: ${cells.join(', ')}`)
   }

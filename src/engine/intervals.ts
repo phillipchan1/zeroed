@@ -83,22 +83,28 @@ function durations(s: string): Token[] {
   return out.sort((a, b) => a.at - b.at)
 }
 
-// "8 ×", "8 rounds", "x 8", "for 8 rounds", "8 efforts".
+// "8 ×", "8 rounds", "x 8", "for 8 rounds", "8 efforts", "finisher 8x 15s".
 function roundCount(s: string): number | null {
   const lead = s.match(/^\D{0,12}?(\d+)\s*(?:x|rounds?|sets? of|efforts?|reps? of|intervals?)(?![a-z])/)
   if (lead && !/^\s*(?:s|sec|min)/.test(s.slice((lead.index ?? 0) + lead[0].length))) return Number(lead[1])
   const tail = s.match(/(?:x|×)\s*(\d+)(?!\s*(?:s|sec|secs|seconds?|min|mins|minutes?|'|:|\d))\b/)
   if (tail) return Number(tail[1])
   const words = s.match(/\b(\d+)\s*(?:rounds?|efforts?|intervals?)\b/)
-  return words ? Number(words[1]) : null
+  if (words) return Number(words[1])
+  // "N x" straight into a number, anywhere: the count of what follows.
+  const mid = s.match(/(?:^|[^\d.])(\d+)\s*x\s*(?=\d)/)
+  return mid ? Number(mid[1]) : null
 }
 
+// A parenthetical is usually a note — "(Tabata-ish)", "(2s pause)" — and is
+// dropped. One that holds a whole work/rest pair is the block itself, the way
+// "8x(15s hard / 45s easy)" writes it, and is kept.
 function normalize(reps: string): string {
   return reps
     .toLowerCase()
     .replace(/×/g, 'x')
     .replace(/[–—]/g, '-')
-    .replace(/\([^)]*\)/g, ' ')
+    .replace(/\(([^)]*)\)/g, (_, inner: string) => (durations(inner).length >= 2 ? ` ${inner} ` : ' '))
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -188,7 +194,7 @@ export function intervalPlanFor(
   ex: Pick<ExerciseTemplate, 'name' | 'reps' | 'sets'> | null | undefined,
 ): IntervalPlan | null {
   if (!ex) return null
-  const p = parseIntervalReps(ex.reps, soundsLikeIntervals(ex.name ?? ''))
+  const p = parseIntervalReps(ex.reps, soundsLikeIntervals(ex.name ?? '')) ?? blockInName(ex.name, ex.reps)
   if (!p) return null
   const sets = clamp(Math.round(Number(ex.sets) || 1), 1, 10)
   const setRest = Math.max(60, p.rest)
@@ -203,6 +209,51 @@ export function intervalPlanFor(
     return { work: p.work, rest: p.rest, rounds: p.rounds, sets: 1, setRest, rows: 'round' }
   }
   return { work: p.work, rest: p.rest, rounds: p.rounds, sets, setRest, rows: 'set' }
+}
+
+/**
+ * A block written into the NAME — "Bike finisher 8x(15s hard / 45s easy)" with
+ * reps "8 rounds" — which is how a coach writing free text tends to put it.
+ * A name is held to more than a rep spec is: a protocol named outright
+ * (Tabata, EMOM), or a round count AND the words of a work/rest pair. "Plank
+ * 30s / Side Plank 30s" is two holds, not a block.
+ */
+function blockInName(name: string | null | undefined, reps: string | null | undefined): ParsedReps | null {
+  if (!name) return null
+  const n = normalize(name)
+  const p = parseIntervalReps(name)
+  if (!p) return null
+  if (/\b(tabata|e\d?mom)\b/.test(n)) return p
+  const rounds = p.rounds ?? (reps ? roundCount(normalize(reps)) : null)
+  if (rounds == null || !(REST_WORD.test(n) || WORK_WORD.test(n))) return null
+  return { ...p, rounds: clamp(rounds, 1, MAX_ROUNDS) }
+}
+
+/**
+ * What to call a block whose name carries its own dose: "Bike finisher
+ * 8x(15s hard / 45s easy)" reads as "Bike finisher" above a block that already
+ * says 8 × 15s / 45s. A name that doesn't carry one comes back unchanged.
+ */
+export function intervalTitle(name: string): string {
+  if (!parseIntervalReps(name)) return name
+  const at = name.search(/\s*[-–—:·,]?\s*\(?\s*\d+\s*(?:x|×|rounds?\b|s\b|secs?\b|seconds?\b|min|')/i)
+  const title = at > 0 ? name.slice(0, at).trim() : ''
+  return title || name
+}
+
+/**
+ * The canonical shape for a block on its way into the program: the dose in
+ * reps, in the coach's documented form, and the name just the movement. Null
+ * when there is nothing to move — straight sets, or a block already written
+ * where it belongs. Deterministic code disposes, whatever shape it was proposed in.
+ */
+export function canonicalBlock(
+  ex: Pick<ExerciseTemplate, 'name' | 'reps' | 'sets'>,
+): { name: string; reps: string } | null {
+  if (parseIntervalReps(ex.reps, soundsLikeIntervals(ex.name))) return null
+  const p = blockInName(ex.name, ex.reps)
+  if (!p || p.rounds == null) return null
+  return { name: intervalTitle(ex.name), reps: intervalReps({ work: p.work, rest: p.rest, rounds: p.rounds }) }
 }
 
 /** Whether a rep spec, on this movement, is a block rather than straight sets. */

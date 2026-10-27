@@ -30,7 +30,7 @@ import {
 import { loadSwapGear, saveSwapGear, recentSwapsFor, rememberSwap } from '../../lib/swapMemory'
 import { restSecondsFor, adjustRest, formatRest } from '../../engine/restTimer'
 import {
-  intervalPlanFor, intervalSetLogs, roundsFromLogs, secondsFromReps, fmtDose, type IntervalPlan,
+  intervalPlanFor, intervalSetLogs, roundsFromLogs, secondsFromReps, fmtDose, intervalTitle, type IntervalPlan,
 } from '../../engine/intervals'
 import { fireRestAlert, playSetClick, playRecord } from '../../lib/restAlert'
 import { tick, record } from '../../lib/haptics'
@@ -2660,10 +2660,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           // written for the lift that's no longer here.
           const names = prescription?.exerciseNames
           const presOk = names ? names[exIdx] === ex.name : !ex.swapped_from
-          const hint = presOk ? prescription?.hints[exIdx] : undefined
+          // An interval block's dose is its clock: "find a working weight" and a
+          // load cap mean nothing to it, so it takes none of the load chips.
+          const intervalPlan = intervalPlanFor(ex)
+          const hint = presOk && !intervalPlan ? prescription?.hints[exIdx] : undefined
           // The cap is the one thing that does carry: the stand-in answers to the
           // same read, so a held slot stays held while its number is pending.
-          const isHeld = !!prescription?.held[exIdx]
+          const isHeld = !intervalPlan && !!prescription?.held[exIdx]
           // A swapped-in or added movement has no history in this slot: it is
           // measured against its own record and its own last session.
           const ownHistory = !!ex.swapped_from || !!ex.added
@@ -2676,8 +2679,10 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           const pReps = leadingInt(ex.reps)
           // "10 min" is six hundred seconds, not ten.
           const pDur  = trackingType === 'time' ? secondsFromReps(ex.reps) ?? leadingInt(ex.reps) : null
-          const intervalPlan = intervalPlanFor(ex)
           const arrived = arrivedIdx === exIdx
+          // A block written with its dose in the name is titled by the movement;
+          // the block below already says 8 × 15s / 45s.
+          const title = intervalPlan ? intervalTitle(ex.name) : ex.name
           // The number to hit is the engine's target for today — the same one
           // Train's session preview and the hint chip quote — not the program's
           // raw load text, which predates every progression since it was written.
@@ -2726,12 +2731,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                         style={{ '--lock-gap': '-6px', '--lock-from': '16px', '--lock-size': '10px' } as React.CSSProperties}
                       >
                         <h2 style={{ fontWeight: 700, fontSize: 'var(--fs-xl)', lineHeight: 1.25, letterSpacing: '-0.01em' }}>
-                          {ex.name}
+                          {title}
                         </h2>
                       </LockOn>
                     ) : (
                       <h2 style={{ fontWeight: 700, fontSize: 'var(--fs-xl)', lineHeight: 1.25, letterSpacing: '-0.01em' }}>
-                        {ex.name}
+                        {title}
                       </h2>
                     )}
                     {ex.swapped_from && (
@@ -2812,7 +2817,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                     )}
                   </div>
                 )}
-                {presOk && !isPushed && <ReasonLines lines={prescription?.reasons?.[exIdx] ?? []} />}
+                {presOk && !isPushed && !intervalPlan && <ReasonLines lines={prescription?.reasons?.[exIdx] ?? []} />}
               </div>
 
               {/* An interval block runs on its timer, so it shows the block —
@@ -3164,7 +3169,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       {/* The interval timer — over everything, until the block is done */}
       {intervalRun && (
         <IntervalTimer
-          name={intervalRun.name}
+          name={intervalTitle(intervalRun.name)}
           plan={intervalRun.plan}
           lastInSession={exercises.every((_, i) => i === intervalRun.exIdx || (setLogs[i] ?? []).some(isLogged))}
           onProgress={onIntervalProgress}

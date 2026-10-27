@@ -28,7 +28,7 @@ const editExerciseSchema = {
   properties: {
     name: { type: 'string', description: 'Exercise name' },
     sets: { type: 'integer', minimum: 1, maximum: 10 },
-    reps: { type: 'string', description: 'Rep spec, e.g. "5", "8-10", "30s"' },
+    reps: { type: 'string', description: 'Rep spec, e.g. "5", "8-10", "30s". An interval/HIIT block goes here whole — "8 × 15s on / 45s off", "Tabata", "EMOM 10 min" — with sets 1 and the name just the movement ("Assault Bike"); the app runs it on its interval timer.' },
     load: { type: 'string', description: 'bodyweight | light | moderate | heavy' },
     cue: { type: 'string' },
     target_rpe: { type: ['number', 'null'], minimum: 1, maximum: 10 },
@@ -56,7 +56,7 @@ const editObjectSchema = {
     set_session_type: { type: ['string', 'null'], description: 'strength | power | conditioning | mobility' },
     set_intended_dow: { type: ['integer', 'null'], minimum: 0, maximum: 6, description: '0=Mon … 6=Sun' },
     sets: { type: ['integer', 'null'], minimum: 1, maximum: 10 },
-    reps: { type: ['string', 'null'] },
+    reps: { type: ['string', 'null'], description: 'Rep spec, e.g. "5", "8-10", "30s". An interval/HIIT block goes here whole — "8 × 15s on / 45s off", "Tabata", "EMOM 10 min" — with sets 1 and the name just the movement ("Assault Bike"); the app runs it on its interval timer.' },
     load: { type: ['string', 'null'] },
     cue: { type: ['string', 'null'] },
     target_rpe: { type: ['number', 'null'], minimum: 1, maximum: 10 },
