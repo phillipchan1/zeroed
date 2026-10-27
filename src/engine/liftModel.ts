@@ -389,8 +389,35 @@ export const HALF_LIFE_DAYS = 21
 export const MAX_AGE_DISCOUNT = 0.10
 export const TM_FRACTION = 0.9
 
+export function parseRpeHalfStepsFlag(raw: string | undefined | null): boolean {
+  const v = String(raw ?? '').trim().toLowerCase().replace(/^['"]+|['"]+$/g, '')
+  return v === '1' || v === 'true'
+}
+
+/** True only when `RPE_HALF_STEPS` / `VITE_RPE_HALF_STEPS` is `1` or `true`. */
+export function rpeHalfStepsOn(): boolean {
+  try {
+    const meta = (import.meta as { env?: Record<string, string | undefined> }).env
+    if (meta?.VITE_RPE_HALF_STEPS != null && String(meta.VITE_RPE_HALF_STEPS).trim() !== '') {
+      return parseRpeHalfStepsFlag(meta.VITE_RPE_HALF_STEPS)
+    }
+    if (meta?.RPE_HALF_STEPS != null && String(meta.RPE_HALF_STEPS).trim() !== '') {
+      return parseRpeHalfStepsFlag(meta.RPE_HALF_STEPS)
+    }
+  } catch { /* no import.meta.env */ }
+  if (typeof process !== 'undefined' && process.env) {
+    return parseRpeHalfStepsFlag(process.env.RPE_HALF_STEPS ?? process.env.VITE_RPE_HALF_STEPS)
+  }
+  const DenoObj = (globalThis as { Deno?: { env?: { get?: (k: string) => string | undefined } } }).Deno
+  if (DenoObj?.env?.get) {
+    return parseRpeHalfStepsFlag(DenoObj.env.get('RPE_HALF_STEPS') ?? DenoObj.env.get('VITE_RPE_HALF_STEPS'))
+  }
+  return false
+}
+
 /**
- * How much a logged RPE counts toward the working max.
+ * How much a logged RPE counts toward the working max when the half-step
+ * flag is on. Flag off: every finite RPE counts in full (pre-#35).
  *
  *   ≥ 7.5  → 1 (full). A hard set is a real statement about the max.
  *   < 7    → 0 (ignored). Easy volume must not inflate e1RM.
@@ -400,7 +427,8 @@ export const TM_FRACTION = 0.9
  *
  * A missing RPE is a floor read at 10, so it counts in full.
  */
-export function rpeEvidenceWeight(rpe: number | null): number {
+export function rpeEvidenceWeight(rpe: number | null, halfSteps = rpeHalfStepsOn()): number {
+  if (!halfSteps) return 1
   if (rpe == null) return 1
   if (!Number.isFinite(rpe)) return 0
   if (rpe >= 7.5) return 1
@@ -416,14 +444,22 @@ export function isHeavySingle(s: LiftSet): boolean {
 /**
  * A set that is allowed to say what the max is. RPE 10 counts on a single only:
  * a made max single IS the max, no chart in between, while "10" on a set of five
- * is the rating lifters hand out loosely to anything that felt brutal. Easy work
- * (RPE under 7.5, weight 0) is not evidence — it can be logged, it just does
- * not move the working max.
+ * is the rating lifters hand out loosely to anything that felt brutal.
+ *
+ * Flag off (pre-#35): RPE 6–9.5 qualifies. Flag on: easy work (weight 0
+ * below 7.5) is not evidence — it can be logged, it just does not move
+ * the working max.
  */
-export function isQualifying(s: LiftSet): boolean {
+export function isQualifying(s: LiftSet, halfSteps = rpeHalfStepsOn()): boolean {
+  if (!halfSteps) {
+    return s.lift != null
+      && s.reps >= 1 && s.reps <= 6
+      && s.rpe != null && s.rpe >= 6 && (s.rpe <= 9.5 || (s.rpe === 10 && s.reps === 1))
+      && s.missedReps === 0
+  }
   return s.lift != null
     && s.reps >= 1 && s.reps <= 6
-    && s.rpe != null && rpeEvidenceWeight(s.rpe) > 0
+    && s.rpe != null && rpeEvidenceWeight(s.rpe, true) > 0
     && (s.rpe <= 9.5 || (s.rpe === 10 && s.reps === 1))
     && s.missedReps === 0
 }
@@ -478,13 +514,13 @@ export interface WorkingMaxReading {
  * newest session on the lift missed 2+ reps, the max is recomputed with that
  * failure as its ceiling.
  */
-export function workingMaxAsOf(sets: LiftSet[], lift: MainLiftId, asOf: string): WorkingMaxReading | null {
+export function workingMaxAsOf(sets: LiftSet[], lift: MainLiftId, asOf: string, halfSteps = rpeHalfStepsOn()): WorkingMaxReading | null {
   const inWindow = sets.filter((s) =>
     s.lift === lift && s.date <= asOf && daysBetween(s.date, asOf) <= WINDOW_DAYS)
   if (!inWindow.length) return null
 
   let basis: WorkingMaxReading['basis'] = 'qualifying'
-  let evidence = inWindow.filter(isQualifying).map((s) => withE1rm(s)).filter((s): s is EvidenceSet => !!s)
+  let evidence = inWindow.filter((s) => isQualifying(s, halfSteps)).map((s) => withE1rm(s)).filter((s): s is EvidenceSet => !!s)
   // A made max single supersedes every estimate before it: an older 5 @8 read
   // off the chart is a guess at what the test then measured. Sets after it
   // can still raise the max again.
@@ -508,7 +544,7 @@ export function workingMaxAsOf(sets: LiftSet[], lift: MainLiftId, asOf: string):
   let anchor: EvidenceSet | null = null
   let value = 0
   for (const e of bestByDay.values()) {
-    const v = e.e1rm * recencyFactor(daysBetween(e.date, asOf)) * rpeEvidenceWeight(e.rpe)
+    const v = e.e1rm * recencyFactor(daysBetween(e.date, asOf)) * (halfSteps ? rpeEvidenceWeight(e.rpe, true) : 1)
     if (v > value) { value = v; anchor = e }
   }
   if (!anchor) return null
@@ -529,14 +565,16 @@ export function workingMaxAsOf(sets: LiftSet[], lift: MainLiftId, asOf: string):
 
   // Easy doubles and triples estimate a max they never earned. Cap at the
   // all-time best estimated or actual max unless this reading *is* a new
-  // heavy single (1 @8+).
-  const lifetime = allTimeBest(sets.filter((s) => s.date <= asOf), lift)
-  const madeSingles = sets.filter((s) =>
-    s.lift === lift && s.date <= asOf && s.reps === 1 && s.missedReps === 0 && s.weight > 0)
-  const actualMax = madeSingles.reduce((m, s) => Math.max(m, s.weight), 0)
-  const capAt = Math.max(lifetime?.e1rm ?? 0, actualMax)
-  if (capAt > 0 && value > capAt && !(isHeavySingle(anchor) && anchor.e1rm > capAt)) {
-    return { value: capAt, anchor, basis: 'capped_by_best', sessions: bestByDay.size }
+  // heavy single (1 @8+). Flag off: pre-#35, no cap.
+  if (halfSteps) {
+    const lifetime = allTimeBest(sets.filter((s) => s.date <= asOf), lift, true)
+    const madeSingles = sets.filter((s) =>
+      s.lift === lift && s.date <= asOf && s.reps === 1 && s.missedReps === 0 && s.weight > 0)
+    const actualMax = madeSingles.reduce((m, s) => Math.max(m, s.weight), 0)
+    const capAt = Math.max(lifetime?.e1rm ?? 0, actualMax)
+    if (capAt > 0 && value > capAt && !(isHeavySingle(anchor) && anchor.e1rm > capAt)) {
+      return { value: capAt, anchor, basis: 'capped_by_best', sessions: bestByDay.size }
+    }
   }
   return { value, anchor, basis, sessions: bestByDay.size }
 }
@@ -553,15 +591,15 @@ export interface WorkingMaxPoint {
  * RPE'd sets exist, all accessories) adds no point: the max only aging between
  * two real readings is not the lifter getting weaker.
  */
-export function workingMaxSeries(sets: LiftSet[], lift: MainLiftId, through: string): WorkingMaxPoint[] {
+export function workingMaxSeries(sets: LiftSet[], lift: MainLiftId, through: string, halfSteps = rpeHalfStepsOn()): WorkingMaxPoint[] {
   const mine = sets.filter((s) => s.lift === lift && s.date <= through)
   const days = [...new Set(mine.map((s) => s.date))].sort()
   const out: WorkingMaxPoint[] = []
   for (const day of days) {
-    const r = workingMaxAsOf(sets, lift, day)
+    const r = workingMaxAsOf(sets, lift, day, halfSteps)
     if (!r) continue
     const today = mine.filter((s) => s.date === day)
-    const evidence = r.basis === 'qualifying' || r.basis === 'capped_by_best' ? today.some(isQualifying)
+    const evidence = r.basis === 'qualifying' || r.basis === 'capped_by_best' ? today.some((s) => isQualifying(s, halfSteps))
       : r.basis === 'no_rpe_floor' ? today.some((s) => s.rpe == null && s.reps >= 1 && s.reps <= 6)
         : today.some((s) => s.missedReps > 0)
     if (evidence) out.push({ date: day, value: r.value, anchor: `${fmtSet(r.anchor)} ${shortDay(r.anchor.date)}` })
@@ -616,16 +654,16 @@ export interface AllTimeBest {
 export const CEILING_PCT = 2.5
 export const DETRAINED_BELOW = 0.9
 
-export function allTimeBest(sets: LiftSet[], lift: MainLiftId): AllTimeBest | null {
+export function allTimeBest(sets: LiftSet[], lift: MainLiftId, halfSteps = rpeHalfStepsOn()): AllTimeBest | null {
   const mine = sets.filter((s) => s.lift === lift && s.reps >= 1)
   if (!mine.length) return null
   const heaviest = mine.reduce((a, b) => (b.weight > a.weight || (b.weight === a.weight && b.reps > a.reps) ? b : a))
   let best: EvidenceSet | null = null
   for (const s of mine) {
     if (s.missedReps > 0 || s.reps > 10) continue
-    // Easy work is not an estimate of the max. A missing RPE still counts as
-    // a floor (weight 1); a heavy single @8+ is an actual max attempt.
-    if (s.rpe != null && rpeEvidenceWeight(s.rpe) < 1 && !isHeavySingle(s)) continue
+    // Flag on: easy work is not an estimate of the max. A missing RPE still
+    // counts as a floor (weight 1); a heavy single @8+ is an actual max attempt.
+    if (halfSteps && s.rpe != null && rpeEvidenceWeight(s.rpe, true) < 1 && !isHeavySingle(s)) continue
     const e = withE1rm(s, 10)
     if (e && (!best || e.e1rm > best.e1rm)) best = e
   }
@@ -924,6 +962,7 @@ export interface LiftModelInput {
   dayOf?: DayOf | null
   /** A standing reason a push may not happen (the app's limiter cap). Holds instead. */
   noPush?: string | null
+  rpeHalfSteps?: boolean
 }
 
 export interface Recommendation {
@@ -1040,6 +1079,7 @@ function painFor(lift: MainLiftId, pain: PainFlag[], checkins: SessionCheckin[],
 
 export function buildLiftModel(input: LiftModelInput): LiftModel {
   const { lift, today } = input
+  const halfSteps = input.rpeHalfSteps ?? rpeHalfStepsOn()
   const unit = input.unit ?? 'lb'
   const inc = liftIncrement(lift, unit)
   const upper = IS_UPPER[lift]
@@ -1051,20 +1091,20 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   const checkins = input.checkins ?? []
   const weekStart = mondayOf(today)
 
-  const series = workingMaxSeries(sets, lift, today)
-  const best = allTimeBest(sets, lift)
-  const lastQualifying = mine.filter(isQualifying).map((s) => withE1rm(s)).filter((s): s is EvidenceSet => !!s)
+  const series = workingMaxSeries(sets, lift, today, halfSteps)
+  const best = allTimeBest(sets, lift, halfSteps)
+  const lastQualifying = mine.filter((s) => isQualifying(s, halfSteps)).map((s) => withE1rm(s)).filter((s): s is EvidenceSet => !!s)
     .sort((a, b) => b.date.localeCompare(a.date) || b.e1rm - a.e1rm).slice(0, 6)
 
   // A max older than the window is still the last thing the log knew. It is
   // carried, flagged, and taken down by the missed-weeks modifier below.
   // It is the max as it stood the last day the lift was trained — already
   // discounted for the age of its evidence then — not a fresh reading.
-  let wm = workingMaxAsOf(sets, lift, today)
+  let wm = workingMaxAsOf(sets, lift, today, halfSteps)
   const lastTrained = mine.reduce((d, s) => (s.date > d ? s.date : d), '')
   if (!wm && lastTrained) {
-    const then = workingMaxAsOf(sets, lift, lastTrained)
-      ?? (series.length ? workingMaxAsOf(sets, lift, series[series.length - 1].date) : null)
+    const then = workingMaxAsOf(sets, lift, lastTrained, halfSteps)
+      ?? (series.length ? workingMaxAsOf(sets, lift, series[series.length - 1].date, halfSteps) : null)
     if (then) {
       wm = { ...then, basis: 'carried' }
       notes.push(`nothing on it in the last ${WINDOW_DAYS / 7} weeks — working max carried from ${shortDay(lastTrained)}, last trained`)
@@ -1076,7 +1116,7 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   if (wm && isTestedMax(wm.anchor)) {
     const anchor = wm.anchor
     const outranked = mine.some((s) => s.date < anchor.date && daysBetween(s.date, today) <= WINDOW_DAYS
-      && isQualifying(s) && (withE1rm(s)?.e1rm ?? 0) > anchor.e1rm)
+      && isQualifying(s, halfSteps) && (withE1rm(s)?.e1rm ?? 0) > anchor.e1rm)
     if (outranked) notes.push(`working max is the tested single ${fmtSet(anchor)} on ${shortDay(anchor.date)} — higher estimates from before it no longer count`)
   }
 
@@ -1404,6 +1444,8 @@ export interface LiftModelSources {
   testDay?: boolean
   deload?: boolean
   noPush?: string | null
+  /** When set, overrides the process / Vite / Deno env for this call. */
+  rpeHalfSteps?: boolean
 }
 
 export function modelFromSources(lift: MainLiftId, src: LiftModelSources): LiftModel {
@@ -1437,6 +1479,7 @@ export function modelFromSources(lift: MainLiftId, src: LiftModelSources): LiftM
     testDay: src.testDay ?? flags.testDay,
     dayOf: src.dayOf ?? null,
     noPush: src.noPush ?? null,
+    rpeHalfSteps: src.rpeHalfSteps,
   })
 }
 

@@ -5,14 +5,14 @@
 
 import type { McpTool } from './mcpProtocol.ts'
 import {
-  MAIN_LIFTS, modelFromSources, parseLiftId, previewTrainingMax, renderLiftModel, tmOverrideEntry,
+  MAIN_LIFTS, modelFromSources, parseLiftId, previewTrainingMax, renderLiftModel, rpeHalfStepsOn, tmOverrideEntry,
   type DayOf, type LiftModelSources, type MainLiftId, type TmOverride,
 } from './engine/liftModel.ts'
 
 export const LIFT_MODEL_TOOLS: McpTool[] = [
   {
     name: 'get_lift_model',
-    description: 'One main lift\'s model from the whole log: working max (RPE-chart e1RM; sets at RPE 7.5+ count fully, below 7 are ignored, 7–7.5 tapers; capped at the all-time best unless a new 1-rep @8+ beats it), training max, 4/8-week trend, all-time best, last qualifying sets, and this week\'s prescription with its reason line. lift: squat | bench | deadlift | ohp, or "all".',
+    description: 'One main lift\'s model from the whole log: working max (RPE-chart e1RM, qualifying sets, last 6 weeks, recency-weighted), training max, 4/8-week trend, all-time best, last qualifying sets, and this week\'s prescription with its reason line. lift: squat | bench | deadlift | ohp, or "all".',
     inputSchema: {
       type: 'object',
       properties: {
@@ -77,6 +77,8 @@ export async function runLiftModelTool(
     load: () => Promise<LiftModelSources>
     /** Null clears the lift; an entry carries when it was set and the model's TM then. */
     saveTrainingMax: (lift: MainLiftId, entry: TmOverride | null) => Promise<unknown>
+    /** Worker / edge `RPE_HALF_STEPS`. Omit to read the process / Deno env. */
+    rpeHalfSteps?: boolean
   },
 ): Promise<string> {
   if (name === 'get_lift_model') {
@@ -87,6 +89,7 @@ export async function runLiftModelTool(
       dayOf: dayOfArgs(args),
       testDay: typeof args.test_day === 'boolean' ? args.test_day : undefined,
       deload: typeof args.deload === 'boolean' ? args.deload : undefined,
+      rpeHalfSteps: io.rpeHalfSteps ?? rpeHalfStepsOn(),
     }
     return lifts.map((l) => renderLiftModel(modelFromSources(l, { ...src, ...opts }))).join('\n\n---\n\n')
   }

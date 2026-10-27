@@ -899,7 +899,7 @@ ok(rpe5Workout.includes('@5') && rpe5Workout.includes('RPE 5'), `get_workout rou
 const rpe5List = await executeZeroedTool(sql, A, 'list_workouts', { limit: 20 })
 ok(rpe5List.includes('@5'), 'list_workouts round-trips RPE 5')
 
-const rpeHalf = await executeDataQuery(sql, ctxA, {
+const rpeHalfOff = await executeDataQuery(sql, ctxA, {
   table: 'workout',
   op: 'insert',
   values: {
@@ -912,10 +912,28 @@ const rpeHalf = await executeDataQuery(sql, ctxA, {
   returning: '*',
   single: 'one',
 })
-ok(rpeHalf.error == null && Number((rpeHalf.data as { rpe?: number | string } | null)?.rpe) === 7.5, 'RPE 7.5 session is accepted')
+ok(Boolean(rpeHalfOff.error), 'flag off: RPE 7.5 session is rejected')
+ok((rpeHalfOff.error?.message ?? '').includes('whole number'), 'flag off: 7.5 error is the INTEGER rule')
+
+process.env.RPE_HALF_STEPS = '1'
+const rpeHalf = await executeDataQuery(sql, { ...ctxA, rpeHalfSteps: true }, {
+  table: 'workout',
+  op: 'insert',
+  values: {
+    routine_id: ROUTINE_A,
+    performed_at: '2026-10-24T17:05:00Z',
+    rpe: 7.5,
+    actual_weights: { '0': [{ set: 1, weight: 225, reps: 3, rpe: 9.5, done: true }] },
+    exercises_snapshot: [{ name: 'Back Squat', sets: 1, reps: '3' }],
+  },
+  returning: '*',
+  single: 'one',
+})
+ok(rpeHalf.error == null && Number((rpeHalf.data as { rpe?: number | string } | null)?.rpe) === 7.5, 'flag on: RPE 7.5 session is accepted')
 const rpeHalfId = (rpeHalf.data as { id: string } | null)?.id
 const rpeHalfText = rpeHalfId ? await executeZeroedTool(sql, A, 'get_workout', { workout_id: rpeHalfId }) : ''
-ok(rpeHalfText.includes('@9.5') && rpeHalfText.includes('RPE 7.5'), 'RPE 9.5 set and 7.5 session round-trip')
+ok(rpeHalfText.includes('@9.5') && rpeHalfText.includes('RPE 7.5'), 'flag on: RPE 9.5 set and 7.5 session round-trip')
+delete process.env.RPE_HALF_STEPS
 
 const rpeHigh = await executeDataQuery(sql, ctxA, {
   table: 'workout',

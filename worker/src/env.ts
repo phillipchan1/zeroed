@@ -24,6 +24,8 @@ export interface Env {
   CF_EMAIL_FROM?: string
   /** Optional comma-separated allowlist for sign-in code emails (cost/abuse guard). */
   ALLOWED_EMAILS?: string
+  /** `1` / `true` enables half-step RPE and the #35 working-max rule. Default off. */
+  RPE_HALF_STEPS?: string
 }
 
 export function databaseUrl(env: Env): string | null {
