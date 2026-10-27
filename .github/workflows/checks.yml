@@ -300,6 +300,13 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - name: Install PostgreSQL client tools
+        run: |
+          set -euo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client
+          command -v psql
+          command -v pg_dump
       - name: Prove source pg TLS verification
         env:
           ZEROED_REQUIRE_TLS: "1"

@@ -15,7 +15,8 @@
  *   3. Load mappings + data-only restore in one transaction
  *      (failure rolls back to empty tables)
  *   4. Source dump + count/hash share one REPEATABLE READ snapshot
- *      (pg_export_snapshot + pg_dump --snapshot) so live writes cannot
+ *      (BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY +
+ *      pg_export_snapshot + pg_dump --snapshot) so live writes cannot
  *      cause a false mismatch. Dry-run is source-only and exits 0 when
  *      the snapshot dump, restore-list sanity, and source counts/md5s
  *      succeed. Live restore still compares source vs Neon and aborts on
@@ -54,7 +55,7 @@
  *
  * Requires: pg_dump, psql, pg_restore (PostgreSQL client tools).
  */
-import { randomBytes } from 'node:crypto'
+import { randomBytes, X509Certificate } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import pg from 'pg'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
@@ -67,6 +68,132 @@ const root = join(here, '..')
 
 export function redactSecrets(text) {
   return String(text ?? '').replace(/postgres(?:ql)?:\/\/\S+/gi, 'postgresql://[redacted]')
+}
+
+export const GENERIC_SAFE_ERROR = 'command failed (details omitted; log looked like row data)'
+
+export const SUPABASE_SOURCE_CA_FINGERPRINT_SHA256 =
+  '80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA'
+
+const SOURCE_URL_ALLOWED_PARAMS = new Set([
+  'host',
+  'hostaddr',
+  'port',
+  'dbname',
+  'user',
+  'password',
+  'application_name',
+  'fallback_application_name',
+  'connect_timeout',
+  'client_encoding',
+  'options',
+  'target_session_attrs',
+])
+
+export function isForbiddenSourceUrlParam(name) {
+  const key = String(name || '').toLowerCase()
+  return key.startsWith('ssl') || key === 'uselibpqcompat'
+}
+
+/** True when log text looks like emails, CSV rows, or dumped secrets. */
+export function logLooksLikeRowData(text) {
+  let s = String(text)
+  s = s.replace(/\bsha256=[0-9a-f]{64}\b/gi, '')
+  if (/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/.test(s)) return true
+  if (/\bencrypted_password\b|\brecovery_token\b|\bconfirmation_token\b/.test(s)) return true
+  if (/1\/\/0[A-Za-z0-9_-]+/.test(s)) return true
+  if (/\bya29\.[A-Za-z0-9_-]+/.test(s)) return true
+  if (/\\x[0-9a-f]{8,}/i.test(s)) return true
+  if (/<Buffer\s+[0-9a-f][0-9a-f ]*>/i.test(s)) return true
+  if (/\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+/.test(s)) return true
+  if (/parameters:\s*\[/.test(s)) return true
+  if (/(?<![0-9a-f])[0-9a-f]{40,}(?![0-9a-f])/i.test(s)) return true
+  return false
+}
+
+export function assertSafeMigrateLog(text, label = 'log') {
+  if (logLooksLikeRowData(text)) {
+    throw new Error(`${label} looks like row data; only counts and hashes may be logged`)
+  }
+}
+
+/** Replace quoted literals, Key (...)=(...), and parenthesised value lists. */
+export function stripPgErrorValues(line) {
+  let s = String(line)
+  s = s.replace(/\bKey\s*\([^)]*\)\s*=\s*\([^)]*\)/gi, 'Key (...)')
+  s = s.replace(/'(?:[^']|'')*'/g, "'…'")
+  s = s.replace(/\$[A-Za-z0-9_]*\$[\s\S]*?\$[A-Za-z0-9_]*\$/g, '$$…$$')
+  s = s.replace(/"(?:[^"\\]|\\.)*"/g, '"…"')
+  s = s.replace(/\([^)]*\)/g, '(…)')
+  return s
+}
+
+function isDroppedPgLine(line) {
+  const s = String(line)
+  if (/^\s*(DETAIL|CONTEXT|LINE|HINT|WHERE)\s*:/i.test(s)) return true
+  if (/Failing row contains/i.test(s)) return true
+  if (/^\s*Command was:/i.test(s)) return true
+  return false
+}
+
+export function extractSqlstate(text) {
+  const s = String(text)
+  return s.match(/\bSQLSTATE[:\s]+([0-9A-Z]{5})\b/i)?.[1]
+    ?? s.match(/\bERROR:\s+([0-9A-Z]{5})\b/)?.[1]
+    ?? null
+}
+
+/** First ERROR / pg_restore error line, values stripped. Drop DETAIL and friends. */
+export function sanitizePgFailureText(text) {
+  const raw = String(text ?? '')
+  const sqlstate = extractSqlstate(raw)
+  const lines = raw.split(/\r?\n/).filter((line) => line.trim() && !isDroppedPgLine(line))
+  const errorLine = lines.find((line) => /^\s*(?:ERROR|pg_restore:\s*error):/i.test(line))
+    ?? lines.find((line) => /ERROR:/i.test(line))
+    ?? ''
+  return { sqlstate, firstError: errorLine ? stripPgErrorValues(errorLine) : '' }
+}
+
+export function safeLoggedMessage(text, label = 'error') {
+  const s = redactSecrets(String(text ?? ''))
+  if (!s) return s
+  if (logLooksLikeRowData(s)) return GENERIC_SAFE_ERROR
+  try {
+    assertSafeMigrateLog(s, label)
+  } catch {
+    return GENERIC_SAFE_ERROR
+  }
+  return s
+}
+
+export function safeErrorMessage(err) {
+  if (err == null) return GENERIC_SAFE_ERROR
+  const msg = err instanceof Error ? err.message : String(err)
+  return safeLoggedMessage(msg)
+}
+
+export function logSafeError(text) {
+  console.error(safeLoggedMessage(String(text ?? '')))
+}
+
+export function formatSafeCommandError(cmd, status, stderr, stdout) {
+  const name = String(cmd || 'command').split(/[/\\]/).pop().split(/\s+/)[0] || 'command'
+  const { sqlstate, firstError } = sanitizePgFailureText(`${stderr || ''}\n${stdout || ''}`)
+  const parts = [`${name} failed (${status})`]
+  if (sqlstate) parts.push(`SQLSTATE ${sqlstate}`)
+  if (firstError) parts.push(firstError)
+  return safeLoggedMessage(parts.join(': '))
+}
+
+export function installSafeErrorHandlers({ exit = true } = {}) {
+  const fail = (err) => {
+    releaseHeldAdvisoryLocks()
+    console.error(safeErrorMessage(err))
+    if (exit) process.exit(1)
+  }
+  process.on('uncaughtException', fail)
+  process.on('unhandledRejection', fail)
+  return fail
 }
 
 export function isSocketHost(host) {
@@ -122,11 +249,39 @@ export function isLoopbackHost(host) {
 
 export const SUPABASE_SOURCE_CA_FILE = join(here, 'certs/supabase-prod-ca-2021.crt')
 
-/** Strip sslmode so an explicit `ssl` object is what node-pg uses. */
+/** Strip ssl* and uselibpqcompat so an explicit `ssl` object / PGSSL* env wins. */
 export function stripSslMode(url) {
   const parsed = new URL(url)
-  parsed.searchParams.delete('sslmode')
+  for (const key of [...parsed.searchParams.keys()]) {
+    if (isForbiddenSourceUrlParam(key)) parsed.searchParams.delete(key)
+  }
   return parsed.toString()
+}
+
+export function refuseUnexpectedSourceUrlParams(url) {
+  const parsed = new URL(url)
+  const unexpected = []
+  for (const key of parsed.searchParams.keys()) {
+    const lower = key.toLowerCase()
+    if (isForbiddenSourceUrlParam(lower)) continue
+    if (!SOURCE_URL_ALLOWED_PARAMS.has(lower)) unexpected.push(key)
+  }
+  if (unexpected.length) {
+    throw new Error(`source URL has unexpected query parameter(s): ${[...new Set(unexpected)].sort().join(', ')}`)
+  }
+}
+
+export function sanitizeSourceConnectionString(url) {
+  refuseUnexpectedSourceUrlParams(url)
+  const stripped = stripSslMode(url)
+  if (/[?&](ssl|uselibpqcompat)/i.test(stripped)) {
+    throw new Error('source URL must not include ssl* or uselibpqcompat')
+  }
+  return stripped
+}
+
+export function sourceCaFingerprintSha256(env = process.env) {
+  return new X509Certificate(loadSourceCa(env)).fingerprint256
 }
 
 export function sourceCaFile(env = process.env) {
@@ -155,8 +310,9 @@ export function assertSourcePgSsl(config) {
   if (!pem.includes('BEGIN CERTIFICATE')) {
     throw new Error('source pg client must be built with a CA')
   }
-  if (String(config.connectionString || '').includes('sslmode=')) {
-    throw new Error('source pg client connection string must not include sslmode')
+  const conn = String(config.connectionString || '')
+  if (/[?&](ssl|uselibpqcompat)/i.test(conn) || /uselibpqcompat/i.test(conn)) {
+    throw new Error('source pg client connection string must not include ssl* or uselibpqcompat')
   }
   return config
 }
@@ -207,7 +363,7 @@ export function targetPgSsl(url, env = process.env) {
 export function sourcePgClientConfig(url, env = process.env) {
   const ssl = sourcePgSsl(url, env)
   const config = {
-    connectionString: stripSslMode(url),
+    connectionString: sanitizeSourceConnectionString(url),
     connectionTimeoutMillis: 10000,
     ssl,
   }
@@ -222,6 +378,16 @@ export function targetPgClientConfig(url, env = process.env) {
     connectionTimeoutMillis: 10000,
     ssl,
   }
+}
+
+/** libpq source tools: verify-full + pinned CA via env, never via the URL. */
+export function sourceLibpqSslEnv(url, env = process.env) {
+  const clean = libpqCleanEnv(env)
+  if (sourcePgSsl(url, env)) {
+    clean.PGSSLMODE = 'verify-full'
+    clean.PGSSLROOTCERT = sourceCaFile(env)
+  }
+  return clean
 }
 
 /** URL-only: same host+port+db, or a target that is not Neon / looks like Supabase. */
@@ -673,8 +839,9 @@ export function parseAuthUsersMapping(content, filename = 'auth-users') {
     try {
       parsed = JSON.parse(trimmed)
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      throw new Error(`${filename}: invalid JSON (${message})`)
+      const raw = err instanceof Error ? err.message : ''
+      const pos = raw.match(/position\s+(\d+)/i)?.[1]
+      throw new Error(pos ? `auth map decode failed (position ${pos})` : 'auth map decode failed')
     }
     const list = Array.isArray(parsed)
       ? parsed
@@ -725,7 +892,7 @@ export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]
 /** Better Auth public tables — excluded from coverage on purpose. */
 export const EXCLUDED_PUBLIC_TABLES = ['user', 'session', 'account', 'verification']
 
-export const SNAPSHOT_BEGIN_SQL = 'BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ'
+export const SNAPSHOT_BEGIN_SQL = 'BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY'
 export const SNAPSHOT_EXPORT_SQL = 'SELECT pg_export_snapshot() AS snapshot'
 
 /**
@@ -803,7 +970,7 @@ export function pgDumpSnapshotArgs(dumpPath, snapshotId, sourceUrl) {
     '--schema=public',
     `--snapshot=${snapshotId}`,
     `--file=${dumpPath}`,
-    sourceUrl,
+    sanitizeSourceConnectionString(sourceUrl),
   ]
 }
 
@@ -1030,7 +1197,7 @@ export function orderRestoreList(tocText) {
   return [...comments, ...tableData.map((x) => x.line), ...rest].join('\n').replace(/\n*$/, '\n')
 }
 
-function run(cmd, args, opts = {}) {
+export function run(cmd, args, opts = {}) {
   const { env, ...rest } = opts
   const res = spawnSync(cmd, args, {
     encoding: 'utf8',
@@ -1039,9 +1206,7 @@ function run(cmd, args, opts = {}) {
     ...rest,
   })
   if (res.status !== 0) {
-    const err = (res.stderr || res.stdout || '').trim()
-    const safeArgs = args.map((a) => (/postgres(?:ql)?:\/\//i.test(a) ? '[redacted-url]' : a))
-    throw new Error(`${cmd} ${safeArgs.join(' ')} failed (${res.status}): ${redactSecrets(err)}`)
+    throw new Error(formatSafeCommandError(cmd, res.status, res.stderr, res.stdout))
   }
   return res.stdout
 }
@@ -1130,7 +1295,7 @@ function printOfflineDryRun(args) {
   console.log(args.relaxTargetRls
     ? 'dry-run: --relax-target-rls is on — would DISABLE RLS and drop policy/function/FK on Neon only'
     : 'dry-run: would leave any leftover RLS artifacts on Neon (pass --relax-target-rls to drop them on the target)')
-  console.log('dry-run: would dump under REPEATABLE READ (pg_export_snapshot + pg_dump --snapshot) so counts/hashes match the dump')
+  console.log('dry-run: would dump under REPEATABLE READ READ ONLY (pg_export_snapshot + pg_dump --snapshot) so counts/hashes match the dump')
   console.log('dry-run: would pin TimeZone=UTC extra_float_digits=1 IntervalStyle=postgres on both checksum sessions')
   console.log('dry-run: would set statement_timeout=0 and idle_in_transaction_session_timeout=0 on the snapshot session')
   console.log('dry-run: would refuse a transaction-pooler source (port 6543 / mode=transaction); direct or session mode required')
@@ -1191,12 +1356,12 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   }
 
   if (!source) {
-    console.error('Set SUPABASE_READONLY_URL (or pass --dry-run).')
+    logSafeError('Set SUPABASE_READONLY_URL (or pass --dry-run).')
     return 2
   }
 
   if (!args.dryRun && !target) {
-    console.error('Set SUPABASE_READONLY_URL and NEON_DIRECT_URL.')
+    logSafeError('Set SUPABASE_READONLY_URL and NEON_DIRECT_URL.')
     return 2
   }
 
@@ -1205,27 +1370,27 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
   if (target) {
     const wipeReason = refuseSourceWipeReason(source, target)
     if (wipeReason) {
-      console.error(`Refusing to continue: ${wipeReason}. Source is read-only.`)
+      logSafeError(`Refusing to continue: ${wipeReason}. Source is read-only.`)
       return 2
     }
   }
 
   const poolerReason = refuseTransactionPoolerReason(source)
   if (poolerReason) {
-    console.error(`Refusing to continue: ${poolerReason}.`)
+    logSafeError(`Refusing to continue: ${poolerReason}.`)
     return 2
   }
 
   if (!args.dryRun) {
     const confirmReason = confirmDropMismatchReason(args.confirmDrop, target)
     if (confirmReason) {
-      console.error(`${confirmReason}.`)
+      logSafeError(`${confirmReason}.`)
       return 2
     }
   }
 
   if (args.skipAuthUsers && !args.dryRun && !args.authUsersFile) {
-    console.error('Live restore without --auth-users-file exits 2. Pass a CSV/JSON mapping; the migration role cannot read auth.users.')
+    logSafeError('Live restore without --auth-users-file exits 2. Pass a CSV/JSON mapping; the migration role cannot read auth.users.')
     return 2
   }
 
@@ -1238,24 +1403,24 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       try {
         targetFp = readFp(target)
       } catch {
-        console.error('Refusing to drop target: could not read target fingerprint. Source is read-only.')
+        logSafeError('Refusing to drop target: could not read target fingerprint. Source is read-only.')
         return 2
       }
       try {
         sourceFp = readFp(source)
       } catch {
-        console.error('Refusing to drop target: could not read source fingerprint. Source is read-only.')
+        logSafeError('Refusing to drop target: could not read source fingerprint. Source is read-only.')
         return 2
       }
       const fpReason = refuseTargetFingerprintReason(targetFp, sourceFp)
       if (fpReason) {
-        console.error(`Refusing to drop target: ${fpReason}. Source is read-only.`)
+        logSafeError(`Refusing to drop target: ${fpReason}. Source is read-only.`)
         return 2
       }
       const holdMs = Number(env.ZEROED_TEST_HOLD_LOCK_MS || 0)
       const lockReason = await checkLock(source, target, newAdvisoryLockKey(), { holdMs })
       if (lockReason) {
-        console.error(`Refusing to drop target: ${lockReason}. Source is read-only.`)
+        logSafeError(`Refusing to drop target: ${lockReason}. Source is read-only.`)
         return 2
       }
     } finally {
@@ -1279,7 +1444,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     console.log('opening REPEATABLE READ snapshot for dump + counts/hashes…')
     const snap = await withSourceSnapshot(source, async ({ client, snapshotId }) => {
       console.log(`dumping public data only (no-owner, no-acl, no schema/RLS, snapshot ${snapshotId})…`)
-      run('pg_dump', pgDumpSnapshotArgs(dumpPath, snapshotId, source))
+      run('pg_dump', pgDumpSnapshotArgs(dumpPath, snapshotId, sanitizeSourceConnectionString(source)), {
+        env: sourceLibpqSslEnv(source, env),
+      })
 
       refuseUncoveredPublicTables(
         (await client.query(uncoveredPublicTablesQuery())).rows.map((r) => r.tablename),
@@ -1317,7 +1484,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
           FROM auth.users
         ) TO STDOUT WITH CSV
       `
-      const csv = run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', source, '-c', usersCopy])
+      const csv = run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', sanitizeSourceConnectionString(source), '-c', usersCopy], {
+        env: sourceLibpqSslEnv(source, env),
+      })
       writeFileSync(usersPath, csv)
       mappedUsers = csv.trim().split('\n').filter(Boolean).length
       console.log(`exported ${mappedUsers} auth.users rows`)
@@ -1326,7 +1495,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     if (args.skipAuthUsers && args.authUsersFile) {
       const missing = missingMappedAuthUserIds(snap.sourceAuthIds, mappingRows)
       if (missing.length) {
-        console.error(`--auth-users-file is missing ${missing.length} source auth_user_id(s) (id match, not counts)`)
+        logSafeError(`--auth-users-file is missing ${missing.length} source auth_user_id(s) (id match, not counts)`)
         return 1
       }
     }
@@ -1334,7 +1503,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     const tocText = run('pg_restore', ['-l', dumpPath])
     const listReason = restoreListSanityReason(tocText)
     if (listReason) {
-      console.error(listReason)
+      logSafeError(listReason)
       return 1
     }
 
@@ -1408,14 +1577,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
       console.log(`  ${table}: source=${aDisp} neon=${bDisp} ${mark}`)
     }
     if (after.mismatch) {
-      console.error('Row-count or content-hash mismatch — abort. Neon was written but is not trusted.')
+      logSafeError('Row-count or content-hash mismatch — abort. Neon was written but is not trusted.')
       return 1
     }
 
     const orphans = parseOrphanIds(psqlTuples(target, orphanAthleteQuery()))
     if (orphans.length) {
-      console.error(`Orphan athletes (auth_user_id with no Better Auth "user"): ${orphans.length}`)
-      console.error('Partial --auth-users-file left athletes unmapped — abort.')
+      logSafeError(`Orphan athletes (auth_user_id with no Better Auth "user"): ${orphans.length}`)
+      logSafeError('Partial --auth-users-file left athletes unmapped — abort.')
       return 1
     }
 
@@ -1427,12 +1596,12 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
 }
 
 if (isExecutedDirectly(import.meta.url, process.argv[1])) {
+  installSafeErrorHandlers()
   try {
     process.exit(await main())
   } catch (err) {
     releaseHeldAdvisoryLocks()
-    const message = err instanceof Error ? err.message : String(err)
-    console.error(redactSecrets(message))
+    logSafeError(safeErrorMessage(err))
     process.exit(1)
   }
 }

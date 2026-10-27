@@ -147,13 +147,20 @@ This PR targets the **Workers Free** plan plus **Neon Free** via Hyperdrive.
    `REPEATABLE READ` or `pg_export_snapshot` — the script refuses it.
    Node `pg` source clients verify TLS with the committed Supabase
    `prod-ca-2021` root (`scripts/certs/supabase-prod-ca-2021.crt`) and
-   `rejectUnauthorized: true`; `sslmode` is stripped from the URL so that
-   explicit `ssl` object wins. Neon, if a Node client is used, keeps
-   verify-full against the public CA store. `psql` / `pg_dump` keep their
-   libpq SSL settings.
+   `rejectUnauthorized: true`. Every `ssl*` query param (`sslmode`,
+   `sslrootcert`, `sslcert`, `sslkey`, `sslcrl`, …) and `uselibpqcompat`
+   is stripped from the source URL; any other unexpected query param is
+   refused. Neon, if a Node client is used, keeps verify-full against the
+   public CA store. `psql` / `pg_dump` against the source set
+   `PGSSLMODE=verify-full` and `PGSSLROOTCERT` to that pinned CA (never
+   in the URL). Worker `pg` clients verify the same way (`rejectUnauthorized:
+   true`); Hyperdrive's bound local proxy stays plaintext.
+   Failure logs never echo raw stdout/stderr: command name, exit code,
+   SQLSTATE, and the first sanitized ERROR line only. `source-counts.json`
+   is deleted in the workflow `always()` step.
    The dump and the source
-   counts/hashes share one `REPEATABLE READ` transaction:
-   `BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ`,
+   counts/hashes share one `REPEATABLE READ` **READ ONLY** transaction:
+   `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`,
    `pg_export_snapshot()`, `pg_dump --snapshot=<id>`, then `COUNT(*)` plus
    a per-table content md5 (`md5(to_jsonb(t))` aggregated `ORDER BY t.id`)
    on the same snapshot. The snapshot session sets

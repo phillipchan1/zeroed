@@ -102,12 +102,14 @@ jobs:
           if [ -n "${SOURCE_URL}" ]; then
             export PATH="/usr/lib/postgresql/${MAJOR}/bin:${PATH}"
             # Match libpqCleanEnv: inherited PG* must not redirect this URL-only probe.
-            # PGPASSFILE=/dev/null; env -u PGSSLMODE, PGHOSTADDR, and the rest.
+            # Then set verify-full + the pinned CA via env (never via the URL).
             unset_pg=()
             while IFS= read -r key; do
               unset_pg+=(-u "${key}")
             done < <(env | awk -F= '/^PG/ { print $1 }')
-            if ! NUM="$(env "${unset_pg[@]}" -u PGSSLMODE -u PGHOSTADDR PGPASSFILE=/dev/null PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql -v ON_ERROR_STOP=1 -tA -d "${SOURCE_URL}" -c 'SHOW server_version_num' | tr -d '[:space:]')"; then
+            CA_FILE="${GITHUB_WORKSPACE}/scripts/certs/supabase-prod-ca-2021.crt"
+            SAFE_URL="$(SOURCE_URL="${SOURCE_URL}" node --experimental-strip-types --input-type=module -e 'import { sanitizeSourceConnectionString } from "./scripts/migrate-supabase-to-neon.mjs"; process.stdout.write(sanitizeSourceConnectionString(process.env.SOURCE_URL))')"
+            if ! NUM="$(env "${unset_pg[@]}" PGPASSFILE=/dev/null PGSERVICEFILE=/dev/null PGSSLMODE=verify-full PGSSLROOTCERT="${CA_FILE}" PGOPTIONS='-c default_transaction_read_only=on' psql -v ON_ERROR_STOP=1 -tA -d "${SAFE_URL}" -c 'SHOW server_version_num' | tr -d '[:space:]')"; then
               echo "::error::Could not read source server_version_num; cannot pick a matching pg_dump."
               exit 1
             fi
@@ -188,3 +190,13 @@ jobs:
           if [ -n "${AUTH_FILE:-}" ]; then
             rm -f "${AUTH_FILE}"
           fi
+      - name: Delete source-counts and hash reports
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f "${RUNNER_TEMP}/source-counts.json" "${GITHUB_WORKSPACE}/source-counts.json"
+          find "${RUNNER_TEMP}" "${GITHUB_WORKSPACE}" -maxdepth 4 \( \
+            -name 'source-counts.json' -o \
+            -name 'source-hashes.json' -o \
+            -name 'checksums.json' \
+          \) -type f -delete

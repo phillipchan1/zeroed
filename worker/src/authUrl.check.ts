@@ -162,6 +162,9 @@ ok(
   'bound Hyperdrive client ssl is false',
 )
 ok(pgClientSsl(neon) !== false, 'remote URL client ssl stays on')
+const neonSsl = pgClientSsl(neon)
+ok(neonSsl !== false && neonSsl.rejectUnauthorized === true, 'Neon / public-CA clients verify TLS')
+ok(neonSsl !== false && neonSsl.rejectUnauthorized !== false, 'pgClientSsl never sets rejectUnauthorized: false')
 ok(
   databaseUrl({ ENVIRONMENT: 'local', DATABASE_URL: loopbackPg, HYPERDRIVE: { connectionString: neon } }) === loopbackPg,
   'local DATABASE_URL beats Hyperdrive',
@@ -276,6 +279,10 @@ for (const method of ['OPTIONS', 'GET', 'POST'] as const) {
   ok(res.headers.get('access-control-allow-origin') == null, `${method} evil.example: no ACAO`)
   ok(res.headers.get('access-control-allow-credentials') == null, `${method} evil.example: no credentials`)
 }
+
+const envSrc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'env.ts'), 'utf8')
+ok(/rejectUnauthorized:\s*true/.test(envSrc), 'env.ts verifies TLS with rejectUnauthorized: true')
+ok(!/rejectUnauthorized:\s*false/.test(envSrc), 'env.ts does not set rejectUnauthorized: false')
 
 const localOk = beginAuthCors('http://localhost:5173', { ENVIRONMENT: 'local' })
 ok(localOk.ok, 'beginAuthCors succeeds when ENVIRONMENT=local')

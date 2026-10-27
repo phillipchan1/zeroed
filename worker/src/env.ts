@@ -57,6 +57,6 @@ export function useDatabaseSsl(
 export function pgClientSsl(
   url: string,
   env: Pick<Env, 'ENVIRONMENT' | 'HYPERDRIVE'> = {},
-): false | { rejectUnauthorized: false } {
-  return useDatabaseSsl(url, env) ? { rejectUnauthorized: false } : false
+): false | { rejectUnauthorized: true } {
+  return useDatabaseSsl(url, env) ? { rejectUnauthorized: true } : false
 }

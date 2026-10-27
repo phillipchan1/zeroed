@@ -32,7 +32,10 @@ import {
   EXCLUDED_PUBLIC_TABLES,
   fingerprintQuery,
   formatCountComparison,
+  formatSafeCommandError,
   formatSourceCountLines,
+  GENERIC_SAFE_ERROR,
+  isForbiddenSourceUrlParam,
   isLoopbackHost,
   isNeonHost,
   isSocketHost,
@@ -40,6 +43,7 @@ import {
   libpqCleanEnv,
   loadSourceCa,
   loadUsersSql,
+  logLooksLikeRowData,
   main,
   maxCreatedAtQuery,
   missingMappedAuthUserIds,
@@ -69,12 +73,19 @@ import {
   resolveSourceUrl,
   resolveTargetUrl,
   restoreListSanityReason,
+  run,
+  sanitizePgFailureText,
+  sanitizeSourceConnectionString,
   sourceCaFile,
+  sourceCaFingerprintSha256,
   sourceCountsReport,
+  sourceLibpqSslEnv,
   sourcePgClientConfig,
   sourcePgSsl,
+  stripPgErrorValues,
   stripSslMode,
   SUPABASE_SOURCE_CA_FILE,
+  SUPABASE_SOURCE_CA_FINGERPRINT_SHA256,
   targetPgClientConfig,
   SNAPSHOT_BEGIN_SQL,
   SNAPSHOT_EXPORT_SQL,
@@ -178,6 +189,50 @@ try {
 }
 ok(missingFields, 'JSON without id is rejected')
 
+let authMapDecode = ''
+try {
+  parseAuthUsersMapping('{ "email": "phil@example.com",', 'auth-users')
+} catch (err) {
+  authMapDecode = err instanceof Error ? err.message : String(err)
+}
+ok(authMapDecode.startsWith('auth map decode failed'), 'malformed auth-map JSON is a decode failure')
+ok(!/phil@/i.test(authMapDecode), 'auth-map decode error omits the JSON / email')
+ok(!/Unexpected|token|JSON/i.test(authMapDecode), 'auth-map decode error omits SyntaxError text')
+ok(!logLooksLikeRowData(authMapDecode), 'auth-map decode error is not row data')
+
+const leakyPg = [
+  'ERROR:  duplicate key value violates unique constraint "user_email_key"',
+  'DETAIL:  Key (email)=(phil@example.com) already exists.',
+  'CONTEXT:  COPY auth_users_import, line 1: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,Phil,phil@example.com,t"',
+  'HINT:  You might need to use ON CONFLICT.',
+  'WHERE:  SQL statement',
+  'LINE 1: INSERT INTO',
+  'Failing row contains (aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, Phil, phil@example.com).',
+  'SQLSTATE 23505',
+].join('\n')
+const sanitized = sanitizePgFailureText(leakyPg)
+eq(sanitized.sqlstate, '23505', 'sanitizer keeps SQLSTATE')
+ok(/ERROR:/i.test(sanitized.firstError), 'sanitizer keeps the first ERROR line')
+ok(!/phil@/i.test(sanitized.firstError), 'sanitizer strips emails from ERROR')
+ok(!/Key \(email\)=\(phil@/i.test(sanitized.firstError), 'sanitizer strips Key (...)=(...)')
+ok(!/DETAIL|CONTEXT|HINT|WHERE|LINE |Failing row/i.test(sanitized.firstError), 'sanitizer drops DETAIL and friends')
+const safeFail = formatSafeCommandError('psql', 1, leakyPg, '')
+ok(!/phil@/i.test(safeFail), 'safe command error has no email')
+ok(/psql failed \(1\)/.test(safeFail), 'safe command error names cmd and exit')
+ok(/SQLSTATE 23505/.test(safeFail), 'safe command error includes SQLSTATE')
+ok(!logLooksLikeRowData(safeFail), 'safe command error is not row data')
+ok(
+  !/\(phil@/i.test(stripPgErrorValues('DETAIL:  Key (email)=(phil@example.com) already exists.')),
+  'stripPgErrorValues removes Key values',
+)
+eq(
+  formatSafeCommandError('psql', 1, 'ERROR:  boom phil@example.com leaked\n', ''),
+  GENERIC_SAFE_ERROR,
+  'safe command error becomes generic if it still looks like row data',
+)
+ok(logLooksLikeRowData('phil@example.com,not-a-real-hash'), 'email/CSV is treated as row data')
+ok(!logLooksLikeRowData('| athlete | 1 | 1 | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa |'), 'checksum table is not row data')
+
 const copy = authUsersToCopyCsv(jsonRows)
 ok(copy.includes('33333333-3333-4333-8333-333333333333'), 'COPY CSV includes the UUID')
 ok(copy.includes('c@example.invalid'), 'COPY CSV includes email')
@@ -264,6 +319,8 @@ ok(uncoveredPublicTablesQuery().includes('pg_tables'), 'coverage guard lists pub
 ok(uncoveredPublicTablesQuery().includes("'user'"), 'coverage guard excludes Better Auth user')
 ok(unexpectedPrimaryKeyQuery().includes('indisprimary'), 'pk guard inspects primary keys')
 ok(SNAPSHOT_BEGIN_SQL.includes('REPEATABLE READ'), 'snapshot opens REPEATABLE READ')
+ok(SNAPSHOT_BEGIN_SQL.includes('READ ONLY'), 'snapshot transaction is READ ONLY')
+ok(SNAPSHOT_BEGIN_SQL.startsWith('BEGIN ISOLATION LEVEL'), 'snapshot uses BEGIN ISOLATION LEVEL')
 ok(SNAPSHOT_EXPORT_SQL.includes('pg_export_snapshot()'), 'snapshot exports pg_export_snapshot()')
 const dumpArgs = pgDumpSnapshotArgs('/tmp/public.dump', '00000003-0000001A-1', 'postgresql://example')
 ok(dumpArgs.includes('--snapshot=00000003-0000001A-1'), 'pg_dump receives --snapshot')
@@ -297,9 +354,33 @@ ok(SNAPSHOT_TIMEOUT_SQL.includes('statement_timeout = 0'), 'snapshot session dis
 ok(SNAPSHOT_TIMEOUT_SQL.includes('idle_in_transaction_session_timeout = 0'), 'snapshot session disables idle-in-transaction timeout')
 ok(isLoopbackHost('127.0.0.1'), 'isLoopbackHost matches 127.0.0.1')
 ok(!stripSslMode('postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?sslmode=require').includes('sslmode='), 'stripSslMode drops sslmode')
+const sslSoup = 'postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?sslmode=require&sslrootcert=/secret.crt&sslcert=/c.pem&sslkey=/k.pem&sslcrl=/crl.pem&uselibpqcompat=true'
+ok(isForbiddenSourceUrlParam('sslmode'), 'sslmode is a forbidden source param')
+ok(isForbiddenSourceUrlParam('sslrootcert'), 'sslrootcert is a forbidden source param')
+ok(isForbiddenSourceUrlParam('uselibpqcompat'), 'uselibpqcompat is a forbidden source param')
+ok(!stripSslMode(sslSoup).includes('sslmode='), 'stripSslMode drops sslmode among other ssl*')
+ok(!stripSslMode(sslSoup).includes('sslrootcert='), 'stripSslMode drops sslrootcert')
+ok(!stripSslMode(sslSoup).includes('sslcert='), 'stripSslMode drops sslcert')
+ok(!stripSslMode(sslSoup).includes('sslkey='), 'stripSslMode drops sslkey')
+ok(!stripSslMode(sslSoup).includes('sslcrl='), 'stripSslMode drops sslcrl')
+ok(!/uselibpqcompat/i.test(stripSslMode(sslSoup)), 'stripSslMode drops uselibpqcompat')
+const sanitizedSoup = sanitizeSourceConnectionString(sslSoup)
+ok(!/[?&](ssl|uselibpqcompat)/i.test(sanitizedSoup), 'sanitizeSourceConnectionString leaves no ssl* or uselibpqcompat')
+let unexpectedParam = false
+try {
+  sanitizeSourceConnectionString('postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?channel_binding=require')
+} catch (err) {
+  unexpectedParam = /unexpected query parameter/.test(err instanceof Error ? err.message : '')
+}
+ok(unexpectedParam, 'unexpected source URL params are refused')
 ok(existsSync(SUPABASE_SOURCE_CA_FILE), 'Supabase prod-ca-2021.crt is committed')
 ok(loadSourceCa().includes('BEGIN CERTIFICATE'), 'committed source CA is a PEM certificate')
 eq(sourceCaFile(), SUPABASE_SOURCE_CA_FILE, 'default source CA is the committed file')
+eq(sourceCaFingerprintSha256(), SUPABASE_SOURCE_CA_FINGERPRINT_SHA256, 'committed Supabase CA SHA-256 fingerprint is pinned')
+const libpqSsl = sourceLibpqSslEnv('postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?sslmode=require')
+eq(libpqSsl.PGSSLMODE, 'verify-full', 'source libpq sets PGSSLMODE=verify-full')
+eq(libpqSsl.PGSSLROOTCERT, SUPABASE_SOURCE_CA_FILE, 'source libpq points PGSSLROOTCERT at the pinned CA')
+ok(!libpqSsl.PGSSLCERT && !libpqSsl.PGSSLKEY, 'source libpq does not set client cert env')
 const supabaseTlsUrl = 'postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?sslmode=require'
 const srcCfg = sourcePgClientConfig(supabaseTlsUrl)
 assertSourcePgSsl(srcCfg)
@@ -956,9 +1037,13 @@ ok(/to_jsonb\(t\)/.test(migrateSrc), 'migrate hashes row content as to_jsonb')
 ok(/uncoveredPublicTablesQuery/.test(migrateSrc), 'migrate refuses uncovered public tables')
 ok(/source-only succeeded/.test(migrateSrc), 'dry-run is source-only and does not abort on empty Neon')
 ok(/sourcePgClientConfig/.test(migrateSrc), 'source pg clients go through sourcePgClientConfig')
+ok(/sourceLibpqSslEnv/.test(migrateSrc), 'source psql/pg_dump use sourceLibpqSslEnv')
+ok(/formatSafeCommandError/.test(migrateSrc), 'run() uses formatSafeCommandError')
+ok(/installSafeErrorHandlers/.test(migrateSrc), 'migrate installs safe uncaught handlers')
+ok(/READ ONLY/.test(migrateSrc), 'snapshot SQL is READ ONLY')
 ok(!/new pg\.Client\(\{\s*connectionString:\s*sourceUrl/.test(migrateSrc), 'source pg clients are not built from a raw URL')
 ok(!/ssl:\s*\{[^}]*rejectUnauthorized:\s*false/.test(migrateSrc), 'migrate script never sets rejectUnauthorized: false')
-ok(!/uselibpqcompat/.test(migrateSrc), 'migrate script does not use uselibpqcompat')
+ok(!/uselibpqcompat\s*[:=]/.test(migrateSrc), 'migrate script does not enable uselibpqcompat')
 ok(/prod-ca-2021/.test(migrateSrc), 'migrate script references the committed Supabase CA')
 ok(/migrate-tls:/.test(checksYml), 'CI has a migrate-tls job')
 ok(/checksumPgOptions/.test(migrateSrc) && /PGOPTIONS/.test(migrateSrc), 'psqlTuples pins checksum GUCs via PGOPTIONS')
@@ -976,7 +1061,9 @@ ok(/statement_timeout=0/.test(runbook) && /idle_in_transaction_session_timeout=0
 ok(/TimeZone=UTC/.test(runbook) && /extra_float_digits=1/.test(runbook), 'RUNBOOK documents checksum GUC pins')
 ok(/transaction pooler/.test(runbook), 'RUNBOOK documents the transaction-pooler refuse')
 ok(/PGPASSFILE=\/dev\/null/.test(workflow), 'migrate workflow version-check nulls PGPASSFILE')
-ok(/-u PGSSLMODE|-u PGHOSTADDR|PGHOSTADDR/.test(workflow), 'migrate workflow version-check unsets inherited PGHOSTADDR/PGSSLMODE')
+ok(/PGSSLMODE=verify-full/.test(workflow), 'migrate workflow version-check sets PGSSLMODE=verify-full')
+ok(/PGSSLROOTCERT/.test(workflow), 'migrate workflow version-check sets PGSSLROOTCERT')
+ok(/sanitizeSourceConnectionString/.test(workflow), 'migrate workflow version-check strips ssl* from the source URL')
 ok(/PGPASSFILE=\/dev\/null/.test(checksYml), 'migrate-pg version-check nulls PGPASSFILE')
 ok(/-u PGSSLMODE|-u PGHOSTADDR|PGHOSTADDR/.test(checksYml), 'migrate-pg version-check unsets inherited PGHOSTADDR/PGSSLMODE')
 
@@ -1156,6 +1243,84 @@ async function runLivePostgresChecks() {
   ok(tzHashes[0] !== tzHashes[1], 'live unpinned TimeZone=America/New_York vs UTC is a false mismatch')
   eq(tzHashes[2], tzHashes[3], 'live checksum session pins make TimeZone drift hash the same')
   eq(tzHashes[2], tzHashes[1], 'live pinned TimeZone=UTC matches an explicit UTC hash')
+
+  function spawnSafeModule(code) {
+    return spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+      encoding: 'utf8',
+      cwd: root,
+      env: libpqCleanEnv({ ...process.env, NODE_NO_WARNINGS: '1' }),
+    })
+  }
+  function assertNoRowLeak(label, res) {
+    const captured = `${res.stdout || ''}\n${res.stderr || ''}`
+    ok(res.status !== 0, `${label} exits non-zero`)
+    ok(/failed|ERROR|omitted|duplicate|decode/i.test(captured), `${label} logs a safe failure`)
+    ok(!logLooksLikeRowData(captured), `${label} captured log is not row data`)
+    ok(!captured.includes('phil@example.com'), `${label} omits phil@example.com`)
+    ok(!captured.includes('Phil@Example.com'), `${label} omits Phil@Example.com`)
+    ok(!/Failing row contains/i.test(captured), `${label} drops Failing row contains`)
+    ok(!/^\s*DETAIL:/mi.test(captured), `${label} drops DETAIL`)
+    ok(!/^\s*CONTEXT:/mi.test(captured), `${label} drops CONTEXT`)
+    return captured
+  }
+
+  const errUrl = (() => {
+    const u = new URL(sourceUrl)
+    u.pathname = '/zeroed_err'
+    return u.href
+  })()
+  pinnedPsql(sourceUrl, 'DROP DATABASE IF EXISTS zeroed_err')
+  pinnedPsql(sourceUrl, 'CREATE DATABASE zeroed_err')
+  pinnedPsql(errUrl, `
+    CREATE TABLE auth_users_import (
+      id TEXT, name TEXT, email TEXT CHECK (char_length(email) < 5),
+      email_verified BOOLEAN, created_at TIMESTAMPTZ, updated_at TIMESTAMPTZ
+    )
+  `)
+  const copyCsv = join(tmpPg, 'bad_copy.csv')
+  writeFileSync(copyCsv, 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa,Phil,phil@example.com,t,2020-01-01,2020-01-01\n')
+  const copySql = `\\copy auth_users_import FROM '${copyCsv}' WITH CSV`
+  const copyFail = spawnSafeModule(`
+    import { installSafeErrorHandlers, run } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    run("psql", ["-v", "ON_ERROR_STOP=1", "-d", ${JSON.stringify(errUrl)}, "-c", ${JSON.stringify(copySql)}]);
+  `)
+  assertNoRowLeak('COPY constraint failure', copyFail)
+
+  pinnedPsql(errUrl, "CREATE TABLE uniq_t (email TEXT PRIMARY KEY); INSERT INTO uniq_t VALUES ('phil@example.com')")
+  const uniqFail = spawnSafeModule(`
+    import { installSafeErrorHandlers, run } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    run("psql", ["-v", "ON_ERROR_STOP=1", "-d", ${JSON.stringify(errUrl)}, "-c", "INSERT INTO uniq_t VALUES ('phil@example.com')"]);
+  `)
+  assertNoRowLeak('unique violation', uniqFail)
+
+  const invalidFail = spawnSafeModule(`
+    import { installSafeErrorHandlers, run } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    run("psql", ["-v", "ON_ERROR_STOP=1", "-d", ${JSON.stringify(errUrl)}, "-c", "SELECT 'phil@example.com'::uuid"]);
+  `)
+  assertNoRowLeak('invalid-input error', invalidFail)
+
+  pinnedPsql(errUrl, "DROP TABLE IF EXISTS restore_t; CREATE TABLE restore_t (id int PRIMARY KEY, email text); INSERT INTO restore_t VALUES (1, 'phil@example.com')")
+  const restoreDump = join(tmpPg, 'restore_fail.dump')
+  const pgDump17 = existsSync('/usr/lib/postgresql/17/bin/pg_dump') ? '/usr/lib/postgresql/17/bin/pg_dump' : 'pg_dump'
+  const pgRestore17 = existsSync('/usr/lib/postgresql/17/bin/pg_restore') ? '/usr/lib/postgresql/17/bin/pg_restore' : 'pg_restore'
+  run(pgDump17, ['-Fc', '-t', 'restore_t', '-f', restoreDump, errUrl])
+  pinnedPsql(errUrl, 'TRUNCATE restore_t; ALTER TABLE restore_t ADD CONSTRAINT restore_t_short CHECK (char_length(email) < 3)')
+  const restoreFail = spawnSafeModule(`
+    import { installSafeErrorHandlers, run } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    run(${JSON.stringify(pgRestore17)}, ["--data-only", "--exit-on-error", "--dbname", ${JSON.stringify(errUrl)}, ${JSON.stringify(restoreDump)}]);
+  `)
+  assertNoRowLeak('pg_restore data-load failure', restoreFail)
+
+  const badMap = join(tmpPg, 'bad.json')
+  writeFileSync(badMap, '{ "email": "phil@example.com",')
+  const badMapRun = spawnMigrate(['--dry-run', '--skip-auth-users', '--auth-users-file', badMap], {
+    SUPABASE_READONLY_URL: sourceUrl,
+  })
+  assertNoRowLeak('malformed auth-map JSON', badMapRun)
 
   const dryLive = spawnMigrate(['--dry-run', '--skip-auth-users', '--auth-users-file', mapPath], {
     SUPABASE_READONLY_URL: sourceUrl,
