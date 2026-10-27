@@ -1605,7 +1605,9 @@ async function runLivePostgresChecks() {
   eq(dryAfter.status, 0, 'connected dry-run still exits 0 after a live restore')
   ok(/source-only succeeded/.test(dryAfterOut), 'post-restore dry-run stays source-only')
 
-  const slashCreated = '2026-01-15T00:00:00\\'
+  // Invalid month/day/time plus a trailing backslash — a near-ISO value
+  // (2026-01-15T00:00:00\) can be accepted by timestamptz input.
+  const slashCreated = '2026-13-40T99:99:99\\'
   const slashMap = join(tmpPg, 'slash.json')
   writeFileSync(slashMap, JSON.stringify([
     { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', email: 'preview.athlete@zeroed.invalid', created_at: slashCreated },
@@ -1622,7 +1624,7 @@ async function runLivePostgresChecks() {
   const slashOut = `${slashRun.stdout}\n${slashRun.stderr}`
   ok(slashRun.status !== 0, 'main restore with created_at trailing backslash fails')
   ok(!slashOut.includes(slashCreated), 'main restore omits created_at trailing backslash')
-  ok(!slashOut.includes('2026-01-15T00:00:00\\'), 'main restore omits the backslash timestamp')
+  ok(!slashOut.includes('2026-13-40T99:99:99\\'), 'main restore omits the backslash timestamp')
   ok(!logLooksLikeRowData(slashOut), 'main restore log is not row data')
   ok(/failed|omitted|SQLSTATE|command/i.test(slashOut), 'main restore logs a safe failure')
 
