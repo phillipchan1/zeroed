@@ -119,8 +119,13 @@ try {
     '/var/lib/postgresql/data/server.crt', '/var/lib/postgresql/data/server.key'])
   run('docker', ['exec', '-u', 'root', name, 'chmod', '644', '/var/lib/postgresql/data/server.crt'])
   run('docker', ['exec', '-u', 'root', name, 'chmod', '600', '/var/lib/postgresql/data/server.key'])
-  retryExec(['exec', name, 'psql', '-U', 'src', '-d', 'srcdb', '-v', 'ON_ERROR_STOP=1', '-c',
-    "ALTER SYSTEM SET ssl = on; ALTER SYSTEM SET ssl_cert_file = 'server.crt'; ALTER SYSTEM SET ssl_key_file = 'server.key';"])
+  for (const sql of [
+    'ALTER SYSTEM SET ssl = on',
+    "ALTER SYSTEM SET ssl_cert_file = 'server.crt'",
+    "ALTER SYSTEM SET ssl_key_file = 'server.key'",
+  ]) {
+    retryExec(['exec', name, 'psql', '-U', 'src', '-d', 'srcdb', '-v', 'ON_ERROR_STOP=1', '-c', sql])
+  }
   retryExec(['exec', name, 'psql', '-U', 'src', '-d', 'srcdb', '-tA', '-v', 'ON_ERROR_STOP=1', '-c',
     'SELECT pg_reload_conf()'])
   if (!waitSql('SHOW ssl', 'on')) {
