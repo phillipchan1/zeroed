@@ -92,7 +92,7 @@ export function formatLoggedWorkout(
   const title = w.routine?.name ?? 'Session'
   const meta = [
     shortDate(w.performed_at),
-    w.rpe != null ? `RPE ${Number(w.rpe)}` : null,
+    w.rpe != null ? `RPE ${w.rpe}` : null,
     w.duration_mins != null ? `${w.duration_mins} min` : null,
     w.id ? `id ${w.id}` : null,
   ].filter(Boolean)

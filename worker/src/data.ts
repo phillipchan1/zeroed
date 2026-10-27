@@ -9,7 +9,6 @@ import { getCryptoKey, makeSignature } from 'better-auth/crypto'
 import { beginAuthCors, json } from './cors.ts'
 import { withSql, type Sql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
-import { workoutRpeError } from '../../src/engine/rpeScale.ts'
 
 export type FilterOp = 'eq' | 'neq' | 'in' | 'gte' | 'gt' | 'lte' | 'lt' | 'ilike' | 'not_in'
 
@@ -769,10 +768,6 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
         if (blocked) return blocked
         if (table === 'athlete') delete row.id
         if (table !== 'athlete') delete row.auth_user_id
-        if (table === 'workout') {
-          const rpeErr = workoutRpeError(row)
-          if (rpeErr) return fail(rpeErr, 400)
-        }
         prepared.push(row)
       }
       const cols = [...new Set(prepared.flatMap((r) => Object.keys(r).filter((k) => r[k] !== undefined)))]
@@ -821,10 +816,6 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       if (table === 'athlete') delete row.athlete_id
       const blocked = await assertWritableRow(sql, table, row, ctx, false)
       if (blocked) return blocked
-      if (table === 'workout') {
-        const rpeErr = workoutRpeError(row)
-        if (rpeErr) return fail(rpeErr, 400)
-      }
       const cols = Object.keys(row).filter((k) => row[k] !== undefined)
       if (cols.length === 0) return fail('update requires columns', 400)
       const params: unknown[] = []

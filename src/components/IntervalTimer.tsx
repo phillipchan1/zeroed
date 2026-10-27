@@ -9,8 +9,6 @@ import {
   cueCount, cueGo, cueRest, cueDone, cueHalf, intervalSoundOn, setIntervalSound, releaseCueAudio, primeCueAudio,
 } from '../lib/intervalCues'
 import { useWakeLock } from '../lib/wakeLock'
-import { pickerRpeScale } from '../engine/rpeScale'
-import { rpeHalfStepsEnabled } from '../lib/api'
 
 // =============================================================================
 // The interval timer — HIIT inside the session, not in another app.
@@ -53,6 +51,8 @@ const PHASE_WORD: Record<PhaseKind, string> = {
   rest: 'Rest',
   break: 'Set break',
 }
+
+const RPE_SCALE = [6, 7, 8, 9, 10]
 
 // The ring. Big enough to read from across a turf lane, inside a 320px phone.
 const R = 128
@@ -271,7 +271,7 @@ export function IntervalTimer({ name, plan, lastInSession, onProgress, onClose }
           <div className="ivl__rpe">
             <p className="eyebrow" style={{ marginBottom: 10 }}>How hard? <span className="text-dim">optional</span></p>
             <div className="ivl__rpe-row" role="radiogroup" aria-label="Effort, RPE">
-              {pickerRpeScale(rpeHalfStepsEnabled()).map((v) => (
+              {RPE_SCALE.map((v) => (
                 <button
                   key={v}
                   type="button"

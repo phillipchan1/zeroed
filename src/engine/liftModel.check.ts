@@ -18,7 +18,7 @@
 
 import {
   canonicalLiftId, parseLiftId, rpePercent, e1rmFromSet, loadForReps,
-  readModelLog, dedupeSets, isQualifying, isHeavySingle, rpeEvidenceWeight, workingMaxAsOf, workingMaxSeries, trendOver,
+  readModelLog, dedupeSets, isQualifying, workingMaxAsOf, workingMaxSeries, trendOver,
   allTimeBest, ceilingLoad, backoffLoad, weeklyCall, dayOfModifiers, missedWeeksModifier,
   buildLiftModel, buildLiftModels, prescriptionFromProgram, renderLiftModel, sessionFlags,
   mondayOf, addDays, shortDay, targetReps, percentOf, liftIncrement, recencyFactor,
@@ -132,20 +132,10 @@ near(loadForReps(400, 5, 8), 324.4, 0.01, '5 @8 off a 400 max is 324.4')
 // ---- qualifying + working max ---------------------------------------------
 
 ok(isQualifying(s('Squat', TODAY, 315, 5, 8)), '5 @8 on the squat qualifies')
-ok(isQualifying(s('Squat', TODAY, 315, 5, 7.5)), '5 @7.5 qualifies (full weight)')
 ok(!isQualifying(s('Squat', TODAY, 275, 7, 8)), '7 reps does not')
 ok(isQualifying(s('Squat', TODAY, 365, 1, 10)), 'a made single at RPE 10 is a tested max and qualifies')
 ok(!isQualifying(s('Squat', TODAY, 315, 3, 10)), 'RPE 10 on a triple does not')
 ok(!isQualifying(s('Squat', TODAY, 385, 1, 10, 1)), 'a missed single does not')
-ok(!isQualifying(s('Squat', TODAY, 405, 2, 6)), 'RPE 6 does not — easy work is not evidence')
-ok(!isQualifying(s('Squat', TODAY, 315, 5, 7)), 'RPE 7 does not (weight 0 at the start of the taper)')
-ok(isHeavySingle(s('Deadlift', TODAY, 455, 1, 8)), '1 @8 is a heavy single')
-ok(!isHeavySingle(s('Deadlift', TODAY, 455, 1, 7.5)), '1 @7.5 is not the cap-beating single')
-eq(rpeEvidenceWeight(8), 1, 'RPE 8 counts in full')
-eq(rpeEvidenceWeight(7.5), 1, 'RPE 7.5 counts in full')
-eq(rpeEvidenceWeight(6), 0, 'RPE 6 has weight 0')
-eq(rpeEvidenceWeight(7), 0, 'RPE 7 has weight 0')
-eq(rpeEvidenceWeight(null), 1, 'missing RPE is a floor and counts in full')
 {
   // A tested max moves the working max: it is the e1RM, no chart in between.
   const wm = workingMaxAsOf([s('Squat', '2026-10-12', 300, 5, 8), s('Squat', '2026-10-24', 375, 1, 10)], 'squat', TODAY)!
@@ -180,35 +170,6 @@ eq(recencyFactor(0), 1, 'today counts in full')
 near(recencyFactor(21), 0.95, 1e-9, 'half the discount is gone at three weeks')
 
 {
-  // Phil's regression: an all-time deadlift around 445 must not jump because
-  // someone logged easy volume — 275×4 @6 and 405×2 @6. Those estimate 350
-  // and ~484 off the chart; without the RPE weight (0 below 7) and the
-  // all-time cap they would set the working max above the real best.
-  const history = [
-    s('Deadlift', '2026-10-05', 445, 1, 10),
-  ]
-  const before = workingMaxAsOf(history, 'deadlift', TODAY)!
-  const best = allTimeBest(history, 'deadlift')!
-  near(best.e1rm, 445, 0.01, 'all-time best estimated/actual max is the 445 single')
-  ok(before.value <= 445 + 1e-9, `working max starts at or under 445 (got ${before.value})`)
-
-  const after = workingMaxAsOf([
-    ...history,
-    s('Deadlift', '2026-10-24', 275, 4, 6),
-    s('Deadlift', '2026-10-24', 405, 2, 6),
-  ], 'deadlift', TODAY)!
-  ok(after.value <= 445 + 1e-9, `275×4 @6 and 405×2 @6 must not raise the working max above 445 (got ${after.value})`)
-  ok(after.value <= before.value + 1e-9, 'those easy sets do not raise it at all')
-
-  const beaten = workingMaxAsOf([
-    ...history,
-    s('Deadlift', '2026-10-25', 455, 1, 8),
-  ], 'deadlift', TODAY)!
-  ok(beaten.value > 445, `a new 1-rep @8+ is allowed to beat the 445 cap (got ${beaten.value})`)
-  eq(beaten.anchor.weight, 455, 'the new heavy single is the anchor')
-}
-
-{
   // A recent 5 @8 at 330 (e1RM 406.9) vs a heavier-looking single five weeks back.
   const log = [
     s('Squat', '2026-09-21', 365, 1, 8),     // e1RM 395.9, 35 days old
@@ -219,7 +180,7 @@ near(recencyFactor(21), 0.95, 1e-9, 'half the discount is gone at three weeks')
   eq(wm.anchor.date, '2026-10-19', 'the recent five beats the old single')
   near(wm.value, (330 / 0.811) * recencyFactor(7), 0.01, 'working max is the recency-weighted best')
   ok(wm.value > 390, 'a deload day does not drag the working max down')
-  eq(wm.sessions, 2, 'the RPE 6 deload is not a session of evidence')
+  eq(wm.sessions, 3, 'three sessions of evidence')
 
   const old = workingMaxAsOf([s('Squat', '2026-08-01', 400, 1, 8)], 'squat', TODAY)
   eq(old, null, 'nothing older than six weeks counts')
@@ -343,9 +304,9 @@ const REASON = /^\d+(\.\d)? = \d+% of TM \d+( \(set by hand\))? \(from \d+(\.\d)
   // the chart think a 135 single is RPE 8 — it must not be prescribed.
   const log = [
     s('Strict OHP', '2026-07-14', 125, 1, 9),
-    s('Strict OHP', '2026-10-06', 110, 5, 7.5),
-    s('Strict OHP', '2026-10-13', 115, 5, 7.5),
-    s('Strict OHP', '2026-10-20', 115, 5, 7.5),
+    s('Strict OHP', '2026-10-06', 110, 5, 7),
+    s('Strict OHP', '2026-10-13', 115, 5, 7),
+    s('Strict OHP', '2026-10-20', 115, 5, 7),
   ]
   const single = buildLiftModel({
     lift: 'ohp', sets: log, today: TODAY,
@@ -367,7 +328,7 @@ const REASON = /^\d+(\.\d)? = \d+% of TM \d+( \(set by hand\))? \(from \d+(\.\d)
     lift: 'ohp', sets: log, today: TODAY,
     prescription: { sets: 3, reps: '5', targetRpe: 8, exercise: 'Strict OHP' },
   }).recommendation!
-  eq(fives.call, 'push', 'fives at @7.5 push')
+  eq(fives.call, 'push', 'fives at @7 push')
   eq(fives.load, 117.5, '115 + 2.5% = 117.9 → 117.5')
 }
 
@@ -489,10 +450,10 @@ const REASON = /^\d+(\.\d)? = \d+% of TM \d+( \(set by hand\))? \(from \d+(\.\d)
   // Months off: the max is carried as it stood the last day the lift was trained.
   const gone = buildLiftModel({
     lift: 'squat', today: TODAY,
-    sets: [s('Squat', '2026-05-27', 260, 5, 8), s('Squat', '2026-06-17', 275, 3, null)],
+    sets: [s('Squat', '2026-05-27', 260, 5, 6), s('Squat', '2026-06-17', 275, 3, null)],
   })
   eq(gone.workingMax!.basis, 'carried', 'a max with nothing in the window is carried, and says so')
-  near(gone.workingMax!.value, (260 / 0.811) * recencyFactor(21), 0.01, 'at its value on the last day trained (Jun 17), not its peak')
+  near(gone.workingMax!.value, (260 / 0.762) * recencyFactor(21), 0.01, 'at its value on the last day trained (Jun 17), not its peak')
   ok(gone.missedWeeks > 2 && gone.recommendation!.call === 'establish', 'and the load re-establishes')
 }
 

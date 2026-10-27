@@ -12,7 +12,7 @@ import {
 export const LIFT_MODEL_TOOLS: McpTool[] = [
   {
     name: 'get_lift_model',
-    description: 'One main lift\'s model from the whole log: working max (RPE-chart e1RM; sets at RPE 7.5+ count fully, below 7 are ignored, 7–7.5 tapers; capped at the all-time best unless a new 1-rep @8+ beats it), training max, 4/8-week trend, all-time best, last qualifying sets, and this week\'s prescription with its reason line. lift: squat | bench | deadlift | ohp, or "all".',
+    description: 'One main lift\'s model from the whole log: working max (RPE-chart e1RM, qualifying sets, last 6 weeks, recency-weighted), training max, 4/8-week trend, all-time best, last qualifying sets, and this week\'s prescription with its reason line. lift: squat | bench | deadlift | ohp, or "all".',
     inputSchema: {
       type: 'object',
       properties: {

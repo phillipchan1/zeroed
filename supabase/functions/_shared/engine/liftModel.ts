@@ -15,11 +15,10 @@
 //   e1RM      — per set, off the RTS (Tuchscherer) reps × RPE chart. A set
 //               without an RPE says only "at least this", so it is read at RPE
 //               10: a floor, never a guess upward.
-//   working   — the best recent evidence: qualifying sets (1–6 reps, the main
-//   max         barbell variation, nothing missed), last six weeks, recency-
-//               weighted (half-life ~3 weeks). RPE 7.5+ counts in full; below
-//               7 is weight 0; 7→7.5 tapers 0→1. Capped at the all-time best
-//               estimated or actual max unless a new 1-rep @8+ beats it.
+//   working   — the best recent evidence: qualifying sets only (1–6 reps, RPE
+//   max         6–9.5, the main barbell variation, nothing missed), last six
+//               weeks, recency-weighted (half-life ~3 weeks). A time series,
+//               with a 4- and 8-week trend.
 //   training  — 90% of the working max, unless the athlete has set one by hand.
 //   max         Every prescription is a % of it, in % and in plates.
 //   all-time  — context and a ceiling, never a target. Below 90% of it reads as
@@ -390,41 +389,14 @@ export const MAX_AGE_DISCOUNT = 0.10
 export const TM_FRACTION = 0.9
 
 /**
- * How much a logged RPE counts toward the working max.
- *
- *   ≥ 7.5  → 1 (full). A hard set is a real statement about the max.
- *   < 7    → 0 (ignored). Easy volume must not inflate e1RM.
- *   7–7.5  → linear taper from 0 to 1. On the 0.5-step log scale that is
- *            just 7.0 = 0 and 7.5 = 1; the ramp is here so a 7.25 (if it
- *            ever arrived) would count as half.
- *
- * A missing RPE is a floor read at 10, so it counts in full.
- */
-export function rpeEvidenceWeight(rpe: number | null): number {
-  if (rpe == null) return 1
-  if (!Number.isFinite(rpe)) return 0
-  if (rpe >= 7.5) return 1
-  if (rpe < 7) return 0
-  return (rpe - 7) / 0.5
-}
-
-/** A made single at RPE 8+: the only thing allowed to beat the all-time cap. */
-export function isHeavySingle(s: LiftSet): boolean {
-  return s.reps === 1 && s.rpe != null && s.rpe >= 8 && s.missedReps === 0
-}
-
-/**
  * A set that is allowed to say what the max is. RPE 10 counts on a single only:
  * a made max single IS the max, no chart in between, while "10" on a set of five
- * is the rating lifters hand out loosely to anything that felt brutal. Easy work
- * (RPE under 7.5, weight 0) is not evidence — it can be logged, it just does
- * not move the working max.
+ * is the rating lifters hand out loosely to anything that felt brutal.
  */
 export function isQualifying(s: LiftSet): boolean {
   return s.lift != null
     && s.reps >= 1 && s.reps <= 6
-    && s.rpe != null && rpeEvidenceWeight(s.rpe) > 0
-    && (s.rpe <= 9.5 || (s.rpe === 10 && s.reps === 1))
+    && s.rpe != null && s.rpe >= 6 && (s.rpe <= 9.5 || (s.rpe === 10 && s.reps === 1))
     && s.missedReps === 0
 }
 
@@ -452,26 +424,22 @@ export interface WorkingMaxReading {
   value: number
   anchor: EvidenceSet
   /** How the number was arrived at. */
-  basis: 'qualifying' | 'no_rpe_floor' | 'capped_by_miss' | 'capped_by_best' | 'carried'
+  basis: 'qualifying' | 'no_rpe_floor' | 'capped_by_miss' | 'carried'
   sessions: number
 }
 
 /**
  * The working max as of `asOf`: the best recency-weighted e1RM among the
- * qualifying sets of the last six weeks, each multiplied by rpeEvidenceWeight.
+ * qualifying sets of the last six weeks.
  *
  * A weighted BEST, not a weighted average, on purpose. An average is dragged
  * down by every light day that happens to qualify — a deload top set of 65% × 5
  * honestly logged at RPE 6 estimates the max 15% low, and this athlete deloads
  * every fifth week. Instead each session's best e1RM is discounted by its age
- * (nothing today, ~5% at three weeks, ~7.5% at six) and by how hard it was
- * (RPE 7.5+ full, below 7 none), and the highest one stands. A new best counts
- * in full the day it happens; an old one has to have been clearly better to
- * outrank it. The set that wins is the anchor every reason line names.
- *
- * The number is then capped at the all-time best estimated or actual max
- * (allTimeBest.e1rm, and any made single). A new heavy single (1 rep, RPE 8+)
- * is the one exception: it may beat that cap, because it *is* a new max.
+ * (nothing today, ~5% at three weeks, ~7.5% at six) and the highest one stands.
+ * A new best counts in full the day it happens; an old one has to have been
+ * clearly better to outrank it. The set that wins is the anchor every reason
+ * line names.
  *
  * Fallbacks, both flagged: with no qualifying sets but RPE-less ones in range,
  * those are read at RPE 10 (a floor — "you did at least this"); and when the
@@ -508,7 +476,7 @@ export function workingMaxAsOf(sets: LiftSet[], lift: MainLiftId, asOf: string):
   let anchor: EvidenceSet | null = null
   let value = 0
   for (const e of bestByDay.values()) {
-    const v = e.e1rm * recencyFactor(daysBetween(e.date, asOf)) * rpeEvidenceWeight(e.rpe)
+    const v = e.e1rm * recencyFactor(daysBetween(e.date, asOf))
     if (v > value) { value = v; anchor = e }
   }
   if (!anchor) return null
@@ -525,18 +493,6 @@ export function workingMaxAsOf(sets: LiftSet[], lift: MainLiftId, asOf: string):
       const failed = missed.reduce((a, b) => (b.weight > a.weight ? b : a))
       return { value: cap, anchor: { ...failed, e1rm: cap }, basis: 'capped_by_miss', sessions: bestByDay.size }
     }
-  }
-
-  // Easy doubles and triples estimate a max they never earned. Cap at the
-  // all-time best estimated or actual max unless this reading *is* a new
-  // heavy single (1 @8+).
-  const lifetime = allTimeBest(sets.filter((s) => s.date <= asOf), lift)
-  const madeSingles = sets.filter((s) =>
-    s.lift === lift && s.date <= asOf && s.reps === 1 && s.missedReps === 0 && s.weight > 0)
-  const actualMax = madeSingles.reduce((m, s) => Math.max(m, s.weight), 0)
-  const capAt = Math.max(lifetime?.e1rm ?? 0, actualMax)
-  if (capAt > 0 && value > capAt && !(isHeavySingle(anchor) && anchor.e1rm > capAt)) {
-    return { value: capAt, anchor, basis: 'capped_by_best', sessions: bestByDay.size }
   }
   return { value, anchor, basis, sessions: bestByDay.size }
 }
@@ -561,7 +517,7 @@ export function workingMaxSeries(sets: LiftSet[], lift: MainLiftId, through: str
     const r = workingMaxAsOf(sets, lift, day)
     if (!r) continue
     const today = mine.filter((s) => s.date === day)
-    const evidence = r.basis === 'qualifying' || r.basis === 'capped_by_best' ? today.some(isQualifying)
+    const evidence = r.basis === 'qualifying' ? today.some(isQualifying)
       : r.basis === 'no_rpe_floor' ? today.some((s) => s.rpe == null && s.reps >= 1 && s.reps <= 6)
         : today.some((s) => s.missedReps > 0)
     if (evidence) out.push({ date: day, value: r.value, anchor: `${fmtSet(r.anchor)} ${shortDay(r.anchor.date)}` })
@@ -623,9 +579,6 @@ export function allTimeBest(sets: LiftSet[], lift: MainLiftId): AllTimeBest | nu
   let best: EvidenceSet | null = null
   for (const s of mine) {
     if (s.missedReps > 0 || s.reps > 10) continue
-    // Easy work is not an estimate of the max. A missing RPE still counts as
-    // a floor (weight 1); a heavy single @8+ is an actual max attempt.
-    if (s.rpe != null && rpeEvidenceWeight(s.rpe) < 1 && !isHeavySingle(s)) continue
     const e = withE1rm(s, 10)
     if (e && (!best || e.e1rm > best.e1rm)) best = e
   }
@@ -1072,7 +1025,6 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   }
   if (wm?.basis === 'no_rpe_floor') notes.push('no RPE logged in the window — working max is a floor (those sets read at RPE 10)')
   if (wm?.basis === 'capped_by_miss') notes.push(`working max recomputed from the miss on ${shortDay(wm.anchor.date)}`)
-  if (wm?.basis === 'capped_by_best') notes.push('working max capped at the all-time best — easy sets do not raise it; only a 1-rep @8+ can')
   if (wm && isTestedMax(wm.anchor)) {
     const anchor = wm.anchor
     const outranked = mine.some((s) => s.date < anchor.date && daysBetween(s.date, today) <= WINDOW_DAYS
