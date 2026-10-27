@@ -6,7 +6,7 @@ import {
   READY_SECONDS, type IntervalPlan, type Phase, type PhaseKind,
 } from '../engine/intervals'
 import {
-  cueCount, cueGo, cueRest, cueDone, intervalSoundOn, setIntervalSound, releaseCueAudio, primeCueAudio,
+  cueCount, cueGo, cueRest, cueDone, cueHalf, intervalSoundOn, setIntervalSound, releaseCueAudio, primeCueAudio,
 } from '../lib/intervalCues'
 import { useWakeLock } from '../lib/wakeLock'
 
@@ -94,6 +94,7 @@ export function IntervalTimer({ name, plan, lastInSession, onProgress, onClose }
   const ringRef = useRef<SVGCircleElement | null>(null)
   const lastIndexRef = useRef(0)
   const lastCountRef = useRef('')
+  const lastHalfRef = useRef(-1)
   const lastDoneRef = useRef('')
   const finishedRef = useRef(false)
   const progressRef = useRef(onProgress)
@@ -158,7 +159,8 @@ export function IntervalTimer({ name, plan, lastInSession, onProgress, onClose }
     if (read.index !== lastIndexRef.current) {
       lastIndexRef.current = read.index
       const k = read.phase.kind
-      if (k === 'work') cueGo()
+      // The last round's go locks a chord: you hear it's the final push.
+      if (k === 'work') cueGo(!timeline.slice(read.index + 1).some((p) => p.kind === 'work'))
       else if (k === 'rest' || k === 'break') cueRest()
       report(roundsDone(plan, timeline, t))
     }
@@ -166,8 +168,14 @@ export function IntervalTimer({ name, plan, lastInSession, onProgress, onClose }
       const key = `${read.index}:${secs}`
       if (lastCountRef.current !== key) {
         lastCountRef.current = key
-        cueCount()
+        cueCount(secs)
       }
+    }
+    // Halfway through a round long enough to need telling — once per round.
+    if (pausedAtRef.current == null && read.phase.kind === 'work' && read.phase.secs >= 20
+      && secs === Math.ceil(read.phase.secs / 2) && lastHalfRef.current !== read.index) {
+      lastHalfRef.current = read.index
+      cueHalf()
     }
     setView((v) => (v.index === read.index && v.secs === secs ? v : { index: read.index, secs }))
   }, [elapsed, finish, plan, report, timeline])

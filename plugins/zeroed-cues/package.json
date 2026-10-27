@@ -1,0 +1,13 @@
+{
+  "name": "zeroed-cues",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Zeroed interval cues: designed sounds played natively, through Silent Mode, ducking the athlete's music for the length of a cue.",
+  "license": "UNLICENSED",
+  "author": "Zeroed",
+  "capacitor": {
+    "ios": {
+      "src": "ios"
+    }
+  }
+}

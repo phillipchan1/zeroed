@@ -137,7 +137,7 @@ the foot of a workout adds a movement or an interval block instead of only a set
 |---|---|---|
 | Phase change | Brackets re-lock on the dial, the phase word tightens onto itself, one wash of the phase colour (amber ready, yellow work, blue rest). | `IntervalTimer.tsx` |
 | Last 3 seconds | Number pulses each second in the phase colour; the arc glows; a blip and a light tick. | `.ivl__num--count` |
-| Work / rest | Rising fifth + heavy haptic for work; the same interval falling + warning haptic for rest. | `lib/intervalCues.ts` |
+| Sound | **Zero-beat**: two tones a few percent apart beat, then glide onto one note, which is how a radio is tuned onto a signal. The 3-2-1 climbs C6–D6–E6 toward the G6 the go locks onto. Rest is the lock released (a unison coming apart and falling). The last round locks a chord. Halfway is two light pings; done is the session chord zero-beating in. Designed once in `engine/cueSound.ts` and rendered sample by sample; the iPhone plays the bundled WAVs (`npm run cues:render`, held to the design by `cueSound.check.ts`) through the native `ZeroedCues` plugin, so cues sound in Silent Mode and duck music instead of stopping it. | `engine/cueSound.ts`, `plugins/zeroed-cues` |
 | Block done | *Intervals zeroed*: the session-finish mark, rounds count up, optional RPE, **Finish session** when nothing else is left. | `IntervalTimer.tsx` |
 | Movement added | Card rises into place and the brackets lock onto its title. | `.ex-arrive` |
 

@@ -1,24 +1,47 @@
-// The interval timer's voice: the 3-2-1, the go, the rest, the finish.
+// The interval timer's voice: the 3-2-1, the go, halfway, the rest, the finish.
 //
-// The rest timer gets away with a fresh AudioContext per beep because the
-// athlete has just tapped a set — the gesture is seconds old. An interval block
-// is twenty minutes of cues with no tap anywhere near most of them, and iOS
-// starts a context created outside a gesture suspended, with no way to wake it.
-// So there is ONE context, created and unlocked by the tap that starts the
-// block (primeCueAudio, called from the button's click handler — including the
-// Train tab's, a screen before the timer exists), and every cue plays on it.
+// What it sounds like lives in engine/cueSound.ts — the zero-beat motif,
+// designed once and rendered sample by sample. This module only decides WHERE
+// it plays:
 //
-// The palette is the brand's: short sine figures. Work resolves UP (the same
-// rising fifth as a PR), rest falls away, the finish is the session chord.
-// Haptics carry every cue too, so a muted phone or a loud gym still gets it.
+//   · in the iPhone app, through the native ZeroedCues plugin, which plays the
+//     same design (bundled WAVs rendered from it) through Silent Mode and dips
+//     the athlete's music under each cue instead of stopping it. The web view
+//     can't: WKWebView audio is muted by the silent switch, and the web's way
+//     around that pauses the music;
+//   · everywhere else, through Web Audio, the design rendered into buffers on
+//     ONE context, created and unlocked by the tap that starts the block — iOS
+//     Safari starts a context made outside a gesture suspended, with no way to
+//     wake it.
+//
+// Haptics ride every cue too, so a muted phone or a loud gym still gets it.
 
+import { Capacitor, registerPlugin } from '@capacitor/core'
 import { tick, record, alert, success } from './haptics'
+import { CUE_NAMES, renderCue, type CueName } from '../engine/cueSound'
 
 const SOUND_KEY = 'zeroed.interval_sound'
 
 type WindowWithAudio = Window & { webkitAudioContext?: typeof AudioContext }
 
+interface ZeroedCuesPlugin {
+  preload(options: { names: string[] }): Promise<void>
+  play(options: { name: string }): Promise<void>
+  release(): Promise<void>
+}
+
+const ZeroedCues = registerPlugin<ZeroedCuesPlugin>('ZeroedCues')
+
+function nativeCues(): boolean {
+  try {
+    return Capacitor.isNativePlatform() && Capacitor.isPluginAvailable('ZeroedCues')
+  } catch {
+    return false
+  }
+}
+
 let ctx: AudioContext | null = null
+const buffers = new Map<CueName, AudioBuffer>()
 
 /** On by default: an interval timer you have to watch is a stopwatch. */
 export function intervalSoundOn(): boolean {
@@ -35,77 +58,117 @@ export function setIntervalSound(on: boolean): void {
   } catch { /* non-persistent session */ }
 }
 
+// Render the design into buffers at the context's own rate — a few ms of
+// arithmetic, deferred so it never sits inside the tap.
+function renderBuffers(c: AudioContext): void {
+  setTimeout(() => {
+    for (const name of CUE_NAMES) {
+      if (buffers.has(name) || ctx !== c) continue
+      try {
+        const samples = renderCue(name, c.sampleRate)
+        const buf = c.createBuffer(1, samples.length, c.sampleRate)
+        buf.getChannelData(0).set(samples)
+        buffers.set(name, buf)
+      } catch { /* this cue stays silent; the haptic still lands */ }
+    }
+  }, 0)
+}
+
 /**
- * Create (or wake) the shared context. Call it synchronously inside a tap
- * handler — that is what unlocks audio on iOS for the rest of the block.
+ * Get the cues ready. Call it synchronously inside a tap handler — that is
+ * what unlocks Web Audio on iOS for the rest of the block. Natively it loads
+ * the players so the first cue isn't late.
  */
 export function primeCueAudio(): void {
+  if (nativeCues()) {
+    void ZeroedCues.preload({ names: [...CUE_NAMES] }).catch(() => {})
+  }
   try {
     const Ctor = window.AudioContext ?? (window as WindowWithAudio).webkitAudioContext
     if (!Ctor) return
-    if (!ctx || ctx.state === 'closed') ctx = new Ctor()
+    if (!ctx || ctx.state === 'closed') {
+      ctx = new Ctor()
+      buffers.clear()
+    }
     void ctx.resume().catch(() => {})
     // A one-sample silent buffer, played inside the gesture: older WebKit only
     // counts the context as unlocked once something has actually played on it.
-    const buf = ctx.createBuffer(1, 1, 22050)
+    const silent = ctx.createBuffer(1, 1, 22050)
     const src = ctx.createBufferSource()
-    src.buffer = buf
+    src.buffer = silent
     src.connect(ctx.destination)
     src.start(0)
-  } catch { /* no audio here — haptics and the screen carry the cues */ }
+    renderBuffers(ctx)
+  } catch { /* no Web Audio here — the native player or the haptics carry it */ }
 }
 
-/** Let the hardware go once the block is over; a held context can duck music. */
+/** Let the hardware go once the block is over; a held session can duck music. */
 export function releaseCueAudio(): void {
+  if (nativeCues()) void ZeroedCues.release().catch(() => {})
   const c = ctx
   ctx = null
+  buffers.clear()
   if (c) void c.close().catch(() => {})
 }
 
-/** `[offset s, Hz, peak gain, length s]` per tone, on the shared context. */
-function tones(spec: [number, number, number, number][]): void {
-  if (!intervalSoundOn()) return
+function playWeb(name: CueName): void {
   try {
     if (!ctx || ctx.state === 'closed') primeCueAudio()
     const c = ctx
     if (!c) return
     if (c.state === 'suspended') void c.resume().catch(() => {})
-    const now = c.currentTime
-    spec.forEach(([offset, hz, peak, len]) => {
-      const osc = c.createOscillator()
-      const gain = c.createGain()
-      osc.type = 'sine'
-      osc.frequency.value = hz
-      gain.gain.setValueAtTime(0.0001, now + offset)
-      gain.gain.exponentialRampToValueAtTime(peak, now + offset + Math.min(0.02, len / 4))
-      gain.gain.exponentialRampToValueAtTime(0.0001, now + offset + len - 0.02)
-      osc.connect(gain).connect(c.destination)
-      osc.start(now + offset)
-      osc.stop(now + offset + len)
-    })
+    let buf = buffers.get(name)
+    if (!buf) {
+      const samples = renderCue(name, c.sampleRate)
+      buf = c.createBuffer(1, samples.length, c.sampleRate)
+      buf.getChannelData(0).set(samples)
+      buffers.set(name, buf)
+    }
+    const src = c.createBufferSource()
+    src.buffer = buf
+    src.connect(c.destination)
+    src.start()
   } catch { /* audio refused — the haptic still lands */ }
 }
 
-/** The three seconds before a change: one dry blip each. */
-export function cueCount(): void {
-  tones([[0, 880, 0.22, 0.09]])
+function play(name: CueName): void {
+  if (!intervalSoundOn()) return
+  if (nativeCues()) {
+    // The native player failing (a missing file, a session it couldn't get)
+    // falls back to the web — silent in Silent Mode, but never worse than that.
+    void ZeroedCues.play({ name }).catch(() => playWeb(name))
+    return
+  }
+  playWeb(name)
+}
+
+/** 3 · 2 · 1 — ticks climbing toward the note the go will lock onto. */
+export function cueCount(n: number): void {
+  const k = Math.max(1, Math.min(3, Math.round(n)))
+  play(`count-${k}` as CueName)
   tick()
 }
 
-/** Work starts: a rising fifth, louder than anything else in the app. */
-export function cueGo(): void {
-  tones([[0, 988, 0.3, 0.12], [0.1, 1480, 0.32, 0.26]])
+/** Work: the zero-beat lock. The last round locks a chord — the final push. */
+export function cueGo(last = false): void {
+  play(last ? 'go-last' : 'go')
   record()
 }
 
-/** Rest starts: the same interval, falling away. */
+/** Halfway through a long round: two light pings. */
+export function cueHalf(): void {
+  play('half')
+  tick()
+}
+
+/** Rest: the lock, released — a unison coming apart and falling away. */
 export function cueRest(): void {
-  tones([[0, 784, 0.24, 0.14], [0.12, 523, 0.22, 0.26]])
+  play('rest')
   alert()
 }
 
-/** The block is done: the session chord, closing onto the octave. */
+/** The block is done: the session chord, every note zero-beating in. */
 export function cueDone(): void {
-  tones([[0, 523, 0.22, 0.16], [0.12, 784, 0.22, 0.16], [0.24, 1047, 0.26, 0.4]])
+  play('done')
   success()
 }

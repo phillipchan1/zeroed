@@ -29,7 +29,8 @@
     "check:layout": "node scripts/check-layout.mjs",
     "ios:sync": "npm run build && npx cap sync ios",
     "ios:check": "node scripts/ios-project-check.mjs",
-    "ios:check:ipa": "node scripts/ios-check-ipa-bundle-ids.mjs --self-test"
+    "ios:check:ipa": "node scripts/ios-check-ipa-bundle-ids.mjs --self-test",
+    "cues:render": "node --experimental-strip-types scripts/render-cues.mjs"
   },
   "dependencies": {
     "@capacitor/core": "^6.2.0",
@@ -43,7 +44,8 @@
     "postgres": "^3.4.7",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "react-router-dom": "^7.15.1"
+    "react-router-dom": "^7.15.1",
+    "zeroed-cues": "file:plugins/zeroed-cues"
   },
   "devDependencies": {
     "@capacitor/cli": "^6.2.0",
