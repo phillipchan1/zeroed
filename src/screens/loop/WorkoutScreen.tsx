@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef, useCallback, type ReactNode } from 'react'
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom'
-import { ChevronLeft, ChevronRight, Check, Plus, Info, X, MessageCircle, Target, ArrowLeftRight, PlayCircle } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Check, Plus, Info, X, MessageCircle, Target, ArrowLeftRight, PlayCircle, Zap, Trash2 } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import {
   restoreDraft, loadDraftLocal, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
@@ -29,11 +29,17 @@ import {
 } from '../../engine/exerciseLibrary'
 import { loadSwapGear, saveSwapGear, recentSwapsFor, rememberSwap } from '../../lib/swapMemory'
 import { restSecondsFor, adjustRest, formatRest } from '../../engine/restTimer'
+import {
+  intervalPlanFor, intervalSetLogs, roundsFromLogs, secondsFromReps, fmtDose, type IntervalPlan,
+} from '../../engine/intervals'
 import { fireRestAlert, playSetClick, playRecord } from '../../lib/restAlert'
 import { tick, record } from '../../lib/haptics'
 import { getCoachingNote, type CoachingNote } from '../../engine/coachingNotes'
 import { getMovementDemo, videoSearchUrl } from '../../engine/movementDemos'
 import { MovementDemo } from '../../components/MovementDemo'
+import { IntervalTimer, type IntervalResult } from '../../components/IntervalTimer'
+import { IntervalBlock } from '../../components/IntervalBlock'
+import { AddToSessionSheet, AdjustIntervalsSheet } from '../../components/AddToSession'
 import { unitContext, convertWeight, type UnitContext } from '../../lib/units'
 import type { FinishedSession } from '../../components/SessionZeroed'
 import { fetchCoachView } from './CoachScreen'
@@ -1297,16 +1303,41 @@ function feedbackFromDebrief(debrief: PendingDebrief | null): Record<number, Exe
 
 // A logged session's swaps back out of its snapshot, onto the feedback map the
 // screen keeps them in — so editing a session done at the other gym shows the
-// dumbbell row that was done, not the T-bar row that was planned.
+// dumbbell row that was done, not the T-bar row that was planned. Additions and
+// re-dosed interval blocks come back the same way: the snapshot is the session
+// as trained, and an edit has to open on that, not on the plan.
 function withSnapshotSwaps(
   fb: Record<number, ExerciseFeedback>,
   snapshot: ExerciseTemplate[] | null | undefined,
 ): Record<number, ExerciseFeedback> {
-  if (!snapshot?.some((ex) => ex?.swapped_from)) return fb
+  if (!snapshot?.some((ex) => ex?.swapped_from || ex?.added || ex?.adjusted)) return fb
   const out = { ...fb }
   snapshot.forEach((ex, i) => {
-    if (!ex?.swapped_from) return
-    out[i] = { ...(out[i] ?? { name: ex.name, felt: null, note: '' }), swap: ex }
+    if (!ex) return
+    const base = out[i] ?? { name: ex.name, felt: null, note: '' }
+    if (ex.added) out[i] = { ...base, extra: ex }
+    else if (ex.swapped_from || ex.adjusted) out[i] = { ...base, swap: ex }
+  })
+  return out
+}
+
+// The movements added to a session sit in the slots after the programmed ones,
+// contiguously — slot index IS set-log index, so a gap would misfile every set
+// behind it.
+function addedExercises(fb: Record<number, ExerciseFeedback>, programmedCount: number): ExerciseTemplate[] {
+  const out: ExerciseTemplate[] = []
+  for (let i = programmedCount; fb[i]?.extra; i++) out.push(fb[i].extra!)
+  return out
+}
+
+// Shift every slot after `removed` down by one — removing an added movement
+// must not leave its neighbours' sets filed under the wrong name.
+function withoutSlot<T>(m: Record<number, T>, removed: number): Record<number, T> {
+  const out: Record<number, T> = {}
+  Object.entries(m).forEach(([k, v]) => {
+    const i = Number(k)
+    if (i < removed) out[i] = v
+    else if (i > removed) out[i - 1] = v
   })
   return out
 }
@@ -1314,7 +1345,7 @@ function withSnapshotSwaps(
 export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}) {
   const { routineId } = useParams<{ routineId: string }>()
   const navigate      = useNavigate()
-  const [searchParams] = useSearchParams()
+  const [searchParams, setSearchParams] = useSearchParams()
   // ?w=<id> → editing an already-logged session (re-runs the coach on save).
   // A session finished in the last few seconds — or offline, or one the server
   // refused — has no `workout` row yet, so it's referenced as `pending:<id>` and
@@ -1454,6 +1485,17 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // Which slot's swap sheet is open, if any.
   const [swapIdx, setSwapIdx] = useState<number | null>(null)
 
+  // Adding to the session: which tab the sheet opened on, the slot that just
+  // arrived (for its lock-on), and the added slot armed for removal.
+  const [addOpen, setAddOpen] = useState<'exercise' | 'intervals' | null>(null)
+  const [arrivedIdx, setArrivedIdx] = useState<number | null>(null)
+  const [confirmRemove, setConfirmRemove] = useState<number | null>(null)
+
+  // The interval timer, when a block is running — its plan is fixed at start so
+  // the per-second re-render of this screen never rebuilds the timeline under it.
+  const [intervalRun, setIntervalRun] = useState<{ exIdx: number; name: string; plan: IntervalPlan } | null>(null)
+  const [adjustIdx, setAdjustIdx] = useState<number | null>(null)
+
   // Two-tap discard. A session started by mistake had NO exit: clearDraft only
   // ever ran on completion, Complete is disabled until something is logged, and
   // a draft survives until the week rolls over — so one stray tap left a session
@@ -1584,11 +1626,12 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   }, [setLogs, feedback, elapsed, checkin])
 
   // A swap counts: it's a decision made at the rack, often before the first set,
-  // and losing it to a phone call between sets would mean making it again.
+  // and losing it to a phone call between sets would mean making it again. So
+  // does an addition, for the same reason.
   const hasDraftSignal = () =>
     !!payloadRef.current && (
       Object.values(payloadRef.current.setLogs).flat().some(isLogged)
-      || Object.values(payloadRef.current.feedback).some((f) => !!f?.swap)
+      || Object.values(payloadRef.current.feedback).some((f) => !!f?.swap || !!f?.extra)
       || hasCheckin(payloadRef.current.checkin)
     )
 
@@ -1640,8 +1683,13 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // athlete swapped replaced by its stand-in. Everything that reads "this
   // session's exercises" — the list, the debrief, the snapshot the sets are
   // filed against — reads this, never routine.exercises directly.
-  const sessionExercises = ((routine?.exercises ?? []) as ExerciseTemplate[])
-    .map((ex, i) => feedback[i]?.swap ?? ex)
+  //
+  // Movements added mid-session follow the programmed slots.
+  const programmedExercises = (routine?.exercises ?? []) as ExerciseTemplate[]
+  const sessionExercises = [
+    ...programmedExercises.map((ex, i) => feedback[i]?.swap ?? ex),
+    ...addedExercises(feedback, programmedExercises.length),
+  ]
   const sessionKey = sessionExercises.map((ex) => ex.name).join('\n')
 
   // Re-prescribe when the session's movements and the prescription's disagree —
@@ -1986,13 +2034,15 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     })
   }
 
+  // Each of these keeps the rest of the slot's entry: a swap, an addition and a
+  // push all ride in it, and a Tweak flag must not quietly undo any of them.
   function setFelt(exIdx: number, name: string, felt: FeltLabel | null) {
     startedLoggingRef.current = true
-    setFeedback((prev) => ({ ...prev, [exIdx]: { name, felt, note: prev[exIdx]?.note ?? '' } }))
+    setFeedback((prev) => ({ ...prev, [exIdx]: { ...prev[exIdx], name, felt, note: prev[exIdx]?.note ?? '' } }))
   }
   function setFeltNote(exIdx: number, name: string, note: string) {
     startedLoggingRef.current = true
-    setFeedback((prev) => ({ ...prev, [exIdx]: { name, felt: prev[exIdx]?.felt ?? null, note } }))
+    setFeedback((prev) => ({ ...prev, [exIdx]: { ...prev[exIdx], name, felt: prev[exIdx]?.felt ?? null, note } }))
   }
 
   // A push rides in `feedback` rather than its own state so it survives a
@@ -2002,7 +2052,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     startedLoggingRef.current = true
     setFeedback((prev) => {
       const cur = prev[exIdx]
-      return { ...prev, [exIdx]: { name, felt: cur?.felt ?? null, note: cur?.note ?? '', pushed: !cur?.pushed } }
+      return { ...prev, [exIdx]: { ...cur, name, felt: cur?.felt ?? null, note: cur?.note ?? '', pushed: !cur?.pushed } }
     })
   }
 
@@ -2036,9 +2086,149 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     if (stand) rememberSwap(programmed.name, stand.name)
   }
 
+  // ---- adding to the session ------------------------------------------------
+
+  // A movement the program didn't call for, in the next slot after everything
+  // already here. Like a swap it is for this session only: the routine isn't
+  // touched, the snapshot files the sets under it, flagged `added`.
+  function addToSession(ex: ExerciseTemplate, start = false) {
+    const idx = sessionExercises.length
+    const entry: ExerciseTemplate = { ...ex, added: true }
+    const plan = intervalPlanFor(entry)
+    startedLoggingRef.current = true
+    setSetLogs((prev) => ({
+      ...prev,
+      [idx]: plan ? intervalSetLogs(plan, [], entry.sets) : Array.from({ length: entry.sets }, (_, j) => newSetLog(j + 1)),
+    }))
+    setFeedback((prev) => ({ ...prev, [idx]: { name: entry.name, felt: null, note: '', extra: entry } }))
+    setAddOpen(null)
+    setActiveExIdx(idx)
+    setArrivedIdx(idx)
+    if (plan && start) beginIntervals(idx, entry.name, plan)
+  }
+
+  // Only an added slot can go — the programmed ones are the plan, and skipping
+  // one is just not logging it.
+  function removeAdded(exIdx: number) {
+    if (!sessionExercises[exIdx]?.added) return
+    startedLoggingRef.current = true
+    setConfirmRemove(null)
+    setSetLogs((prev) => withoutSlot(prev, exIdx))
+    setFeedback((prev) => withoutSlot(prev, exIdx))
+    setActiveExIdx((a) => (a >= exIdx ? Math.max(0, a - 1) : a))
+  }
+
+  // ---- interval blocks --------------------------------------------------------
+
+  function beginIntervals(exIdx: number, name: string, plan: IntervalPlan) {
+    ;(document.activeElement as HTMLElement | null)?.blur?.()
+    // One clock at a time: the rest timer has nothing to say during a block.
+    setRestEndsAt(null)
+    setRestUp(false)
+    setHasStarted(true)
+    setActiveExIdx(exIdx)
+    setIntervalRun({ exIdx, name, plan })
+  }
+
+  function startIntervals(exIdx: number) {
+    const ex = sessionExercises[exIdx]
+    const plan = intervalPlanFor(ex)
+    if (ex && plan) beginIntervals(exIdx, ex.name, plan)
+  }
+
+  // Rounds land in the grid as they finish, so the draft autosave holds the work
+  // even if the phone dies mid-block.
+  function onIntervalProgress(done: number[]) {
+    if (!intervalRun) return
+    const { exIdx, plan } = intervalRun
+    startedLoggingRef.current = true
+    setSetLogs((prev) => ({ ...prev, [exIdx]: intervalSetLogs(plan, done, (prev[exIdx] ?? []).length) }))
+  }
+
+  function closeIntervals(result: IntervalResult) {
+    const run = intervalRun
+    setIntervalRun(null)
+    if (run && result.rpe != null) {
+      setSetLogs((prev) => ({
+        ...prev,
+        [run.exIdx]: (prev[run.exIdx] ?? []).map((l) => (l.done ? { ...l, rpe: result.rpe } : l)),
+      }))
+    }
+    if (result.finishSession) handleCompleteWorkout()
+  }
+
+  // Re-dose a block for today. A programmed block keeps its slot and name and
+  // is marked `adjusted`; an added one is simply rewritten. Its grid is resized
+  // to the new plan unless it already holds work, which the next run replaces.
+  function applyDose(exIdx: number, built: ExerciseTemplate): IntervalPlan | null {
+    const cur = sessionExercises[exIdx]
+    if (!cur) return null
+    const next: ExerciseTemplate = {
+      ...cur,
+      name: cur.added ? built.name : cur.name,
+      sets: built.sets,
+      reps: built.reps,
+      tracking_type: 'time',
+    }
+    const plan = intervalPlanFor(next)
+    startedLoggingRef.current = true
+    setFeedback((prev) => {
+      const base = prev[exIdx] ?? { name: next.name, felt: null, note: '' }
+      return {
+        ...prev,
+        [exIdx]: cur.added
+          ? { ...base, name: next.name, extra: { ...next, added: true } }
+          : { ...base, swap: { ...next, adjusted: true } },
+      }
+    })
+    if (plan && !(setLogs[exIdx] ?? []).some(isLogged)) {
+      setSetLogs((prev) => ({ ...prev, [exIdx]: intervalSetLogs(plan, [], 0) }))
+    }
+    setAdjustIdx(null)
+    return plan
+  }
+
+  // Train's "Start intervals" lands here with ?go=intervals: the first block
+  // still to run starts on arrival, ready beat and all. The flag is dropped at
+  // once so Back, or a reload mid-block, doesn't start it over.
+  const goIntervals = searchParams.get('go') === 'intervals'
+  const autoStartedRef = useRef(false)
+  useEffect(() => {
+    if (!goIntervals || autoStartedRef.current || loading || !routine || isEdit) return
+    autoStartedRef.current = true
+    const idx = sessionExercises.findIndex((ex, i) => {
+      const plan = intervalPlanFor(ex)
+      if (!plan) return false
+      return roundsFromLogs(plan, setLogs[i] ?? []).reduce((a, b) => a + b, 0) < plan.rounds * plan.sets
+    })
+    if (idx >= 0) startIntervals(idx)
+    const next = new URLSearchParams(searchParams)
+    next.delete('go')
+    setSearchParams(next, { replace: true })
+    // Runs once, the first time the session is on screen.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [goIntervals, loading, routine])
+
+  // A slot that just arrived is brought into view and holds its lock-on for a
+  // beat — long enough to see where it went.
+  useEffect(() => {
+    if (arrivedIdx == null) return
+    const raf = requestAnimationFrame(() => {
+      document.getElementById(`ex-${arrivedIdx}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    })
+    const t = setTimeout(() => setArrivedIdx(null), 1400)
+    return () => { cancelAnimationFrame(raf); clearTimeout(t) }
+  }, [arrivedIdx])
+
+  useEffect(() => {
+    if (confirmRemove == null) return
+    const t = setTimeout(() => setConfirmRemove(null), 3000)
+    return () => clearTimeout(t)
+  }, [confirmRemove])
+
   const allSetsFlat = Object.values(setLogs).flat()
   const hasAnyLog = allSetsFlat.some(isLogged)
-  const hasSwap = sessionExercises.some((ex) => !!ex.swapped_from)
+  const hasSwap = sessionExercises.some((ex) => !!ex.swapped_from || !!ex.added || !!ex.adjusted)
 
   // "Complete" no longer writes — it freezes the clock and opens the debrief.
   // The actual server commit happens at finishSession (after debrief or skip), so
@@ -2136,9 +2326,11 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   function finishedSummary(pendingId: string): FinishedSession {
     // The session as trained — a swapped slot is named, and judged, as the
     // stand-in, against that movement's own record (as its set rows are).
+    // An interval block's durations are set by its timer, so "longest ever" is
+    // the block's length, not a record — blocks never claim a PR.
     const prLifts = sessionExercises
-      .filter((ex, i) => (setLogs[i] ?? []).some((log) => {
-        const best = ex.swapped_from ? bestsByName[ex.name] ?? NO_BEST : bestByExercise[i] ?? NO_BEST
+      .filter((ex, i) => !intervalPlanFor(ex) && (setLogs[i] ?? []).some((log) => {
+        const best = ex.swapped_from || ex.added ? bestsByName[ex.name] ?? NO_BEST : bestByExercise[i] ?? NO_BEST
         return isSetLogged(log) && displayPRs(log, best).length > 0
       }))
       .map((ex) => ex.name)
@@ -2165,7 +2357,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
         name: ex.name,
         felt: fb?.felt ?? null,
         note: fb?.note ?? '',
-        prescribed: `${ex.sets}×${ex.reps}${ex.load ? ` ${ex.load}` : ''}`,
+        prescribed: `${fmtDose(ex)}${ex.load ? ` ${ex.load}` : ''}${ex.added ? ' (added mid-session)' : ''}`,
         performed: performedSummary(t, setLogs[i] ?? [], u),
         pushed: fb?.pushed === true,
       }
@@ -2337,7 +2529,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // Complete earns the signal colour once you're on the last lift (or every set
   // is in). Before that it's a quiet outline: one set in, a yellow "Complete
   // workout" competed with the next set for the eye. It works either way.
-  const lastExIdx = routine ? (routine.exercises as ExerciseTemplate[]).length - 1 : -1
+  const lastExIdx = sessionExercises.length - 1
   const finishing = setsDone === setsTotal || (setLogs[lastExIdx] ?? []).some(isLogged)
   // Load moved. NOT in the sticky header: that strip was deliberately cut back
   // to a title, one metadata line and a progress bar, and a fourth field wraps
@@ -2472,14 +2664,20 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           // The cap is the one thing that does carry: the stand-in answers to the
           // same read, so a held slot stays held while its number is pending.
           const isHeld = !!prescription?.held[exIdx]
-          const best = ex.swapped_from ? bestsByName[ex.name] ?? NO_BEST : bestByExercise[exIdx] ?? NO_BEST
+          // A swapped-in or added movement has no history in this slot: it is
+          // measured against its own record and its own last session.
+          const ownHistory = !!ex.swapped_from || !!ex.added
+          const best = ownHistory ? bestsByName[ex.name] ?? NO_BEST : bestByExercise[exIdx] ?? NO_BEST
           // Last time: this slot's own history when it held this movement, else
           // the movement's most recent session anywhere in the program.
-          const prevSets = ex.swapped_from
+          const prevSets = ownHistory
             ? prevByName[ex.name] ?? []
             : prevByExercise[exIdx] ?? prevByName[ex.name] ?? []
           const pReps = leadingInt(ex.reps)
-          const pDur  = trackingType === 'time' ? leadingInt(ex.reps) : null
+          // "10 min" is six hundred seconds, not ten.
+          const pDur  = trackingType === 'time' ? secondsFromReps(ex.reps) ?? leadingInt(ex.reps) : null
+          const intervalPlan = intervalPlanFor(ex)
+          const arrived = arrivedIdx === exIdx
           // The number to hit is the engine's target for today — the same one
           // Train's session preview and the hint chip quote — not the program's
           // raw load text, which predates every progression since it was written.
@@ -2513,28 +2711,59 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
           })()
 
           return (
-            <div key={exIdx} style={{ paddingTop: 26, paddingBottom: 16, borderBottom: '1px solid var(--line)' }}>
+            <div
+              key={exIdx}
+              id={`ex-${exIdx}`}
+              className={arrived ? 'ex-arrive' : undefined}
+              style={{ paddingTop: 26, paddingBottom: 16, borderBottom: '1px solid var(--line)' }}
+            >
               <div style={{ marginBottom: 14 }}>
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <h2 style={{ fontWeight: 700, fontSize: 'var(--fs-xl)', lineHeight: 1.25, letterSpacing: '-0.01em' }}>
-                      {ex.name}
-                    </h2>
+                    {arrived ? (
+                      <LockOn
+                        className="ex-arrive__lock"
+                        style={{ '--lock-gap': '-6px', '--lock-from': '16px', '--lock-size': '10px' } as React.CSSProperties}
+                      >
+                        <h2 style={{ fontWeight: 700, fontSize: 'var(--fs-xl)', lineHeight: 1.25, letterSpacing: '-0.01em' }}>
+                          {ex.name}
+                        </h2>
+                      </LockOn>
+                    ) : (
+                      <h2 style={{ fontWeight: 700, fontSize: 'var(--fs-xl)', lineHeight: 1.25, letterSpacing: '-0.01em' }}>
+                        {ex.name}
+                      </h2>
+                    )}
                     {ex.swapped_from && (
                       <p className="text-xs text-dim" style={{ marginTop: 3 }}>
                         Swapped in for {ex.swapped_from}
                       </p>
                     )}
+                    {ex.added && <p className="ex-added-tag">{intervalPlan ? 'Finisher · added today' : 'Added today'}</p>}
                   </div>
-                  <button
-                    type="button"
-                    className="howto-tag"
-                    style={{ flexShrink: 0 }}
-                    aria-label={`Swap ${ex.name}`}
-                    onClick={() => setSwapIdx(exIdx)}
-                  >
-                    <ArrowLeftRight size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Swap
-                  </button>
+                  {/* An added movement can be taken back out; a programmed one
+                      is swapped — or simply not logged. */}
+                  {ex.added ? (
+                    <button
+                      type="button"
+                      className="howto-tag"
+                      style={{ flexShrink: 0, ...(confirmRemove === exIdx ? { borderColor: 'var(--veto)', color: 'var(--veto)' } : {}) }}
+                      aria-label={confirmRemove === exIdx ? `Tap again to remove ${ex.name}` : `Remove ${ex.name}`}
+                      onClick={() => (confirmRemove === exIdx ? removeAdded(exIdx) : setConfirmRemove(exIdx))}
+                    >
+                      <Trash2 size={14} strokeWidth={2} style={{ marginRight: 5 }} /> {confirmRemove === exIdx ? 'Sure?' : 'Remove'}
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      className="howto-tag"
+                      style={{ flexShrink: 0 }}
+                      aria-label={`Swap ${ex.name}`}
+                      onClick={() => setSwapIdx(exIdx)}
+                    >
+                      <ArrowLeftRight size={14} strokeWidth={2} style={{ marginRight: 5 }} /> Swap
+                    </button>
+                  )}
                   {/* One affordance, not three. Everything about this lift —
                       how-to, faults, your cue, the read it serves — is behind it. */}
                   <button
@@ -2586,6 +2815,16 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                 {presOk && !isPushed && <ReasonLines lines={prescription?.reasons?.[exIdx] ?? []} />}
               </div>
 
+              {/* An interval block runs on its timer, so it shows the block —
+                  what it is, every round, one Start — instead of a set grid. */}
+              {intervalPlan ? (
+                <IntervalBlock
+                  plan={intervalPlan}
+                  logs={logs}
+                  onStart={() => startIntervals(exIdx)}
+                  onAdjust={() => setAdjustIdx(exIdx)}
+                />
+              ) : (<>
               <SetHeader
                 trackingType={trackingType}
                 u={u}
@@ -2653,6 +2892,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
                 <Plus size={16} strokeWidth={2} style={{ marginRight: 6 }} />
                 Add set
               </button>
+              </>)}
 
               <FeltChips
                 value={feedback[exIdx]?.felt ?? null}
@@ -2663,6 +2903,17 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
             </div>
           )
         })}
+
+        {/* The + that used to stop at a set: a movement from the library, or an
+            interval block to finish on. */}
+        <div className="add-cta">
+          <button type="button" className="add-cta__btn" onClick={() => setAddOpen('exercise')}>
+            <Plus size={16} strokeWidth={2.2} /> Exercise
+          </button>
+          <button type="button" className="add-cta__btn add-cta__btn--signal" onClick={() => setAddOpen('intervals')}>
+            <Zap size={16} strokeWidth={2.2} /> Intervals
+          </button>
+        </div>
         </div>
        </div>
 
@@ -2878,6 +3129,47 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       {/* Mid-workout coach chat — quick questions, no program edits */}
       {coachOpen && athleteId && (
         <WorkoutCoachSheet athleteId={athleteId} onClose={() => setCoachOpen(false)} />
+      )}
+
+      {/* Add a movement or an interval block to this session */}
+      {addOpen && (
+        <AddToSessionSheet
+          initialTab={addOpen}
+          sessionNames={exercises.map((e) => e.name)}
+          u={u}
+          lastSetsFor={(n) => prevByName[n] ?? null}
+          screened={onboardingStep !== 'first_session_pending'}
+          onAdd={(ex) => addToSession(ex)}
+          onStartIntervals={(ex) => addToSession(ex, true)}
+          onClose={() => setAddOpen(null)}
+        />
+      )}
+
+      {/* Re-dose a block for today */}
+      {adjustIdx != null && exercises[adjustIdx] && intervalPlanFor(exercises[adjustIdx]) && (
+        <AdjustIntervalsSheet
+          name={exercises[adjustIdx].name}
+          plan={intervalPlanFor(exercises[adjustIdx])!}
+          lockName={!exercises[adjustIdx].added}
+          onSave={(ex) => applyDose(adjustIdx, ex)}
+          onStart={(ex) => {
+            const name = exercises[adjustIdx].added ? ex.name : exercises[adjustIdx].name
+            const plan = applyDose(adjustIdx, ex)
+            if (plan) beginIntervals(adjustIdx, name, plan)
+          }}
+          onClose={() => setAdjustIdx(null)}
+        />
+      )}
+
+      {/* The interval timer — over everything, until the block is done */}
+      {intervalRun && (
+        <IntervalTimer
+          name={intervalRun.name}
+          plan={intervalRun.plan}
+          lastInSession={exercises.every((_, i) => i === intervalRun.exIdx || (setLogs[i] ?? []).some(isLogged))}
+          onProgress={onIntervalProgress}
+          onClose={closeIntervals}
+        />
       )}
     </div>
   )

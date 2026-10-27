@@ -12,9 +12,11 @@ import {
   type PagerWeekView, type WeekPagerData, type SessionActuals,
 } from '../../engine'
 import { effectiveTrackingType } from '../../engine/exerciseLibrary'
+import { fmtDose, isIntervalBlock, intervalPlanFor, roundsFromLogs, fmtClock } from '../../engine/intervals'
+import { primeCueAudio } from '../../lib/intervalCues'
 import { tallySession } from '../../engine/volume'
 import { unitContext, type UnitContext } from '../../lib/units'
-import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag, Play } from 'lucide-react'
 import { loadDraftStarts } from '../../lib/workoutDraft'
 import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
 import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
@@ -264,9 +266,23 @@ function fmtSet(t: TrackingType, s: SetLog, u: UnitContext): string {
   return `${s.weight != null ? `${u.fmt(s.weight)}${u.unit}` : 'BW'}×${s.reps ?? '?'}`
 }
 
-// What was prescribed, as one string: "3×8 · moderate".
+// What was prescribed, as one string: "3×8 · moderate", or the block an
+// interval prescription describes ("8 × 20s / 40s").
 function fmtPrescribed(ex: ExerciseTemplate): string {
+  if (isIntervalBlock(ex)) return fmtDose(ex)
   return `${ex.sets}×${ex.reps}${ex.load ? ` · ${ex.load}` : ''}`
+}
+
+/**
+ * A session that IS intervals — a conditioning day, or nothing but blocks —
+ * starts on the timer: one tap from Train to the ready beat, the coach's
+ * prescription already loaded. A lifting day with a finisher still starts on
+ * its first lift.
+ */
+function intervalLed(r: RoutineRow): boolean {
+  const blocks = r.exercises.filter((ex) => isIntervalBlock(ex)).length
+  if (!blocks) return false
+  return r.session_type === 'conditioning' || blocks === r.exercises.length
 }
 
 const CMP_LABEL: React.CSSProperties = {
@@ -292,6 +308,13 @@ function PerformedRow({
   const avgRpe = rpes.length ? Math.round(rpes.reduce((a, b) => a + b, 0) / rpes.length) : null
   const short = done.length < ex.sets
   const tone = done.length === 0 ? 'var(--text-dim)' : short ? 'var(--pending)' : 'var(--confirmed)'
+  // A block is read in rounds — "8 of 8 rounds · 2:40 of work" — not as the
+  // seconds of work each row happens to hold.
+  const plan = intervalPlanFor(ex)
+  const rounds = plan ? roundsFromLogs(plan, logs).reduce((a, b) => a + b, 0) : 0
+  const loggedText = plan
+    ? `${rounds}/${plan.rounds * plan.sets} rounds · ${fmtClock(rounds * plan.work)} of work`
+    : done.map((s) => fmtSet(t, s, u)).join(', ')
 
   return (
     <div style={{ padding: '14px 0', borderBottom: '1px solid var(--line)' }}>
@@ -301,6 +324,11 @@ function PerformedRow({
           {ex.swapped_from && (
             <span className="text-xs text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
               Swapped in for {ex.swapped_from}
+            </span>
+          )}
+          {ex.added && (
+            <span className="text-xs text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
+              Added in the session
             </span>
           )}
         </span>
@@ -314,8 +342,7 @@ function PerformedRow({
         <span style={CMP_LABEL}>Logged</span>
         <span className="num text-sm" style={{ color: done.length ? 'var(--text)' : 'var(--text-dim)' }}>
           {done.length
-            ? done.map((s) => fmtSet(t, s, u)).join(', ')
-                + (avgRpe != null ? ` · RPE ${avgRpe}` : '')
+            ? loggedText + (avgRpe != null ? ` · RPE ${avgRpe}` : '')
             : 'Not logged'}
         </span>
       </div>
@@ -329,7 +356,7 @@ function PerformedRow({
  * here, one tap away, so the week list stays scannable.
  */
 function SessionSheet({
-  routine, state, targets, actuals, u, plannedDow, onPlanDay, onClose, onStart, onEdit, onLogAgain,
+  routine, state, targets, actuals, u, plannedDow, onPlanDay, onClose, onStart, onStartIntervals, onEdit, onLogAgain,
 }: {
   routine: RoutineRow
   state: SessionState
@@ -344,6 +371,7 @@ function SessionSheet({
   onPlanDay: (dow: number | null) => void
   onClose: () => void
   onStart: () => void
+  onStartIntervals: () => void
   onEdit: () => void
   onLogAgain: () => void
 }) {
@@ -362,6 +390,14 @@ function SessionSheet({
       <>
         <Button variant="primary" full onClick={onEdit}>Review / edit →</Button>
         <Button variant="ghost" full style={{ marginTop: 6 }} onClick={onLogAgain}>Log it again</Button>
+      </>
+    ) : state.kind !== 'in_progress' && intervalLed(routine) ? (
+      <>
+        <Button variant="primary" full onClick={() => { primeCueAudio(); onStartIntervals() }}>
+          <Play size={18} strokeWidth={2.2} fill="currentColor" style={{ marginRight: 8 }} />
+          Start intervals
+        </Button>
+        <Button variant="ghost" full style={{ marginTop: 6 }} onClick={onStart}>Open session</Button>
       </>
     ) : (
       <Button variant="primary" full onClick={onStart}>
@@ -382,7 +418,7 @@ function SessionSheet({
                 actuals!.rpe != null ? `RPE ${actuals!.rpe}` : null,
                 actuals!.durationMins ? `${actuals!.durationMins} min` : null,
               ].filter(Boolean).join(' · ')
-            : `${exercises.length} exercises`}
+            : `${exercises.length} exercise${exercises.length === 1 ? '' : 's'}`}
         </span>
       </div>
 
@@ -429,8 +465,9 @@ function SessionSheet({
           )}
         </span>
                 <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
-                  {ex.sets}×{ex.reps}
-                  {target != null ? ` · ${target}${u.unit}` : ex.load ? ` · ${ex.load}` : ''}
+                  {isIntervalBlock(ex)
+                    ? fmtDose(ex)
+                    : <>{ex.sets}×{ex.reps}{target != null ? ` · ${target}${u.unit}` : ex.load ? ` · ${ex.load}` : ''}</>}
                 </span>
               </div>
             )
@@ -471,7 +508,7 @@ function SessionSheet({
  * target for the detail sheet, and only the next-up session carries a CTA.
  */
 function SessionCard({
-  routine, recommended, state, lastDone, plannedDow, onOpen, onStart,
+  routine, recommended, state, lastDone, plannedDow, onOpen, onStart, onStartIntervals,
 }: {
   routine: RoutineRow
   recommended: boolean
@@ -480,20 +517,22 @@ function SessionCard({
   plannedDow: number | null
   onOpen: () => void
   onStart: () => void
+  onStartIntervals: () => void
 }) {
   const exCount = routine.exercises.length
   const chip = STATE_CHIP[state.kind]
   const showCta = recommended && state.kind !== 'done'
 
+  const exNoun = `${exCount} exercise${exCount === 1 ? '' : 's'}`
   // One line of metadata, in priority order — never more.
   const meta =
     state.kind === 'done'
       ? `Logged ${shortDay(state.lastWorkout.performedAt)}${state.count > 1 ? ` · ×${state.count}` : ''}`
       : plannedDow != null
-        ? `${exCount} exercises · planned ${PLAN_DAYS[plannedDow]}`
+        ? `${exNoun} · planned ${PLAN_DAYS[plannedDow]}`
         : lastDone
-          ? `${exCount} exercises · last ${shortDate(lastDone)}`
-          : `${exCount} exercises`
+          ? `${exNoun} · last ${shortDate(lastDone)}`
+          : exNoun
 
   return (
     <div
@@ -514,9 +553,18 @@ function SessionCard({
 
       {showCta && (
         <div style={{ marginTop: 16 }} onClick={(e) => e.stopPropagation()}>
-          <Button variant="primary" full onClick={onStart}>
-            {state.kind === 'in_progress' ? 'Resume →' : 'Start session →'}
-          </Button>
+          {state.kind !== 'in_progress' && intervalLed(routine) ? (
+            // Audio is unlocked inside this tap: the timer's cues play a screen
+            // later, on a context iOS only lets a gesture start.
+            <Button variant="primary" full onClick={() => { primeCueAudio(); onStartIntervals() }}>
+              <Play size={18} strokeWidth={2.2} fill="currentColor" style={{ marginRight: 8 }} />
+              Start intervals
+            </Button>
+          ) : (
+            <Button variant="primary" full onClick={onStart}>
+              {state.kind === 'in_progress' ? 'Resume →' : 'Start session →'}
+            </Button>
+          )}
         </div>
       )}
     </div>
@@ -920,6 +968,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
     : weekList
   const startWeek = viewingUpcoming ? displayWindow.weekStart : null
   const startHref = (id: string) => startWeek ? `/app/workout/${id}?week=${startWeek}` : `/app/workout/${id}`
+  const intervalsHref = (id: string) => `${startHref(id)}${startWeek ? '&' : '?'}go=intervals`
 
   // Exactly one session gets the primary Start. It follows the list on screen
   // (this week, or the upcoming week when that's what's showing): the open
@@ -1208,6 +1257,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
                       plannedDow={plannedDowFor(r)}
                       onOpen={() => setOpenSessionId(r.id)}
                       onStart={() => navigate(startHref(r.id), { viewTransition: true })}
+                      onStartIntervals={() => navigate(intervalsHref(r.id), { viewTransition: true })}
                     />
                   ))}
                 </div>
@@ -1286,6 +1336,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
           onPlanDay={(dow) => handlePlanDay(openSession.id, dow)}
           onClose={() => setOpenSessionId(null)}
           onStart={() => navigate(startHref(openSession.id), { viewTransition: true })}
+          onStartIntervals={() => navigate(intervalsHref(openSession.id), { viewTransition: true })}
           onLogAgain={() => navigate(startHref(openSession.id))}
           onEdit={() => {
             const s = statusFor(openSession.id)
