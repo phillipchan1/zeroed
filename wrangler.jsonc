@@ -4,6 +4,8 @@
   "main": "worker/src/index.ts",
   "compatibility_date": "2026-01-15",
   "compatibility_flags": ["nodejs_compat"],
+  // Dashboard-only vars (e.g. ALLOWED_EMAILS, RESEND_FROM) survive deploys.
+  "keep_vars": true,
   // Static Vite build. Deep links fall back to index.html (same as Vercel SPA).
   "assets": {
     "directory": "./dist",
@@ -17,9 +19,12 @@
   // ENVIRONMENT=local (or a DB/Hyperdrive hostname that is exactly loopback) is
   // the only unset-URL fallback. Prod: omit ENVIRONMENT and set BETTER_AUTH_URL
   // to the public Worker origin (docs/cloudflare-cutover.md).
+  // Sign-in codes go out through Cloudflare Email Service (EMAIL binding below,
+  // zeroed.madeforgreatnesslabs.com is onboarded for sending). Resend is an
+  // optional fallback: set RESEND_API_KEY (secret) and RESEND_FROM (dashboard).
   "vars": {
     "OPENAI_MODEL": "gpt-5.4-nano",
-    "RESEND_FROM": "Zeroed <noreply@localhost>",
+    "CF_EMAIL_FROM": "Zeroed <login@zeroed.madeforgreatnesslabs.com>",
   },
   // Neon via Hyperdrive. Local `wrangler dev` uses localConnectionString
   // (or DATABASE_URL in .dev.vars).
@@ -30,7 +35,33 @@
       "localConnectionString": "postgresql://postgres:postgres@127.0.0.1:5432/zeroed",
     },
   ],
+  "send_email": [
+    { "name": "EMAIL", "remote": true, "allowed_sender_addresses": ["login@zeroed.madeforgreatnesslabs.com"] },
+  ],
   "observability": {
     "enabled": true,
+  },
+  "env": {
+    // Non-prod rehearsal Worker on workers.dev against the Neon dev branch
+    // (dev-migration-rehearsal) via its own Hyperdrive config. ENVIRONMENT=dev
+    // allows OTP log mode; no EMAIL binding so it never sends mail.
+    // Deploy: npm run build && wrangler deploy --env dev
+    "dev": {
+      "name": "zeroed-dev",
+      "workers_dev": true,
+      "vars": {
+        "OPENAI_MODEL": "gpt-5.4-nano",
+        "ENVIRONMENT": "dev",
+        "CF_EMAIL_FROM": "Zeroed <login@zeroed.madeforgreatnesslabs.com>",
+      },
+      "hyperdrive": [
+        {
+          "binding": "HYPERDRIVE",
+          "id": "88fa5b29e4f84762a135ca5f43c3b692",
+          "localConnectionString": "postgresql://postgres:postgres@127.0.0.1:5432/zeroed",
+        },
+      ],
+      "send_email": [],
+    },
   },
 }

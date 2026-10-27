@@ -42,7 +42,7 @@ function captureOtp() {
   const orig = console.log
   console.log = (...args) => {
     const line = args.map(String).join(' ')
-    const match = /OTP for \S+ \([^)]+\): (\d+)/.exec(line)
+    const match = /(?:OTP for \S+|dev OTP) \([^)]+\): (\d+)/.exec(line)
     if (match) otps.push(match[1])
     orig.apply(console, args)
   }
@@ -80,7 +80,7 @@ async function runFlow(email, { reset = true } = {}) {
     const sendText = await send.text()
     if (!send.ok) throw new Error(`send otp ${send.status}: ${sendText.slice(0, 240)}`)
     const otp = cap.otps.at(-1)
-    if (!otp) throw new Error('OTP was not logged (RESEND unset should console.log the code)')
+    if (!otp) throw new Error('OTP was not logged (no sender + ENVIRONMENT=local should console.log the code)')
 
     const signIn = await post('/api/auth/sign-in/email-otp', { email, otp })
     const signText = await signIn.text()
