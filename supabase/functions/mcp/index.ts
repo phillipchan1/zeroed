@@ -9,6 +9,11 @@ import {
   type JsonRpcResponse,
 } from '../_shared/mcpProtocol.ts'
 import { executeZeroedTool, ZEROED_TOOLS } from '../_shared/zeroedTools.ts'
+import {
+  ONBOARDING_SERVER_INSTRUCTIONS,
+  listedZeroedTools,
+  onboardingAgentV1On,
+} from '../_shared/onboardingTools.ts'
 
 const RATE_LIMIT_PER_MIN = 120
 
@@ -108,11 +113,13 @@ Deno.serve(async (req) => {
     const raw = await req.json().catch(() => null)
     const extra = sessionHeaders(req)
 
+    const onboardingOn = onboardingAgentV1On(Deno.env.get('ONBOARDING_AGENT_V1'))
+    const tools = listedZeroedTools(ZEROED_TOOLS, onboardingOn)
     const run = async (msg: JsonRpcRequest): Promise<JsonRpcResponse | null> => {
-      return await handleMcpMethod(msg, ZEROED_TOOLS, async (name, args) => {
+      return await handleMcpMethod(msg, tools, async (name, args) => {
         await touchMcpToken(conn.id)
-        return await executeZeroedTool(conn.athlete_id, name, args)
-      }, athleteLabel)
+        return await executeZeroedTool(conn.athlete_id, name, args, { onboardingAgentV1: onboardingOn })
+      }, athleteLabel, onboardingOn ? ONBOARDING_SERVER_INSTRUCTIONS : undefined)
     }
 
     if (Array.isArray(raw)) {

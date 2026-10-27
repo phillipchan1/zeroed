@@ -6,6 +6,12 @@ export interface McpTool {
   name: string
   description: string
   inputSchema: Record<string, unknown>
+  annotations?: {
+    readOnlyHint?: boolean
+    destructiveHint?: boolean
+    idempotentHint?: boolean
+    openWorldHint?: boolean
+  }
 }
 
 export type JsonRpcId = string | number | null
@@ -74,9 +80,11 @@ export async function handleMcpMethod(
   tools: McpTool[],
   call: ToolCaller,
   athleteLabel?: string | null,
+  extraInstructions?: string,
 ): Promise<JsonRpcResponse | null> {
   const id = (msg.id ?? null) as JsonRpcId
   const method = typeof msg.method === 'string' ? msg.method : ''
+  const extra = extraInstructions?.trim() ? ` ${extraInstructions.trim()}` : ''
 
   if (isNotification(msg)) return null
 
@@ -92,7 +100,7 @@ export async function handleMcpMethod(
         protocolVersion,
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'zeroed', version: '1.0.0' },
-        instructions: SERVER_INSTRUCTIONS + who,
+        instructions: SERVER_INSTRUCTIONS + extra + who,
       })
     }
     case 'ping':
@@ -117,7 +125,7 @@ export async function handleMcpMethod(
           role: 'user',
           content: {
             type: 'text',
-            text: 'Call get_training_brief first. Then help me review my training from the record — lifts, sessions, insights, and the live week. Do not change the program unless I ask. If I ask to change it, preview_program_edits first and wait for my confirm before apply_program_edits.',
+            text: 'Call get_training_brief first. Then help me review my training from the record — lifts, sessions, insights, and the live week. Do not change the program unless I ask. If I ask to change it, preview_program_edits first and wait for my confirm before apply_program_edits.' + extra,
           },
         }],
       })

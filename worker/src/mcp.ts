@@ -10,6 +10,11 @@ import { parseRpeHalfStepsFlag } from '../../src/engine/rpeScale.ts'
 import { resolveMcpToken, tokenFrom, touchMcpToken } from './mcpToken.ts'
 import { executeZeroedTool, ZEROED_TOOLS } from './tools.ts'
 import { isMcpUserError } from './userError.ts'
+import {
+  ONBOARDING_SERVER_INSTRUCTIONS,
+  listedZeroedTools,
+  onboardingAgentV1On,
+} from '../../supabase/functions/_shared/onboardingTools.ts'
 
 /** Only McpUserError messages are shown. DB / runtime errors stay generic. */
 export function publicMcpError(err: unknown): string {
@@ -117,18 +122,21 @@ async function serveMcp(req: Request, sql: Sql, env?: Env): Promise<Response> {
   if (containsNul(raw)) return json({ error: 'invalid input' }, 400, MCP_CORS)
   const extra = sessionHeaders(req)
 
+  const onboardingOn = onboardingAgentV1On(env?.ONBOARDING_AGENT_V1)
+  const tools = listedZeroedTools(ZEROED_TOOLS, onboardingOn)
   const run = async (msg: JsonRpcRequest): Promise<JsonRpcResponse | null> => {
-    return await handleMcpMethod(msg, ZEROED_TOOLS, async (name, args) => {
+    return await handleMcpMethod(msg, tools, async (name, args) => {
       await touchMcpToken(sql, conn.id)
       try {
         return await executeZeroedTool(sql, conn.athlete_id, name, args, {
           rpeHalfSteps: parseRpeHalfStepsFlag(env?.RPE_HALF_STEPS),
+          onboardingAgentV1: onboardingOn,
         })
       } catch (err) {
         console.error('[mcp] tool', name, err instanceof Error ? err.message : String(err))
         throw new Error(publicMcpError(err))
       }
-    }, athleteLabel)
+    }, athleteLabel, onboardingOn ? ONBOARDING_SERVER_INSTRUCTIONS : undefined)
   }
 
   if (Array.isArray(raw)) {

@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS public.athlete (
   limiter_choice    TEXT,
   training_preferences TEXT,
   training_max_overrides JSONB,
+  starter_pack TEXT,
+  starter_pack_settings JSONB,
+  onboarding_answers JSONB,
   CONSTRAINT athlete_auth_user_unique UNIQUE (auth_user_id),
   CONSTRAINT athlete_onboarding_step_check CHECK (onboarding_step IN (
     'hook',
@@ -52,6 +55,11 @@ CREATE TABLE IF NOT EXISTS public.athlete (
     arena_type IS NULL OR arena_type IN (
       'sport', 'number', 'body', 'durability', 'event', 'all_around'
     )
+  ),
+  CONSTRAINT athlete_starter_pack_check CHECK (
+    starter_pack IS NULL OR starter_pack IN (
+      'sport_sc', 'get_strong', 'chase_total', 'hybrid', 'layoff', 'thirty_three', 'byo'
+    )
   )
 );
 
@@ -60,6 +68,15 @@ COMMENT ON COLUMN public.athlete.training_max_overrides IS
 
 COMMENT ON COLUMN public.athlete.training_preferences IS
   'Athlete-stated standing training preferences, newest first. Fed to phase design as the emphasis so steering survives a phase change.';
+
+COMMENT ON COLUMN public.athlete.starter_pack IS
+  'Starter pack id. Null until a pack is started. Ignored when onboarding_agent_v1 is off.';
+
+COMMENT ON COLUMN public.athlete.starter_pack_settings IS
+  'Pack settings jsonb, e.g. {sport, season, game_days}. Sport is a setting, not a library.';
+
+COMMENT ON COLUMN public.athlete.onboarding_answers IS
+  'Onboarding answers (goal, days, minutes, equipment, lifts, pain, style).';
 
 -- =============================================================================
 -- DIAGNOSTIC

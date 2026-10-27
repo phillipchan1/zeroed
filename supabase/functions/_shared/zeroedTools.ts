@@ -23,6 +23,11 @@ import {
   type ConnectedStore,
 } from './zeroedStore.ts'
 import { admin } from './admin.ts'
+import {
+  ONBOARDING_TOOL_NAMES,
+  runOnboardingTool,
+} from './onboardingTools.ts'
+import { edgeOnboardingIo } from './onboardingStore.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -206,8 +211,14 @@ export async function executeZeroedTool(
   athleteId: string,
   name: string,
   args: Record<string, unknown>,
+  flags?: { onboardingAgentV1?: boolean },
 ): Promise<string> {
   const store = storeForAthlete(athleteId)
+
+  if (ONBOARDING_TOOL_NAMES.has(name)) {
+    if (!flags?.onboardingAgentV1) throw new Error(`Unknown tool: ${name}`)
+    return runOnboardingTool(name, args, edgeOnboardingIo(athleteId))
+  }
 
   if (LIFT_MODEL_TOOL_NAMES.has(name)) {
     return runLiftModelTool(name, args, {

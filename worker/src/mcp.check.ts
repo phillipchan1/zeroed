@@ -11,6 +11,13 @@ import { handleMcp, publicMcpError } from './mcp.ts'
 import { resolveMcpToken, sha256Hex, timingSafeEqualHex } from './mcpToken.ts'
 import { ZEROED_TOOLS } from './tools.ts'
 import { LIFT_MODEL_TOOLS } from '../../supabase/functions/_shared/liftModelTools.ts'
+import { SERVER_INSTRUCTIONS } from '../../supabase/functions/_shared/mcpProtocol.ts'
+import {
+  ONBOARDING_SERVER_INSTRUCTIONS,
+  ONBOARDING_TOOLS,
+  listedZeroedTools,
+  onboardingAgentV1On,
+} from '../../supabase/functions/_shared/onboardingTools.ts'
 import { McpUserError } from './userError.ts'
 
 const fails: string[] = []
@@ -24,6 +31,8 @@ function ok(cond: boolean, msg: string) {
 const here = dirname(fileURLToPath(import.meta.url))
 const A = '11111111-1111-1111-1111-111111111111'
 const B = '22222222-2222-2222-2222-222222222222'
+const C = 'cccccccc-cccc-cccc-cccc-cccccccccccc'
+const AUTH_C = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
 const PROG_A = '33333333-3333-3333-3333-333333333333'
 const ROUTINE_A = '77777777-7777-7777-7777-777777777777'
 const WORKOUT_A = '99999999-9999-9999-9999-999999999999'
@@ -31,6 +40,7 @@ const WORKOUT_B = 'bbbb9999-9999-4999-8999-999999999999'
 
 const TOKEN_A = 'zeroed-mcp-token-athlete-a-aaaaaaaa'
 const TOKEN_B = 'zeroed-mcp-token-athlete-b-bbbbbbbb'
+const TOKEN_C = 'zeroed-mcp-token-athlete-c-cccccccc'
 const TOKEN_REVOKED = 'zeroed-mcp-token-revoked-cccccccc'
 const TOKEN_EXPIRED = 'zeroed-mcp-token-expired-dddddddd'
 
@@ -53,6 +63,18 @@ const edgeNames = [
 ]
 const workerNames = ZEROED_TOOLS.map((t) => t.name)
 ok(workerNames.join() === edgeNames.join(), `parity: tool names ${workerNames.join(',')}`)
+ok(onboardingAgentV1On(undefined) === false && onboardingAgentV1On('1') === true && onboardingAgentV1On('true') === false, 'parity: server flag is off unless exactly 1')
+ok(listedZeroedTools(ZEROED_TOOLS, false) === ZEROED_TOOLS, 'parity: flag-off listed tools is the same array')
+ok(listedZeroedTools(ZEROED_TOOLS, true).map((t) => t.name).slice(0, workerNames.length).join() === workerNames.join(), 'parity: flag-on list keeps existing tools first')
+ok(ONBOARDING_TOOLS.map((t) => t.name).join() === 'get_onboarding_state,list_starter_packs,record_onboarding_answers,preview_starter_pack,start_starter_pack', 'parity: five onboarding tools')
+ok(workerSrc.includes("from '../../supabase/functions/_shared/onboardingTools.ts'"), 'parity: worker tools import shared onboarding defs')
+ok(edgeSrc.includes("from './onboardingTools.ts'"), 'parity: edge tools import shared onboarding defs')
+ok(workerSrc.includes('runOnboardingTool') && edgeSrc.includes('runOnboardingTool'), 'parity: both runners call runOnboardingTool')
+const workerMcpSrc = readFileSync(join(here, 'mcp.ts'), 'utf8')
+const edgeMcpSrc = readFileSync(join(here, '../../supabase/functions/mcp/index.ts'), 'utf8')
+ok(workerMcpSrc.includes('listedZeroedTools') && edgeMcpSrc.includes('listedZeroedTools'), 'parity: both MCP servers gate the list')
+ok(workerMcpSrc.includes('ONBOARDING_SERVER_INSTRUCTIONS') && edgeMcpSrc.includes('ONBOARDING_SERVER_INSTRUCTIONS'), 'parity: both servers share onboarding instructions')
+ok(!workerNames.includes('get_onboarding_state'), 'parity: onboarding tools are not on the flag-off list')
 ok(workerNames.includes('get_current_program'), 'parity: get_current_program is advertised')
 ok(workerNames.includes('list_workouts') && workerNames.includes('get_workout'), 'parity: workout tools are advertised')
 for (const need of [
@@ -78,11 +100,28 @@ ok(publicMcpError(new McpUserError('workout_id is required')) === 'workout_id is
 const harness = await openIsolationHarness()
 const sql = harness.sql
 const env = {} as Env
+const envOn = { ONBOARDING_AGENT_V1: '1' } as Env
 
 await sql`UPDATE mcp_token SET token_hash = ${await sha256Hex(TOKEN_A)} WHERE name = ${'claude-a'}`
 await sql`UPDATE mcp_token SET token_hash = ${await sha256Hex(TOKEN_B)} WHERE name = ${'claude-b'}`
 await sql`UPDATE mcp_token SET token_hash = ${await sha256Hex(TOKEN_REVOKED)} WHERE name = ${'revoked-a'}`
 await sql`UPDATE mcp_token SET token_hash = ${await sha256Hex(TOKEN_EXPIRED)} WHERE name = ${'expired-a'}`
+
+await sql`INSERT INTO auth.users (id, email) VALUES (${AUTH_C}, ${'c@example.com'})`
+await sql`
+  INSERT INTO athlete (id, auth_user_id, name, onboarding_step, training_age)
+  VALUES (${C}, ${AUTH_C}, ${'Athlete C'}, ${'hook'}, 2)
+`
+await sql`
+  INSERT INTO mcp_token (id, athlete_id, name, token_hash, last_four)
+  VALUES (
+    ${'cccc6666-0000-4000-8000-000000000001'},
+    ${C},
+    ${'claude-c'},
+    ${await sha256Hex(TOKEN_C)},
+    ${'ccc1'}
+  )
+`
 
 const resolvedA = await resolveMcpToken(sql, TOKEN_A)
 ok(resolvedA?.athlete_id === A, 'resolveMcpToken: A token maps to A')
@@ -94,6 +133,7 @@ async function mcp(
   token: string | null,
   body: unknown,
   extra: Record<string, string> = {},
+  useEnv: Env = env,
 ): Promise<Response> {
   const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extra }
   if (token) headers.Authorization = `Bearer ${token}`
@@ -101,11 +141,16 @@ async function mcp(
     method: 'POST',
     headers,
     body: JSON.stringify(body),
-  }), env, { sql })
+  }), useEnv, { sql })
 }
 
 async function rpc(token: string, method: string, params: unknown = {}, id: number | string = 1) {
   const res = await mcp(token, { jsonrpc: '2.0', id, method, params })
+  return { status: res.status, body: await res.json() as Record<string, unknown> }
+}
+
+async function rpcOn(token: string, method: string, params: unknown = {}, id: number | string = 1) {
+  const res = await mcp(token, { jsonrpc: '2.0', id, method, params }, {}, envOn)
   return { status: res.status, body: await res.json() as Record<string, unknown> }
 }
 
@@ -263,6 +308,148 @@ ok(nul.status === 400, 'HTTP: NUL in body is 400')
 const nulBody = await nul.json() as { error?: string }
 ok(nulBody.error === 'invalid input', 'HTTP: NUL message is generic')
 ok(!JSON.stringify(nulBody).includes('UTF8') && !JSON.stringify(nulBody).includes('0x00'), 'HTTP: NUL response does not leak PG encoding')
+
+const initOff = await rpc(TOKEN_A, 'initialize')
+const initOffText = (initOff.body.result as { instructions?: string } | undefined)?.instructions ?? ''
+ok(
+  initOffText === `${SERVER_INSTRUCTIONS} You are connected as Athlete A. That is the only athlete this token can see.`,
+  'flag-off: initialize instructions are unchanged',
+)
+ok(!initOffText.includes('get_onboarding_state'), 'flag-off: initialize does not mention onboarding tools')
+
+const listedOff = ((listed.body.result as { tools?: Array<{ name: string }> })?.tools ?? []).map((t) => t.name)
+ok(!listedOff.includes('get_onboarding_state'), 'flag-off: tools/list does not advertise onboarding tools')
+
+const hiddenCall = await rpc(TOKEN_A, 'tools/call', { name: 'get_onboarding_state', arguments: {} })
+const hiddenErr = hiddenCall.body.error as { message?: string } | undefined
+ok(hiddenCall.status === 200 && hiddenErr?.message === 'Unknown tool: get_onboarding_state', 'flag-off: get_onboarding_state is not callable')
+
+const listedOn = await rpcOn(TOKEN_A, 'tools/list')
+const listedOnTools = ((listedOn.body.result as { tools?: Array<{ name: string; inputSchema?: unknown; annotations?: unknown }> })?.tools) ?? []
+ok(listedOn.status === 200, 'flag-on: tools/list is 200')
+ok(listedOnTools.map((t) => t.name).join() === listedZeroedTools(ZEROED_TOOLS, true).map((t) => t.name).join(), 'flag-on: list is existing tools plus the five onboarding tools')
+for (const tool of ONBOARDING_TOOLS) {
+  const advertised = listedOnTools.find((t) => t.name === tool.name)
+  ok(JSON.stringify(advertised?.inputSchema) === JSON.stringify(tool.inputSchema), `flag-on: ${tool.name} schema matches shared def`)
+  ok(JSON.stringify(advertised?.annotations) === JSON.stringify(tool.annotations), `flag-on: ${tool.name} annotations match`)
+}
+
+const initOn = await rpcOn(TOKEN_C, 'initialize')
+const initOnText = (initOn.body.result as { instructions?: string } | undefined)?.instructions ?? ''
+ok(initOnText.includes(ONBOARDING_SERVER_INSTRUCTIONS), 'flag-on: initialize tells the model to run onboarding first')
+ok(initOnText.includes(SERVER_INSTRUCTIONS.slice(0, 40)), 'flag-on: existing instructions are still present')
+
+const coachOn = await rpcOn(TOKEN_C, 'prompts/get', { name: 'coach' })
+const coachText = JSON.stringify(coachOn.body)
+ok(coachText.includes('get_onboarding_state'), 'flag-on: coach prompt mentions onboarding')
+const coachOff = await rpc(TOKEN_C, 'prompts/get', { name: 'coach' })
+ok(!JSON.stringify(coachOff.body).includes('get_onboarding_state'), 'flag-off: coach prompt is unchanged')
+
+const stateC = toolText((await rpcOn(TOKEN_C, 'tools/call', { name: 'get_onboarding_state', arguments: {} })).body)
+ok(stateC.includes('Step: hook') && stateC.includes('Session 1: none'), 'e2e: get_onboarding_state reads C')
+ok(stateC.includes('Next question') && stateC.includes('goal'), 'e2e: get_onboarding_state suggests the next question')
+ok(!stateC.includes('Athlete B') && !stateC.includes('B only'), 'isolation: C state does not leak B')
+
+const packs = toolText((await rpcOn(TOKEN_C, 'tools/call', { name: 'list_starter_packs', arguments: {} })).body)
+ok(packs.includes('sport_sc') && packs.includes('get_strong') && packs.includes('byo'), 'e2e: list_starter_packs names all 7 packs')
+ok(packs.includes('sport') && packs.includes('setting'), 'e2e: list_starter_packs says sport is a setting')
+
+const recPreview = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'record_onboarding_answers',
+  arguments: { answers: { goal: 'get_strong', days: 3, pain: 'nothing' } },
+})).body)
+ok(recPreview.includes('Preview only'), 'e2e: record_onboarding_answers without confirm only previews')
+const [cBefore] = await sql<{ onboarding_answers: unknown }[]>`SELECT onboarding_answers FROM athlete WHERE id = ${C}`
+ok(cBefore?.onboarding_answers == null, 'e2e: record preview writes nothing')
+
+const recSaved = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'record_onboarding_answers',
+  arguments: { answers: { goal: 'get_strong', days: 3, pain: 'nothing', minutes: 45 }, confirm: true, athlete_id: B },
+})).body)
+ok(recSaved.includes('Saved.'), 'e2e: record_onboarding_answers with confirm saves')
+const [cAns] = await sql<{ onboarding_answers: unknown }[]>`SELECT onboarding_answers FROM athlete WHERE id = ${C}`
+const cAnsVal = typeof cAns?.onboarding_answers === 'string' ? JSON.parse(cAns.onboarding_answers) : cAns?.onboarding_answers
+ok((cAnsVal as { goal?: string } | null)?.goal === 'get_strong', 'e2e: C answers were saved')
+const [bAns] = await sql<{ onboarding_answers: unknown }[]>`SELECT onboarding_answers FROM athlete WHERE id = ${B}`
+ok(bAns?.onboarding_answers == null, 'isolation: athlete_id override cannot write B answers')
+
+const packPreview = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'preview_starter_pack',
+  arguments: { pack: 'get_strong' },
+})).body)
+ok(packPreview.includes('Recommended: get_strong') && packPreview.includes('arithmetic:'), 'e2e: preview_starter_pack shows pack + arithmetic')
+ok(packPreview.includes('Writes nothing'), 'e2e: preview_starter_pack says it writes nothing')
+const [cPackBefore] = await sql<{ starter_pack: string | null }[]>`SELECT starter_pack FROM athlete WHERE id = ${C}`
+ok(cPackBefore?.starter_pack == null, 'e2e: preview_starter_pack writes no pack')
+
+const painPrev = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'preview_starter_pack',
+  arguments: { pack: 'chase_total', answers: { pain: 'knee' } },
+})).body)
+// answers on preview are not a write path; pain comes from saved answers (nothing) unless we record it
+ok(painPrev.includes('get_strong') || painPrev.includes('layoff') || painPrev.includes('chase_total'), 'e2e: preview_starter_pack returns a pack')
+
+const recPain = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'record_onboarding_answers',
+  arguments: { answers: { pain: 'knee' }, confirm: true },
+})).body)
+ok(recPain.includes('Saved.'), 'e2e: pain answer saved')
+const painPack = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'preview_starter_pack',
+  arguments: { pack: 'chase_total' },
+})).body)
+ok(painPack.includes('layoff') && painPack.includes('Pain-flag override'), 'e2e: preview enforces the pain flag in the engine')
+
+const startRefused = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'start_starter_pack',
+  arguments: { pack: 'layoff' },
+})).body)
+ok(startRefused.includes('confirm=true'), 'e2e: start_starter_pack without confirm is refused')
+const [cProgBefore] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM program WHERE athlete_id = ${C}`
+ok(cProgBefore?.n === '0', 'e2e: start without confirm writes no program')
+
+const started = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'start_starter_pack',
+  arguments: { pack: 'chase_total', confirm: true, athlete_id: B },
+})).body)
+ok(started.includes('Started layoff') || started.includes('Already started'), 'e2e: start_starter_pack with confirm writes (pain routes to layoff)')
+const [cAfter] = await sql<{ starter_pack: string | null; onboarding_step: string }[]>`
+  SELECT starter_pack, onboarding_step FROM athlete WHERE id = ${C}
+`
+ok(cAfter?.starter_pack === 'layoff', 'e2e: C pack is layoff after pain flag')
+ok(cAfter?.onboarding_step === 'first_session_pending', 'e2e: start advances onboarding_step')
+const [cProg] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM program WHERE athlete_id = ${C} AND status = 'active'`
+ok(cProg?.n === '1', 'e2e: C has one active program')
+const [bProg] = await sql<{ goal: string | null }[]>`SELECT goal FROM program WHERE athlete_id = ${B} AND status = 'active'`
+ok(bProg?.goal === 'B program', 'isolation: start cannot replace B via athlete_id')
+
+const again = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'start_starter_pack',
+  arguments: { pack: 'layoff', confirm: true },
+})).body)
+ok(again.includes('Already started') || again.includes('Idempotent'), 'e2e: start_starter_pack is idempotent')
+const [cProg2] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM program WHERE athlete_id = ${C}`
+ok(cProg2?.n === '1', 'e2e: idempotent start does not insert a second program')
+
+const aRefuse = toolText((await rpcOn(TOKEN_A, 'tools/call', {
+  name: 'start_starter_pack',
+  arguments: { pack: 'get_strong', confirm: true },
+})).body)
+ok(aRefuse.includes('already has a live program'), 'e2e: start refuses a live program without replace')
+const [aPack] = await sql<{ starter_pack: string | null }[]>`SELECT starter_pack FROM athlete WHERE id = ${A}`
+ok(aPack?.starter_pack == null, 'e2e: refused start writes no pack on A')
+
+const aReplace = toolText((await rpcOn(TOKEN_A, 'tools/call', {
+  name: 'start_starter_pack',
+  arguments: { pack: 'get_strong', confirm: true, replace: true },
+})).body)
+ok(aReplace.includes('Started get_strong'), 'e2e: start with replace=true writes A')
+const [aAfter] = await sql<{ starter_pack: string | null }[]>`SELECT starter_pack FROM athlete WHERE id = ${A}`
+ok(aAfter?.starter_pack === 'get_strong', 'e2e: A pack is get_strong after replace')
+const [aActive] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM program WHERE athlete_id = ${A} AND status = 'active'`
+ok(aActive?.n === '1', 'e2e: A still has one active program after replace')
+const [bStill] = await sql<{ name: string }[]>`SELECT name FROM routine WHERE id = ${'88888888-8888-8888-8888-888888888888'}`
+ok(bStill?.name === 'B day', 'isolation: replace on A leaves B routines alone')
 
 await harness.close()
 

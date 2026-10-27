@@ -9,9 +9,9 @@
  * (Director of Product signed off 2026-10-27). Do not paraphrase them.
  */
 
-import { estimateSessionMinutes } from './programDraft.ts'
+import { estimateSessionMinutes } from '../../supabase/functions/_shared/engine/programDraft.ts'
 import { validateProvisionalProgram } from './safety.ts'
-import type { ProgramDesignResult, ProgramExercise } from './agentClient.ts'
+import type { ProgramDesignResult, ProgramExercise } from './programDesignTypes.ts'
 import type { ExerciseTemplate } from '../types/database.ts'
 
 export type StarterPackId =
