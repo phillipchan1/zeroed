@@ -236,7 +236,9 @@ const tmSaved = toolText((await rpc(TOKEN_A, 'tools/call', {
 ok(tmSaved.includes('Saved.'), 'e2e: set_training_max with confirm saves')
 const [aTm] = await sql<{ training_max_overrides: unknown }[]>`SELECT training_max_overrides FROM athlete WHERE id = ${A}`
 const aTmValue = typeof aTm?.training_max_overrides === 'string' ? JSON.parse(aTm.training_max_overrides) : aTm?.training_max_overrides
-ok((aTmValue as Record<string, number> | null)?.squat === 200, 'e2e: A\'s squat TM is 200')
+const aSquat = (aTmValue as Record<string, { value?: number; set_at?: string } | null> | null)?.squat
+ok(aSquat?.value === 200, 'e2e: A\'s squat TM is 200')
+ok(typeof aSquat?.set_at === 'string' && !Number.isNaN(Date.parse(aSquat.set_at)), 'e2e: the write is stamped with when it was set')
 const [bTm] = await sql<{ training_max_overrides: unknown }[]>`SELECT training_max_overrides FROM athlete WHERE id = ${B}`
 ok(bTm?.training_max_overrides == null, 'isolation: an athlete_id arg cannot write B\'s TM')
 const afterTm = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'get_lift_model', arguments: { lift: 'squat' } })).body)

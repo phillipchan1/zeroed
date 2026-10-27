@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS public.athlete (
 );
 
 COMMENT ON COLUMN public.athlete.training_max_overrides IS
-  'Hand-set training maxes by lift id ({"bench": 275, "ohp": 140}), storage weight unit. Absent lifts use 90% of the working max.';
+  'Hand-set training maxes by lift id: {"bench": {"value": 275, "set_at": "<iso>", "model_tm": 268.4}} (older writes are a bare number), storage weight unit. Absent lifts use 90% of the working max.';
 
 COMMENT ON COLUMN public.athlete.training_preferences IS
   'Athlete-stated standing training preferences, newest first. Fed to phase design as the emphasis so steering survives a phase change.';

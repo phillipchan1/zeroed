@@ -523,6 +523,22 @@ ok(checkin.error == null, `data check-in write: allowed (${checkin.error?.messag
 ok(Number(await scalar('SELECT knee_pain_r FROM workout WHERE id = $1', [WORKOUT_A])) === 5, 'data check-in write: landed on A')
 const tmRead = await executeDataQuery(sql, ctxA, { table: 'athlete', op: 'select', columns: 'training_max_overrides', single: 'maybe' })
 ok(tmRead.error == null, `data TM read: training_max_overrides is allowed (${tmRead.error?.message ?? 'ok'})`)
+// The app's Training maxes card writes the whole object back, dated entries and all.
+const tmEntry = { bench: { value: 250, set_at: '2026-10-26T18:00:00.000Z', model_tm: 241.3 } }
+const tmBBefore = JSON.stringify(await scalar<unknown>('SELECT training_max_overrides FROM athlete WHERE id = $1', [B]))
+const tmWrite = await executeDataQuery(sql, ctxA, {
+  table: 'athlete', op: 'update', values: { training_max_overrides: tmEntry },
+  filters: [{ column: 'id', op: 'eq', value: A }],
+})
+ok(tmWrite.error == null, `data TM write: allowed (${tmWrite.error?.message ?? 'ok'})`)
+const tmWritten = await scalar<unknown>('SELECT training_max_overrides FROM athlete WHERE id = $1', [A])
+const tmWrittenObj = (typeof tmWritten === 'string' ? JSON.parse(tmWritten) : tmWritten) as typeof tmEntry | null
+ok(tmWrittenObj?.bench?.value === 250 && tmWrittenObj.bench.set_at === tmEntry.bench.set_at, 'data TM write: the dated entry landed on A as JSON')
+await executeDataQuery(sql, ctxA, {
+  table: 'athlete', op: 'update', values: { training_max_overrides: tmEntry },
+  filters: [{ column: 'id', op: 'eq', value: B }],
+})
+ok(JSON.stringify(await scalar<unknown>('SELECT training_max_overrides FROM athlete WHERE id = $1', [B])) === tmBBefore, 'data TM write: A naming B\'s id changes nothing on B')
 
 const loadedB = await executeDataQuery(sql, ctxA, {
   table: 'workout',
@@ -665,11 +681,16 @@ ok((await count('insight', 'athlete_id = $1', [B])) === 1, 'DELETE insight: B in
 // Distinct overrides on each side, so a read or write that drops its owner
 // filter lands on the other athlete's row and shows up here.
 // jsonb keeps its own key order, so compare as sorted entries.
+const sortKeys = (v: unknown): unknown => v && typeof v === 'object' && !Array.isArray(v)
+  ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b)).map(([k, x]) => [k, sortKeys(x)]))
+  : v
 const tmOf = async (id: string) => {
   const raw = await scalar<unknown>('SELECT training_max_overrides FROM athlete WHERE id = $1', [id])
-  const obj = (typeof raw === 'string' ? JSON.parse(raw) : raw) as Record<string, number> | null
-  return obj ? Object.fromEntries(Object.entries(obj).sort(([a], [b]) => a.localeCompare(b))) : null
+  return sortKeys(typeof raw === 'string' ? JSON.parse(raw) : raw)
 }
+const same = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(sortKeys(b))
+const benchA = { value: 200, set_at: '2026-10-26T18:00:00.000Z', model_tm: 180.5 }
+const ohpB = { value: 140, set_at: '2026-10-26T18:00:00.000Z', model_tm: null }
 await harness.query('UPDATE athlete SET training_max_overrides = $1::jsonb WHERE id = $2', [JSON.stringify({ squat: 111 }), A])
 await harness.query('UPDATE athlete SET training_max_overrides = $1::jsonb WHERE id = $2', [JSON.stringify({ deadlift: 222 }), B])
 const liftA = await loadLiftModelSources(storeA)
@@ -679,14 +700,14 @@ ok(liftB.workouts.some((w) => w.id === WORKOUT_B) && !liftB.workouts.some((w) =>
 ok(liftA.overrides?.squat === 111 && liftA.overrides?.deadlift == null, 'loadLiftModelSources: A reads A TM overrides')
 ok(liftB.overrides?.deadlift === 222 && liftB.overrides?.squat == null, 'loadLiftModelSources: B reads B TM overrides')
 
-await saveTrainingMax(storeA, 'bench', 200)
-ok(JSON.stringify(await tmOf(A)) === JSON.stringify({ bench: 200, squat: 111 }), 'saveTrainingMax: A merges into A overrides only')
-ok(JSON.stringify(await tmOf(B)) === JSON.stringify({ deadlift: 222 }), 'saveTrainingMax: B row untouched by A write')
-await saveTrainingMax(storeB, 'ohp', 140)
-ok(JSON.stringify(await tmOf(B)) === JSON.stringify({ deadlift: 222, ohp: 140 }), 'saveTrainingMax: B merges into B overrides only')
-ok(JSON.stringify(await tmOf(A)) === JSON.stringify({ bench: 200, squat: 111 }), 'saveTrainingMax: A row untouched by B write')
+await saveTrainingMax(storeA, 'bench', benchA)
+ok(same(await tmOf(A), { bench: benchA, squat: 111 }), 'saveTrainingMax: A merges a dated entry into A overrides only')
+ok(same(await tmOf(B), { deadlift: 222 }), 'saveTrainingMax: B row untouched by A write')
+await saveTrainingMax(storeB, 'ohp', ohpB)
+ok(same(await tmOf(B), { deadlift: 222, ohp: ohpB }), 'saveTrainingMax: B merges into B overrides only')
+ok(same(await tmOf(A), { bench: benchA, squat: 111 }), 'saveTrainingMax: A row untouched by B write')
 await saveTrainingMax(storeA, 'squat', null)
-ok(JSON.stringify(await tmOf(A)) === JSON.stringify({ bench: 200 }), 'saveTrainingMax: null clears one lift on A')
+ok(same(await tmOf(A), { bench: benchA }), 'saveTrainingMax: null clears one lift on A')
 
 ok((await loadWorkout(storeA, WORKOUT_A))?.workout.routine_id === ROUTINE_A, 'post-write: A workout still readable')
 ok((await loadWorkout(storeA, WORKOUT_B)) === null, 'post-write: B workout still hidden from A')

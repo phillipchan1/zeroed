@@ -74,8 +74,8 @@ import { planPagerFutureWeeks, weekWindowInZone } from './weekDates'
 // in liftModel.ts. This file only reads the rows it needs.
 import {
   canonicalLiftId, modelFromSources, dayOfModifiers, exerciseCall, readModelLog, localDay,
-  fmtLoad, addDays as addDaysIso, mondayOf,
-  type DayOf, type LiftModelSources, type ModelWorkout, type Recommendation,
+  fmtLoad, addDays as addDaysIso, mondayOf, readTmOverride, convertTmOverride, tmOverrideEntry,
+  type DayOf, type LiftModelSources, type MainLiftId, type ModelWorkout, type Recommendation,
 } from './liftModel'
 export {
   canonicalLiftId, backoffLoad, liftIncrement, type DayOf, type MainLiftId,
@@ -2471,9 +2471,12 @@ export async function gatherLiftSources(athleteId: string, u: UnitContext): Prom
       ? supabase.from('session_observation').select('signal, severity, logged_at').in('workout_id', recentIds).gte('severity', 4)
       : Promise.resolve({ data: [] }),
   ])
-  const stored = ((ath as { training_max_overrides?: Record<string, number> | null } | null)?.training_max_overrides) ?? null
+  const stored = ((ath as { training_max_overrides?: Record<string, unknown> | null } | null)?.training_max_overrides) ?? null
   const overrides = stored
-    ? Object.fromEntries(Object.entries(stored).map(([k, v]) => [k, u.show(Number(v))]))
+    ? Object.fromEntries(Object.entries(stored).flatMap(([k, v]) => {
+      const o = readTmOverride(v)
+      return o ? [[k, convertTmOverride(o, u.show)]] : []
+    }))
     : null
   return {
     workouts,
@@ -2482,6 +2485,61 @@ export async function gatherLiftSources(athleteId: string, u: UnitContext): Prom
     unit: u.unit,
     convert: (w) => u.show(w),
   }
+}
+
+/**
+ * What the Training maxes card reads: the whole lift log plus the live week, so
+ * a preview shows the number the athlete will actually be handed — the
+ * program's reps, the block's RPE, the week's RECOVERY if there is one.
+ */
+export async function gatherTrainingMaxSources(athleteId: string, u: UnitContext): Promise<LiftModelSources | null> {
+  const liftSrc = await gatherLiftSources(athleteId, u)
+  if (!liftSrc) return null
+  const { data: prog } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
+  if (!prog?.id) return liftSrc
+  const [{ data: phase }, { data: review }] = await Promise.all([
+    supabase.from('phase').select('id, name').eq('program_id', prog.id).eq('status', 'active').maybeSingle(),
+    supabase.from('weekly_review').select('week_ending, next_week_prescription')
+      .eq('program_id', prog.id).order('week_ending', { ascending: false }).limit(1).maybeSingle(),
+  ])
+  type RoutineRow = { name: string; intent: string | null; exercises: ExerciseTemplate[] | null; intended_dow: number | null }
+  const cols = 'name, intent, exercises, intended_dow'
+  const phaseRow = phase as { id: string; name: string } | null
+  let routines = phaseRow
+    ? ((await supabase.from('routine').select(cols).eq('phase_id', phaseRow.id)).data ?? []) as RoutineRow[]
+    : []
+  if (!routines.length) routines = ((await supabase.from('routine').select(cols).eq('program_id', prog.id)).data ?? []) as RoutineRow[]
+  const rv = review as { week_ending: string; next_week_prescription: { directive?: string } | null } | null
+  const weekStart = mondayOf(localDay(new Date().toISOString()))
+  return {
+    ...liftSrc,
+    sessions: routines
+      .sort((a, b) => (a.intended_dow ?? 7) - (b.intended_dow ?? 7) || a.name.localeCompare(b.name))
+      .map((r) => ({ name: r.name, intent: r.intent, exercises: r.exercises ?? [] })),
+    phaseName: phaseRow?.name ?? null,
+    directive: rv && rv.week_ending === addDaysIso(weekStart, -1) ? rv.next_week_prescription?.directive ?? null : null,
+  }
+}
+
+/**
+ * Write (or clear, with null) one lift's hand-set TM from the app. `value` is in
+ * the display unit; the entry lands in the storage unit, stamped now, with the
+ * model's own TM beside it so a later read can tell when it has gone stale.
+ */
+export async function saveTrainingMaxOverride(
+  athleteId: string, lift: MainLiftId, value: number | null, src: LiftModelSources, u: UnitContext,
+): Promise<void> {
+  const { data, error } = await supabase.from('athlete').select('training_max_overrides').eq('id', athleteId).maybeSingle()
+  if (error) throw error
+  const next: Record<string, unknown> = {
+    ...(((data as { training_max_overrides?: Record<string, unknown> | null } | null)?.training_max_overrides) ?? {}),
+  }
+  const entry = tmOverrideEntry(lift, value, src)
+  if (entry) next[lift] = convertTmOverride(entry, u.store)
+  else delete next[lift]
+  const { error: upErr } = await supabase.from('athlete').update({ training_max_overrides: next }).eq('id', athleteId)
+  if (upErr) throw upErr
 }
 
 const CALL_LABEL: Record<Recommendation['call'], string> = {
@@ -2619,7 +2677,11 @@ export async function gatherSessionPrescription(
         skip[i] = rec.skip
         pushTargets[i] = isHeld ? modelFromSources(lift, src).recommendation?.load ?? null : null
         hints[i] = liftHint(rec, u.unit)
-        reasons[i] = [rec.reason, ...rec.why, ...rec.conditional]
+        const stale = model.trainingMax?.override?.stale ?? []
+        reasons[i] = [
+          rec.reason, ...rec.why, ...rec.conditional,
+          ...(stale.length ? [`Hand-set TM may be out of date (${stale.join('; ')}) — check it in You → Training maxes`] : []),
+        ]
         return
       }
     }

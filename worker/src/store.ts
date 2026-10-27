@@ -3,7 +3,7 @@ import { readLoggedExercises, type LoggedWorkoutLike } from '../../supabase/func
 import { formatSet, isoDay, shortDate, topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import {
   addDays, e1rmFromSet, liftNameMatcher, localDay, mondayOf, parseLiftId,
-  type LiftModelSources, type MainLiftId, type ModelWorkout,
+  type LiftModelSources, type MainLiftId, type ModelWorkout, type TmOverride,
 } from '../../supabase/functions/_shared/engine/liftModel.ts'
 import { asJson, type Sql } from './db.ts'
 
@@ -496,7 +496,7 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
   return {
     workouts,
     observations,
-    overrides: asJson<Record<string, number> | null>(athlete?.training_max_overrides, null),
+    overrides: asJson<Record<string, unknown> | null>(athlete?.training_max_overrides, null),
     sessions: (live?.sessions ?? []).slice().sort((a, b) => (a.intendedDow ?? 7) - (b.intendedDow ?? 7) || a.name.localeCompare(b.name)),
     phaseName: live?.phaseName ?? null,
     directive: review && review.week_ending === addDays(weekStart, -1) ? presc?.directive ?? null : null,
@@ -510,17 +510,18 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
  * merges in SQL: no read-modify-write window for a second writer to fall into,
  * and a single owner filter on the row it touches.
  */
-export async function saveTrainingMax(store: ConnectedStore, lift: MainLiftId, value: number | null): Promise<Record<string, number>> {
+export async function saveTrainingMax(store: ConnectedStore, lift: MainLiftId, entry: TmOverride | null): Promise<Record<string, unknown>> {
+  const json = entry ? JSON.stringify(entry) : null
   const [row] = await store.sql<{ training_max_overrides: unknown }[]>`
     UPDATE athlete SET training_max_overrides = CASE
-      WHEN ${value}::numeric IS NULL THEN COALESCE(training_max_overrides, '{}'::jsonb) - ${lift}::text
-      ELSE COALESCE(training_max_overrides, '{}'::jsonb) || jsonb_build_object(${lift}::text, ${value}::numeric)
+      WHEN ${json}::jsonb IS NULL THEN COALESCE(training_max_overrides, '{}'::jsonb) - ${lift}::text
+      ELSE COALESCE(training_max_overrides, '{}'::jsonb) || jsonb_build_object(${lift}::text, ${json}::jsonb)
     END
     WHERE id = ${store.athleteId}
     RETURNING training_max_overrides
   `
   if (!row) throw new Error('Athlete row missing')
-  return asJson<Record<string, number>>(row.training_max_overrides, {})
+  return asJson<Record<string, unknown>>(row.training_max_overrides, {})
 }
 
 export async function loadJourney(store: ConnectedStore): Promise<{

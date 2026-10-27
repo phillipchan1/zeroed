@@ -388,12 +388,21 @@ export const HALF_LIFE_DAYS = 21
 export const MAX_AGE_DISCOUNT = 0.10
 export const TM_FRACTION = 0.9
 
-/** A set that is allowed to say what the max is. */
+/**
+ * A set that is allowed to say what the max is. RPE 10 counts on a single only:
+ * a made max single IS the max, no chart in between, while "10" on a set of five
+ * is the rating lifters hand out loosely to anything that felt brutal.
+ */
 export function isQualifying(s: LiftSet): boolean {
   return s.lift != null
     && s.reps >= 1 && s.reps <= 6
-    && s.rpe != null && s.rpe >= 6 && s.rpe <= 9.5
+    && s.rpe != null && s.rpe >= 6 && (s.rpe <= 9.5 || (s.rpe === 10 && s.reps === 1))
     && s.missedReps === 0
+}
+
+/** A made single at RPE 10: the max, measured rather than estimated. */
+export function isTestedMax(s: LiftSet): boolean {
+  return s.reps === 1 && s.rpe === 10 && s.missedReps === 0
 }
 
 export interface EvidenceSet extends LiftSet {
@@ -444,6 +453,11 @@ export function workingMaxAsOf(sets: LiftSet[], lift: MainLiftId, asOf: string):
 
   let basis: WorkingMaxReading['basis'] = 'qualifying'
   let evidence = inWindow.filter(isQualifying).map((s) => withE1rm(s)).filter((s): s is EvidenceSet => !!s)
+  // A made max single supersedes every estimate before it: an older 5 @8 read
+  // off the chart is a guess at what the test then measured. Sets after it
+  // can still raise the max again.
+  const tested = evidence.filter(isTestedMax).reduce<EvidenceSet | null>((a, b) => (!a || b.date > a.date ? b : a), null)
+  if (tested) evidence = evidence.filter((e) => e.date >= tested.date)
   if (!evidence.length) {
     evidence = inWindow
       .filter((s) => s.rpe == null && s.missedReps === 0 && s.reps >= 1 && s.reps <= 6)
@@ -743,6 +757,96 @@ export function missedWeeksModifier(weeks: number): Modifier | null {
 // ────────────────────────────────────────────────────────────────────────────
 
 /** What the program asks of the lift this week. */
+// ────────────────────────────────────────────────────────────────────────────
+// HAND-SET TRAINING MAX — and when it has stopped being right.
+//
+// An override is the athlete saying "load me off this number". It wins over the
+// computed TM, but it is a snapshot: the log keeps moving under it. So each one
+// is stored with when it was set and what the model's own TM was then, and it
+// reads as stale when it is old, when the model has since moved a long way, or
+// when reps were missed after it was set. Stale is a flag, never a reset.
+// ────────────────────────────────────────────────────────────────────────────
+
+/**
+ * One entry of athlete.training_max_overrides. Writes before set_at existed
+ * are a bare number, and read as { value } with no date.
+ */
+export interface TmOverride {
+  value: number
+  /** ISO timestamp of the write. */
+  set_at?: string | null
+  /** The computed TM when it was set, in the same unit as value. */
+  model_tm?: number | null
+}
+
+export function readTmOverride(v: unknown): TmOverride | null {
+  if (v != null && typeof v === 'object') {
+    const o = v as Record<string, unknown>
+    const value = num(o.value)
+    if (value == null || value <= 0) return null
+    return { value, set_at: typeof o.set_at === 'string' ? o.set_at : null, model_tm: num(o.model_tm) }
+  }
+  const value = num(v)
+  return value != null && value > 0 ? { value } : null
+}
+
+/** The same override in another unit: value and model_tm both move. */
+export function convertTmOverride(o: TmOverride, f: (w: number) => number): TmOverride {
+  return { ...o, value: f(o.value), model_tm: o.model_tm != null ? f(o.model_tm) : null }
+}
+
+export const STALE_OVERRIDE_DAYS = 28
+/** How far the computed TM may move after an override before it reads stale. */
+export const MODEL_MOVED_PCT = 5
+/** An undated override is only flagged when it sits this far from the model. */
+export const UNDATED_DRIFT_PCT = 10
+
+export interface OverrideStatus {
+  /** Athlete-local day it was set, or null for an undated write. */
+  setOn: string | null
+  ageDays: number | null
+  modelAtSet: number | null
+  /** Why the hand-set number may no longer be right. Empty when it still holds. */
+  stale: string[]
+}
+
+export function overrideStatus(input: {
+  value: number
+  setOn: string | null
+  modelAtSet: number | null
+  computedNow: number | null
+  sets: LiftSet[]
+  lift: MainLiftId
+  today: string
+}): OverrideStatus {
+  const { value, setOn, modelAtSet, computedNow, today } = input
+  const stale: string[] = []
+  const ageDays = setOn ? Math.max(0, daysBetween(setOn, today)) : null
+  if (ageDays != null && ageDays >= STALE_OVERRIDE_DAYS) {
+    stale.push(`set ${Math.floor(ageDays / 7)} weeks ago (${shortDay(setOn!)})`)
+  }
+  if (modelAtSet != null && modelAtSet > 0 && computedNow != null) {
+    const moved = ((computedNow - modelAtSet) / modelAtSet) * 100
+    if (Math.abs(moved) >= MODEL_MOVED_PCT) {
+      stale.push(`the model's TM has moved ${fmtLoad(Math.round(modelAtSet))} → ${fmtLoad(Math.round(computedNow))} since`)
+    }
+  } else if (!setOn && computedNow != null && computedNow > 0) {
+    const off = ((value - computedNow) / computedNow) * 100
+    if (Math.abs(off) >= UNDATED_DRIFT_PCT) {
+      stale.push(`${Math.round(Math.abs(off))}% ${off > 0 ? 'above' : 'below'} the model's ${fmtLoad(Math.round(computedNow))}, date set unknown`)
+    }
+  }
+  // Strictly after the day it was set: a TM lowered in answer to a miss that
+  // same morning is the athlete already acting on it.
+  if (setOn) {
+    const miss = input.sets
+      .filter((s) => s.lift === input.lift && s.date > setOn && s.date <= today && s.missedReps > 0)
+      .sort((a, b) => b.date.localeCompare(a.date))[0]
+    if (miss) stale.push(`missed reps on ${shortDay(miss.date)}, after it was set`)
+  }
+  return { setOn, ageDays, modelAtSet, stale }
+}
+
 export interface LiftPrescription {
   sets: number
   reps: string | number
@@ -762,6 +866,8 @@ export interface LiftModelInput {
   today: string
   unit?: ModelUnit
   tmOverride?: number | null
+  /** When the override was set (athlete-local day) and the computed TM then. */
+  tmOverrideSet?: { on: string | null; modelTm: number | null } | null
   prescription?: LiftPrescription | null
   /** The block's RPE target when the lift carries none of its own. */
   defaultTargetRpe?: number
@@ -802,7 +908,13 @@ export interface LiftModel {
   unit: ModelUnit
   asOf: string
   workingMax: (WorkingMaxReading & { rounded: number }) | null
-  trainingMax: { value: number; source: 'computed' | 'override'; computed: number | null } | null
+  trainingMax: {
+    value: number
+    source: 'computed' | 'override'
+    computed: number | null
+    /** Only on an override. */
+    override: OverrideStatus | null
+  } | null
   trend: { w4: Trend | null; w8: Trend | null }
   series: WorkingMaxPoint[]
   allTimeBest: AllTimeBest | null
@@ -913,13 +1025,36 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   }
   if (wm?.basis === 'no_rpe_floor') notes.push('no RPE logged in the window — working max is a floor (those sets read at RPE 10)')
   if (wm?.basis === 'capped_by_miss') notes.push(`working max recomputed from the miss on ${shortDay(wm.anchor.date)}`)
+  if (wm && isTestedMax(wm.anchor)) {
+    const anchor = wm.anchor
+    const outranked = mine.some((s) => s.date < anchor.date && daysBetween(s.date, today) <= WINDOW_DAYS
+      && isQualifying(s) && (withE1rm(s)?.e1rm ?? 0) > anchor.e1rm)
+    if (outranked) notes.push(`working max is the tested single ${fmtSet(anchor)} on ${shortDay(anchor.date)} — higher estimates from before it no longer count`)
+  }
 
   const computedTm = wm ? wm.value * TM_FRACTION : null
   const override = input.tmOverride != null && input.tmOverride > 0 ? input.tmOverride : null
   const tm = override ?? computedTm
-  const trainingMax = tm != null
-    ? { value: tm, source: override != null ? 'override' as const : 'computed' as const, computed: computedTm }
+  const overrideState = override != null
+    ? overrideStatus({
+      value: override,
+      setOn: input.tmOverrideSet?.on ?? null,
+      modelAtSet: input.tmOverrideSet?.modelTm ?? null,
+      computedNow: computedTm,
+      sets,
+      lift,
+      today,
+    })
     : null
+  const trainingMax = tm != null
+    ? {
+      value: tm,
+      source: override != null ? 'override' as const : 'computed' as const,
+      computed: computedTm,
+      override: overrideState,
+    }
+    : null
+  if (overrideState?.stale.length) notes.push(`hand-set TM may be out of date: ${overrideState.stale.join('; ')}`)
 
   const detrained = wm != null && best != null && wm.value < best.e1rm * DETRAINED_BELOW
   if (detrained && wm && best) {
@@ -1010,16 +1145,24 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
     call = missedWeeks >= 2 ? 'establish' : decision.call
     deltaPct = decision.deltaPct
     why.push(decision.why)
+    // A hand-set TM scales last week's top set by how far it sits from the
+    // model's own: equal to it changes nothing, 5% under takes 5% off. Without
+    // this, setting one would move nothing on a week that repeats a rep range.
+    // With no model TM to compare against, it charts the base instead.
     const comparable = ref != null && ref.top.reps >= reps.lo && ref.top.reps <= reps.hi
-    if (comparable) {
-      base = ref!.top.weight
+    const tmScale = override != null && computedTm != null && computedTm > 0 ? override / computedTm : null
+    if (comparable && (override == null || tmScale != null)) {
+      base = ref!.top.weight * (tmScale ?? 1)
       basis = 'last_top_set'
-      why.push(`base: top set ${fmtSet(ref!.top)} on ${shortDay(ref!.top.date)}`)
+      const pct = tmScale != null ? Math.round((tmScale - 1) * 1000) / 10 : 0
+      why.push(`base: top set ${fmtSet(ref!.top)} on ${shortDay(ref!.top.date)}${pct !== 0
+        ? `, ${pct > 0 ? '+' : '−'}${fmtLoad(Math.abs(pct))}% for the hand-set TM (${fmtLoad(Math.round(override!))} vs the model's ${fmtLoad(Math.round(computedTm!))})`
+        : ''}`)
     } else if (chartMax != null) {
       base = loadForReps(chartMax, repCount, target) ?? ref?.top.weight ?? 0
       basis = 'rpe_chart'
       const pct = rpePercent(repCount, target)
-      why.push(`base: ${repCount} @${fmtLoad(target)} is ${pct != null ? fmtLoad(pct * 100) : '?'}% of ${fmtLoad(Math.round(chartMax))} on the RPE chart${ref ? ` (last top set was ${fmtSet(ref.top)})` : ''}`)
+      why.push(`base: ${repCount} @${fmtLoad(target)} is ${pct != null ? fmtLoad(pct * 100) : '?'}% of ${fmtLoad(Math.round(chartMax))} on the RPE chart${override != null ? ', off the hand-set TM' : ''}${ref ? ` (last top set was ${fmtSet(ref.top)})` : ''}`)
     } else {
       base = ref?.top.weight ?? 0
       basis = 'last_top_set'
@@ -1198,7 +1341,8 @@ export interface LiftModelSources {
   workouts: ModelWorkout[]
   /** session_observation rows; a Tweak/Pain chip reads "<exercise> — Pain". */
   observations?: Array<{ logged_at: string; signal: string; severity: number }>
-  overrides?: Record<string, number | null> | null
+  /** athlete.training_max_overrides, in the model's unit: numbers or TmOverride entries. */
+  overrides?: Record<string, unknown> | null
   /** The live week, in training order. */
   sessions?: Array<{ name?: string; intent?: string | null; exercises: ExerciseTemplate[] }>
   phaseName?: string | null
@@ -1223,7 +1367,7 @@ export function modelFromSources(lift: MainLiftId, src: LiftModelSources): LiftM
     .map((o) => ({ date: localDay(o.logged_at, timeZone), exercise: o.signal.split('—')[0].trim(), severity: o.severity }))
   const rx = prescriptionFromProgram(lift, src.sessions ?? [])
   const flags = sessionFlags(rx?.session, rx?.sessionIntent, rx?.load, src.phaseName)
-  const override = src.overrides?.[lift]
+  const override = readTmOverride(src.overrides?.[lift])
   // The weekly review's DELOAD is chosen off an average RPE across every lift —
   // exactly the signal this model exists to stop reading — so only an explicit
   // deload (the program's words, the athlete's RECOVERY, or the caller) counts.
@@ -1235,7 +1379,10 @@ export function modelFromSources(lift: MainLiftId, src: LiftModelSources): LiftM
     pain,
     today,
     unit: src.unit,
-    tmOverride: typeof override === 'number' ? override : null,
+    tmOverride: override?.value ?? null,
+    tmOverrideSet: override
+      ? { on: override.set_at ? localDay(override.set_at, timeZone) : null, modelTm: override.model_tm ?? null }
+      : null,
     prescription: rx,
     defaultTargetRpe: (src.phaseName && BLOCK_TARGET_RPE[src.phaseName]) || DEFAULT_TARGET_RPE,
     deload,
@@ -1273,12 +1420,31 @@ export function exerciseCall(
 }
 
 /** A hand-set TM write, previewed: what the change does to this week's number. */
+/**
+ * The entry a write stores: the value, now, and the computed TM it overrides
+ * (rounded to a tenth), so a later read can tell how far the model has moved.
+ * Null clears the override.
+ */
+export function tmOverrideEntry(lift: MainLiftId, value: number | null, src: LiftModelSources, now = new Date()): TmOverride | null {
+  if (value == null) return null
+  const rest = { ...(src.overrides ?? {}) }
+  delete rest[lift]
+  const computed = modelFromSources(lift, { ...src, overrides: rest }).trainingMax?.computed ?? null
+  return { value, set_at: now.toISOString(), model_tm: computed != null ? Math.round(computed * 10) / 10 : null }
+}
+
+/** The sources with one lift's override set to `value` as of now (or cleared). */
+export function withTrainingMax(lift: MainLiftId, value: number | null, src: LiftModelSources, now = new Date()): LiftModelSources {
+  const overrides = { ...(src.overrides ?? {}) }
+  const entry = tmOverrideEntry(lift, value, src, now)
+  if (entry) overrides[lift] = entry
+  else delete overrides[lift]
+  return { ...src, overrides }
+}
+
 export function previewTrainingMax(lift: MainLiftId, value: number | null, src: LiftModelSources): string {
   const before = modelFromSources(lift, src)
-  const overrides = { ...(src.overrides ?? {}) }
-  if (value == null) delete overrides[lift]
-  else overrides[lift] = value
-  const after = modelFromSources(lift, { ...src, overrides })
+  const after = modelFromSources(lift, withTrainingMax(lift, value, src))
   const tm = (m: LiftModel) => m.trainingMax
     ? `${fmtLoad(Math.round(m.trainingMax.value))}${m.unit}${m.trainingMax.source === 'override' ? ' (set by hand)' : ''}`
     : 'none'
@@ -1316,8 +1482,9 @@ export function renderLiftModel(m: LiftModel): string {
   }
   if (m.trainingMax) {
     const tm = m.trainingMax
+    const setOn = tm.override?.setOn ? ` ${shortDay(tm.override.setOn)}` : ''
     lines.push(`Training max: ${fmtLoad(Math.round(tm.value))}${u}${tm.source === 'override'
-      ? ` (set by hand; computed would be ${tm.computed != null ? fmtLoad(Math.round(tm.computed)) : '—'})`
+      ? ` (set by hand${setOn}; computed would be ${tm.computed != null ? fmtLoad(Math.round(tm.computed)) : '—'})`
       : ` (${TM_FRACTION * 100}% of working max)`}`)
   }
   lines.push(`Trend: 4 wk ${fmtTrend(m.trend.w4)} · 8 wk ${fmtTrend(m.trend.w8)}`)

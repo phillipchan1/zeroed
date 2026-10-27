@@ -23,6 +23,7 @@ import {
   buildLiftModel, buildLiftModels, prescriptionFromProgram, renderLiftModel, sessionFlags,
   mondayOf, addDays, shortDay, targetReps, percentOf, liftIncrement, recencyFactor,
   modelFromSources, previewTrainingMax, BLOCK_TARGET_RPE,
+  readTmOverride, convertTmOverride, tmOverrideEntry, withTrainingMax,
   type LiftSet, type TopSetWeek, type ModelWorkout,
 } from './liftModel.ts'
 import { PHASE_RPE } from './prescription.ts'
@@ -132,7 +133,34 @@ near(loadForReps(400, 5, 8), 324.4, 0.01, '5 @8 off a 400 max is 324.4')
 
 ok(isQualifying(s('Squat', TODAY, 315, 5, 8)), '5 @8 on the squat qualifies')
 ok(!isQualifying(s('Squat', TODAY, 275, 7, 8)), '7 reps does not')
-ok(!isQualifying(s('Squat', TODAY, 365, 1, 10)), 'RPE 10 does not')
+ok(isQualifying(s('Squat', TODAY, 365, 1, 10)), 'a made single at RPE 10 is a tested max and qualifies')
+ok(!isQualifying(s('Squat', TODAY, 315, 3, 10)), 'RPE 10 on a triple does not')
+ok(!isQualifying(s('Squat', TODAY, 385, 1, 10, 1)), 'a missed single does not')
+{
+  // A tested max moves the working max: it is the e1RM, no chart in between.
+  const wm = workingMaxAsOf([s('Squat', '2026-10-12', 300, 5, 8), s('Squat', '2026-10-24', 375, 1, 10)], 'squat', TODAY)!
+  eq(wm.anchor.weight, 375, 'the tested single anchors the working max')
+  near(wm.value, 375 * recencyFactor(2), 0.01, 'its e1RM is the weight, discounted two days')
+
+  // And it supersedes the estimates before it, even higher ones: 315×5 @8 reads
+  // as 388, but the test then measured 365.
+  const older = [s('Squat', '2026-10-05', 315, 5, 8), s('Squat', '2026-10-19', 365, 1, 10)]
+  const tested = workingMaxAsOf(older, 'squat', TODAY)!
+  eq(tested.anchor.weight, 365, 'a test under the old estimate sets the working max')
+  near(tested.value, 365 * recencyFactor(7), 0.01, 'at the tested weight')
+  const after = workingMaxAsOf([...older, s('Squat', '2026-10-24', 345, 3, 8)], 'squat', TODAY)!
+  eq(after.anchor.weight, 345, 'a set after the test can raise it again')
+  ok(after.value > tested.value, 'and does')
+  const m = buildLiftModel({ lift: 'squat', sets: older, today: TODAY })
+  ok(m.notes.some((n) => n.includes('tested single 365x1 @10') && n.includes('no longer count')), 'the model says the test superseded the estimate')
+  // The OHP sanity case with a test in it: 115×5 @8 reads as 142, a tested 125 is the max.
+  const ohp = buildLiftModel({
+    lift: 'ohp', sets: [s('Strict OHP', '2026-09-29', 115, 5, 8), s('Strict OHP', '2026-10-17', 125, 1, 10)], today: TODAY,
+    prescription: { sets: 1, reps: '1', targetRpe: 9, exercise: 'Strict OHP' },
+  })
+  ok(ohp.workingMax!.value <= 125, `a tested 125 OHP caps the working max (got ${ohp.workingMax!.value.toFixed(1)})`)
+  ok(ohp.recommendation!.load < 135, `and nothing near 135 is prescribed (got ${ohp.recommendation!.load})`)
+}
 ok(!isQualifying(s('Squat', TODAY, 225, 5, 5.5)), 'RPE 5.5 does not')
 ok(!isQualifying(s('Squat', TODAY, 315, 5, null)), 'no RPE does not')
 ok(!isQualifying(s('Squat', TODAY, 315, 3, 9, 2)), 'a set with missed reps does not')
@@ -315,6 +343,88 @@ const REASON = /^\d+(\.\d)? = \d+% of TM \d+( \(set by hand\))? \(from \d+(\.\d)
   eq(m.recommendation!.load, 180, '65% of TM 275 = 178.75 → 180')
   eq(m.recommendation!.pctOfTm, 65, 'shown as a % of TM')
   ok(m.recommendation!.reason.includes('(set by hand)'), 'the reason says the TM was set by hand')
+}
+
+{
+  // A hand-set TM moves the number even when last week's top set matches the
+  // rep range — by its ratio to the model's TM, so the same number changes nothing.
+  const log = [s('Bench press', '2026-10-20', 245, 5, 8)]
+  const rx = { sets: 3, reps: '5', targetRpe: 8, exercise: 'Bench press' }
+  const plainModel = buildLiftModel({ lift: 'bench', sets: log, today: TODAY, prescription: rx })
+  const plain = plainModel.recommendation!
+  eq(plain.basis, 'last_top_set', 'without an override the base is last week\'s top set')
+  const modelTm = plainModel.trainingMax!.value
+  const same = buildLiftModel({ lift: 'bench', sets: log, today: TODAY, prescription: rx, tmOverride: modelTm }).recommendation!
+  eq(same.load, plain.load, 'a hand-set TM equal to the model\'s changes nothing')
+  const hand = buildLiftModel({ lift: 'bench', sets: log, today: TODAY, prescription: rx, tmOverride: modelTm * 0.9 }).recommendation!
+  eq(hand.basis, 'last_top_set', 'it still reads last week\'s top set')
+  near(hand.load, plain.load * 0.9, 5, `10% under the model takes ~10% off (${hand.load} vs ${plain.load})`)
+  ok(hand.why.some((w) => w.includes('−10% for the hand-set TM')), 'the base line says how far the hand-set TM moved it')
+  // No model TM to scale against (no RPE in range, nothing qualifying): the TM charts the base.
+  const noModel = buildLiftModel({
+    lift: 'bench', sets: [s('Bench press', '2026-10-20', 225, 8, null)], today: TODAY, tmOverride: 250,
+    prescription: { sets: 3, reps: '8', targetRpe: 8, exercise: 'Bench press' },
+  }).recommendation!
+  eq(noModel.basis, 'rpe_chart', 'with no model TM, a hand-set one charts the base')
+  ok(noModel.why.some((w) => w.includes('off the hand-set TM')), 'and says so')
+}
+
+{
+  // Stale overrides: old, the model moved, or a miss since. Bench computed TM ≈ 267.
+  const log = [s('Bench press', '2026-10-20', 245, 5, 8)]
+  const at = (on: string | null, modelTm: number | null, sets = log, value = 260) =>
+    buildLiftModel({ lift: 'bench', sets, today: TODAY, tmOverride: value, tmOverrideSet: on || modelTm != null ? { on, modelTm } : null })
+      .trainingMax!.override!
+  const computed = buildLiftModel({ lift: 'bench', sets: log, today: TODAY }).trainingMax!.value
+  near(computed, 267, 1, 'fixture: computed bench TM')
+
+  eq(at('2026-10-25', 266).stale.length, 0, 'set yesterday against the same model: not stale')
+  eq(at('2026-10-25', 266).ageDays, 1, 'age in days')
+  ok(at('2026-09-20', 266).stale.some((r) => r.includes('5 weeks ago')), 'set five weeks ago: stale')
+  eq(at('2026-09-29', 266).stale.length, 0, 'four weeks less a day: not yet')
+  ok(at('2026-10-21', 240).stale.some((r) => r.includes('240 → 267')), 'the model moved 11% since: stale, with both numbers')
+  eq(at('2026-10-21', 260).stale.length, 0, 'the model moved under 5%: not stale')
+  const missed = [...log, s('Bench press', '2026-10-23', 260, 3, 10, 2)]
+  ok(at('2026-10-21', 266, missed).stale.some((r) => r.includes('missed reps on Oct 23')), 'a miss after it was set: stale')
+  eq(at('2026-10-23', 266, missed).stale.some((r) => r.includes('missed')), false, 'a miss the same day it was set is what it answered')
+  ok(at(null, null, log, 300).stale.some((r) => r.includes('date set unknown')), 'an undated override 12% over the model: stale')
+  eq(at(null, null, log, 270).stale.length, 0, 'an undated override near the model: not stale')
+  const m = buildLiftModel({ lift: 'bench', sets: log, today: TODAY, tmOverride: 260, tmOverrideSet: { on: '2026-09-20', modelTm: 266 } })
+  ok(m.notes.some((n) => n.startsWith('hand-set TM may be out of date')), 'a stale override is a note')
+  ok(renderLiftModel(m).includes('set by hand Sep 20'), 'the TM line says when it was set')
+  eq(buildLiftModel({ lift: 'bench', sets: log, today: TODAY }).trainingMax!.override, null, 'a computed TM has no override status')
+}
+
+{
+  // Stored shapes: a bare number (older writes) or a dated entry.
+  eq(readTmOverride(275)?.value, 275, 'a bare number reads as a value')
+  eq(readTmOverride('275')?.value, 275, 'a NUMERIC string reads too')
+  const e = readTmOverride({ value: 275, set_at: '2026-10-01T15:00:00Z', model_tm: 268.4 })!
+  eq(e.set_at, '2026-10-01T15:00:00Z', 'set_at kept')
+  eq(e.model_tm, 268.4, 'model_tm kept')
+  eq(readTmOverride({ value: 0 }), null, 'zero is no override')
+  eq(readTmOverride('heavy'), null, 'garbage is no override')
+  eq(readTmOverride(null), null, 'null is no override')
+  eq(convertTmOverride(e, (w) => w / 2).model_tm, 134.2, 'converting moves model_tm with the value')
+
+  // Through the sources: set_at becomes the athlete-local day; a write records the model's TM.
+  const workouts: ModelWorkout[] = [{
+    id: 'w1', performed_at: '2026-10-20T17:00:00Z',
+    exercises_snapshot: [{ name: 'Bench press', sets: 3, reps: '5' }],
+    actual_weights: { '0': [{ weight: 245, reps: 5, rpe: 8, done: true }] },
+  } as unknown as ModelWorkout]
+  const src = { workouts, today: TODAY, overrides: { bench: { value: 260, set_at: '2026-10-02T03:00:00Z', model_tm: 266 } } }
+  const fromSrc = modelFromSources('bench', src).trainingMax!
+  eq(fromSrc.source, 'override', 'an entry override is read')
+  eq(fromSrc.override!.setOn, '2026-10-01', 'set_at is read as the Pacific day it happened')
+  const entry = tmOverrideEntry('bench', 250, src, new Date('2026-10-26T18:00:00Z'))!
+  eq(entry.set_at, '2026-10-26T18:00:00.000Z', 'the write is stamped')
+  near(entry.model_tm!, modelFromSources('bench', { ...src, overrides: null }).trainingMax!.value, 0.1, 'the write records the computed TM it overrides, not the old override')
+  const after = modelFromSources('bench', withTrainingMax('bench', 250, src, new Date('2026-10-26T18:00:00Z'))).trainingMax!
+  eq(after.value, 250, 'withTrainingMax sets it')
+  eq(after.override!.stale.length, 0, 'a fresh write is not stale')
+  eq(modelFromSources('bench', withTrainingMax('bench', null, src)).trainingMax!.source, 'computed', 'and null clears it')
+  ok(previewTrainingMax('bench', 250, src).includes('260lb (set by hand) → 250lb (set by hand)'), 'the preview reads an entry override')
 }
 
 {

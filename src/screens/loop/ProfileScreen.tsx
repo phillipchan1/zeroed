@@ -11,6 +11,7 @@ import { restAlertEnabled, setRestAlertEnabled, setClickEnabled, setSetClickEnab
 import {
   PageHeader, SectionHeader, Skeleton, Button, Input, Row, Sheet,
 } from '../../components/ui'
+import { TrainingMaxes } from './TrainingMaxes'
 
 interface McpTokenRow {
   id: string
@@ -316,6 +317,8 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
             />
           </div>
         </div>
+
+        <TrainingMaxes athleteId={athleteId} unit={unit} />
 
         <div className="section">
           <SectionHeader>Your data</SectionHeader>

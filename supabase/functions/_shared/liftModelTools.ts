@@ -5,8 +5,8 @@
 
 import type { McpTool } from './mcpProtocol.ts'
 import {
-  MAIN_LIFTS, modelFromSources, parseLiftId, previewTrainingMax, renderLiftModel,
-  type DayOf, type LiftModelSources, type MainLiftId,
+  MAIN_LIFTS, modelFromSources, parseLiftId, previewTrainingMax, renderLiftModel, tmOverrideEntry,
+  type DayOf, type LiftModelSources, type MainLiftId, type TmOverride,
 } from './engine/liftModel.ts'
 
 export const LIFT_MODEL_TOOLS: McpTool[] = [
@@ -30,7 +30,7 @@ export const LIFT_MODEL_TOOLS: McpTool[] = [
   },
   {
     name: 'set_training_max',
-    description: 'Set (or clear, with training_max null) one lift\'s hand-set training max. Without confirm=true it only previews what this week\'s number becomes.',
+    description: 'Set (or clear, with training_max null) one lift\'s hand-set training max. It is stored with today\'s date and the model\'s own TM, so get_lift_model can flag it once it goes stale. Without confirm=true it only previews what this week\'s number becomes.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -75,7 +75,8 @@ export async function runLiftModelTool(
   args: Record<string, unknown>,
   io: {
     load: () => Promise<LiftModelSources>
-    saveTrainingMax: (lift: MainLiftId, value: number | null) => Promise<unknown>
+    /** Null clears the lift; an entry carries when it was set and the model's TM then. */
+    saveTrainingMax: (lift: MainLiftId, entry: TmOverride | null) => Promise<unknown>
   },
 ): Promise<string> {
   if (name === 'get_lift_model') {
@@ -100,7 +101,7 @@ export async function runLiftModelTool(
     const src = await io.load()
     const preview = previewTrainingMax(id, value, src)
     if (args.confirm !== true) return `${preview}\n\nPreview only — call again with confirm=true to save it.`
-    await io.saveTrainingMax(id, value)
+    await io.saveTrainingMax(id, tmOverrideEntry(id, value, src))
     return `${preview}\n\nSaved.`
   }
   throw new Error(`Unknown tool: ${name}`)

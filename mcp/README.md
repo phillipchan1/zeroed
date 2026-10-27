@@ -19,7 +19,7 @@ Same tools either way. The model proposes. The existing engine (`src/engine/prog
 | `list_workouts` / `get_workout` | Full history, filterable by date or lift. |
 | `search_lifts` | One movement's top sets + RPE-chart e1RM trend. Main lifts match by identity ("squat" never pulls a Cossack). |
 | `get_lift_model` | Squat / bench / deadlift / OHP (or `all`): working max, training max, 4/8-week trend, all-time best, last qualifying sets, and this week's prescription with its reason line. Pass today's sleep / readiness / knee pain to apply the modifiers. |
-| `set_training_max` | Hand-set one lift's TM (or clear it with `null`). Previews unless `confirm=true`. |
+| `set_training_max` | Hand-set one lift's TM (or clear it with `null`). Stored with the date and the model's own TM, so `get_lift_model` flags it once it goes stale (4+ weeks old, the model moved 5%+, or reps missed since). The app sets the same value under You → Training maxes. Previews unless `confirm=true`. |
 | `get_program_journey` / `get_coach_notes` | Blocks, revisions, weekly reviews. |
 | `preview_program_edits` | In-memory surgical edits + deterministic diff. Writes nothing. |
 | `apply_program_edits` | Write the preview. Requires `confirm=true`. |

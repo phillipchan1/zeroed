@@ -211,7 +211,7 @@ export async function executeZeroedTool(
   if (LIFT_MODEL_TOOL_NAMES.has(name)) {
     return runLiftModelTool(name, args, {
       load: () => loadLiftModelSources(store),
-      saveTrainingMax: (lift, value) => saveTrainingMax(store, lift, value),
+      saveTrainingMax: (lift, entry) => saveTrainingMax(store, lift, entry),
     })
   }
 

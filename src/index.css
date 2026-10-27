@@ -3681,6 +3681,84 @@ textarea.input {
   cursor: pointer;
 }
 
+/* --- Training maxes (You tab) ----------------------------------------------- */
+.tm-flag {
+  margin-left: 8px;
+  padding: 2px 6px;
+  border-radius: var(--radius-pill);
+  background: rgba(212, 168, 72, 0.12);
+  color: var(--pending);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  vertical-align: 2px;
+}
+.tm-link {
+  min-height: 32px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--computing);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.tm-stale {
+  margin-bottom: 16px;
+  padding: 12px;
+  border: 1px solid rgba(212, 168, 72, 0.35);
+  border-radius: 10px;
+  background: rgba(212, 168, 72, 0.06);
+  font-size: var(--fs-sm);
+}
+.tm-stale__title { color: var(--pending); font-weight: 600; }
+.tm-stale ul { margin: 6px 0 0; padding-left: 16px; color: var(--text); line-height: 1.5; }
+.tm-stale__actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.tm-stale__actions .btn { flex: 1 1 140px; min-height: 44px; }
+.tm-field { display: flex; flex-direction: column; gap: 6px; }
+.tm-field__label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.tm-field .input { font-size: var(--fs-xl); font-weight: 700; }
+.tm-nudges { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin-top: 10px; }
+.tm-nudge {
+  min-height: 44px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  background: transparent;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.tm-nudge:active { border-color: var(--signal); color: var(--signal); }
+.tm-model {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 14px;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  color: var(--text-dim);
+}
+.tm-model strong { color: var(--text); }
+.tm-note { margin-top: 6px; font-size: var(--fs-xs); line-height: 1.45; color: var(--text-dim); }
+.tm-warn { margin-top: 12px; font-size: var(--fs-sm); line-height: 1.45; color: var(--pending); }
+.tm-preview {
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+  font-size: var(--fs-sm);
+  line-height: 1.5;
+}
+.tm-preview p { margin-top: 4px; }
+.tm-preview .text-dim { display: inline-block; min-width: 44px; }
+
 .set-row__missed {
   margin-left: 4px;
   font-size: var(--fs-xs);

@@ -4,7 +4,7 @@ import { applyEdits, previewEdits, type EditInput } from './edits.ts'
 import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from './format.ts'
 import { liveToDraft } from './edits.ts'
 import {
-  MAIN_LIFTS, modelFromSources, parseLiftId, previewTrainingMax, renderLiftModel, type MainLiftId,
+  MAIN_LIFTS, modelFromSources, parseLiftId, previewTrainingMax, renderLiftModel, tmOverrideEntry, type MainLiftId,
 } from '../../src/engine/liftModel.ts'
 import {
   connectStore,
@@ -267,7 +267,7 @@ export function createZeroedServer(): McpServer {
 
   server.tool(
     'set_training_max',
-    'Set (or clear, with training_max null) one lift\'s hand-set training max. Without confirm=true it only previews what this week\'s number becomes.',
+    'Set (or clear, with training_max null) one lift\'s hand-set training max. It is stored with today\'s date and the model\'s own TM, so get_lift_model can flag it once it goes stale. Without confirm=true it only previews what this week\'s number becomes.',
     {
       lift: z.string().describe('squat | bench | deadlift | ohp'),
       training_max: z.number().positive().nullable().describe('The TM in the athlete\'s unit, or null to go back to 90% of the working max'),
@@ -280,7 +280,7 @@ export function createZeroedServer(): McpServer {
       const src = await loadLiftModelSources(store)
       const preview = previewTrainingMax(id, training_max, src)
       if (confirm !== true) return `${preview}\n\nPreview only — call again with confirm=true to save it.`
-      await saveTrainingMax(store, id, training_max)
+      await saveTrainingMax(store, id, tmOverrideEntry(id, training_max, src))
       return `${preview}\n\nSaved.`
     }),
   )

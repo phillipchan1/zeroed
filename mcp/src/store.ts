@@ -2,7 +2,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { readLoggedExercises, type LoggedWorkoutLike } from '../../src/engine/loggedSets.ts'
 import {
   e1rmFromSet, liftNameMatcher, localDay, mondayOf, addDays, parseLiftId,
-  type LiftModelSources, type MainLiftId, type ModelWorkout,
+  type LiftModelSources, type MainLiftId, type ModelWorkout, type TmOverride,
 } from '../../src/engine/liftModel.ts'
 import type { ExerciseTemplate, SetLog } from '../../src/types/database.ts'
 import { describeAuth, readEnv, type ZeroedEnv } from './env.ts'
@@ -398,7 +398,7 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
   return {
     workouts,
     observations: (obsRes.data ?? []) as Array<{ signal: string; severity: number; logged_at: string }>,
-    overrides: (athleteRes.data?.training_max_overrides as Record<string, number> | null) ?? null,
+    overrides: (athleteRes.data?.training_max_overrides as Record<string, unknown> | null) ?? null,
     sessions: (live?.sessions ?? []).slice().sort((a, b) => (a.intendedDow ?? 7) - (b.intendedDow ?? 7) || a.name.localeCompare(b.name)),
     phaseName: live?.phaseName ?? null,
     directive: review && review.week_ending === addDays(weekStart, -1) ? review.next_week_prescription?.directive ?? null : null,
@@ -408,12 +408,12 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
 }
 
 /** Write (or clear, with null) one lift's hand-set training max. */
-export async function saveTrainingMax(store: ConnectedStore, lift: MainLiftId, value: number | null): Promise<Record<string, number>> {
+export async function saveTrainingMax(store: ConnectedStore, lift: MainLiftId, entry: TmOverride | null): Promise<Record<string, unknown>> {
   const { data, error } = await store.supabase.from('athlete').select('training_max_overrides').eq('id', store.athleteId).maybeSingle()
   if (error) throw new Error(error.message)
-  const next: Record<string, number> = { ...((data?.training_max_overrides as Record<string, number> | null) ?? {}) }
-  if (value == null) delete next[lift]
-  else next[lift] = value
+  const next: Record<string, unknown> = { ...((data?.training_max_overrides as Record<string, unknown> | null) ?? {}) }
+  if (entry == null) delete next[lift]
+  else next[lift] = entry
   const { error: upErr } = await store.supabase.from('athlete').update({ training_max_overrides: next }).eq('id', store.athleteId)
   if (upErr) throw new Error(upErr.message)
   return next
