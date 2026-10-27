@@ -21,6 +21,7 @@
 // =============================================================================
 
 import type { ExerciseTemplate, TrackingType } from '../types/database'
+import { intervalPlanFor } from './intervals.ts'
 
 export type LibraryCategory =
   | 'Lower Chain' | 'Upper Chain' | 'Posterior Chain' | 'Core' | 'Conditioning'
@@ -759,6 +760,9 @@ export function resolveTrackingType(
   reps?: string,
   load?: string,
 ): TrackingType {
+  // An interval block is timed by construction — "8 × 20s on / 40s off" is
+  // logged as the work it held, whatever the movement is usually counted in.
+  if (intervalPlanFor({ name, reps: reps ?? '', sets: 1 })) return 'time'
   const hit = lookup(name)
   if (hit) {
     if (hit.alt) {
@@ -778,10 +782,13 @@ export function resolveTrackingType(
  * before the library knew it (a T-bar row the heuristic once filed as a timed
  * hold stays wrong forever otherwise). An uncurated one keeps whatever it was
  * stamped with, so a heuristic change never moves the inputs under a lift the
- * athlete has already been logging.
+ * athlete has already been logging. An interval block is timed either way: its
+ * stamp predates the timer that now logs it.
  */
 export function effectiveTrackingType(ex: Pick<ExerciseTemplate, 'name' | 'reps' | 'load' | 'tracking_type'>): TrackingType {
-  if (lookup(ex.name)) return resolveTrackingType(ex.name, ex.reps, ex.load)
+  if (lookup(ex.name) || intervalPlanFor({ name: ex.name, reps: ex.reps ?? '', sets: 1 })) {
+    return resolveTrackingType(ex.name, ex.reps, ex.load)
+  }
   return ex.tracking_type ?? resolveTrackingType(ex.name, ex.reps, ex.load)
 }
 

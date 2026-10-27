@@ -3613,16 +3613,21 @@ textarea.input {
 /* --- Session check-in + the lift model's reason line ------------------------ */
 .checkin {
   margin-top: 16px;
-  padding: 10px 12px;
+  /* The toggle carries the height now, so the card closes at the same 52px it
+     always did — the tap area grew, the row didn't. */
+  padding: 4px 12px;
   border: 1px solid var(--line);
   border-radius: 10px;
 }
+.checkin:has(.checkin__grid) { padding-bottom: 12px; }
 .checkin__toggle {
   display: flex;
   align-items: center;
   gap: 10px;
   width: 100%;
-  min-height: 32px;
+  /* 44px: tapped at the rack, often with chalk on the thumb. At 32 it was the
+     one control on the workout screen under the miss-tap floor. */
+  min-height: 44px;
   padding: 0;
   background: none;
   border: 0;
@@ -3685,3 +3690,615 @@ textarea.input {
   margin-top: 8px;
   color: var(--pending);
 }
+
+/* ==========================================================================
+   Interval timer — HIIT inside the session
+   One full-screen instrument. The phase owns the colour: amber to get ready,
+   signal yellow for work, computing blue for rest — readable from across a
+   turf lane without parsing a single digit. Every phase change re-locks the
+   brackets and washes the screen once; the last three seconds pulse with the
+   count. The clock is the only thing that moves continuously.
+   ========================================================================== */
+.ivl {
+  --ivl-color: var(--signal);
+  position: fixed;
+  inset: 0;
+  z-index: 300;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: calc(8px + env(safe-area-inset-top, 0px)) 16px calc(20px + env(safe-area-inset-bottom, 0px));
+  background: var(--ground);
+  overflow: hidden;
+  user-select: none;
+  -webkit-user-select: none;
+  animation: ivl-in 320ms var(--ease-out);
+}
+@keyframes ivl-in { from { opacity: 0; transform: scale(1.03); } }
+.ivl--ready  { --ivl-color: var(--pending); }
+.ivl--work   { --ivl-color: var(--signal); }
+.ivl--rest,
+.ivl--break  { --ivl-color: var(--computing); }
+.ivl--paused { --ivl-color: var(--text-dim); }
+
+/* Phase glows, stacked and cross-faded by opacity — a custom property can't
+   transition, an opacity can. */
+.ivl__glow {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 600ms var(--ease-out);
+}
+.ivl__glow--ready { background: radial-gradient(circle at 50% 46%, rgba(212, 168, 72, 0.10) 0%, transparent 60%); }
+.ivl__glow--work  { background: radial-gradient(circle at 50% 46%, rgba(232, 204, 10, 0.15) 0%, transparent 62%); }
+.ivl__glow--rest  { background: radial-gradient(circle at 50% 46%, rgba(90, 143, 184, 0.16) 0%, transparent 62%); }
+.ivl__glow--done  { background: radial-gradient(circle at 50% 40%, rgba(232, 204, 10, 0.09) 0%, transparent 55%); opacity: 1; }
+.ivl--ready .ivl__glow--ready,
+.ivl--work .ivl__glow--work,
+.ivl--rest .ivl__glow--rest,
+.ivl--break .ivl__glow--rest { opacity: 1; }
+
+.ivl__flash {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: var(--ivl-color);
+  opacity: 0;
+  animation: ivl-flash 650ms var(--ease-out);
+}
+@keyframes ivl-flash {
+  from { opacity: 0.3; }
+  to   { opacity: 0; }
+}
+
+.ivl__top {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  min-height: 48px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.ivl__end {
+  min-height: 44px;
+  min-width: 72px;
+  padding: 0 14px;
+  border-radius: 999px;
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+}
+.ivl__end--armed { border-color: var(--veto); color: var(--veto); }
+.ivl__left {
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+.ivl__icon {
+  width: 44px;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.ivl__icon:active { background: rgba(255, 255, 255, 0.06); }
+
+.ivl__head {
+  position: relative;
+  text-align: center;
+  margin-top: clamp(4px, 2.5dvh, 24px);
+}
+.ivl__name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  letter-spacing: 0.24em;
+  margin-right: -0.24em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.ivl__round {
+  margin-top: 6px;
+  font-size: var(--fs-lg);
+  font-weight: 700;
+  color: var(--text);
+}
+
+/* The dial is the pause button too: the biggest target on the screen, hit with
+   a sweaty palm mid-round without aiming. */
+.ivl__dial {
+  --dial: min(84vw, 46dvh, 400px);
+  position: relative;
+  flex: none;
+  width: var(--dial);
+  height: var(--dial);
+  margin: auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: 0;
+  border-radius: 50%;
+  padding: 0;
+  color: inherit;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.ivl__ring {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+.ivl__track { fill: none; stroke: var(--line); stroke-width: 6; }
+.ivl__arc {
+  fill: none;
+  stroke: var(--ivl-color);
+  stroke-width: 8;
+  stroke-linecap: round;
+  transition: stroke 300ms var(--ease-out), filter 300ms var(--ease-out);
+}
+.ivl__tick { stroke: #333; stroke-width: 1.5; }
+.ivl__tick--major {
+  stroke: var(--ivl-color);
+  stroke-width: 2.5;
+  opacity: 0.85;
+  transition: stroke 300ms var(--ease-out);
+}
+.ivl--final .ivl__arc { filter: drop-shadow(0 0 10px var(--ivl-color)); }
+
+.ivl__readout {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 4px 12px;
+}
+.ivl__num {
+  font-size: calc(var(--dial) * 0.34);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.04em;
+  color: var(--text);
+}
+.ivl__num--long { font-size: calc(var(--dial) * 0.22); }
+.ivl__num--count { animation: ivl-count 900ms var(--ease-out); }
+@keyframes ivl-count {
+  0%   { transform: scale(1.18); color: var(--ivl-color); }
+  55%  { color: var(--text); }
+  100% { transform: scale(1); }
+}
+.ivl__word {
+  margin-top: 10px;
+  margin-right: -0.32em;
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  font-weight: 700;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--ivl-color);
+  animation: ivl-word 460ms var(--ease-out) backwards;
+}
+@keyframes ivl-word {
+  from { letter-spacing: 0.9em; opacity: 0; filter: blur(4px); }
+}
+
+.ivl__next {
+  position: relative;
+  min-height: 1.5em;
+  font-size: var(--fs-sm);
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.ivl__track-rounds {
+  position: relative;
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 420px;
+  margin-top: 14px;
+}
+.ivl__set { flex: 1; display: flex; gap: 3px; }
+.ivl__seg {
+  flex: 1;
+  height: 6px;
+  border-radius: 3px;
+  background: var(--line);
+}
+.ivl__seg--done { background: var(--signal); animation: ivl-seg 420ms var(--ease-snap); }
+.ivl__seg--now  { background: var(--signal-dim); box-shadow: inset 0 0 0 1px var(--signal); }
+@keyframes ivl-seg {
+  from { transform: scaleY(2.2); opacity: 0.5; }
+}
+
+.ivl__controls {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  width: 100%;
+  max-width: 360px;
+  margin-top: clamp(12px, 3dvh, 28px);
+}
+.ivl__ctl {
+  justify-self: center;
+  width: 60px;
+  height: 60px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--text);
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out), background 300ms var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+}
+.ivl__ctl:active { transform: scale(0.94); }
+.ivl__ctl--main {
+  width: 84px;
+  height: 84px;
+  background: var(--ivl-color);
+  border-color: transparent;
+  color: var(--ground);
+}
+.ivl--paused .ivl__ctl--main { background: var(--signal); }
+
+/* Done — the session's finish moment, scaled to one block. */
+.ivl--finished { justify-content: center; text-align: center; overflow-y: auto; }
+.ivl__finish {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  width: 100%;
+  max-width: 380px;
+  margin: auto 0;
+}
+.ivl__of { font-size: 0.55em; color: var(--text-dim); margin-left: 2px; }
+.ivl__rpe { margin-top: 32px; animation: fadeRise var(--dur-mid) var(--ease-out) 700ms backwards; }
+.ivl__rpe-row { display: flex; gap: 8px; justify-content: center; }
+.ivl__finish-actions {
+  width: 100%;
+  margin-top: 28px;
+  animation: fadeRise var(--dur-mid) var(--ease-out) 800ms backwards;
+}
+.ivl__finish-actions .btn { height: var(--tap-lg); }
+
+/* --- Interval block (in the session list) -------------------------------- */
+.ivl-block {
+  position: relative;
+  padding: 16px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background:
+    linear-gradient(180deg, rgba(232, 204, 10, 0.05), transparent 60%),
+    var(--ground);
+  transition: border-color var(--dur-mid) var(--ease-out);
+}
+.ivl-block--done { border-color: rgba(95, 184, 122, 0.45); background: var(--ground); }
+.ivl-block__head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+}
+.ivl-block__dose { font-size: var(--fs-lg); font-weight: 700; letter-spacing: -0.01em; }
+.ivl-block__total { font-size: var(--fs-sm); color: var(--text-dim); }
+.ivl-block__rounds { display: flex; gap: 10px; margin-top: 14px; }
+.ivl-block__status {
+  display: flex;
+  align-items: center;
+  margin-top: 10px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+}
+.ivl-block__status--done { color: var(--confirmed); }
+.ivl-block__actions { display: flex; gap: 8px; margin-top: 14px; }
+.ivl-block__actions .btn { height: var(--tap-lg); }
+.ivl-block__adjust { flex: none; width: var(--tap-lg); padding: 0; color: var(--text-dim); }
+/* The one signal on a block that hasn't run: it breathes once on arrival, then
+   holds still — a finisher waiting for you, not an alarm. */
+.ivl-block__go { animation: ivl-go-in 700ms var(--ease-snap) 150ms backwards; }
+@keyframes ivl-go-in {
+  0%   { transform: scale(0.96); box-shadow: 0 0 0 0 rgba(232, 204, 10, 0.5); }
+  60%  { box-shadow: 0 0 0 10px rgba(232, 204, 10, 0); }
+  100% { transform: scale(1); }
+}
+
+/* --- Add to session -------------------------------------------------------- */
+/* The two doors at the foot of the list: a movement, or a block. Dashed — the
+   space where something can go, not something already there. */
+.add-cta {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 22px;
+}
+.add-cta__btn {
+  min-height: var(--tap-lg);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 0 12px;
+  border-radius: var(--radius-btn);
+  border: 1px dashed #3A3A3A;
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+}
+.add-cta__btn:hover { color: var(--text); border-color: var(--text-dim); }
+.add-cta__btn:active { transform: scale(0.975); }
+.add-cta__btn--signal { color: var(--signal); border-color: rgba(232, 204, 10, 0.4); }
+.add-cta__btn--signal:hover { color: var(--signal); border-color: var(--signal); }
+
+/* A movement just added arrives the way a target is acquired: it rises into
+   place and the brackets lock onto its title. */
+.ex-arrive { animation: fadeRise var(--dur-transition) var(--ease-out); }
+.ex-arrive .ex-arrive__lock .lockon__c { animation-duration: 620ms; }
+.ex-added-tag {
+  display: inline-block;
+  margin-top: 4px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--computing);
+}
+
+/* Segmented control — two tabs, one sliding signal underline. */
+.tabseg {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--line);
+}
+.tabseg__opt {
+  min-height: var(--tap);
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: color var(--dur-mid) var(--ease-out);
+}
+.tabseg__opt[aria-selected='true'] { color: var(--text); }
+.tabseg__ind {
+  position: absolute;
+  left: 0;
+  bottom: -1px;
+  width: 50%;
+  height: 2px;
+  background: var(--signal);
+  transition: transform var(--dur-transition) var(--ease-snap);
+}
+
+.add-search {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: var(--tap);
+  padding: 0 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  background: var(--ground);
+  color: var(--text-dim);
+}
+.add-search:focus-within { border-color: #4A4A4A; }
+.add-search__input {
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  background: none;
+  border: 0;
+  outline: none;
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 16px;
+}
+.add-shelves {
+  display: flex;
+  gap: 6px;
+  margin: 12px -20px 0;
+  padding: 0 20px 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.add-shelves::-webkit-scrollbar { display: none; }
+.add-shelf {
+  flex: none;
+  min-height: 40px;
+  padding: 0 14px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: var(--font-sans);
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+}
+.add-shelf--on { border-color: var(--signal); color: var(--signal); background: var(--signal-dim); }
+
+.add-list { margin-top: 6px; }
+.add-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 60px;
+  padding: 10px 0;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.add-row:active { background: rgba(255, 255, 255, 0.03); }
+.add-row__main { flex: 1; min-width: 0; }
+.add-row__name { display: block; font-size: var(--fs-base); font-weight: 600; line-height: 1.3; }
+.add-row__sub { display: block; margin-top: 2px; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.4; }
+.add-row__dose { flex: none; font-size: var(--fs-xs); color: var(--text-dim); }
+.add-row__chev { flex: none; color: var(--text-dim); }
+
+.add-config { animation: fadeRise var(--dur-mid) var(--ease-out); }
+.add-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 40px;
+  margin: -6px 0 6px -4px;
+  padding: 0 4px;
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+.add-config__name { font-size: var(--fs-2xl); font-weight: 700; line-height: 1.15; letter-spacing: -0.02em; }
+.add-config__last { margin-top: 10px; color: var(--computing); }
+
+/* Steppers — a value you can read across the room and two thumb-sized taps.
+   Typing a number mid-workout is the slow path this replaces. */
+.stepper-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin-top: 18px;
+}
+.stepper {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 12px 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: var(--ground);
+  min-width: 0;
+}
+.stepper__label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.stepper__value {
+  margin-top: 6px;
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+  white-space: nowrap;
+  animation: stepper-tick 220ms var(--ease-out);
+}
+@keyframes stepper-tick {
+  from { opacity: 0.4; transform: translateY(3px); }
+}
+.stepper__sub { margin-top: 2px; font-size: var(--fs-micro); color: var(--text-dim); }
+.stepper__btns { display: flex; gap: 8px; width: 100%; margin-top: 10px; }
+.stepper__btn {
+  flex: 1;
+  height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+}
+.stepper__btn:active:not(:disabled) { transform: scale(0.94); background: #242424; }
+.stepper__btn:disabled { opacity: 0.35; cursor: default; }
+
+/* Interval builder */
+.ivb__presets {
+  display: flex;
+  gap: 8px;
+  margin: 0 -20px;
+  padding: 0 20px 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.ivb__presets::-webkit-scrollbar { display: none; }
+.ivb__preset {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  min-width: 92px;
+  min-height: 58px;
+  padding: 8px 14px;
+  border-radius: var(--radius-btn);
+  border: 1px solid var(--line);
+  background: var(--ground);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), transform var(--dur-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+}
+.ivb__preset:active { transform: scale(0.97); }
+.ivb__preset--on { border-color: var(--signal); background: var(--signal-dim); }
+.ivb__preset-label { font-size: var(--fs-sm); font-weight: 700; line-height: 1.2; }
+.ivb__preset--on .ivb__preset-label { color: var(--signal); }
+.ivb__preset-sub { margin-top: 2px; font-size: var(--fs-micro); color: var(--text-dim); }
+.ivb__total {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  margin-top: 18px;
+  text-align: center;
+}
+.ivb__total-clock {
+  font-size: var(--fs-4xl);
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.03em;
+  animation: stepper-tick 220ms var(--ease-out);
+}
+.ivb__total-sub { margin-top: 6px; font-size: var(--fs-xs); color: var(--text-dim); }
+.ivb__moves { display: flex; flex-wrap: wrap; gap: 6px; }
+.howto-tag--on { border-color: var(--signal); color: var(--signal); }
+.howto-tag--on:hover { color: var(--signal); border-color: var(--signal); }

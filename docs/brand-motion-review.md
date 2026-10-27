@@ -108,6 +108,39 @@ Everything the first pass left as findings, done.
   is for numbers, units, labels and readouts; Inter is for anything read as words.
 - Today: spacing under *The read*.
 
+## Intervals and adding to a session (shipped)
+
+HIIT runs inside the session instead of in a separate timer app, and the + at
+the foot of a workout adds a movement or an interval block instead of only a set.
+
+- **The prescription is the setup.** The coach already writes blocks as rep specs
+  (`8 × 20s on / 40s off`, `Tabata`, `EMOM 10 min`, `10 x 30/30` on a bike), so
+  `engine/intervals.ts` reads them straight into a timeline. Nothing new is
+  stored: a block built by hand is written back in the same shape, and one row of
+  the set grid holds the work of a set (`rows: 'set'`) or of a round
+  (`rows: 'round'`). An interval spec always logs as time.
+- **One tap from Train.** A conditioning day (or one that is nothing but blocks)
+  shows **Start intervals** instead of Start session. The tap unlocks audio
+  (`lib/intervalCues.ts`; iOS only lets a gesture start a context) and lands on
+  the timer's ready beat via `?go=intervals`.
+- **Wall-clock, not a counter.** A locked phone or a backgrounded app comes back
+  to the right second with the rounds it slept through banked. Rounds are written
+  into the grid as they finish, so the draft holds them if the phone dies. The
+  screen stays on while a block runs (`lib/wakeLock.ts`).
+- **Adding to a session.** Picked movements arrive with a dose: your last sets of
+  it, else a table default (`engine/addExercise.ts`). They ride in
+  `feedback[i].extra` (persisted by the draft like a swap) and are filed in the
+  snapshot with `added: true`. A programmed block re-dosed for the day is marked
+  `adjusted`.
+
+| Moment | What happens | Where |
+|---|---|---|
+| Phase change | Brackets re-lock on the dial, the phase word tightens onto itself, one wash of the phase colour (amber ready, yellow work, blue rest). | `IntervalTimer.tsx` |
+| Last 3 seconds | Number pulses each second in the phase colour; the arc glows; a blip and a light tick. | `.ivl__num--count` |
+| Work / rest | Rising fifth + heavy haptic for work; the same interval falling + warning haptic for rest. | `lib/intervalCues.ts` |
+| Block done | *Intervals zeroed*: the session-finish mark, rounds count up, optional RPE, **Finish session** when nothing else is left. | `IntervalTimer.tsx` |
+| Movement added | Card rises into place and the brackets lock onto its title. | `.ex-arrive` |
+
 ## Still open
 - Retire the remaining inline `fontFamily: var(--font-mono)` styles screen by
   screen in favour of `.readout` / `.meta` / `.num`.

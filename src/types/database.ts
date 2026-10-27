@@ -336,6 +336,15 @@ export interface ExerciseTemplate {
   // exercises_snapshot, so the sets are filed under what was actually lifted
   // while the slot still remembers what the plan was.
   swapped_from?: string
+  // Set on a movement the athlete ADDED to this session — never on the program
+  // itself. It sits after the programmed slots in the session's
+  // exercises_snapshot, so the sets are filed under it like any other, and the
+  // snapshot still says it wasn't part of the plan.
+  added?: boolean
+  // Set on a programmed interval block the athlete re-dosed for this session
+  // (fewer rounds today, a longer rest). Same movement, same slot; the snapshot
+  // records the block as it was actually run.
+  adjusted?: boolean
 }
 
 export interface SetLog {
@@ -392,8 +401,13 @@ export interface ExerciseFeedback {
   // The stand-in the athlete swapped into this slot for THIS session (equipment
   // taken, a different gym, a hotel). Rides in feedback for the same reason
   // `pushed` does: the draft already persists it, so a swap made before the
-  // first set is still there when the session is resumed.
+  // first set is still there when the session is resumed. Also carries a
+  // re-dosed interval block (same name, `adjusted`), for the same reason.
   swap?: ExerciseTemplate
+  // A movement the athlete added to this session, keyed at its slot after the
+  // programmed ones. Rides in feedback like `swap` does: the draft already
+  // persists it, locally and to the server, so an addition survives a resume.
+  extra?: ExerciseTemplate
 }
 
 // ---- The clearance test (how a limiter is allowed to end) ------------------
