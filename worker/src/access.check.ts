@@ -578,7 +578,7 @@ const savedAgain = await executeDataQuery(sql, ctxA, {
   returning: '*',
   single: 'maybe',
 })
-ok((savedAgain.data as { rpe: number } | null)?.rpe === 7, 'smoke save workout: A update succeeds')
+ok(Number((savedAgain.data as { rpe: number | string } | null)?.rpe) === 7, 'smoke save workout: A update succeeds')
 
 const stealUpdate = await executeDataQuery(sql, ctxA, {
   table: 'workout',
@@ -877,6 +877,90 @@ ok(emptyIn.error == null && emptyIn.status === 200, 'empty in[] on uuid does not
 ok(Array.isArray(emptyIn.data) && (emptyIn.data as unknown[]).length === 0, 'empty in[] on uuid returns []')
 
 ok((await loadNotes(storeA)).weekly.length >= 1, 'loadNotes: ANY(uuid[]) returns A weekly reviews')
+
+const rpe5 = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: {
+    routine_id: ROUTINE_A,
+    performed_at: '2026-10-24T16:00:00Z',
+    rpe: 5,
+    actual_weights: { '0': [{ set: 1, weight: 135, reps: 5, rpe: 5, done: true }] },
+    exercises_snapshot: [{ name: 'Back Squat', sets: 1, reps: '5' }],
+  },
+  returning: '*',
+  single: 'one',
+})
+const rpe5Id = (rpe5.data as { id: string } | null)?.id
+ok(rpe5.error == null && rpe5Id != null, `RPE 5 saves (${rpe5.error?.message ?? 'ok'})`)
+ok(Number((rpe5.data as { rpe?: number | string } | null)?.rpe) === 5, 'RPE 5 session value round-trips on insert')
+const rpe5Workout = await executeZeroedTool(sql, A, 'get_workout', { workout_id: rpe5Id })
+ok(rpe5Workout.includes('@5') && rpe5Workout.includes('RPE 5'), `get_workout round-trips RPE 5 (got: ${rpe5Workout.slice(0, 180)})`)
+const rpe5List = await executeZeroedTool(sql, A, 'list_workouts', { limit: 20 })
+ok(rpe5List.includes('@5'), 'list_workouts round-trips RPE 5')
+
+const rpeHalf = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: {
+    routine_id: ROUTINE_A,
+    performed_at: '2026-10-24T17:00:00Z',
+    rpe: 7.5,
+    actual_weights: { '0': [{ set: 1, weight: 225, reps: 3, rpe: 9.5, done: true }] },
+    exercises_snapshot: [{ name: 'Back Squat', sets: 1, reps: '3' }],
+  },
+  returning: '*',
+  single: 'one',
+})
+ok(rpeHalf.error == null && Number((rpeHalf.data as { rpe?: number | string } | null)?.rpe) === 7.5, 'RPE 7.5 session is accepted')
+const rpeHalfId = (rpeHalf.data as { id: string } | null)?.id
+const rpeHalfText = rpeHalfId ? await executeZeroedTool(sql, A, 'get_workout', { workout_id: rpeHalfId }) : ''
+ok(rpeHalfText.includes('@9.5') && rpeHalfText.includes('RPE 7.5'), 'RPE 9.5 set and 7.5 session round-trip')
+
+const rpeHigh = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: { routine_id: ROUTINE_A, performed_at: '2026-10-24T18:00:00Z', rpe: 10.5 },
+  returning: '*',
+  single: 'one',
+})
+ok(Boolean(rpeHigh.error), 'RPE 10.5 session is rejected')
+ok((rpeHigh.error?.message ?? '').includes('10.5'), 'RPE 10.5 error names the value')
+
+const rpeLow = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: { routine_id: ROUTINE_A, performed_at: '2026-10-24T18:30:00Z', rpe: 0.5 },
+  returning: '*',
+  single: 'one',
+})
+ok(Boolean(rpeLow.error), 'RPE 0.5 session is rejected')
+
+const rpeSetHigh = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: {
+    routine_id: ROUTINE_A,
+    performed_at: '2026-10-24T19:00:00Z',
+    actual_weights: { '0': [{ set: 1, weight: 225, reps: 3, rpe: 10.5, done: true }] },
+  },
+  returning: '*',
+  single: 'one',
+})
+ok(Boolean(rpeSetHigh.error), 'set RPE 10.5 is rejected')
+
+const rpeSetLow = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: {
+    routine_id: ROUTINE_A,
+    performed_at: '2026-10-24T19:30:00Z',
+    actual_weights: { '0': [{ set: 1, weight: 225, reps: 3, rpe: 0.5, done: true }] },
+  },
+  returning: '*',
+  single: 'one',
+})
+ok(Boolean(rpeSetLow.error), 'set RPE 0.5 is rejected')
 
 await harness.close()
 

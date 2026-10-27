@@ -147,7 +147,7 @@ export interface WorkoutRow {
   performed_at: string
   actual_weights: Record<string, SetLog[]> | null
   actual_reps: Record<string, number[]> | null
-  rpe: number | null
+  rpe: number | null  // session-average logged RPE, 1–10 in 0.5 steps
   duration_mins: number | null
   /**
    * The routine's exercises AS THEY WERE when this session was logged.
@@ -351,7 +351,7 @@ export interface SetLog {
   set: number
   weight: number | null
   reps: number | null
-  rpe: number | null
+  rpe: number | null  // 1–10 in 0.5 steps; null if not logged
   done: boolean
   // Type-specific metrics — only the field for the exercise's tracking_type is
   // ever populated. JSONB-backed (workout.actual_weights), so additive & safe.

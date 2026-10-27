@@ -47,6 +47,21 @@ export function isCloudflareApi(): boolean {
   return !base.includes('supabase.co')
 }
 
+/**
+ * Half-step RPE input. Off on the live Vercel→Supabase path (`workout.rpe`
+ * is still INTEGER CHECK 1–10). On after Worker/Neon cutover, or when
+ * `VITE_RPE_HALF_STEPS` is `1` / `true`.
+ */
+export function resolveRpeHalfSteps(flag: string | undefined, cloudflare: boolean): boolean {
+  if (cloudflare) return true
+  const v = clean(flag).toLowerCase()
+  return v === '1' || v === 'true'
+}
+
+export function rpeHalfStepsEnabled(): boolean {
+  return resolveRpeHalfSteps(import.meta.env.VITE_RPE_HALF_STEPS, isCloudflareApi())
+}
+
 export function agentUrl(): string | null {
   const base = apiBaseUrl()
   return base ? `${base}/agent` : null
