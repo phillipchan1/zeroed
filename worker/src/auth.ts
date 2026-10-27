@@ -6,6 +6,7 @@ import { NATIVE_APP_ORIGINS } from './cors.ts'
 import { sessionFromRequest } from './data.ts'
 import { withSql, type WaitUntil } from './db.ts'
 import { databaseUrl, pgClientSsl, type Env } from './env.ts'
+import { sendOtpEmail } from './mail.ts'
 
 type AuthInstance = ReturnType<typeof createAuth>
 
@@ -65,34 +66,6 @@ export const BETTER_AUTH_SNAKE_CASE = {
     },
   },
 } as const
-
-async function sendOtpEmail(env: Env, email: string, otp: string, type: string): Promise<void> {
-  const subject = type === 'forget-password'
-    ? 'Reset your Zeroed sign-in'
-    : 'Your Zeroed sign-in code'
-  const text = `Your code is ${otp}. It expires in 5 minutes.\n\nNo password. If you did not request this, ignore the email.`
-  if (!env.RESEND_API_KEY) {
-    console.log(`[auth] OTP for ${email} (${type}): ${otp}`)
-    return
-  }
-  const res = await fetch('https://api.resend.com/emails', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${env.RESEND_API_KEY}`,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      from: env.RESEND_FROM || 'Zeroed <noreply@localhost>',
-      to: email,
-      subject,
-      text,
-    }),
-  })
-  if (!res.ok) {
-    const body = await res.text().catch(() => '')
-    throw new Error(`resend ${res.status}: ${body.slice(0, 200)}`)
-  }
-}
 
 /**
  * First-time adoption safety net for SELECT lookups only.
@@ -308,7 +281,7 @@ export function createAuth(env: Env, pool: Pool) {
         otpLength: 6,
         expiresIn: 300,
         sendVerificationOTP: async ({ email, otp, type }) => {
-          await sendOtpEmail(env, email, otp, type)
+          await sendOtpEmail(env, { email, otp, type })
         },
       }),
     ],

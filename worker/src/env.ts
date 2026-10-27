@@ -1,4 +1,5 @@
 import { isLoopbackHostname } from './authUrl.ts'
+import type { SendEmailBinding } from './mail.ts'
 
 export interface HyperdriveBinding {
   connectionString: string
@@ -17,6 +18,12 @@ export interface Env {
   ENVIRONMENT?: string
   RESEND_API_KEY?: string
   RESEND_FROM?: string
+  /** Cloudflare Email Service send_email binding (primary OTP sender). */
+  EMAIL?: SendEmailBinding
+  /** From for the EMAIL binding. Default `Zeroed <login@zeroed.madeforgreatnesslabs.com>`. */
+  CF_EMAIL_FROM?: string
+  /** Optional comma-separated allowlist for sign-in code emails (cost/abuse guard). */
+  ALLOWED_EMAILS?: string
 }
 
 export function databaseUrl(env: Env): string | null {
