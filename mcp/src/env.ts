@@ -50,6 +50,25 @@ function first(...keys: string[]): string | undefined {
   return undefined
 }
 
+/**
+ * Bridge mode: since the Oct 27 cutover, production is the Cloudflare Worker on
+ * Neon, and Supabase is the frozen rollback copy. With ZEROED_MCP_URL set, this
+ * server forwards every tool to that Worker's MCP endpoint instead of reading
+ * Supabase. Null when unset (Supabase mode). Throws when the URL is set but the
+ * token isn't, rather than quietly serving the stale copy.
+ */
+export function readRemoteEnv(): { url: string; token: string } | null {
+  const url = first('ZEROED_MCP_URL')
+  if (!url) return null
+  const token = first('ZEROED_MCP_TOKEN')
+  if (!token) {
+    throw new Error(
+      'ZEROED_MCP_URL is set but ZEROED_MCP_TOKEN is empty. In the app: Profile → Claude connector → Create token, then paste it into mcp/.env as ZEROED_MCP_TOKEN.',
+    )
+  }
+  return { url, token }
+}
+
 export interface ZeroedEnv {
   url: string
   anonKey?: string

@@ -71,7 +71,21 @@ npm install
 cp .env.example .env
 ```
 
-Fill `mcp/.env` with one of the two auth modes.
+**Bridge mode (use this since the Oct 27 cutover).** Production is the
+Cloudflare Worker on Neon; Supabase is the frozen rollback copy. Set these two
+and the local server forwards every tool to production, with the same tools and
+answers as the remote connector, and no database credentials on this machine:
+
+```
+ZEROED_MCP_URL=https://zeroed.madeforgreatnesslabs.com/functions/v1/mcp
+ZEROED_MCP_TOKEN=<from the app: Profile → Claude connector → Create token>
+```
+
+With `ZEROED_MCP_URL` set and no token, the server refuses to start rather than
+quietly serving the rollback copy. Comment out `ZEROED_MCP_URL` to fall back to
+the Supabase modes below.
+
+Otherwise, fill `mcp/.env` with one of the two Supabase auth modes.
 
 **Athlete login (preferred).** Same RLS as the app — Claude can only see your rows.
 
