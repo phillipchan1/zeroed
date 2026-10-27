@@ -1119,6 +1119,10 @@ ok(/refuseTargetFingerprintReason/.test(migrateSrc), 'live restore fingerprints 
 ok(/confirmDropMismatchReason/.test(migrateSrc), 'live restore requires --confirm-drop')
 ok(/probing target identity before drop/.test(migrateSrc), 'fingerprint probe is logged before DROP')
 ok(/could not read source fingerprint/.test(migrateSrc), 'unreadable source fingerprint fails closed')
+ok(
+  /extractSqlstate\(message\) === '42P01'/.test(migrateSrc),
+  'empty-target checksum treats allowlisted 42P01 as missing tables',
+)
 ok(/source advisory lock is visible on the target/.test(migrateSrc), 'source lock visible on target is refused')
 ok(!/zeroed_cutover_guard/.test(migrateSrc), 'migrate script does not write a source marker schema')
 ok(/SIGINT/.test(migrateSrc) && /SIGTERM/.test(migrateSrc), 'lock session is released on SIGINT/SIGTERM')

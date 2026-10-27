@@ -333,7 +333,10 @@ ok(dataSrc.includes('STANDARD_PADDED_HMAC') && dataSrc.includes('atob(signature)
 ok(!dataSrc.includes('bytesToBase64UrlNoPad'), 'session HMAC does not use unpadded url-safe encoding')
 const workflow = readFileSync(join(here, '../../.github/workflows/checks.yml'), 'utf8')
 ok(workflow.includes('postgres:17'), 'CI postgres/isolation services are 17')
-ok(/migrate-pg:[\s\S]*image: postgres:17/.test(workflow), 'migrate-pg uses Postgres 17 so the dump path matches Supabase')
+ok(
+  /migrate-pg:[\s\S]*postgres:17/.test(workflow) && /migrate-pg:[\s\S]*docker run/.test(workflow),
+  'migrate-pg uses Postgres 17 so the dump path matches Supabase',
+)
 ok(/migrate-pg:[\s\S]*postgresql-client-17/.test(workflow), 'migrate-pg installs postgresql-client-17 from PGDG')
 ok(workflow.includes('/usr/lib/postgresql/17/bin'), 'CI puts the Postgres 17 client first on PATH')
 const migrateWf = readFileSync(join(here, '../../.github/workflows/migrate-supabase-to-neon.yml'), 'utf8')

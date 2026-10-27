@@ -1321,7 +1321,10 @@ function readChecksums(url, label, { required = true } = {}) {
     return parsed
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-    if (!required && /does not exist|undefined_table/i.test(message)) {
+    if (
+      !required &&
+      (extractSqlstate(message) === '42P01' || /does not exist|undefined_table/i.test(message))
+    ) {
       console.log(`${label}: tables not present yet`)
       return { counts: null, hashes: null }
     }
