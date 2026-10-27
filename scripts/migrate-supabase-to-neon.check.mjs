@@ -33,6 +33,7 @@ import {
   fingerprintQuery,
   formatCountComparison,
   formatSafeCommandError,
+  formatSafePgClientError,
   formatSourceCountLines,
   GENERIC_SAFE_ERROR,
   isForbiddenSourceUrlParam,
@@ -59,6 +60,8 @@ import {
   parseOrphanIds,
   parseMigrateArgs,
   postgresUrlParts,
+  psqlArgv,
+  psqlTuples,
   readFingerprint,
   redactSecrets,
   refuseSourceWipeReason,
@@ -90,9 +93,11 @@ import {
   SNAPSHOT_BEGIN_SQL,
   SNAPSHOT_EXPORT_SQL,
   SNAPSHOT_TIMEOUT_SQL,
+  SQLSTATE_CLASS_TEXT,
   systemIdentifierQuery,
   uncoveredPublicTablesQuery,
   unexpectedPrimaryKeyQuery,
+  withSourceSnapshot,
   wrapRestoreTransaction,
 } from './migrate-supabase-to-neon.mjs'
 import { previewTargetRefuseReason } from './seed-preview.mjs'
@@ -212,14 +217,11 @@ const leakyPg = [
 ].join('\n')
 const sanitized = sanitizePgFailureText(leakyPg)
 eq(sanitized.sqlstate, '23505', 'sanitizer keeps SQLSTATE')
-ok(/ERROR:/i.test(sanitized.firstError), 'sanitizer keeps the first ERROR line')
-ok(!/phil@/i.test(sanitized.firstError), 'sanitizer strips emails from ERROR')
-ok(!/Key \(email\)=\(phil@/i.test(sanitized.firstError), 'sanitizer strips Key (...)=(...)')
-ok(!/DETAIL|CONTEXT|HINT|WHERE|LINE |Failing row/i.test(sanitized.firstError), 'sanitizer drops DETAIL and friends')
+eq(sanitized.firstError, '', 'allowlist sanitizer does not keep ERROR text')
 const safeFail = formatSafeCommandError('psql', 1, leakyPg, '')
+eq(safeFail, 'psql failed (1): SQLSTATE 23505: integrity constraint violation', 'safe command error is SQLSTATE + class only')
 ok(!/phil@/i.test(safeFail), 'safe command error has no email')
-ok(/psql failed \(1\)/.test(safeFail), 'safe command error names cmd and exit')
-ok(/SQLSTATE 23505/.test(safeFail), 'safe command error includes SQLSTATE')
+ok(!/user_email_key|Failing row|DETAIL/i.test(safeFail), 'safe command error has no constraint or DETAIL text')
 ok(!logLooksLikeRowData(safeFail), 'safe command error is not row data')
 ok(
   !/\(phil@/i.test(stripPgErrorValues('DETAIL:  Key (email)=(phil@example.com) already exists.')),
@@ -232,6 +234,80 @@ eq(
 )
 ok(logLooksLikeRowData('phil@example.com,not-a-real-hash'), 'email/CSV is treated as row data')
 ok(!logLooksLikeRowData('| athlete | 1 | 1 | aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa |'), 'checksum table is not row data')
+
+const quoteTok = 'rowtok-has"quote'
+const slashTok = 'rowtok-slash\\'
+const nlTok = 'rowtok-line1\nrowtok-line2'
+const mixTok = `': "`
+eq(
+  formatSafeCommandError('psql', 1, `ERROR:  invalid "${quoteTok}" is bad\n`, ''),
+  GENERIC_SAFE_ERROR,
+  'odd " count in failure text becomes generic',
+)
+eq(
+  formatSafeCommandError('psql', 1, `ERROR:  boom ${slashTok}\n`, ''),
+  GENERIC_SAFE_ERROR,
+  'trailing backslash in failure text becomes generic',
+)
+eq(
+  formatSafeCommandError('psql', 1, `ERROR:  boom ${nlTok}\n`, ''),
+  GENERIC_SAFE_ERROR,
+  'newline value without SQLSTATE becomes generic',
+)
+eq(
+  formatSafeCommandError('psql', 1, `ERROR:  ${mixTok}\n`, ''),
+  GENERIC_SAFE_ERROR,
+  `': " mix in failure text becomes generic`,
+)
+eq(
+  formatSafeCommandError('psql', 1, 'ERROR:  P0001\n', ''),
+  GENERIC_SAFE_ERROR,
+  'P0001 RAISE becomes generic',
+)
+eq(
+  formatSafeCommandError('psql', 1, 'ERROR:  P0001\nDETAIL:  rowtok-plpgsql\n', ''),
+  GENERIC_SAFE_ERROR,
+  'plpgsql RAISE (P0001) becomes generic',
+)
+eq(
+  formatSafeCommandError('psql', 1, 'ERROR:  P0001\nCONTEXT:  PL/pgSQL function boom_trig()\nDETAIL:  rowtok-trig\n', ''),
+  GENERIC_SAFE_ERROR,
+  'trigger RAISE (P0001) becomes generic',
+)
+eq(
+  formatSafeCommandError('psql', 1, 'ERROR:  P0001\nCONTEXT:  PL/pgSQL function inline_code_block line 1\nDETAIL:  rowtok-do\n', ''),
+  GENERIC_SAFE_ERROR,
+  'DO-block RAISE (P0001) becomes generic',
+)
+eq(
+  formatSafeCommandError('pg_dump', 1, 'pg_dump: error: SQLSTATE 08006\nDETAIL: leaked-rowtok\n', ''),
+  'pg_dump failed (1): SQLSTATE 08006: connection exception',
+  'pg_dump logs cmd, exit, SQLSTATE, and class only',
+)
+eq(
+  formatSafeCommandError('pg_restore', 1, 'pg_restore: error: SQLSTATE 23505\nDETAIL: leaked-rowtok\n', ''),
+  'pg_restore failed (1): SQLSTATE 23505: integrity constraint violation',
+  'pg_restore logs cmd, exit, SQLSTATE, and class only',
+)
+eq(
+  formatSafeCommandError('pg_dump', 1, 'pg_dump: error: connection failed\nDETAIL: leaked-rowtok\n', ''),
+  GENERIC_SAFE_ERROR,
+  'pg_dump without a known SQLSTATE class is generic',
+)
+eq(SQLSTATE_CLASS_TEXT['23'], 'integrity constraint violation', '23505 class text is pinned')
+eq(
+  formatSafePgClientError({ code: '22P02', message: 'invalid input syntax for type integer: "rowtok-pg"' }, 'snapshot'),
+  'snapshot failed (1): SQLSTATE 22P02: data exception',
+  'node-pg snapshot errors keep SQLSTATE + class only',
+)
+ok(!formatSafePgClientError({ code: '22P02', message: 'invalid input syntax for type integer: "rowtok-pg"' }, 'snapshot').includes('rowtok-pg'), 'node-pg snapshot error omits the value')
+eq(
+  formatSafePgClientError(new Error(slashTok)),
+  GENERIC_SAFE_ERROR,
+  'uncaught error with trailing backslash is generic',
+)
+ok(psqlArgv('-d', 'x').includes('VERBOSITY=sqlstate'), 'psqlArgv sets VERBOSITY=sqlstate')
+ok(psqlArgv('-d', 'x').includes('ON_ERROR_STOP=1'), 'psqlArgv sets ON_ERROR_STOP=1')
 
 const copy = authUsersToCopyCsv(jsonRows)
 ok(copy.includes('33333333-3333-4333-8333-333333333333'), 'COPY CSV includes the UUID')
@@ -366,6 +442,11 @@ ok(!stripSslMode(sslSoup).includes('sslcrl='), 'stripSslMode drops sslcrl')
 ok(!/uselibpqcompat/i.test(stripSslMode(sslSoup)), 'stripSslMode drops uselibpqcompat')
 const sanitizedSoup = sanitizeSourceConnectionString(sslSoup)
 ok(!/[?&](ssl|uselibpqcompat)/i.test(sanitizedSoup), 'sanitizeSourceConnectionString leaves no ssl* or uselibpqcompat')
+const plusOpts = 'postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?options=-c+TimeZone=UTC&sslmode=require'
+const cleanedPlus = sanitizeSourceConnectionString(plusOpts)
+ok(cleanedPlus.includes('options=-c+TimeZone=UTC'), 'sanitizeSourceConnectionString does not re-encode + in libpq options')
+ok(!cleanedPlus.includes('%20') && !cleanedPlus.includes('%2B'), 'libpq options plus stays a plus')
+ok(!cleanedPlus.includes('sslmode='), 'plus-preserving sanitize still drops sslmode')
 let unexpectedParam = false
 try {
   sanitizeSourceConnectionString('postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?channel_binding=require')
@@ -373,6 +454,16 @@ try {
   unexpectedParam = /unexpected query parameter/.test(err instanceof Error ? err.message : '')
 }
 ok(unexpectedParam, 'unexpected source URL params are refused')
+let hostOverride = false
+let hostOverrideMsg = ''
+try {
+  sanitizeSourceConnectionString('postgresql://reader@db.abcdefghijkl.supabase.co:5432/postgres?host=evil.example')
+} catch (err) {
+  hostOverrideMsg = err instanceof Error ? err.message : String(err)
+  hostOverride = /host=/.test(hostOverrideMsg)
+}
+ok(hostOverride, 'source URL ?host= override is refused')
+ok(!/evil\.example/.test(hostOverrideMsg), 'host= refuse message omits the override host')
 ok(existsSync(SUPABASE_SOURCE_CA_FILE), 'Supabase prod-ca-2021.crt is committed')
 ok(loadSourceCa().includes('BEGIN CERTIFICATE'), 'committed source CA is a PEM certificate')
 eq(sourceCaFile(), SUPABASE_SOURCE_CA_FILE, 'default source CA is the committed file')
@@ -1040,6 +1131,11 @@ ok(/sourcePgClientConfig/.test(migrateSrc), 'source pg clients go through source
 ok(/sourceLibpqSslEnv/.test(migrateSrc), 'source psql/pg_dump use sourceLibpqSslEnv')
 ok(/formatSafeCommandError/.test(migrateSrc), 'run() uses formatSafeCommandError')
 ok(/installSafeErrorHandlers/.test(migrateSrc), 'migrate installs safe uncaught handlers')
+ok(/VERBOSITY=sqlstate/.test(migrateSrc), 'every psql sets VERBOSITY=sqlstate')
+ok(/psqlArgv\(/.test(migrateSrc), 'psql invocations go through psqlArgv')
+ok(/formatSafePgClientError/.test(migrateSrc), 'node-pg snapshot errors go through formatSafePgClientError')
+ok(/must not include a host= override/.test(migrateSrc), 'source URL ?host= is refused')
+ok(/queryParamKey/.test(migrateSrc) || /does not re-encode/.test(migrateSrc) || /without re-encoding/.test(migrateSrc), 'libpq options plus is not re-encoded')
 ok(/READ ONLY/.test(migrateSrc), 'snapshot SQL is READ ONLY')
 ok(!/new pg\.Client\(\{\s*connectionString:\s*sourceUrl/.test(migrateSrc), 'source pg clients are not built from a raw URL')
 ok(!/ssl:\s*\{[^}]*rejectUnauthorized:\s*false/.test(migrateSrc), 'migrate script never sets rejectUnauthorized: false')
@@ -1064,6 +1160,12 @@ ok(/PGPASSFILE=\/dev\/null/.test(workflow), 'migrate workflow version-check null
 ok(/PGSSLMODE=verify-full/.test(workflow), 'migrate workflow version-check sets PGSSLMODE=verify-full')
 ok(/PGSSLROOTCERT/.test(workflow), 'migrate workflow version-check sets PGSSLROOTCERT')
 ok(/sanitizeSourceConnectionString/.test(workflow), 'migrate workflow version-check strips ssl* from the source URL')
+ok(/::add-mask::/.test(workflow) && /postgresUrlParts/.test(workflow), 'migrate workflow masks the probed source host')
+ok(/VERBOSITY=sqlstate/.test(workflow), 'migrate workflow probe uses VERBOSITY=sqlstate')
+ok(/set -euo pipefail/.test(workflow) && /psql .*\|\s*tr/.test(workflow), 'migrate workflow probe pipe runs under pipefail')
+ok(/::add-mask::/.test(checksYml) && /postgresUrlParts/.test(checksYml), 'migrate-pg probe masks the source host')
+ok(/VERBOSITY=sqlstate/.test(checksYml), 'migrate-pg probe uses VERBOSITY=sqlstate')
+ok(/migrate-tls:[\s\S]*persist-credentials:\s*false/.test(checksYml), 'migrate-tls checkout does not persist credentials')
 ok(/PGPASSFILE=\/dev\/null/.test(checksYml), 'migrate-pg version-check nulls PGPASSFILE')
 ok(/-u PGSSLMODE|-u PGHOSTADDR|PGHOSTADDR/.test(checksYml), 'migrate-pg version-check unsets inherited PGHOSTADDR/PGSSLMODE')
 
@@ -1194,6 +1296,39 @@ function sourceResidue(url) {
   return { schemas: Number(schemas.trim()), locks: Number(locks.trim()) }
 }
 
+{
+  function spawnSafeUnit(code) {
+    return spawnSync(process.execPath, ['--input-type=module', '-e', code], {
+      encoding: 'utf8',
+      cwd: root,
+      env: libpqCleanEnv({ ...process.env, NODE_NO_WARNINGS: '1' }),
+    })
+  }
+  const timerTok = 'rowtok-timer\\'
+  const timerFail = spawnSafeUnit(`
+    import { installSafeErrorHandlers } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    setTimeout(() => { throw new Error(${JSON.stringify(`ERROR:  boom ${timerTok}`)}); }, 0);
+    await new Promise((r) => setTimeout(r, 250));
+  `)
+  const timerOut = `${timerFail.stdout || ''}\n${timerFail.stderr || ''}`
+  ok(timerFail.status !== 0, 'uncaught timer exits non-zero')
+  ok(timerOut.includes(GENERIC_SAFE_ERROR) || /omitted/.test(timerOut), 'uncaught timer is re-sanitized')
+  ok(!timerOut.includes('rowtok-timer'), 'uncaught timer omits the value')
+
+  const rejTok = 'rowtok-reject\\'
+  const rejFail = spawnSafeUnit(`
+    import { installSafeErrorHandlers } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    Promise.reject(new Error(${JSON.stringify(`ERROR:  boom ${rejTok}`)}));
+    await new Promise((r) => setTimeout(r, 250));
+  `)
+  const rejOut = `${rejFail.stdout || ''}\n${rejFail.stderr || ''}`
+  ok(rejFail.status !== 0, 'unhandledRejection exits non-zero')
+  ok(rejOut.includes(GENERIC_SAFE_ERROR) || /omitted/.test(rejOut), 'unhandledRejection is re-sanitized')
+  ok(!rejOut.includes('rowtok-reject'), 'unhandledRejection omits the value')
+}
+
 async function runLivePostgresChecks() {
   const targetUrl = process.env.ZEROED_PG_TARGET_URL || ''
   const aliasUrl = process.env.ZEROED_PG_ALIAS_URL || ''
@@ -1315,6 +1450,86 @@ async function runLivePostgresChecks() {
   `)
   assertNoRowLeak('pg_restore data-load failure', restoreFail)
 
+  const raiseTok = 'rowtok-do-raise'
+  pinnedPsql(errUrl, `
+    CREATE OR REPLACE FUNCTION boom_raise() RETURNS void AS $$
+    BEGIN
+      RAISE EXCEPTION '${raiseTok}';
+    END;
+    $$ LANGUAGE plpgsql;
+    CREATE TABLE IF NOT EXISTS trig_t (id int, note text);
+    CREATE OR REPLACE FUNCTION boom_trig() RETURNS trigger AS $$
+    BEGIN
+      RAISE EXCEPTION '${raiseTok}-trig';
+    END;
+    $$ LANGUAGE plpgsql;
+    DROP TRIGGER IF EXISTS boom_trig ON trig_t;
+    CREATE TRIGGER boom_trig BEFORE INSERT ON trig_t FOR EACH ROW EXECUTE FUNCTION boom_trig();
+  `)
+  const plpgsqlFail = spawnSafeModule(`
+    import { installSafeErrorHandlers, run, psqlArgv } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    run("psql", psqlArgv("-d", ${JSON.stringify(errUrl)}, "-c", "SELECT boom_raise()"));
+  `)
+  const plpgsqlOut = assertNoRowLeak('plpgsql RAISE', plpgsqlFail)
+  ok(!plpgsqlOut.includes(raiseTok), 'plpgsql RAISE omits the exception text')
+
+  const triggerFail = spawnSafeModule(`
+    import { installSafeErrorHandlers, run, psqlArgv } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    run("psql", psqlArgv("-d", ${JSON.stringify(errUrl)}, "-c", "INSERT INTO trig_t VALUES (1, '${raiseTok}')"));
+  `)
+  const triggerOut = assertNoRowLeak('trigger RAISE', triggerFail)
+  ok(!triggerOut.includes(raiseTok), 'trigger RAISE omits the exception text')
+
+  const doFail = spawnSafeModule(`
+    import { installSafeErrorHandlers, run, psqlArgv } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    run("psql", psqlArgv("-d", ${JSON.stringify(errUrl)}, "-c", "DO $$ BEGIN RAISE EXCEPTION '${raiseTok}-do'; END $$;"));
+  `)
+  const doOut = assertNoRowLeak('DO-block RAISE', doFail)
+  ok(!doOut.includes(raiseTok), 'DO-block RAISE omits the exception text')
+
+  let tuplesMsg = ''
+  try {
+    psqlTuples(errUrl, `DO $$ BEGIN RAISE EXCEPTION '${raiseTok}-tuples'; END $$;`)
+  } catch (err) {
+    tuplesMsg = err instanceof Error ? err.message : String(err)
+  }
+  ok(tuplesMsg === GENERIC_SAFE_ERROR, 'psqlTuples RAISE is generic')
+  ok(!tuplesMsg.includes(raiseTok), 'psqlTuples RAISE omits the exception text')
+
+  let snapMsg = ''
+  try {
+    await withSourceSnapshot(errUrl, async ({ client }) => {
+      await client.query('SELECT $1::int AS n', ['rowtok-snap'])
+    })
+  } catch (err) {
+    snapMsg = err instanceof Error ? err.message : String(err)
+  }
+  ok(!snapMsg.includes('rowtok-snap'), 'node-pg snapshot error omits the bound value')
+  ok(/snapshot failed|omitted|SQLSTATE 22P02|data exception/.test(snapMsg), 'node-pg snapshot error is allowlisted')
+
+  const timerTok = 'rowtok-timer\\'
+  const timerFail = spawnSafeModule(`
+    import { installSafeErrorHandlers } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    setTimeout(() => { throw new Error(${JSON.stringify(`ERROR:  boom ${timerTok}`)}); }, 0);
+    await new Promise((r) => setTimeout(r, 250));
+  `)
+  const timerOut = assertNoRowLeak('uncaught timer', timerFail)
+  ok(!timerOut.includes('rowtok-timer'), 'uncaught timer omits the value')
+
+  const rejTok = 'rowtok-reject\\'
+  const rejFail = spawnSafeModule(`
+    import { installSafeErrorHandlers } from ${JSON.stringify(join(here, 'migrate-supabase-to-neon.mjs'))};
+    installSafeErrorHandlers();
+    Promise.reject(new Error(${JSON.stringify(`ERROR:  boom ${rejTok}`)}));
+    await new Promise((r) => setTimeout(r, 250));
+  `)
+  const rejOut = assertNoRowLeak('unhandledRejection', rejFail)
+  ok(!rejOut.includes('rowtok-reject'), 'unhandledRejection omits the value')
+
   const badMap = join(tmpPg, 'bad.json')
   writeFileSync(badMap, '{ "email": "phil@example.com",')
   const badMapRun = spawnMigrate(['--dry-run', '--skip-auth-users', '--auth-users-file', badMap], {
@@ -1375,6 +1590,35 @@ async function runLivePostgresChecks() {
   if (dryAfter.status !== 0) console.error(redactSecrets(dryAfterOut))
   eq(dryAfter.status, 0, 'connected dry-run still exits 0 after a live restore')
   ok(/source-only succeeded/.test(dryAfterOut), 'post-restore dry-run stays source-only')
+
+  const slashCreated = '2026-01-15T00:00:00\\'
+  const slashMap = join(tmpPg, 'slash.json')
+  writeFileSync(slashMap, JSON.stringify([
+    { id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', email: 'preview.athlete@zeroed.invalid', created_at: slashCreated },
+  ]))
+  const slashRun = spawnMigrate([
+    '--skip-auth-users',
+    `--confirm-drop=${postgresUrlParts(targetUrl).dbname}`,
+    '--auth-users-file',
+    slashMap,
+  ], {
+    SUPABASE_READONLY_URL: sourceUrl,
+    NEON_DIRECT_URL: targetUrl,
+  })
+  const slashOut = `${slashRun.stdout}\n${slashRun.stderr}`
+  ok(slashRun.status !== 0, 'main restore with created_at trailing backslash fails')
+  ok(!slashOut.includes(slashCreated), 'main restore omits created_at trailing backslash')
+  ok(!slashOut.includes('2026-01-15T00:00:00\\'), 'main restore omits the backslash timestamp')
+  ok(!logLooksLikeRowData(slashOut), 'main restore log is not row data')
+  ok(/failed|omitted|SQLSTATE|command/i.test(slashOut), 'main restore logs a safe failure')
+
+  const hostRun = spawnMigrate(['--dry-run', '--skip-auth-users', '--auth-users-file', mapPath], {
+    SUPABASE_READONLY_URL: `${sourceUrl}${sourceUrl.includes('?') ? '&' : '?'}host=evil.example`,
+  })
+  const hostOut = `${hostRun.stdout}\n${hostRun.stderr}`
+  eq(hostRun.status, 2, 'main refuses source ?host= override')
+  ok(/host=/.test(hostOut), 'main host= refuse mentions host=')
+  ok(!/evil\.example/.test(hostOut), 'main host= refuse omits the override host')
 
   const alias = spawnMigrate([
     '--skip-auth-users',

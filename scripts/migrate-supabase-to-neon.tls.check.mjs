@@ -185,6 +185,23 @@ try {
   }
   ok(failed, 'wrong CA is rejected')
 
+  const mismatchCfg = sourcePgClientConfig(url, goodEnv)
+  mismatchCfg.ssl.servername = 'wrong.example'
+  const mismatch = new pg.Client(mismatchCfg)
+  let mismatchFailed = false
+  try {
+    await mismatch.connect()
+    ok(false, 'hostname mismatch must not connect')
+  } catch (err) {
+    mismatchFailed = true
+    const message = redactSecrets(err instanceof Error ? err.message : String(err))
+    ok(/hostname|altnames|not in|not match|CERT|ERR_TLS|HostNot/i.test(message), 'hostname mismatch fails TLS verification')
+    ok(!/postgresql:\/\//i.test(message), 'hostname-mismatch error does not print a URL')
+  } finally {
+    try { await mismatch.end() } catch { /* ignore */ }
+  }
+  ok(mismatchFailed, 'hostname mismatch is rejected')
+
   let missingCaFailed = false
   try {
     assertSourcePgSsl({

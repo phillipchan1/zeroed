@@ -72,11 +72,27 @@ export function redactSecrets(text) {
 
 export const GENERIC_SAFE_ERROR = 'command failed (details omitted; log looked like row data)'
 
+/** Fixed text for the SQLSTATE class (first two characters). Unknown → generic. */
+export const SQLSTATE_CLASS_TEXT = Object.freeze({
+  '08': 'connection exception',
+  '0A': 'feature not supported',
+  '22': 'data exception',
+  '23': 'integrity constraint violation',
+  '25': 'invalid transaction state',
+  '28': 'invalid authorization specification',
+  '3D': 'invalid catalog name',
+  '40': 'transaction rollback',
+  '42': 'syntax error or access rule violation',
+  '53': 'insufficient resources',
+  '57': 'operator intervention',
+  '58': 'system error',
+  XX: 'internal error',
+})
+
 export const SUPABASE_SOURCE_CA_FINGERPRINT_SHA256 =
   '80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA'
 
 const SOURCE_URL_ALLOWED_PARAMS = new Set([
-  'host',
   'hostaddr',
   'port',
   'dbname',
@@ -117,7 +133,7 @@ export function assertSafeMigrateLog(text, label = 'log') {
   }
 }
 
-/** Replace quoted literals, Key (...)=(...), and parenthesised value lists. */
+/** Kept for tests; logging no longer scrubs values — it allowlists SQLSTATE. */
 export function stripPgErrorValues(line) {
   let s = String(line)
   s = s.replace(/\bKey\s*\([^)]*\)\s*=\s*\([^)]*\)/gi, 'Key (...)')
@@ -128,72 +144,114 @@ export function stripPgErrorValues(line) {
   return s
 }
 
-function isDroppedPgLine(line) {
-  const s = String(line)
-  if (/^\s*(DETAIL|CONTEXT|LINE|HINT|WHERE)\s*:/i.test(s)) return true
-  if (/Failing row contains/i.test(s)) return true
-  if (/^\s*Command was:/i.test(s)) return true
-  return false
-}
-
-export function extractSqlstate(text) {
-  const s = String(text)
+export function extractSqlstate(text, err) {
+  const code = err && typeof err === 'object' ? String(err.code || '') : ''
+  if (/^[0-9A-Z]{5}$/.test(code)) return code
+  const s = String(text ?? '')
   return s.match(/\bSQLSTATE[:\s]+([0-9A-Z]{5})\b/i)?.[1]
     ?? s.match(/\bERROR:\s+([0-9A-Z]{5})\b/)?.[1]
     ?? null
 }
 
-/** First ERROR / pg_restore error line, values stripped. Drop DETAIL and friends. */
-export function sanitizePgFailureText(text) {
+export function sqlstateClassText(sqlstate) {
+  const code = String(sqlstate || '')
+  if (!/^[0-9A-Z]{5}$/.test(code) || code === 'P0001') return null
+  return SQLSTATE_CLASS_TEXT[code.slice(0, 2)] || null
+}
+
+/** Odd ", trailing \, or P0001 — do not try to scrub; drop the text. */
+export function allowlistRejected(text) {
+  const s = String(text ?? '')
+  if ((s.match(/"/g) || []).length % 2 === 1) return true
+  if (/\\[ \t]*$/.test(s.replace(/\r?\n$/, ''))) return true
+  if (extractSqlstate(s) === 'P0001') return true
+  return false
+}
+
+export function commandName(cmd) {
+  return String(cmd || 'command').split(/[/\\]/).pop().split(/\s+/)[0] || 'command'
+}
+
+export function formatAllowlistedFailure(cmd, status, sqlstate) {
+  const name = commandName(cmd)
+  const klass = sqlstateClassText(sqlstate)
+  if (!klass || !sqlstate) return GENERIC_SAFE_ERROR
+  const text = `${name} failed (${status}): SQLSTATE ${sqlstate}: ${klass}`
+  if (allowlistRejected(text) || logLooksLikeRowData(text)) return GENERIC_SAFE_ERROR
+  return text
+}
+
+export function isAllowlistedCommandError(text) {
+  const s = String(text || '').trim()
+  if (!s) return false
+  if (s === GENERIC_SAFE_ERROR) return true
+  if (allowlistRejected(s) || logLooksLikeRowData(s)) return false
+  return /^[A-Za-z0-9._-]+ failed \(-?\d+\)(?:: SQLSTATE [0-9A-Z]{5}: [a-z ]+)?$/.test(s)
+}
+
+/** SQLSTATE only. firstError is always empty — values are not logged. */
+export function sanitizePgFailureText(text, err) {
   const raw = String(text ?? '')
-  const sqlstate = extractSqlstate(raw)
-  const lines = raw.split(/\r?\n/).filter((line) => line.trim() && !isDroppedPgLine(line))
-  const errorLine = lines.find((line) => /^\s*(?:ERROR|pg_restore:\s*error):/i.test(line))
-    ?? lines.find((line) => /ERROR:/i.test(line))
-    ?? ''
-  return { sqlstate, firstError: errorLine ? stripPgErrorValues(errorLine) : '' }
+  const sqlstate = extractSqlstate(raw, err)
+  if (allowlistRejected(raw) || sqlstate === 'P0001') {
+    return { sqlstate, firstError: '' }
+  }
+  return { sqlstate, firstError: '' }
+}
+
+export function formatSafeCommandError(cmd, status, stderr, stdout, err) {
+  const raw = `${stderr || ''}\n${stdout || ''}`
+  if (allowlistRejected(raw)) return GENERIC_SAFE_ERROR
+  const sqlstate = extractSqlstate(raw, err)
+  return formatAllowlistedFailure(cmd, status, sqlstate)
+}
+
+export function formatSafePgClientError(err, cmd = 'query') {
+  if (err == null) return GENERIC_SAFE_ERROR
+  const msg = err instanceof Error ? err.message : String(err)
+  if (isAllowlistedCommandError(msg)) return msg
+  if (allowlistRejected(msg)) return GENERIC_SAFE_ERROR
+  const sqlstate = extractSqlstate(msg, err)
+  return formatAllowlistedFailure(cmd, 1, sqlstate)
 }
 
 export function safeLoggedMessage(text, label = 'error') {
   const s = redactSecrets(String(text ?? ''))
   if (!s) return s
-  if (logLooksLikeRowData(s)) return GENERIC_SAFE_ERROR
+  if (isAllowlistedCommandError(s)) return s
+  if (allowlistRejected(s) || logLooksLikeRowData(s)) return GENERIC_SAFE_ERROR
   try {
     assertSafeMigrateLog(s, label)
   } catch {
     return GENERIC_SAFE_ERROR
   }
+  if (extractSqlstate(s) || /failed \(\d+\)/.test(s) || /^\s*(ERROR|pg_restore:|pg_dump:)/im.test(s)) {
+    return formatAllowlistedFailure('command', 1, extractSqlstate(s))
+  }
   return s
 }
 
 export function safeErrorMessage(err) {
-  if (err == null) return GENERIC_SAFE_ERROR
-  const msg = err instanceof Error ? err.message : String(err)
-  return safeLoggedMessage(msg)
+  return formatSafePgClientError(err)
 }
 
 export function logSafeError(text) {
   console.error(safeLoggedMessage(String(text ?? '')))
 }
 
-export function formatSafeCommandError(cmd, status, stderr, stdout) {
-  const name = String(cmd || 'command').split(/[/\\]/).pop().split(/\s+/)[0] || 'command'
-  const { sqlstate, firstError } = sanitizePgFailureText(`${stderr || ''}\n${stdout || ''}`)
-  const parts = [`${name} failed (${status})`]
-  if (sqlstate) parts.push(`SQLSTATE ${sqlstate}`)
-  if (firstError) parts.push(firstError)
-  return safeLoggedMessage(parts.join(': '))
-}
-
 export function installSafeErrorHandlers({ exit = true } = {}) {
   const fail = (err) => {
     releaseHeldAdvisoryLocks()
-    console.error(safeErrorMessage(err))
+    console.error(formatSafePgClientError(err))
     if (exit) process.exit(1)
   }
   process.on('uncaughtException', fail)
   process.on('unhandledRejection', fail)
   return fail
+}
+
+export function psqlArgv(...rest) {
+  return ['-v', 'ON_ERROR_STOP=1', '-v', 'VERBOSITY=sqlstate', ...rest]
 }
 
 export function isSocketHost(host) {
@@ -249,13 +307,25 @@ export function isLoopbackHost(host) {
 
 export const SUPABASE_SOURCE_CA_FILE = join(here, 'certs/supabase-prod-ca-2021.crt')
 
-/** Strip ssl* and uselibpqcompat so an explicit `ssl` object / PGSSL* env wins. */
-export function stripSslMode(url) {
-  const parsed = new URL(url)
-  for (const key of [...parsed.searchParams.keys()]) {
-    if (isForbiddenSourceUrlParam(key)) parsed.searchParams.delete(key)
+function queryParamKey(part) {
+  const rawKey = String(part || '').split('=')[0] || ''
+  try {
+    return decodeURIComponent(rawKey.replace(/\+/g, '%20')).toLowerCase()
+  } catch {
+    return rawKey.toLowerCase()
   }
-  return parsed.toString()
+}
+
+/** Strip ssl* / uselibpqcompat without re-encoding `+` in libpq options. */
+export function stripSslMode(url) {
+  const s = String(url)
+  const q = s.indexOf('?')
+  if (q < 0) return s
+  const kept = s.slice(q + 1).split('&').filter((part) => {
+    if (!part) return false
+    return !isForbiddenSourceUrlParam(queryParamKey(part))
+  })
+  return kept.length ? `${s.slice(0, q)}?${kept.join('&')}` : s.slice(0, q)
 }
 
 export function refuseUnexpectedSourceUrlParams(url) {
@@ -263,6 +333,9 @@ export function refuseUnexpectedSourceUrlParams(url) {
   const unexpected = []
   for (const key of parsed.searchParams.keys()) {
     const lower = key.toLowerCase()
+    if (lower === 'host') {
+      throw new Error('source URL must not include a host= override')
+    }
     if (isForbiddenSourceUrlParam(lower)) continue
     if (!SOURCE_URL_ALLOWED_PARAMS.has(lower)) unexpected.push(key)
   }
@@ -276,6 +349,9 @@ export function sanitizeSourceConnectionString(url) {
   const stripped = stripSslMode(url)
   if (/[?&](ssl|uselibpqcompat)/i.test(stripped)) {
     throw new Error('source URL must not include ssl* or uselibpqcompat')
+  }
+  if (/[?&]host=/i.test(stripped)) {
+    throw new Error('source URL must not include a host= override')
   }
   return stripped
 }
@@ -1015,10 +1091,15 @@ export function migrateWorkDir(env = process.env) {
   return mkdtempSync(join(base, 'zeroed-migrate-'))
 }
 
+function wrapSnapshotError(err) {
+  if (err instanceof Error && isAllowlistedCommandError(err.message)) return err
+  return new Error(formatSafePgClientError(err, 'snapshot'))
+}
+
 export async function withSourceSnapshot(sourceUrl, work) {
   const client = new pg.Client(sourcePgClientConfig(sourceUrl))
-  await client.connect()
   try {
+    await client.connect()
     await client.query(checksumSessionSetSql())
     await client.query(SNAPSHOT_TIMEOUT_SQL)
     await client.query(SNAPSHOT_BEGIN_SQL)
@@ -1033,6 +1114,8 @@ export async function withSourceSnapshot(sourceUrl, work) {
       try { await client.query('ROLLBACK') } catch { /* ignore */ }
       throw err
     }
+  } catch (err) {
+    throw wrapSnapshotError(err)
   } finally {
     try { await client.end() } catch { /* ignore */ }
   }
@@ -1216,10 +1299,10 @@ function needBin(name) {
   if (res.status !== 0) throw new Error(`Missing ${name}. Install PostgreSQL client tools.`)
 }
 
-function psqlTuples(url, sql) {
+export function psqlTuples(url, sql) {
   const env = libpqCleanEnv()
   env.PGOPTIONS = checksumPgOptions()
-  return run('psql', ['-v', 'ON_ERROR_STOP=1', '-At', '-F', ',', '-d', url, '-c', sql], { env })
+  return run('psql', psqlArgv('-At', '-F', ',', '-d', url, '-c', sql), { env })
 }
 
 function readChecksums(url, label, { required = true } = {}) {
@@ -1343,7 +1426,7 @@ export function loadUsersSql(usersPath) {
 
 export async function main(argv = process.argv.slice(2), env = process.env, deps = {}) {
   const args = parseMigrateArgs(argv, env)
-  const source = resolveSourceUrl(env)
+  let source = resolveSourceUrl(env)
   const target = resolveTargetUrl(env)
   const readFp = typeof deps.readFingerprint === 'function' ? deps.readFingerprint : readFingerprint
   const checkLock = typeof deps.checkSourceLock === 'function'
@@ -1357,6 +1440,12 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
 
   if (!source) {
     logSafeError('Set SUPABASE_READONLY_URL (or pass --dry-run).')
+    return 2
+  }
+  try {
+    source = sanitizeSourceConnectionString(source)
+  } catch (err) {
+    logSafeError(err instanceof Error ? err.message : 'source URL is not allowed')
     return 2
   }
 
@@ -1484,7 +1573,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
           FROM auth.users
         ) TO STDOUT WITH CSV
       `
-      const csv = run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', sanitizeSourceConnectionString(source), '-c', usersCopy], {
+      const csv = run('psql', psqlArgv('-d', sanitizeSourceConnectionString(source), '-c', usersCopy), {
         env: sourceLibpqSslEnv(source, env),
       })
       writeFileSync(usersPath, csv)
@@ -1527,14 +1616,14 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
     if (before.mismatch) console.log('source and neon counts/hashes differ before restore (expected on empty neon)')
 
     console.log('resetting Neon public/auth schemas so a rerun starts empty…')
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-c', `
+    run('psql', psqlArgv('-d', target, '-c', `
       DROP SCHEMA IF EXISTS public CASCADE;
       DROP SCHEMA IF EXISTS auth CASCADE;
       CREATE SCHEMA public;
-    `])
+    `))
     console.log('applying worker/schema/app.sql + better-auth.sql on Neon…')
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(root, 'worker/schema/app.sql')])
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(root, 'worker/schema/better-auth.sql')])
+    run('psql', psqlArgv('-d', target, '-f', join(root, 'worker/schema/app.sql')))
+    run('psql', psqlArgv('-d', target, '-f', join(root, 'worker/schema/better-auth.sql')))
 
     console.log('restoring users + public data in one transaction…')
     const tocPath = join(dir, 'restore.list')
@@ -1557,11 +1646,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, deps
         readFileSync(restoreSqlPath, 'utf8'),
       ),
     )
-    run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', join(dir, 'restore_txn.sql')])
+    run('psql', psqlArgv('-d', target, '-f', join(dir, 'restore_txn.sql')))
 
     if (args.relaxTargetRls) {
       console.log('relaxing leftover RLS / auth helpers on Neon (--relax-target-rls)…')
-      run('psql', ['-v', 'ON_ERROR_STOP=1', '-d', target, '-f', relaxPath])
+      run('psql', psqlArgv('-d', target, '-f', relaxPath))
     }
 
     const afterDst = readChecksums(target, 'neon', { required: true })
@@ -1601,7 +1690,7 @@ if (isExecutedDirectly(import.meta.url, process.argv[1])) {
     process.exit(await main())
   } catch (err) {
     releaseHeldAdvisoryLocks()
-    logSafeError(safeErrorMessage(err))
+    console.error(formatSafePgClientError(err))
     process.exit(1)
   }
 }
