@@ -40,6 +40,9 @@ CREATE TABLE IF NOT EXISTS public.athlete (
   limiter_choice    TEXT,
   training_preferences TEXT,
   training_max_overrides JSONB,
+  -- arc_load_v1 (migration 20261028000001).
+  flags             JSONB,
+  time_zone         TEXT,
   CONSTRAINT athlete_auth_user_unique UNIQUE (auth_user_id),
   CONSTRAINT athlete_onboarding_step_check CHECK (onboarding_step IN (
     'hook',
@@ -57,6 +60,12 @@ CREATE TABLE IF NOT EXISTS public.athlete (
 
 COMMENT ON COLUMN public.athlete.training_max_overrides IS
   'Hand-set training maxes by lift id: {"bench": {"value": 275, "set_at": "<iso>", "model_tm": 268.4}} (older writes are a bare number), storage weight unit. Absent lifts use 90% of the working max.';
+
+COMMENT ON COLUMN public.athlete.flags IS
+  'Per-athlete runtime feature flags, e.g. {"arc_load_v1": true}. Set by hand.';
+
+COMMENT ON COLUMN public.athlete.time_zone IS
+  'The athlete''s training calendar (IANA zone). Null = America/Los_Angeles.';
 
 COMMENT ON COLUMN public.athlete.training_preferences IS
   'Athlete-stated standing training preferences, newest first. Fed to phase design as the emphasis so steering survives a phase change.';
@@ -167,10 +176,15 @@ CREATE TABLE IF NOT EXISTS public.program (
   start_date  DATE NOT NULL DEFAULT CURRENT_DATE,
   retest_date DATE,
   status      TEXT NOT NULL DEFAULT 'active'
-               CHECK (status IN ('draft','active','completed','paused'))
+               CHECK (status IN ('draft','active','completed','paused','external'))
 );
 
 CREATE INDEX IF NOT EXISTS program_athlete_id_idx ON public.program(athlete_id);
+
+-- One 'external' program per athlete: it holds the sessions logged outside the
+-- plan and the coach's one-offs (arc_load_v1), never the planned week.
+CREATE UNIQUE INDEX IF NOT EXISTS program_one_external_per_athlete
+  ON public.program(athlete_id) WHERE status = 'external';
 
 -- =============================================================================
 -- PHASE
@@ -226,7 +240,11 @@ CREATE TABLE IF NOT EXISTS public.workout (
   knee_pain_r        SMALLINT CHECK (knee_pain_r IS NULL OR knee_pain_r BETWEEN 0 AND 10),
   sleep_hours        NUMERIC(3, 1) CHECK (sleep_hours IS NULL OR sleep_hours BETWEEN 0 AND 24),
   readiness          SMALLINT CHECK (readiness IS NULL OR readiness BETWEEN 1 AND 10),
-  bodyweight         NUMERIC(6, 1) CHECK (bodyweight IS NULL OR bodyweight > 0)
+  bodyweight         NUMERIC(6, 1) CHECK (bodyweight IS NULL OR bodyweight > 0),
+  -- arc_load_v1 (migration 20261028000001): Foster session RPE for the whole
+  -- session, and 'external' for a session logged outside the plan.
+  session_rpe        NUMERIC(3, 1) CHECK (session_rpe IS NULL OR (session_rpe >= 0 AND session_rpe <= 10)),
+  source             TEXT CHECK (source IS NULL OR source IN ('plan', 'external'))
 );
 
 CREATE INDEX IF NOT EXISTS workout_routine_id_idx   ON public.workout(routine_id);
@@ -245,9 +263,9 @@ COMMENT ON COLUMN public.workout.exercises_snapshot IS
 -- applies this file to Neon; keep INTEGER CHECK 1–10 to match live Supabase.
 -- Hand-apply worker/schema/rpe-half-steps.sql only when flipping RPE_HALF_STEPS.
 --
--- Nor are arc_load_v1's columns (workout.session_rpe / source, athlete.flags /
--- time_zone, program status 'external'). Hand-apply worker/schema/arc-load-v1.sql
--- before turning arc_load_v1 on for anyone.
+-- arc_load_v1's columns ARE in this snapshot (session_rpe, source above;
+-- athlete.flags / time_zone; program status 'external'): migration
+-- 20261028000001 is live on Supabase, Neon production and the dev branch.
 
 -- =============================================================================
 -- SESSION_OBSERVATION

@@ -1,10 +1,9 @@
--- Follow-up only. Do not apply from migrate-supabase-to-neon, seed-preview,
--- or any other automated path. Those use worker/schema/app.sql, which stays
--- matched to live Supabase so the migrate checksums (to_jsonb of every row)
--- agree.
+-- Brings an existing Neon database up to arc_load_v1. Same SQL as
+-- supabase/migrations/20261028000001_arc_load_v1.sql, and idempotent.
 --
--- Apply by hand on Neon (and supabase/migrations/20261028000001_arc_load_v1.sql
--- on Supabase) before turning arc_load_v1 on for anyone. Same SQL as that file.
+-- worker/schema/app.sql already includes all of it, so a fresh restore needs
+-- nothing from here. Applied 2026-10-27 to Supabase (the rollback copy), Neon
+-- production (branch `production`) and Neon `dev-migration-rehearsal`.
 
 -- arc_load_v1: session RPE, sessions logged outside the plan, and the athlete's
 -- own calendar zone. Everything here is additive and nullable; nothing reads it
