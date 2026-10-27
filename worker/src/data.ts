@@ -83,6 +83,9 @@ const COLUMNS: Record<string, Set<string>> = {
     'id', 'auth_user_id', 'name', 'sport', 'goals', 'obstacle', 'training_age',
     'sessions_per_week', 'training_preferences', 'arena_type', 'arena_raw',
     'limiter_choice', 'onboarding_step', 'created_at', 'training_max_overrides',
+    // arc_load_v1 (worker/schema/arc-load-v1.sql, applied by hand). flags is
+    // readable here and never writable: insert and update strip it.
+    'flags', 'time_zone',
   ]),
   athlete_profile: new Set(['id', 'athlete_id', 'last_updated', 'current_phase', 'retest_date']),
   diagnostic: new Set([
@@ -112,6 +115,9 @@ const COLUMNS: Record<string, Set<string>> = {
     'duration_mins', 'exercises_snapshot',
     // The session check-in (migration 20261026000001) — read by the lift model.
     'knee_pain_l', 'knee_pain_r', 'sleep_hours', 'readiness', 'bodyweight',
+    // arc_load_v1: Foster session RPE, and 'external' for a session logged
+    // outside the plan.
+    'session_rpe', 'source',
   ]),
   session_observation: new Set([
     'id', 'workout_id', 'category', 'signal', 'severity', 'logged_at',
@@ -143,7 +149,7 @@ const JSONB = new Set([
   'phase.non_negotiables', 'phase.advancement_criteria',
   'routine.exercises',
   'workout.actual_weights', 'workout.actual_reps', 'workout.exercises_snapshot',
-  'athlete.training_max_overrides',
+  'athlete.training_max_overrides', 'athlete.flags',
   'weekly_review.adjustments', 'weekly_review.next_week_prescription',
   'program_revision.requests', 'program_revision.snapshot', 'program_revision.diff',
   'workout_draft.set_logs', 'workout_draft.feedback',
@@ -768,7 +774,7 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
         const row = { ...raw }
         const blocked = await assertWritableRow(sql, table, row, ctx)
         if (blocked) return blocked
-        if (table === 'athlete') delete row.id
+        if (table === 'athlete') { delete row.id; delete row.flags }
         if (table !== 'athlete') delete row.auth_user_id
         if (table === 'workout') {
           const rpeErr = workoutRpeError(row, ctx.rpeHalfSteps ?? rpeHalfStepsOn())
@@ -819,7 +825,7 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       delete row.id
       delete row.auth_user_id
       if (ATHLETE_COL.has(table)) row.athlete_id = ctx.athleteId
-      if (table === 'athlete') delete row.athlete_id
+      if (table === 'athlete') { delete row.athlete_id; delete row.flags }
       const blocked = await assertWritableRow(sql, table, row, ctx, false)
       if (blocked) return blocked
       if (table === 'workout') {

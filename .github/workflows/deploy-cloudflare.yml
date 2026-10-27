@@ -24,6 +24,7 @@ jobs:
         run: npm run build
         env:
           VITE_API_BASE_URL: /api
+          VITE_ARC_LOAD_V1: ${{ vars.VITE_ARC_LOAD_V1 }}
       - name: wrangler deploy
         uses: cloudflare/wrangler-action@da0e0dfe58b7a431659754fdf3f186c529afbe65 # v3.14.1
         with:

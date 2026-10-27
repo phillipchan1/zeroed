@@ -16,7 +16,7 @@ import { fmtDose, isIntervalBlock, intervalPlanFor, roundsFromLogs, fmtClock, in
 import { primeCueAudio } from '../../lib/intervalCues'
 import { tallySession } from '../../engine/volume'
 import { unitContext, type UnitContext } from '../../lib/units'
-import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag, Play } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag, Play, Plus, MessageSquarePlus } from 'lucide-react'
 import { loadDraftStarts } from '../../lib/workoutDraft'
 import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
 import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
@@ -25,7 +25,11 @@ import {
   pendingRef, parsePendingRef, pendingSessionById,
 } from '../../lib/workoutOutbox'
 import { setIntendedDay, orderByPlannedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
-import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, LockOn } from '../../components/ui'
+import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, LockOn, Row } from '../../components/ui'
+import { OutsidePlanSheet } from '../../components/OutsidePlanSheet'
+import { OneOffSheet } from '../../components/OneOffSheet'
+import { arcLoadOn } from '../../lib/arcLoad'
+import { isOffPlan } from '../../engine/outsidePlan'
 import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate, WeeklyDirective } from '../../types/database'
 
 const PAGER_DIRECTIVE_TONE: Record<WeeklyDirective, 'done' | 'todo' | 'pending'> = {
@@ -794,6 +798,15 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
   const isFirstVisit = onboardingStep === 'first_session_pending'
   const [draftStarts, setDraftStarts] = useState<Record<string, string>>({})
   const [showCloseSheet, setShowCloseSheet] = useState(false)
+  // arc_load_v1: a session the plan didn't write, planned by the coach now or
+  // logged after the fact. The note is the lock-on line once one is logged.
+  const [offPlan, setOffPlan] = useState<'plan' | 'log' | null>(null)
+  const [loggedNote, setLoggedNote] = useState<string | null>(null)
+  useEffect(() => {
+    if (!loggedNote) return
+    const t = setTimeout(() => setLoggedNote(null), 5000)
+    return () => clearTimeout(t)
+  }, [loggedNote])
   const [openSessionId, setOpenSessionId] = useState<string | null>(null)
   const [closing, setClosing] = useState(false)
   const [weekOffset, setWeekOffset] = useState(0)   // 0 = this week, <0 past, >0 future/boundary
@@ -832,7 +845,11 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
   // their own once the outbox drains and the real rows arrive.
   const allWorkouts: WeekWorkout[] = (() => {
     const committed = view?.weekWorkouts ?? []
+    // A session logged outside the plan, or a coach-planned one-off, never
+    // fills a planned slot — same as its committed row, which lives in the
+    // external program and so never reaches weekWorkouts.
     const queued = pendingSessionsRaw()
+      .filter((p) => !isOffPlan(p))
       .map((p) => ({ id: pendingRef(p.id), routineId: p.routineId, performedAt: p.performedAt ?? p.queuedAt }))
       .filter((p) => !committed.some(
         (w) => w.routineId === p.routineId && isSameDay(new Date(w.performedAt), new Date(p.performedAt)),
@@ -1261,6 +1278,28 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
                     />
                   ))}
                 </div>
+                {arcLoadOn() && wOffset === 0 && (
+                  <div className="offplan">
+                    {loggedNote && (
+                      <LockOn className="offplan__done">
+                        <span className="text-sm">Logged outside the plan</span>
+                        <span className="num text-xs text-dim">{loggedNote}</span>
+                      </LockOn>
+                    )}
+                    <Row
+                      leading={<MessageSquarePlus size={20} strokeWidth={1.75} aria-hidden />}
+                      title="Plan a one-off session"
+                      sub="Say what you've got: time, kit, who with"
+                      onClick={() => setOffPlan('plan')}
+                    />
+                    <Row
+                      leading={<Plus size={20} strokeWidth={1.75} aria-hidden />}
+                      title="Log outside the plan"
+                      sub="A class, a run, a match you already did"
+                      onClick={() => setOffPlan('log')}
+                    />
+                  </div>
+                )}
               </>
             )}
 
@@ -1359,6 +1398,23 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
             })
           }}
           onDiscard={() => { discardBlocked(); setStuckOpen(false); refetch() }}
+        />
+      )}
+
+      {offPlan === 'log' && (
+        <OutsidePlanSheet
+          athleteId={athleteId}
+          athleteName={athleteName}
+          onClose={() => setOffPlan(null)}
+          onLogged={(summary) => { setOffPlan(null); setLoggedNote(summary) }}
+        />
+      )}
+      {offPlan === 'plan' && (
+        <OneOffSheet
+          athleteId={athleteId}
+          athleteName={athleteName}
+          onboardingStep={onboardingStep ?? null}
+          onClose={() => setOffPlan(null)}
         />
       )}
 

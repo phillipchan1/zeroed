@@ -468,9 +468,16 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
     readiness: w.readiness,
     bodyweight: w.bodyweight,
   }))
-  const today = localDay(new Date().toISOString())
+  // time_zone arrives with the arc_load_v1 migration, applied by hand. Read
+  // through to_jsonb so a database without the column answers null, not an error.
+  const [athlete] = await store.sql<{ training_max_overrides: unknown; time_zone: string | null }[]>`
+    SELECT a.training_max_overrides, to_jsonb(a) ->> 'time_zone' AS time_zone
+    FROM athlete a WHERE a.id = ${store.athleteId} LIMIT 1
+  `
+  const timeZone = calendarZone(athlete?.time_zone)
+  const today = localDay(new Date().toISOString(), timeZone)
   const weekStart = mondayOf(today)
-  const recentIds = workouts.filter((w) => localDay(w.performed_at) >= addDays(weekStart, -14)).map((w) => w.id as string)
+  const recentIds = workouts.filter((w) => localDay(w.performed_at, timeZone) >= addDays(weekStart, -14)).map((w) => w.id as string)
   const observations = recentIds.length
     ? await store.sql<{ signal: string; severity: number; logged_at: string }[]>`
         SELECT signal, severity, to_json(logged_at) #>> '{}' AS logged_at
@@ -478,9 +485,6 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
         WHERE workout_id = ANY(${store.sql.array(recentIds)}) AND severity >= 4
       `
     : []
-  const [athlete] = await store.sql<{ training_max_overrides: unknown }[]>`
-    SELECT training_max_overrides FROM athlete WHERE id = ${store.athleteId} LIMIT 1
-  `
   const ids = await programIds(store)
   const [review] = ids.length
     ? await store.sql<{ week_ending: string; next_week_prescription: unknown }[]>`
@@ -501,8 +505,24 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
     phaseName: live?.phaseName ?? null,
     directive: review && review.week_ending === addDays(weekStart, -1) ? presc?.directive ?? null : null,
     today,
+    timeZone,
     unit: store.unit === 'kg' ? 'kg' : 'lb',
   }
+}
+
+/**
+ * The athlete's training calendar: the zone the app stored for them, or the
+ * lift model's own default when there is none (or Intl can't read it). Passed
+ * per call, never set as module state: this isolate serves every athlete.
+ */
+export function calendarZone(stored: string | null | undefined): string {
+  if (stored) {
+    try {
+      new Intl.DateTimeFormat('en-US', { timeZone: stored })
+      return stored
+    } catch { /* fall through to the default */ }
+  }
+  return 'America/Los_Angeles'
 }
 
 /**

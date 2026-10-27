@@ -2,6 +2,7 @@ import { useEffect } from 'react'
 import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from 'react-router-dom'
 import { useAuth } from './hooks/useAuth'
 import { useAppState } from './hooks/useAppState'
+import { useArcLoad } from './lib/arcLoad'
 import { useDisableShakeToUndo } from './hooks/useDisableShakeToUndo'
 import { useOutboxSync, pendingSessionsRaw } from './lib/workoutOutbox'
 import { cacheKeys, useWarmLoopCaches } from './lib/loopCache'
@@ -96,6 +97,8 @@ function LoopLayout({
 function AppRoutes() {
   const { user, loading: authLoading } = useAuth()
   const { athlete, todayRoutine, routines, loading: stateLoading, refresh } = useAppState(user?.id)
+  // Before any screen renders: the flag they read, and the week they bucket on.
+  useArcLoad(athlete)
 
   // Flush any sessions completed offline once we're back (and on every launch).
   useOutboxSync()

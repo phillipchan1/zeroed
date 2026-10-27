@@ -32,6 +32,26 @@ function fmtSet(s: SetLog, u: UnitContext): string {
 
 // ---- One logged session in the week list ----------------------------------
 
+// A session logged outside the plan: what it was, how long, how hard. No sets
+// behind it to review, so it isn't a door.
+function OutsidePlanCard({ s }: { s: LogSession & { outsidePlan: NonNullable<LogSession['outsidePlan']> } }) {
+  return (
+    <div className="card" style={{ marginBottom: 10 }}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+        <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700, minWidth: 0 }}>{s.routineName}</h3>
+        <span className="meta" style={{ whiteSpace: 'nowrap' }}>
+          {dayAndDate(s.performedAt)}
+        </span>
+      </div>
+      <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        {s.pending ? <Chip tone="pending">Syncing</Chip> : <Chip tone="info">Outside the plan</Chip>}
+        {s.outsidePlan.minutes != null && <Chip tone="todo">{s.outsidePlan.minutes} min</Chip>}
+        {s.outsidePlan.effort != null && <Chip tone="todo">Effort {s.outsidePlan.effort}</Chip>}
+      </div>
+    </div>
+  )
+}
+
 function LogSessionCard({
   s, u, onOpen, onExercise,
 }: {
@@ -40,6 +60,7 @@ function LogSessionCard({
   onOpen: () => void
   onExercise: (name: string) => void
 }) {
+  if (s.outsidePlan) return <OutsidePlanCard s={{ ...s, outsidePlan: s.outsidePlan }} />
   return (
     // A not-yet-synced session opens too: it's edited straight out of the outbox,
     // so there's no reason to make the athlete wait for a round trip to fix a
@@ -59,6 +80,7 @@ function LogSessionCard({
         {s.pending
           ? <Chip tone="pending">Syncing</Chip>
           : <Chip tone="done">{s.setsDone} sets</Chip>}
+        {s.oneOff && <Chip tone="info">One-off</Chip>}
         {/* Load moved, not just how many times you stopped. A session of 3x5 at
             315 and one of 3x12 at 95 both read as "3 sets" without it. */}
         {!!s.volume?.load && <Chip tone="todo">{u.volume(s.volume.load)}{u.unit}</Chip>}

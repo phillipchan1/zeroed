@@ -38,7 +38,7 @@ import {
   type ProgramDesignResult, type PhaseDesignResult, type InsightCategory,
   type CoachContext, type CoachChatTurn, type CoachAction, type RetestFindings,
 } from './agentClient'
-import { FELT_CHIPS, isClearanceTest, type FeltLabel, type ClearanceTest } from '../types/database'
+import { FELT_CHIPS, isClearanceTest, type FeltLabel, type ClearanceTest, type ExposureTags, type WorkoutSource } from '../types/database'
 import { unitContext, type UnitContext } from '../lib/units'
 import {
   estimate1RM, estimateIsReliable, displayPRs, foldBest, NO_BEST,
@@ -69,7 +69,7 @@ import {
   clearanceTestOf, pickClearanceLift, describeClearanceTest, newClearanceTest, judgeClearanceSession,
   type WeeklyTally, type WeekWorkout, type WeekObservation, type LiftAttempt,
 } from './prescription'
-import { planPagerFutureWeeks, weekWindowInZone } from './weekDates'
+import { athleteTimeZone, planPagerFutureWeeks, weekWindowInZone } from './weekDates'
 import { workoutRpeError } from './rpeScale'
 // Per-lift loads for the main lifts — working max, training max, push / hold /
 // drop, modifiers, the all-time-best ceiling and the reason line — are decided
@@ -2478,9 +2478,9 @@ export async function gatherLiftSources(athleteId: string, u: UnitContext): Prom
     after = rows[rows.length - 1].performed_at
   }
   const workouts = [...byId.values()]
-  const weekStart = mondayOf(localDay(new Date().toISOString()))
+  const weekStart = mondayOf(localDay(new Date().toISOString(), athleteTimeZone()))
   const recentIds = workouts
-    .filter((w) => localDay(w.performed_at) >= addDaysIso(weekStart, -14))
+    .filter((w) => localDay(w.performed_at, athleteTimeZone()) >= addDaysIso(weekStart, -14))
     .map((w) => w.id).filter((id): id is string => !!id)
   const [{ data: ath }, { data: obs }] = await Promise.all([
     supabase.from('athlete').select('training_max_overrides').eq('id', athleteId).maybeSingle(),
@@ -2501,6 +2501,9 @@ export async function gatherLiftSources(athleteId: string, u: UnitContext): Prom
     overrides,
     unit: u.unit,
     convert: (w) => u.show(w),
+    // liftModel.ts stays byte-identical to its edge copy, so it can't read the
+    // runtime calendar itself; the client hands it over here.
+    timeZone: athleteTimeZone(),
   }
 }
 
@@ -2528,7 +2531,7 @@ export async function gatherTrainingMaxSources(athleteId: string, u: UnitContext
     : []
   if (!routines.length) routines = ((await supabase.from('routine').select(cols).eq('program_id', prog.id)).data ?? []) as RoutineRow[]
   const rv = review as { week_ending: string; next_week_prescription: { directive?: string } | null } | null
-  const weekStart = mondayOf(localDay(new Date().toISOString()))
+  const weekStart = mondayOf(localDay(new Date().toISOString(), athleteTimeZone()))
   return {
     ...liftSrc,
     sessions: routines
@@ -2674,7 +2677,7 @@ export async function gatherSessionPrescription(
   // The whole log, read once. Best-effort: without it every lift falls back to
   // the per-session path below, exactly as before the lift model existed.
   const liftSrc = await gatherLiftSources(athleteId, u).catch(() => null)
-  const today = localDay(new Date().toISOString())
+  const today = localDay(new Date().toISOString(), athleteTimeZone())
   const loggedSets = liftSrc ? readModelLog(liftSrc.workouts, { convert: liftSrc.convert }).sets : []
 
   exercises.forEach((ex, i) => {
@@ -3872,6 +3875,32 @@ export interface PendingSession {
    * before it existed — those leave the row's check-in columns alone.
    */
   checkin?: SessionCheckinInput | null
+  /**
+   * Foster's session RPE (CR-10, 0–10): one rating of the whole session, asked
+   * at the finish while arc_load_v1 is on. Not `rpe`, the mean of the set RPEs.
+   * Null or absent leaves the row's column alone.
+   */
+  sessionRpe?: number | null
+  /**
+   * Set on a session logged outside the plan (a class, a run, a match). Its
+   * `routineId` is empty until commit, which files it under the athlete's one
+   * external program — so nothing that folds queued sessions into the planned
+   * week can match it to a slot.
+   */
+  outsidePlan?: OutsidePlanLog | null
+  /**
+   * 'external' on a one-off session the coach planned outside the program: it
+   * runs and logs like any session, against its own routine in the external
+   * program, and never counts toward the planned week.
+   */
+  source?: WorkoutSource | null
+}
+
+/** What the athlete said about a session that wasn't in the plan. */
+export interface OutsidePlanLog {
+  activity: string
+  minutes: number
+  exposure: ExposureTags
 }
 
 /** What the athlete said about themselves at the start of a session. All optional. */
@@ -3904,6 +3933,31 @@ function checkinColumns(c: SessionCheckinInput | null | undefined): Record<strin
   }
 }
 
+// arc_load_v1's columns (migration 20261028000001) ship by hand the same way.
+function arcColumns(p: PendingSession): Record<string, unknown> | null {
+  const cols: Record<string, unknown> = {}
+  if (p.sessionRpe != null) cols.session_rpe = p.sessionRpe
+  if (p.outsidePlan || p.source === 'external') cols.source = 'external'
+  return Object.keys(cols).length ? cols : null
+}
+
+// Write a row with its optional column groups, oldest migration first. A backend
+// missing a group's columns gets the row without that group (newest dropped
+// first), so a session never sits in the outbox over columns the database
+// hasn't caught up to.
+async function writeDroppingMissing<T>(
+  base: Record<string, unknown>,
+  optional: Array<Record<string, unknown> | null>,
+  write: (row: Record<string, unknown>) => PromiseLike<{ data: T | null; error: { code?: string; message?: string } | null }>,
+): Promise<{ data: T | null; error: { code?: string; message?: string } | null }> {
+  let groups = optional.filter((g): g is Record<string, unknown> => g != null)
+  for (;;) {
+    const res = await write(Object.assign({}, base, ...groups))
+    if (!groups.length || !isMissingColumn(res.error)) return res
+    groups = groups.slice(0, -1)
+  }
+}
+
 // The check-in columns arrive with migration 20261026000001, and the database
 // ships by hand, behind the web deploy. A backend without them rejects the write
 // as an unknown column — so the session commits without its check-in rather than
@@ -3913,6 +3967,70 @@ function isMissingColumn(err: { code?: string; message?: string } | null | undef
   // PostgREST says PGRST204 / 42703; the Worker's /api/data says "unknown column".
   return err.code === 'PGRST204' || err.code === '42703'
     || /column .*(does not exist|could not find)|could not find the .* column|unknown column/i.test(err.message ?? '')
+}
+
+// ---- Sessions outside the plan (arc_load_v1) --------------------------------
+// A workout needs a routine (routine_id is NOT NULL), and a routine a program.
+// Each athlete gets one program with status 'external' holding one routine for
+// logs (session_type 'external'), plus one per coach-planned one-off ('adhoc').
+// Every read of "the athlete's program" filters on 'active', and every week
+// count is scoped to the active program, so these never fill a planned slot;
+// the log, the lift history and the MCP's list_workouts read every program, so
+// they show up there. Made on the first commit, then remembered on the device.
+
+const OUTSIDE_PLAN = 'Outside the plan'
+
+function outsidePlanKey(athleteId: string): string {
+  return `zeroed.outside_plan_routine:${athleteId}`
+}
+
+export function forgetOutsidePlanRoutine(athleteId: string): void {
+  try { localStorage.removeItem(outsidePlanKey(athleteId)) } catch { /* nothing held */ }
+}
+
+/** The athlete's external program, or null when nothing has been logged outside the plan yet. */
+export async function findOutsidePlanProgram(athleteId: string): Promise<string | null> {
+  const { data, error } = await supabase
+    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'external').limit(1)
+  if (error) throw error
+  return ((data ?? []) as Array<{ id: string }>)[0]?.id ?? null
+}
+
+/** The athlete's external program, made on first use. */
+export async function ensureOutsidePlanProgram(athleteId: string): Promise<string> {
+  const found = await findOutsidePlanProgram(athleteId)
+  if (found) return found
+  const { data, error } = await supabase
+    .from('program').insert({ athlete_id: athleteId, goal: OUTSIDE_PLAN, status: 'external' }).select('id').single()
+  if (data) return (data as { id: string }).id
+  // Another device made it first (a unique index allows one per athlete).
+  const theirs = await findOutsidePlanProgram(athleteId)
+  if (theirs) return theirs
+  throw error ?? new Error('could not file the session outside the plan')
+}
+
+async function outsidePlanRoutineId(athleteId: string): Promise<string> {
+  try {
+    const held = localStorage.getItem(outsidePlanKey(athleteId))
+    if (held) return held
+  } catch { /* no storage: look it up */ }
+  const programId = await ensureOutsidePlanProgram(athleteId)
+  // The same program holds the coach's one-off sessions ('adhoc'); the log's
+  // routine is the one typed 'external'.
+  const { data: found, error: findErr } = await supabase
+    .from('routine').select('id').eq('program_id', programId).eq('session_type', 'external').limit(1)
+  if (findErr) throw findErr
+  let routineId = ((found ?? []) as Array<{ id: string }>)[0]?.id
+  if (!routineId) {
+    const { data, error } = await supabase
+      .from('routine')
+      .insert({ program_id: programId, phase_id: null, name: OUTSIDE_PLAN, session_type: 'external', exercises: [] })
+      .select('id').single()
+    if (error || !data) throw error ?? new Error('could not file the session outside the plan')
+    routineId = (data as { id: string }).id
+  }
+  try { localStorage.setItem(outsidePlanKey(athleteId), routineId) } catch { /* looked up again next time */ }
+  return routineId
 }
 
 export interface CommitResult {
@@ -3952,20 +4070,18 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     // now mean. Absent (an older queued entry), leave the stored one alone.
     if (p.exercisesSnapshot?.length) patch.exercises_snapshot = p.exercisesSnapshot
     if (p.performedAt) patch.performed_at = p.performedAt
-    const checkin = checkinColumns(p.checkin)
-    let { data: updated, error: updErr } = await supabase
-      .from('workout').update(checkin ? { ...patch, ...checkin } : patch).eq('id', p.editWorkoutId).select().single()
-    if (checkin && isMissingColumn(updErr)) {
-      ({ data: updated, error: updErr } = await supabase
-        .from('workout').update(patch).eq('id', p.editWorkoutId).select().single())
-    }
+    const { data: updated, error: updErr } = await writeDroppingMissing(
+      patch,
+      [checkinColumns(p.checkin), arcColumns(p)],
+      (row) => supabase.from('workout').update(row).eq('id', p.editWorkoutId!).select().single(),
+    )
     if (updErr || !updated) throw updErr ?? new Error('workout update failed')
     workoutId = (updated as { id: string }).id
     // Clear prior observations so the re-run doesn't stack duplicates.
     await supabase.from('session_observation').delete().eq('workout_id', workoutId)
   } else {
     const insert: Record<string, unknown> = {
-      routine_id:     p.routineId,
+      routine_id:     p.outsidePlan ? await outsidePlanRoutineId(p.athleteId) : p.routineId,
       actual_weights: p.actualWeights,
       actual_reps:    p.actualReps,
       rpe:            p.rpe,
@@ -3976,13 +4092,17 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     // the athlete's history as a side effect.
     if (p.exercisesSnapshot?.length) insert.exercises_snapshot = p.exercisesSnapshot
     if (p.performedAt) insert.performed_at = p.performedAt
-    const checkin = hasCheckin(p.checkin) ? checkinColumns(p.checkin) : null
-    let { data: workout, error } = await supabase
-      .from('workout').insert(checkin ? { ...insert, ...checkin } : insert).select().single()
-    if (checkin && isMissingColumn(error)) {
-      ({ data: workout, error } = await supabase.from('workout').insert(insert).select().single())
+    const { data: workout, error } = await writeDroppingMissing(
+      insert,
+      [hasCheckin(p.checkin) ? checkinColumns(p.checkin) : null, arcColumns(p)],
+      (row) => supabase.from('workout').insert(row).select().single(),
+    )
+    if (error || !workout) {
+      // The cached external routine is gone (a debug reset): forget it, so the
+      // outbox's retry files the session under a fresh one.
+      if (p.outsidePlan) forgetOutsidePlanRoutine(p.athleteId)
+      throw error ?? new Error('workout insert failed')
     }
-    if (error || !workout) throw error ?? new Error('workout insert failed')
     workoutId = (workout as { id: string }).id
   }
 
@@ -4321,6 +4441,10 @@ export interface LogSession {
   volume?: VolumeTally
   pending: boolean                     // finished offline, not yet synced
   highlights: RecapSessionHighlight[]  // top set of the first few exercises
+  /** Logged outside the plan (arc_load_v1): no sets to review, just what it was. */
+  outsidePlan?: { minutes: number | null; effort: number | null }
+  /** A one-off the coach planned outside the program; reviewable like any session. */
+  oneOff?: boolean
 }
 export interface LogWeek {
   weekStart: string   // ISO Monday
@@ -4474,14 +4598,78 @@ export async function gatherTrainingLog(
     }
   })
 
+  // Sessions off the plan live in the athlete's external program (arc_load_v1):
+  // never in the week, always on the log. '*' rather than naming session_rpe,
+  // which arrives with a migration applied by hand.
+  const extProgramId = await findOutsidePlanProgram(athleteId).catch(() => null)
+  if (extProgramId) {
+    const { data: ext } = await supabase
+      .from('workout')
+      .select('*, routine!inner(name, exercises, program_id, session_type)')
+      .eq('routine.program_id', extProgramId)
+      .order('performed_at', { ascending: false })
+      .limit(limit)
+    type ExtRow = Row & { duration_mins: number | null; session_rpe?: number | string | null; routine: Row['routine'] & { session_type: string | null } }
+    for (const w of (ext ?? []) as unknown as ExtRow[]) {
+      const effort = w.session_rpe == null ? null : Number(w.session_rpe)
+      if (w.routine?.session_type === 'external') {
+        committed.push({
+          workoutId: w.id,
+          routineId: w.routine_id,
+          routineName: w.exercises_snapshot?.[0]?.name ?? 'Outside the plan',
+          phaseName: null,
+          performedAt: w.performed_at,
+          setsDone: 0,
+          rpe: null,
+          pending: false,
+          highlights: [],
+          outsidePlan: { minutes: w.duration_mins, effort },
+        })
+      } else {
+        const volume = tallySession(w.actual_weights)
+        committed.push({
+          workoutId: w.id,
+          routineId: w.routine_id,
+          routineName: w.routine?.name ?? 'One-off',
+          phaseName: null,
+          performedAt: w.performed_at,
+          setsDone: volume.loggedSets,
+          rpe: w.rpe,
+          volume,
+          pending: false,
+          highlights: topHighlights(w),
+          oneOff: true,
+        })
+      }
+    }
+  }
+
   // Fold in finished-but-uncommitted sessions. Resolve their routine names in one
   // query; skip any whose routine + calendar day a committed session already owns.
-  const committedDayKeys = new Set(committed.map((s) => `${s.routineId}|${isoDate(new Date(s.performedAt))}`))
+  // A log outside the plan has no routine until it commits, so it keys on what it was.
+  const dayKey = (s: { routineId: string; routineName: string; outsidePlan?: unknown }, at: string) =>
+    s.outsidePlan ? `out|${s.routineName.toLowerCase()}|${isoDate(new Date(at))}` : `${s.routineId}|${isoDate(new Date(at))}`
+  const committedDayKeys = new Set(committed.map((s) => dayKey(s, s.performedAt)))
+  const loggedOutside: LogSession[] = pending
+    .filter((p) => p.outsidePlan)
+    .map((p) => ({
+      workoutId: `pending:${p.id}`,
+      routineId: p.routineId,
+      routineName: p.outsidePlan!.activity,
+      phaseName: null,
+      performedAt: p.performedAt ?? p.queuedAt,
+      setsDone: 0,
+      rpe: null,
+      pending: true,
+      highlights: [],
+      outsidePlan: { minutes: p.outsidePlan!.minutes, effort: p.sessionRpe ?? null },
+    }))
+    .filter((s) => !committedDayKeys.has(dayKey(s, s.performedAt)))
   // Dedupe on the day the session HAPPENED. Keying on queuedAt filed a backdated
   // session under the day it was typed in, so it both escaped the dedupe against
   // its own committed row and landed in the wrong week of the log.
   const freshPending = pending.filter(
-    (p) => !committedDayKeys.has(`${p.routineId}|${isoDate(new Date(p.performedAt ?? p.queuedAt))}`),
+    (p) => !p.outsidePlan && !committedDayKeys.has(`${p.routineId}|${isoDate(new Date(p.performedAt ?? p.queuedAt))}`),
   )
   let pendingSessions: LogSession[] = []
   if (freshPending.length) {
@@ -4515,11 +4703,12 @@ export async function gatherTrainingLog(
           exercises_snapshot: p.exercisesSnapshot ?? null,
           routine: { exercises: r?.exercises ?? [] },
         }),
+        ...(p.source === 'external' ? { oneOff: true } : {}),
       }
     })
   }
 
-  const all = [...pendingSessions, ...committed].sort((a, b) => b.performedAt.localeCompare(a.performedAt))
+  const all = [...loggedOutside, ...pendingSessions, ...committed].sort((a, b) => b.performedAt.localeCompare(a.performedAt))
 
   // Bucket by week-ending Sunday.
   const weeks = new Map<string, LogWeek>()

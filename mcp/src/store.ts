@@ -4,6 +4,7 @@ import {
   e1rmFromSet, liftNameMatcher, localDay, mondayOf, addDays, parseLiftId,
   type LiftModelSources, type MainLiftId, type ModelWorkout, type TmOverride,
 } from '../../src/engine/liftModel.ts'
+import { ATHLETE_TIME_ZONE, isValidTimeZone } from '../../src/engine/weekDates.ts'
 import type { ExerciseTemplate, SetLog } from '../../src/types/database.ts'
 import { describeAuth, readEnv, type ZeroedEnv } from './env.ts'
 import { formatSet, isoDay, shortDate, topWorkingSet } from './format.ts'
@@ -379,11 +380,16 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
     workouts.push(...((data ?? []) as unknown as ModelWorkout[]))
     if ((data ?? []).length < 1000) break
   }
-  const today = localDay(new Date().toISOString())
+  // select('*') rather than naming time_zone: the column arrives with the
+  // arc_load_v1 migration, applied by hand, and naming a missing one errors.
+  const athleteRes = await store.supabase.from('athlete').select('*').eq('id', store.athleteId).maybeSingle()
+  if (athleteRes.error) throw new Error(athleteRes.error.message)
+  const stored = (athleteRes.data as { time_zone?: string | null } | null)?.time_zone
+  const timeZone = stored && isValidTimeZone(stored) ? stored : ATHLETE_TIME_ZONE
+  const today = localDay(new Date().toISOString(), timeZone)
   const weekStart = mondayOf(today)
-  const recentIds = workouts.filter((w) => localDay(w.performed_at) >= addDays(weekStart, -14)).map((w) => w.id).filter((id): id is string => !!id)
-  const [athleteRes, live, obsRes, reviewRes] = await Promise.all([
-    store.supabase.from('athlete').select('training_max_overrides').eq('id', store.athleteId).maybeSingle(),
+  const recentIds = workouts.filter((w) => localDay(w.performed_at, timeZone) >= addDays(weekStart, -14)).map((w) => w.id).filter((id): id is string => !!id)
+  const [live, obsRes, reviewRes] = await Promise.all([
     loadLiveProgram(store),
     recentIds.length
       ? store.supabase.from('session_observation').select('signal, severity, logged_at').in('workout_id', recentIds).gte('severity', 4)
@@ -392,7 +398,6 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
       ? store.supabase.from('weekly_review').select('week_ending, next_week_prescription').in('program_id', ids).order('week_ending', { ascending: false }).limit(1).maybeSingle()
       : Promise.resolve({ data: null, error: null }),
   ])
-  if (athleteRes.error) throw new Error(athleteRes.error.message)
   if (obsRes.error) throw new Error(obsRes.error.message)
   const review = reviewRes.data as { week_ending: string; next_week_prescription: { directive?: string } | null } | null
   return {
@@ -403,6 +408,7 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
     phaseName: live?.phaseName ?? null,
     directive: review && review.week_ending === addDays(weekStart, -1) ? review.next_week_prescription?.directive ?? null : null,
     today,
+    timeZone,
     unit: store.env.unit === 'kg' ? 'kg' : 'lb',
   }
 }

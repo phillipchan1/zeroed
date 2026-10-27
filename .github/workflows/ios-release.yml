@@ -118,6 +118,9 @@ jobs:
           VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
           VITE_SUPABASE_URL: ${{ secrets.VITE_SUPABASE_URL }}
           VITE_SUPABASE_ANON_KEY: ${{ secrets.VITE_SUPABASE_ANON_KEY }}
+          # arc_load_v1's build ceiling. Unset = off for everyone; "1" lets an
+          # athlete's own athlete.flags turn it on (src/lib/flags.ts).
+          VITE_ARC_LOAD_V1: ${{ vars.VITE_ARC_LOAD_V1 }}
         run: |
           set -euo pipefail
           if [ -n "${VITE_API_BASE_URL:-}" ]; then
