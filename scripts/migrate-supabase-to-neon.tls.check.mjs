@@ -77,28 +77,57 @@ try {
     throw new Error(redactSecrets((started.stderr || started.stdout || 'docker run failed').trim()))
   }
 
-  function waitReady() {
-    const deadline = Date.now() + 30000
+  function waitSql(sql, expect) {
+    const deadline = Date.now() + 60000
+    let consecutive = 0
     while (Date.now() < deadline) {
-      const probe = spawnSync('docker', ['exec', name, 'pg_isready', '-U', 'src', '-d', 'srcdb'], { encoding: 'utf8' })
-      if (probe.status === 0) return true
+      // TCP, not the unix socket: the official image accepts socket
+      // connections during init, then shuts down before the main server.
+      const probe = spawnSync('docker', [
+        'exec', '-e', 'PGPASSWORD=dummy', name,
+        'psql', '-h', '127.0.0.1', '-p', '5432', '-U', 'src', '-d', 'srcdb',
+        '-tA', '-v', 'ON_ERROR_STOP=1', '-c', sql,
+      ], { encoding: 'utf8' })
+      const out = String(probe.stdout || '').trim()
+      if (probe.status === 0 && (expect == null || out === expect)) {
+        consecutive += 1
+        if (consecutive >= 3) return true
+      } else {
+        consecutive = 0
+      }
       spawnSync('sleep', ['1'])
     }
     return false
   }
-  ok(waitReady(), 'postgres became ready')
+
+  function retryExec(args, attempts = 8) {
+    let last = ''
+    for (let i = 0; i < attempts; i++) {
+      const res = spawnSync('docker', args, { encoding: 'utf8' })
+      if (res.status === 0) return res.stdout
+      last = redactSecrets((res.stderr || res.stdout || `docker ${res.status}`).trim())
+      spawnSync('sleep', ['1'])
+    }
+    throw new Error(last || 'docker exec failed')
+  }
+
+  ok(waitSql('SELECT 1', '1'), 'postgres became ready')
 
   run('docker', ['cp', join(dir, 'server.crt'), `${name}:/var/lib/postgresql/data/server.crt`])
   run('docker', ['cp', join(dir, 'server.key'), `${name}:/var/lib/postgresql/data/server.key`])
   run('docker', ['exec', '-u', 'root', name, 'chown', 'postgres:postgres',
     '/var/lib/postgresql/data/server.crt', '/var/lib/postgresql/data/server.key'])
+  run('docker', ['exec', '-u', 'root', name, 'chmod', '644', '/var/lib/postgresql/data/server.crt'])
   run('docker', ['exec', '-u', 'root', name, 'chmod', '600', '/var/lib/postgresql/data/server.key'])
-  run('docker', ['exec', name, 'psql', '-U', 'src', '-d', 'srcdb', '-v', 'ON_ERROR_STOP=1', '-c',
+  retryExec(['exec', name, 'psql', '-U', 'src', '-d', 'srcdb', '-v', 'ON_ERROR_STOP=1', '-c',
     "ALTER SYSTEM SET ssl = on; ALTER SYSTEM SET ssl_cert_file = 'server.crt'; ALTER SYSTEM SET ssl_key_file = 'server.key';"])
-  run('docker', ['restart', name])
-  ok(waitReady(), 'TLS postgres became ready after ssl reload')
-  const sslOn = spawnSync('docker', ['exec', name, 'psql', '-U', 'src', '-d', 'srcdb', '-tA', '-c', 'SHOW ssl'], { encoding: 'utf8' })
-  ok(String(sslOn.stdout || '').trim() === 'on', 'postgres ssl is on')
+  retryExec(['exec', name, 'psql', '-U', 'src', '-d', 'srcdb', '-tA', '-v', 'ON_ERROR_STOP=1', '-c',
+    'SELECT pg_reload_conf()'])
+  if (!waitSql('SHOW ssl', 'on')) {
+    run('docker', ['restart', name])
+    ok(waitSql('SELECT 1', '1'), 'TLS postgres became ready after restart')
+  }
+  ok(waitSql('SHOW ssl', 'on'), 'postgres ssl is on')
 
   const url = `postgresql://src:dummy@127.0.0.1:${port}/srcdb?sslmode=require`
   ok(!stripSslMode(url).includes('sslmode='), 'stripSslMode removes sslmode before node-pg')
