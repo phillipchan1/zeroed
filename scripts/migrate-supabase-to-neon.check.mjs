@@ -61,6 +61,9 @@ import {
   parseMigrateArgs,
   postgresUrlParts,
   psqlArgv,
+  extractSqlstate,
+  probeMaskValues,
+  safeLoggedMessage,
   psqlTuples,
   readFingerprint,
   redactSecrets,
@@ -213,7 +216,7 @@ const leakyPg = [
   'WHERE:  SQL statement',
   'LINE 1: INSERT INTO',
   'Failing row contains (aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa, Phil, phil@example.com).',
-  'SQLSTATE 23505',
+  'psql:<stdin>:1: ERROR:  23505',
 ].join('\n')
 const sanitized = sanitizePgFailureText(leakyPg)
 eq(sanitized.sqlstate, '23505', 'sanitizer keeps SQLSTATE')
@@ -281,13 +284,79 @@ eq(
 )
 eq(
   formatSafeCommandError('pg_dump', 1, 'pg_dump: error: SQLSTATE 08006\nDETAIL: leaked-rowtok\n', ''),
-  'pg_dump failed (1): SQLSTATE 08006: connection exception',
-  'pg_dump logs cmd, exit, SQLSTATE, and class only',
+  GENERIC_SAFE_ERROR,
+  'free-text "SQLSTATE xxxxx" in pg_dump stderr is not trusted',
 )
 eq(
   formatSafeCommandError('pg_restore', 1, 'pg_restore: error: SQLSTATE 23505\nDETAIL: leaked-rowtok\n', ''),
+  GENERIC_SAFE_ERROR,
+  'free-text "SQLSTATE xxxxx" in pg_restore stderr is not trusted',
+)
+eq(
+  formatSafeCommandError('pg_restore', 1, 'pg_restore: error: boom\n', { code: '23505' }),
   'pg_restore failed (1): SQLSTATE 23505: integrity constraint violation',
-  'pg_restore logs cmd, exit, SQLSTATE, and class only',
+  'err.code SQLSTATE is trusted',
+)
+eq(extractSqlstate('ERROR:  23505\n'), '23505', 'exact VERBOSITY=sqlstate stderr line is trusted')
+eq(extractSqlstate('psql:/tmp/x.sql:3: ERROR:  42P01\n'), '42P01', 'psql file-prefixed sqlstate line is trusted')
+eq(extractSqlstate('ERROR:  22QXS rest ZQXSlead01\n'), null, 'RAISE text starting with a SQLSTATE-shaped token is not trusted')
+eq(extractSqlstate('ERROR:  SQLSTATE 23QXS ZQXSlead02\n'), null, 'RAISE text "SQLSTATE xxxxx" is not trusted')
+eq(extractSqlstate('SQLSTATE 22QXS\n'), null, 'bare "SQLSTATE xxxxx" text is not trusted')
+eq(extractSqlstate('ERROR:  23505 trailing\n'), null, 'sqlstate line with trailing text is not trusted')
+
+// QA2 B1' sentinels (f89368a): run() must never surface a SQLSTATE from stdout
+// or from free-text stderr. Real child processes, same run() as production.
+function childFailing(stdout, stderr) {
+  const script = `process.stdout.write(${JSON.stringify(stdout)});process.stderr.write(${JSON.stringify(stderr)});process.exit(1)`
+  try {
+    run(process.execPath, ['-e', script], { env: { PATH: process.env.PATH || '' } })
+    return { message: 'no throw', code: undefined }
+  } catch (err) {
+    return { message: err instanceof Error ? err.message : String(err), code: err?.code }
+  }
+}
+const sentinels = [
+  ['raw verbosity RAISE value shaped like SQLSTATE (22QXS)', '', 'ERROR:  22QXS rest ZQXSlead01\nCONTEXT:  PL/pgSQL function lead(text) line 1 at RAISE\n'],
+  ['raw verbosity RAISE "SQLSTATE 23QXS"', '', 'ERROR:  SQLSTATE 23QXS ZQXSlead02\nCONTEXT:  PL/pgSQL function lead(text) line 1 at RAISE\n'],
+  ['psqlArgv COPY TO STDOUT mid-stream, earlier row "SQLSTATE 22QXS"', 'SQLSTATE 22QXS\n', 'ERROR:  P0001\nCONTEXT:  PL/pgSQL function slowfail(text) line 1 at RAISE\n'],
+  ['raw verbosity COPY TO STDOUT mid-stream, earlier row "SQLSTATE 22QXS"', 'SQLSTATE 22QXS\n', 'ERROR:  slow failure\nCONTEXT:  PL/pgSQL function slowfail(text) line 1 at RAISE\n'],
+]
+for (const [label, out, err] of sentinels) {
+  const r = childFailing(out, err)
+  ok(!/QXS/.test(r.message) && !/QXS/.test(String(r.code ?? '')), `sentinel: ${label} does not surface the value`)
+  eq(r.message, GENERIC_SAFE_ERROR, `sentinel: ${label} is generic`)
+}
+{
+  const r = childFailing('SQLSTATE 22QXS\n', 'ERROR:  42P01\n')
+  ok(/failed \(1\): SQLSTATE 42P01: syntax error or access rule violation$/.test(r.message), 'run() keeps a real stderr SQLSTATE even with noisy stdout')
+  eq(r.code, '42P01', 'run() sets err.code from the stderr sqlstate line')
+}
+eq(
+  safeLoggedMessage('psql failed (1): SQLSTATE 22QXS: data exception x'),
+  GENERIC_SAFE_ERROR,
+  'free-text error-shaped log line is generic (no err.code to trust)',
+)
+eq(
+  safeLoggedMessage('psql failed (1): SQLSTATE 22QXS: data exception'),
+  GENERIC_SAFE_ERROR,
+  'free-text allowlist-shaped SQLSTATE line is generic in safeLoggedMessage',
+)
+eq(
+  formatSafePgClientError(new Error('psql failed (1): SQLSTATE 22QXS: data exception')),
+  GENERIC_SAFE_ERROR,
+  'uncaught allowlist-shaped message without err.code is generic',
+)
+{
+  const e = new Error('psql failed (1): SQLSTATE 42P01: syntax error or access rule violation')
+  e.code = '42P01'
+  eq(formatSafePgClientError(e), 'psql failed (1): SQLSTATE 42P01: syntax error or access rule violation', 'uncaught run() error with matching err.code keeps SQLSTATE')
+  e.code = '22P02'
+  eq(formatSafePgClientError(e), GENERIC_SAFE_ERROR, 'uncaught message SQLSTATE that disagrees with err.code is generic')
+}
+eq(
+  formatSafePgClientError(new Error('ERROR:  23505')),
+  GENERIC_SAFE_ERROR,
+  'uncaught error message text is never parsed for SQLSTATE',
 )
 eq(
   formatSafeCommandError('pg_dump', 1, 'pg_dump: error: connection failed\nDETAIL: leaked-rowtok\n', ''),
@@ -464,6 +533,23 @@ try {
 }
 ok(hostOverride, 'source URL ?host= override is refused')
 ok(!/evil\.example/.test(hostOverrideMsg), 'host= refuse message omits the override host')
+{
+  const masks = await probeMaskValues('postgresql://reader:pw@db.abcdefghijkl.supabase.co:5432/postgres', { resolve: false })
+  ok(masks.includes('reader') && masks.includes('db.abcdefghijkl.supabase.co'), 'probeMaskValues masks user and host')
+  ok(!masks.includes('pw'), 'probeMaskValues never emits the password')
+  const lo = await probeMaskValues('postgresql://reader@localhost:5432/postgres')
+  ok(lo.includes('127.0.0.1') || lo.includes('::1'), 'probeMaskValues adds resolved addresses')
+}
+for (const q of ['hostaddr=203.0.113.9', 'HostAddr=203.0.113.9', 'hostaddr=%32%30%33.0.113.9']) {
+  let msg = ''
+  try {
+    sanitizeSourceConnectionString(`postgresql://reader@127.0.0.1:5432/postgres?${q}`)
+  } catch (err) {
+    msg = err instanceof Error ? err.message : String(err)
+  }
+  ok(/hostaddr=/.test(msg), `source URL ?${q.split('=')[0]}= override is refused`)
+  ok(!/203\.0\.113\.9/.test(msg), 'hostaddr= refuse message omits the address')
+}
 ok(existsSync(SUPABASE_SOURCE_CA_FILE), 'Supabase prod-ca-2021.crt is committed')
 ok(loadSourceCa().includes('BEGIN CERTIFICATE'), 'committed source CA is a PEM certificate')
 eq(sourceCaFile(), SUPABASE_SOURCE_CA_FILE, 'default source CA is the committed file')
@@ -1120,7 +1206,7 @@ ok(/confirmDropMismatchReason/.test(migrateSrc), 'live restore requires --confir
 ok(/probing target identity before drop/.test(migrateSrc), 'fingerprint probe is logged before DROP')
 ok(/could not read source fingerprint/.test(migrateSrc), 'unreadable source fingerprint fails closed')
 ok(
-  /extractSqlstate\(message\) === '42P01'/.test(migrateSrc),
+  /sqlstateFromErrCode\(err\) === '42P01'/.test(migrateSrc),
   'empty-target checksum treats allowlisted 42P01 as missing tables',
 )
 ok(/source advisory lock is visible on the target/.test(migrateSrc), 'source lock visible on target is refused')
@@ -1174,10 +1260,17 @@ ok(/PGPASSFILE=\/dev\/null/.test(workflow), 'migrate workflow version-check null
 ok(/PGSSLMODE=verify-full/.test(workflow), 'migrate workflow version-check sets PGSSLMODE=verify-full')
 ok(/PGSSLROOTCERT/.test(workflow), 'migrate workflow version-check sets PGSSLROOTCERT')
 ok(/sanitizeSourceConnectionString/.test(workflow), 'migrate workflow version-check strips ssl* from the source URL')
-ok(/::add-mask::/.test(workflow) && /postgresUrlParts/.test(workflow), 'migrate workflow masks the probed source host')
+ok(/::add-mask::/.test(workflow) && /probeMaskValues/.test(workflow), 'migrate workflow masks the probed source user, host and IPs')
+ok(
+  workflow.indexOf('probeMaskValues') > 0 && workflow.indexOf('probeMaskValues') < workflow.indexOf('SAFE_URL='),
+  'migrate workflow computes SAFE_URL only after the masks are added',
+)
+ok(/sanitizeSourceConnectionString\(process\.env\.SOURCE_URL\)\)' 2>\/dev\/null/.test(workflow), 'SAFE_URL step drops node stderr (a URL TypeError would echo the secret)')
+ok(/SHOW server_version_num' 2>\/dev\/null/.test(workflow), 'migrate probe drops psql stderr')
 ok(/VERBOSITY=sqlstate/.test(workflow), 'migrate workflow probe uses VERBOSITY=sqlstate')
 ok(/set -euo pipefail/.test(workflow) && /psql .*\|\s*tr/.test(workflow), 'migrate workflow probe pipe runs under pipefail')
-ok(/::add-mask::/.test(checksYml) && /postgresUrlParts/.test(checksYml), 'migrate-pg probe masks the source host')
+ok(/::add-mask::/.test(checksYml) && /probeMaskValues/.test(checksYml), 'migrate-pg probe masks the source user, host and IPs')
+ok(/SHOW server_version_num' 2>\/dev\/null/.test(checksYml), 'migrate-pg probe drops psql stderr')
 ok(/VERBOSITY=sqlstate/.test(checksYml), 'migrate-pg probe uses VERBOSITY=sqlstate')
 ok(/migrate-tls:[\s\S]*persist-credentials:\s*false/.test(checksYml), 'migrate-tls checkout does not persist credentials')
 ok(/PGPASSFILE=\/dev\/null/.test(checksYml), 'migrate-pg version-check nulls PGPASSFILE')
@@ -1635,6 +1728,12 @@ async function runLivePostgresChecks() {
   eq(hostRun.status, 2, 'main refuses source ?host= override')
   ok(/host=/.test(hostOut), 'main host= refuse mentions host=')
   ok(!/evil\.example/.test(hostOut), 'main host= refuse omits the override host')
+  const hostaddrRun = spawnMigrate(['--dry-run', '--skip-auth-users', '--auth-users-file', mapPath], {
+    SUPABASE_READONLY_URL: `${sourceUrl}${sourceUrl.includes('?') ? '&' : '?'}hostaddr=203.0.113.9`,
+  })
+  const hostaddrOut = `${hostaddrRun.stdout}\n${hostaddrRun.stderr}`
+  eq(hostaddrRun.status, 2, 'main refuses source ?hostaddr= override')
+  ok(!/203\.0\.113\.9/.test(hostaddrOut), 'main hostaddr= refuse omits the address')
 
   const alias = spawnMigrate([
     '--skip-auth-users',

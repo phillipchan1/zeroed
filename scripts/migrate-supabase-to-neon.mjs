@@ -60,6 +60,7 @@ import { spawnSync } from 'node:child_process'
 import pg from 'pg'
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
+import { lookup } from 'node:dns/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -93,7 +94,6 @@ export const SUPABASE_SOURCE_CA_FINGERPRINT_SHA256 =
   '80:70:25:AD:50:D4:ED:21:9D:2C:9C:7D:29:9C:00:4F:82:4E:B0:0C:F7:F6:5A:FE:F6:07:D0:7B:72:E6:CA:FA'
 
 const SOURCE_URL_ALLOWED_PARAMS = new Set([
-  'hostaddr',
   'port',
   'dbname',
   'user',
@@ -144,13 +144,23 @@ export function stripPgErrorValues(line) {
   return s
 }
 
-export function extractSqlstate(text, err) {
+/** Exact psql VERBOSITY=sqlstate error line on stderr. Nothing else counts. */
+export const STDERR_SQLSTATE_LINE = /^(?:psql:[^\n]*?: )?ERROR: {2}([0-9A-Z]{5})$/m
+
+export function sqlstateFromErrCode(err) {
   const code = err && typeof err === 'object' ? String(err.code || '') : ''
-  if (/^[0-9A-Z]{5}$/.test(code)) return code
-  const s = String(text ?? '')
-  return s.match(/\bSQLSTATE[:\s]+([0-9A-Z]{5})\b/i)?.[1]
-    ?? s.match(/\bERROR:\s+([0-9A-Z]{5})\b/)?.[1]
-    ?? null
+  return /^[0-9A-Z]{5}$/.test(code) ? code : null
+}
+
+/**
+ * SQLSTATE from err.code, or from a child's **stderr** only (exact
+ * `ERROR:  XXXXX` line). Never pass stdout or free-text messages: a row
+ * value can look like a SQLSTATE token.
+ */
+export function extractSqlstate(stderr, err) {
+  const fromErr = sqlstateFromErrCode(err)
+  if (fromErr) return fromErr
+  return String(stderr ?? '').match(STDERR_SQLSTATE_LINE)?.[1] ?? null
 }
 
 export function sqlstateClassText(sqlstate) {
@@ -190,8 +200,8 @@ export function isAllowlistedCommandError(text) {
 }
 
 /** SQLSTATE only. firstError is always empty — values are not logged. */
-export function sanitizePgFailureText(text, err) {
-  const raw = String(text ?? '')
+export function sanitizePgFailureText(stderr, err) {
+  const raw = String(stderr ?? '')
   const sqlstate = extractSqlstate(raw, err)
   if (allowlistRejected(raw) || sqlstate === 'P0001') {
     return { sqlstate, firstError: '' }
@@ -199,8 +209,9 @@ export function sanitizePgFailureText(text, err) {
   return { sqlstate, firstError: '' }
 }
 
-export function formatSafeCommandError(cmd, status, stderr, stdout, err) {
-  const raw = `${stderr || ''}\n${stdout || ''}`
+/** stderr only — stdout carries query output (row values) and is never read. */
+export function formatSafeCommandError(cmd, status, stderr, err) {
+  const raw = String(stderr || '')
   if (allowlistRejected(raw)) return GENERIC_SAFE_ERROR
   const sqlstate = extractSqlstate(raw, err)
   return formatAllowlistedFailure(cmd, status, sqlstate)
@@ -209,24 +220,35 @@ export function formatSafeCommandError(cmd, status, stderr, stdout, err) {
 export function formatSafePgClientError(err, cmd = 'query') {
   if (err == null) return GENERIC_SAFE_ERROR
   const msg = err instanceof Error ? err.message : String(err)
-  if (isAllowlistedCommandError(msg)) return msg
+  if (isAllowlistedCommandError(msg)) {
+    // Our own run() shape. Rebuild it: the SQLSTATE must come from err.code,
+    // never from the message text.
+    if (msg === GENERIC_SAFE_ERROR) return msg
+    const m = msg.match(/^([A-Za-z0-9._-]+) failed \((-?\d+)\)(?:: SQLSTATE ([0-9A-Z]{5}))?/)
+    if (!m) return GENERIC_SAFE_ERROR
+    const code = sqlstateFromErrCode(err)
+    if (!m[3]) return code ? GENERIC_SAFE_ERROR : `${m[1]} failed (${m[2]})`
+    return code === m[3] ? formatAllowlistedFailure(m[1], m[2], code) : GENERIC_SAFE_ERROR
+  }
   if (allowlistRejected(msg)) return GENERIC_SAFE_ERROR
-  const sqlstate = extractSqlstate(msg, err)
-  return formatAllowlistedFailure(cmd, 1, sqlstate)
+  // err.message is free text: only err.code is trusted.
+  return formatAllowlistedFailure(cmd, 1, sqlstateFromErrCode(err))
 }
 
 export function safeLoggedMessage(text, label = 'error') {
   const s = redactSecrets(String(text ?? ''))
   if (!s) return s
-  if (isAllowlistedCommandError(s)) return s
+  // Free text has no err.code: a SQLSTATE in it is never trusted.
+  if (isAllowlistedCommandError(s)) return /SQLSTATE/.test(s) ? GENERIC_SAFE_ERROR : s
   if (allowlistRejected(s) || logLooksLikeRowData(s)) return GENERIC_SAFE_ERROR
   try {
     assertSafeMigrateLog(s, label)
   } catch {
     return GENERIC_SAFE_ERROR
   }
-  if (extractSqlstate(s) || /failed \(\d+\)/.test(s) || /^\s*(ERROR|pg_restore:|pg_dump:)/im.test(s)) {
-    return formatAllowlistedFailure('command', 1, extractSqlstate(s))
+  // Free text has no err.code to trust: anything error-shaped is generic.
+  if (/SQLSTATE|failed \(\d+\)/i.test(s) || /^\s*(ERROR|pg_restore:|pg_dump:)/im.test(s)) {
+    return GENERIC_SAFE_ERROR
   }
   return s
 }
@@ -287,6 +309,28 @@ export function postgresUrlParts(url) {
   }
 }
 
+/**
+ * Values a CI probe must ::add-mask:: before psql runs: the user, every host
+ * spelling, and the addresses the host resolves to (a psql connection error
+ * prints `server at "host" (ip)` and the user). Throws on a malformed URL;
+ * callers must drop stderr so the URL is never echoed.
+ */
+export async function probeMaskValues(url, { resolve: doResolve = true } = {}) {
+  const parts = postgresUrlParts(url)
+  const values = new Set()
+  for (const v of [parts.user, parts.host, parts.urlHost, parts.queryHost, parts.hostaddr]) {
+    if (v && !parts.isSocket) values.add(v)
+  }
+  if (doResolve && parts.host && !parts.isSocket) {
+    try {
+      for (const a of await lookup(parts.host, { all: true })) values.add(a.address)
+    } catch {
+      // unresolvable: psql will fail; its stderr is dropped by the caller
+    }
+  }
+  return [...values].filter((v) => v.length >= 3)
+}
+
 export function isSupabaseHost(host) {
   const h = String(host || '').toLowerCase()
   return h === 'supabase.co'
@@ -336,6 +380,9 @@ export function refuseUnexpectedSourceUrlParams(url) {
     if (lower === 'host') {
       throw new Error('source URL must not include a host= override')
     }
+    if (lower === 'hostaddr') {
+      throw new Error('source URL must not include a hostaddr= override')
+    }
     if (isForbiddenSourceUrlParam(lower)) continue
     if (!SOURCE_URL_ALLOWED_PARAMS.has(lower)) unexpected.push(key)
   }
@@ -352,6 +399,9 @@ export function sanitizeSourceConnectionString(url) {
   }
   if (/[?&]host=/i.test(stripped)) {
     throw new Error('source URL must not include a host= override')
+  }
+  if (/[?&]hostaddr=/i.test(stripped)) {
+    throw new Error('source URL must not include a hostaddr= override')
   }
   return stripped
 }
@@ -1289,7 +1339,10 @@ export function run(cmd, args, opts = {}) {
     ...rest,
   })
   if (res.status !== 0) {
-    throw new Error(formatSafeCommandError(cmd, res.status, res.stderr, res.stdout))
+    const sqlstate = extractSqlstate(res.stderr)
+    const e = new Error(formatSafeCommandError(cmd, res.status, res.stderr))
+    if (sqlstate) e.code = sqlstate
+    throw e
   }
   return res.stdout
 }
@@ -1323,7 +1376,7 @@ function readChecksums(url, label, { required = true } = {}) {
     const message = err instanceof Error ? err.message : String(err)
     if (
       !required &&
-      (extractSqlstate(message) === '42P01' || /does not exist|undefined_table/i.test(message))
+      (sqlstateFromErrCode(err) === '42P01' || /does not exist|undefined_table/i.test(message))
     ) {
       console.log(`${label}: tables not present yet`)
       return { counts: null, hashes: null }

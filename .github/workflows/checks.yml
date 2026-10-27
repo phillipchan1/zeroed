@@ -290,11 +290,16 @@ jobs:
             while IFS= read -r key; do
               unset_pg+=(-u "${key}")
             done < <(env | awk -F= '/^PG/ { print $1 }')
-            HOST="$(SOURCE_URL="${SOURCE_URL}" node --experimental-strip-types --input-type=module -e 'import { postgresUrlParts } from "./scripts/migrate-supabase-to-neon.mjs"; process.stdout.write(postgresUrlParts(process.env.SOURCE_URL || "").host || "")')"
-            if [ -n "${HOST}" ]; then
-              echo "::add-mask::${HOST}"
+            # Mask user, host spellings and resolved IPs BEFORE anything else can print
+            # them. stderr is dropped so a malformed URL is never echoed.
+            if ! MASKS="$(SOURCE_URL="${SOURCE_URL}" node --experimental-strip-types --input-type=module -e 'import { probeMaskValues } from "./scripts/migrate-supabase-to-neon.mjs"; process.stdout.write((await probeMaskValues(process.env.SOURCE_URL || "")).join("\n"))' 2>/dev/null)"; then
+              echo "::error::Source URL could not be parsed (details omitted)."
+              exit 1
             fi
-            if ! NUM="$(env "${unset_pg[@]}" -u PGSSLMODE -u PGHOSTADDR PGPASSFILE=/dev/null PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -tA -d "${SOURCE_URL}" -c 'SHOW server_version_num' | tr -d '[:space:]')"; then
+            while IFS= read -r value; do
+              if [ -n "${value}" ]; then echo "::add-mask::${value}"; fi
+            done <<< "${MASKS}"
+            if ! NUM="$(env "${unset_pg[@]}" -u PGSSLMODE -u PGHOSTADDR PGPASSFILE=/dev/null PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -tA -d "${SOURCE_URL}" -c 'SHOW server_version_num' 2>/dev/null | tr -d '[:space:]')"; then
               echo "::error::Could not read source server_version_num; cannot pick a matching pg_dump."
               exit 1
             fi
