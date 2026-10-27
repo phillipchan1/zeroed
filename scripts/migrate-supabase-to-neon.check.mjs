@@ -1108,6 +1108,7 @@ ok(/log_min_messages = panic/.test(pinLogs), 'pin script sets log_min_messages=p
 ok(/log_min_error_statement = panic/.test(pinLogs), 'pin script sets log_min_error_statement=panic')
 ok(/log_error_verbosity = terse/.test(pinLogs), 'pin script sets log_error_verbosity=terse')
 ok(/pg_reload_conf/.test(pinLogs), 'pin script reloads Postgres after ALTER SYSTEM')
+ok(/-d "\$\{db\}"/.test(pinLogs) || /-d postgres/.test(pinLogs), 'pin script connects to an existing database')
 ok(/Silence Postgres fixture logs/.test(checksYml), 'fixture Postgres services pin log verbosity')
 const migrateSrc = readFileSync(join(root, 'scripts/migrate-supabase-to-neon.mjs'), 'utf8')
 ok(!/disable-triggers/.test(migrateSrc), 'migrate script does not use --disable-triggers')
