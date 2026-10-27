@@ -71,37 +71,41 @@ try {
     '-e', 'POSTGRES_PASSWORD=dummy',
     '-e', 'POSTGRES_DB=srcdb',
     '-p', `127.0.0.1:${port}:5432`,
-    '-v', `${dir}:/certs:ro`,
     'postgres:17',
-    'bash', '-c', [
-      'cp /certs/server.crt /var/lib/postgresql/server.crt',
-      'cp /certs/server.key /var/lib/postgresql/server.key',
-      'chown postgres:postgres /var/lib/postgresql/server.crt /var/lib/postgresql/server.key',
-      'chmod 600 /var/lib/postgresql/server.key',
-      'exec docker-entrypoint.sh postgres -c ssl=on -c ssl_cert_file=/var/lib/postgresql/server.crt -c ssl_key_file=/var/lib/postgresql/server.key',
-    ].join(' && '),
   ], { encoding: 'utf8' })
   if (started.status !== 0) {
     throw new Error(redactSecrets((started.stderr || started.stdout || 'docker run failed').trim()))
   }
 
-  const deadline = Date.now() + 30000
-  let ready = false
-  while (Date.now() < deadline) {
-    const probe = spawnSync('docker', ['exec', name, 'pg_isready', '-U', 'src', '-d', 'srcdb'], { encoding: 'utf8' })
-    if (probe.status === 0) {
-      ready = true
-      break
+  function waitReady() {
+    const deadline = Date.now() + 30000
+    while (Date.now() < deadline) {
+      const probe = spawnSync('docker', ['exec', name, 'pg_isready', '-U', 'src', '-d', 'srcdb'], { encoding: 'utf8' })
+      if (probe.status === 0) return true
+      spawnSync('sleep', ['1'])
     }
-    spawnSync('sleep', ['1'])
+    return false
   }
-  ok(ready, 'TLS postgres became ready')
+  ok(waitReady(), 'postgres became ready')
 
-  const url = `postgresql://src:dummy@localhost:${port}/srcdb?sslmode=require`
+  run('docker', ['cp', join(dir, 'server.crt'), `${name}:/var/lib/postgresql/data/server.crt`])
+  run('docker', ['cp', join(dir, 'server.key'), `${name}:/var/lib/postgresql/data/server.key`])
+  run('docker', ['exec', '-u', 'root', name, 'chown', 'postgres:postgres',
+    '/var/lib/postgresql/data/server.crt', '/var/lib/postgresql/data/server.key'])
+  run('docker', ['exec', '-u', 'root', name, 'chmod', '600', '/var/lib/postgresql/data/server.key'])
+  run('docker', ['exec', name, 'psql', '-U', 'src', '-d', 'srcdb', '-v', 'ON_ERROR_STOP=1', '-c',
+    "ALTER SYSTEM SET ssl = on; ALTER SYSTEM SET ssl_cert_file = 'server.crt'; ALTER SYSTEM SET ssl_key_file = 'server.key';"])
+  run('docker', ['restart', name])
+  ok(waitReady(), 'TLS postgres became ready after ssl reload')
+  const sslOn = spawnSync('docker', ['exec', name, 'psql', '-U', 'src', '-d', 'srcdb', '-tA', '-c', 'SHOW ssl'], { encoding: 'utf8' })
+  ok(String(sslOn.stdout || '').trim() === 'on', 'postgres ssl is on')
+
+  const url = `postgresql://src:dummy@127.0.0.1:${port}/srcdb?sslmode=require`
   ok(!stripSslMode(url).includes('sslmode='), 'stripSslMode removes sslmode before node-pg')
 
   const goodEnv = { ZEROED_SOURCE_CA_FILE: join(dir, 'ca.crt') }
   const goodCfg = sourcePgClientConfig(url, goodEnv)
+  goodCfg.ssl.servername = 'localhost'
   assertSourcePgSsl(goodCfg)
   ok(goodCfg.ssl.rejectUnauthorized === true, 'matching-CA client sets rejectUnauthorized: true')
   ok(String(goodCfg.ssl.ca).includes('BEGIN CERTIFICATE'), 'matching-CA client has a CA')
@@ -121,6 +125,7 @@ try {
   let badCfg
   try {
     badCfg = sourcePgClientConfig(url, badEnv)
+    badCfg.ssl.servername = 'localhost'
     assertSourcePgSsl(badCfg)
   } catch (err) {
     ok(false, `wrong-CA config should still build (${redactSecrets(err instanceof Error ? err.message : String(err))})`)
