@@ -36,6 +36,15 @@ jobs:
       ZEROED_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/zeroed_test
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Silence Postgres fixture logs
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --filter publish=5432 --format '{{.ID}}')"
+          if [ "$(printf '%s\n' "${cid}" | grep -c .)" -ne 1 ]; then
+            echo "::error::expected exactly one Postgres fixture container"
+            exit 1
+          fi
+          scripts/pin-postgres-container-logs.sh "${cid}" postgres
       - name: actionlint
         run: |
           set -euo pipefail
@@ -105,6 +114,15 @@ jobs:
       ZEROED_TEST_DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/zeroed_test
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - name: Silence Postgres fixture logs
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --filter publish=5432 --format '{{.ID}}')"
+          if [ "$(printf '%s\n' "${cid}" | grep -c .)" -ne 1 ]; then
+            echo "::error::expected exactly one Postgres fixture container"
+            exit 1
+          fi
+          scripts/pin-postgres-container-logs.sh "${cid}" postgres
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
@@ -134,6 +152,15 @@ jobs:
       ZEROED_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/zeroed
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+      - name: Silence Postgres fixture logs
+        run: |
+          set -euo pipefail
+          cid="$(docker ps --filter publish=5432 --format '{{.ID}}')"
+          if [ "$(printf '%s\n' "${cid}" | grep -c .)" -ne 1 ]; then
+            echo "::error::expected exactly one Postgres fixture container"
+            exit 1
+          fi
+          scripts/pin-postgres-container-logs.sh "${cid}" postgres
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 22
@@ -160,33 +187,6 @@ jobs:
   migrate-pg:
     name: migrate-pg
     runs-on: ubuntu-latest
-    services:
-      pg-source:
-        image: postgres:17
-        env:
-          POSTGRES_USER: src
-          POSTGRES_PASSWORD: dummy
-          POSTGRES_DB: srcdb
-        ports:
-          - 55418:5432
-        options: >-
-          --health-cmd "pg_isready -U src -d srcdb"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      pg-target:
-        image: postgres:17
-        env:
-          POSTGRES_USER: dst
-          POSTGRES_PASSWORD: dummy
-          POSTGRES_DB: dstdb
-        ports:
-          - 55419:5432
-        options: >-
-          --health-cmd "pg_isready -U dst -d dstdb"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
@@ -194,6 +194,53 @@ jobs:
           node-version: 22
           cache: npm
       - run: npm ci --no-audit --no-fund
+      - name: Start migrate Postgres with discarded logs
+        run: |
+          set -euo pipefail
+          # Pull first so docker run is not mixed with a layer download
+          # (that pairing has exited 2 on this runner after "Downloaded").
+          docker pull postgres:17 >/dev/null
+          start_pg() {
+            local name="$1" user="$2" db="$3" port="$4"
+            local attempt=0
+            while [ "${attempt}" -lt 3 ]; do
+              attempt=$((attempt + 1))
+              docker rm -f "${name}" >/dev/null 2>&1 || true
+              if docker run -d --name "${name}" --log-driver=none \
+                -e "POSTGRES_USER=${user}" \
+                -e POSTGRES_PASSWORD=dummy \
+                -e "POSTGRES_DB=${db}" \
+                -p "127.0.0.1:${port}:5432" \
+                postgres:17 \
+                postgres \
+                -c log_min_messages=panic \
+                -c log_min_error_statement=panic \
+                -c log_error_verbosity=terse \
+                >/dev/null
+              then
+                break
+              fi
+              if [ "${attempt}" -ge 3 ]; then
+                echo "::error::failed to start Postgres ${name}"
+                exit 1
+              fi
+              sleep 2
+            done
+            n=0
+            while [ "${n}" -lt 60 ]; do
+              n=$((n + 1))
+              if docker exec "${name}" pg_isready -U "${user}" -d "${db}" >/dev/null 2>&1; then
+                scripts/pin-postgres-container-logs.sh "${name}" "${user}" postgres
+                return 0
+              fi
+              sleep 1
+            done
+            echo "::error::Postgres ${name} did not become ready"
+            exit 1
+          }
+          start_pg zeroed-pg-src src srcdb 55418
+          start_pg zeroed-pg-dst dst dstdb 55419
+          echo "127.0.0.1 ep-src.neon.tech ep-dst.neon.tech" | sudo tee -a /etc/hosts >/dev/null
       - name: Install PostgreSQL client tools
         env:
           ZEROED_PG_SOURCE_URL: postgresql://src:dummy@127.0.0.1:55418/srcdb
@@ -255,7 +302,16 @@ jobs:
             while IFS= read -r key; do
               unset_pg+=(-u "${key}")
             done < <(env | awk -F= '/^PG/ { print $1 }')
-            if ! NUM="$(env "${unset_pg[@]}" -u PGSSLMODE -u PGHOSTADDR PGPASSFILE=/dev/null PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql -v ON_ERROR_STOP=1 -tA -d "${SOURCE_URL}" -c 'SHOW server_version_num' | tr -d '[:space:]')"; then
+            # Mask user, host spellings and resolved IPs BEFORE anything else can print
+            # them. stderr is dropped so a malformed URL is never echoed.
+            if ! MASKS="$(SOURCE_URL="${SOURCE_URL}" node --experimental-strip-types --input-type=module -e 'import { probeMaskValues } from "./scripts/migrate-supabase-to-neon.mjs"; process.stdout.write((await probeMaskValues(process.env.SOURCE_URL || "")).join("\n"))' 2>/dev/null)"; then
+              echo "::error::Source URL could not be parsed (details omitted)."
+              exit 1
+            fi
+            while IFS= read -r value; do
+              if [ -n "${value}" ]; then echo "::add-mask::${value}"; fi
+            done <<< "${MASKS}"
+            if ! NUM="$(env "${unset_pg[@]}" -u PGSSLMODE -u PGHOSTADDR PGPASSFILE=/dev/null PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -tA -d "${SOURCE_URL}" -c 'SHOW server_version_num' 2>/dev/null | tr -d '[:space:]')"; then
               echo "::error::Could not read source server_version_num; cannot pick a matching pg_dump."
               exit 1
             fi
@@ -276,10 +332,6 @@ jobs:
           echo "/usr/lib/postgresql/${MAJOR}/bin" >> "${GITHUB_PATH}"
           "/usr/lib/postgresql/${MAJOR}/bin/pg_dump" --version
           "/usr/lib/postgresql/${MAJOR}/bin/psql" --version
-      - name: Map Neon-style aliases to the service containers
-        run: |
-          set -euo pipefail
-          echo "127.0.0.1 ep-src.neon.tech ep-dst.neon.tech" | sudo tee -a /etc/hosts
       - name: Live two-Postgres migrate guards
         env:
           ZEROED_REQUIRE_PG: "1"
@@ -288,3 +340,38 @@ jobs:
           ZEROED_PG_ALIAS_URL: postgresql://src:dummy@ep-src.neon.tech:55418/srcdb
           ZEROED_CHECK_PSQL_URL: postgresql://src:dummy@127.0.0.1:55418/srcdb
         run: node --experimental-strip-types scripts/migrate-supabase-to-neon.check.mjs
+      - name: Stop migrate Postgres without printing logs
+        if: always()
+        run: |
+          set -euo pipefail
+          docker rm -f zeroed-pg-src zeroed-pg-dst >/dev/null 2>&1 || true
+
+  migrate-tls:
+    name: migrate-tls
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --no-audit --no-fund
+      - name: Install PostgreSQL 17 client
+        run: |
+          set -euo pipefail
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          if ! sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql-client-17; then
+            sudo apt-get install -y postgresql-common
+            sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y postgresql-client-17
+          fi
+          echo "/usr/lib/postgresql/17/bin" >> "$GITHUB_PATH"
+          /usr/lib/postgresql/17/bin/psql --version
+          /usr/lib/postgresql/17/bin/pg_dump --version
+      - name: Prove source pg TLS verification
+        env:
+          ZEROED_REQUIRE_TLS: "1"
+        run: node --experimental-strip-types scripts/migrate-supabase-to-neon.tls.check.mjs

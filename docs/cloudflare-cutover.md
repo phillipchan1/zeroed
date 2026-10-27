@@ -204,14 +204,27 @@ only on the prod Worker, which is not deployed with it until cutover night.
 4. Fresh Supabase backup. Neon project created, empty or schema-only.
 5. Apply `worker/schema/app.sql` then `worker/schema/better-auth.sql` on an
    empty Neon (or let the migrate script do it). Then
-   `SUPABASE_READONLY_URL=… NEON_DIRECT_URL=… node scripts/migrate-supabase-to-neon.mjs --dry-run --skip-auth-users --auth-users-file=users.json`
-   (read-only source is enough for dry-run). `SUPABASE_READONLY_URL` must
+   `SUPABASE_READONLY_URL=… node scripts/migrate-supabase-to-neon.mjs --dry-run --skip-auth-users --auth-users-file=users.json`
+   (source-only: Neon is not required and is not compared). `SUPABASE_READONLY_URL` must
    be a **direct** connection or the **session** pooler (port 5432). The
    transaction pooler (port 6543 / `mode=transaction`) cannot hold
    `REPEATABLE READ` or `pg_export_snapshot` — the script refuses it.
+   Node `pg` source clients verify TLS with the committed Supabase
+   `prod-ca-2021` root (`scripts/certs/supabase-prod-ca-2021.crt`) and
+   `rejectUnauthorized: true`. Every `ssl*` query param (`sslmode`,
+   `sslrootcert`, `sslcert`, `sslkey`, `sslcrl`, …) and `uselibpqcompat`
+   is stripped from the source URL; any other unexpected query param is
+   refused. Neon, if a Node client is used, keeps verify-full against the
+   public CA store. `psql` / `pg_dump` against the source set
+   `PGSSLMODE=verify-full` and `PGSSLROOTCERT` to that pinned CA (never
+   in the URL). Worker `pg` clients verify the same way (`rejectUnauthorized:
+   true`); Hyperdrive's bound local proxy stays plaintext.
+   Failure logs never echo raw stdout/stderr: command name, exit code,
+   SQLSTATE, and the first sanitized ERROR line only. `source-counts.json`
+   is deleted in the workflow `always()` step.
    The dump and the source
-   counts/hashes share one `REPEATABLE READ` transaction:
-   `BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ`,
+   counts/hashes share one `REPEATABLE READ` **READ ONLY** transaction:
+   `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`,
    `pg_export_snapshot()`, `pg_dump --snapshot=<id>`, then `COUNT(*)` plus
    a per-table content md5 (`md5(to_jsonb(t))` aggregated `ORDER BY t.id`)
    on the same snapshot. The snapshot session sets
@@ -222,9 +235,14 @@ only on the prod Worker, which is not deployed with it until cutover night.
    client) so a timestamptz / float / interval display difference cannot
    look like a content mismatch. Live writes on Supabase cannot make the dump and
    the checksums diverge, so a mismatch is a real restore problem, not
-   snapshot skew. Dry-run prints those counts and hashes only (the dump
-   file is discarded, never uploaded) and **exits non-zero on any
-   mismatch** — including an empty Neon vs a populated source. It also
+   snapshot skew. Dry-run writes the dump under `$RUNNER_TEMP` (discarded,
+   never uploaded), attaches the auth mapping, runs `pg_restore --list`
+   sanity, and writes per-table source counts and md5s to
+   `source-counts.json` (including `workout`). It **exits 0** when those
+   source-side steps succeed — an empty Neon is not a dry-run failure.
+   The live restore is what compares source snapshot vs Neon and aborts
+   on a count/hash mismatch. Logs print counts per table, not hashes,
+   URLs, or query dumps. It also
    refuses if a `public` table is missing from the coverage list (Better
    Auth `user` / `session` / `account` / `verification` stay excluded on
    purpose). The migration role cannot read

@@ -282,7 +282,15 @@ ok(migrateSrc.includes('pg_export_snapshot'), 'migrate dumps under pg_export_sna
 ok(migrateSrc.includes('--snapshot='), 'migrate passes --snapshot to pg_dump')
 ok(migrateSrc.includes('to_jsonb(t)'), 'migrate hashes row content as to_jsonb')
 ok(migrateSrc.includes('uncoveredPublicTablesQuery'), 'migrate refuses uncovered public tables')
-ok(migrateSrc.includes('count/hash mismatch'), 'dry-run exits non-zero on a mismatch')
+ok(migrateSrc.includes('source-only succeeded'), 'dry-run is source-only')
+ok(migrateSrc.includes('sourcePgClientConfig'), 'source pg clients use sourcePgClientConfig')
+ok(!/ssl:\s*\{[^}]*rejectUnauthorized:\s*false/.test(migrateSrc), 'migrate never sets rejectUnauthorized: false')
+ok(!/uselibpqcompat\s*[:=]/.test(migrateSrc), 'migrate does not enable uselibpqcompat')
+ok(migrateSrc.includes('isForbiddenSourceUrlParam'), 'migrate refuses ssl* and uselibpqcompat URL params')
+ok(migrateSrc.includes('prod-ca-2021'), 'migrate references the committed Supabase CA')
+ok(migrateSrc.includes('READ ONLY'), 'snapshot transaction is READ ONLY')
+ok(migrateSrc.includes('PGSSLMODE') && migrateSrc.includes('PGSSLROOTCERT'), 'source libpq uses PGSSLMODE/PGSSLROOTCERT')
+ok(migrateSrc.includes('formatSafeCommandError'), 'migrate sanitizes subprocess errors')
 ok(migrateSrc.includes('checksumPgOptions') && migrateSrc.includes('PGOPTIONS'), 'psqlTuples pins checksum GUCs via PGOPTIONS')
 ok(migrateSrc.includes("SET TimeZone = 'UTC'"), 'snapshot client pins TimeZone=UTC')
 ok(migrateSrc.includes('refuseTransactionPoolerReason'), 'migrate refuses a transaction-pooler source')
@@ -325,7 +333,10 @@ ok(dataSrc.includes('STANDARD_PADDED_HMAC') && dataSrc.includes('atob(signature)
 ok(!dataSrc.includes('bytesToBase64UrlNoPad'), 'session HMAC does not use unpadded url-safe encoding')
 const workflow = readFileSync(join(here, '../../.github/workflows/checks.yml'), 'utf8')
 ok(workflow.includes('postgres:17'), 'CI postgres/isolation services are 17')
-ok(/migrate-pg:[\s\S]*image: postgres:17/.test(workflow), 'migrate-pg uses Postgres 17 so the dump path matches Supabase')
+ok(
+  /migrate-pg:[\s\S]*postgres:17/.test(workflow) && /migrate-pg:[\s\S]*docker run/.test(workflow),
+  'migrate-pg uses Postgres 17 so the dump path matches Supabase',
+)
 ok(/migrate-pg:[\s\S]*postgresql-client-17/.test(workflow), 'migrate-pg installs postgresql-client-17 from PGDG')
 ok(workflow.includes('/usr/lib/postgresql/17/bin'), 'CI puts the Postgres 17 client first on PATH')
 const migrateWf = readFileSync(join(here, '../../.github/workflows/migrate-supabase-to-neon.yml'), 'utf8')
@@ -334,7 +345,7 @@ ok(migrateWf.includes('apt.postgresql.org'), 'manual migrate uses the PGDG apt r
 ok(migrateWf.includes('B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8'), 'manual migrate pins the PGDG signing key')
 ok(migrateWf.includes('server_version_num'), 'manual migrate matches client major to the source server')
 ok(
-  migrateWf.includes("PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql"),
+  migrateWf.includes('PGSERVICEFILE=/dev/null') && migrateWf.includes("PGOPTIONS='-c default_transaction_read_only=on'"),
   'manual migrate version probe uses a clean read-only libpq env',
 )
 ok(
@@ -343,7 +354,7 @@ ok(
 )
 ok(migrateWf.includes('PGPASSFILE=/dev/null'), 'manual migrate version probe nulls PGPASSFILE')
 ok(workflow.includes('PGPASSFILE=/dev/null'), 'migrate-pg version probe nulls PGPASSFILE')
-ok(migrateWf.includes('-u PGSSLMODE') && migrateWf.includes('-u PGHOSTADDR'), 'manual migrate version probe unsets PGSSLMODE and PGHOSTADDR')
+ok(migrateWf.includes('PGSSLMODE=verify-full') && migrateWf.includes('PGSSLROOTCERT'), 'manual migrate version probe sets verify-full + pinned CA')
 ok(workflow.includes('-u PGSSLMODE') && workflow.includes('-u PGHOSTADDR'), 'migrate-pg version probe unsets PGSSLMODE and PGHOSTADDR')
 ok(migrateWf.includes('GITHUB_PATH'), 'manual migrate puts the matching client first on PATH')
 

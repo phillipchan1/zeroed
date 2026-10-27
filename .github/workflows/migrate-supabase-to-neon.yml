@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       dry_run:
-        description: Snapshot dump + compare counts/hashes (exit 1 on mismatch; no Neon writes)
+        description: Source-only snapshot dump + counts/md5s (exit 0; no Neon compare)
         type: boolean
         default: true
       confirm_drop:
@@ -41,6 +41,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version: 22
@@ -102,12 +104,26 @@ jobs:
           if [ -n "${SOURCE_URL}" ]; then
             export PATH="/usr/lib/postgresql/${MAJOR}/bin:${PATH}"
             # Match libpqCleanEnv: inherited PG* must not redirect this URL-only probe.
-            # PGPASSFILE=/dev/null; env -u PGSSLMODE, PGHOSTADDR, and the rest.
+            # Then set verify-full + the pinned CA via env (never via the URL).
             unset_pg=()
             while IFS= read -r key; do
               unset_pg+=(-u "${key}")
             done < <(env | awk -F= '/^PG/ { print $1 }')
-            if ! NUM="$(env "${unset_pg[@]}" -u PGSSLMODE -u PGHOSTADDR PGPASSFILE=/dev/null PGSERVICEFILE=/dev/null PGOPTIONS='-c default_transaction_read_only=on' psql -v ON_ERROR_STOP=1 -tA -d "${SOURCE_URL}" -c 'SHOW server_version_num' | tr -d '[:space:]')"; then
+            CA_FILE="${GITHUB_WORKSPACE}/scripts/certs/supabase-prod-ca-2021.crt"
+            # Mask user, host spellings and resolved IPs BEFORE anything else can print
+            # them. stderr is dropped so a malformed URL is never echoed.
+            if ! MASKS="$(SOURCE_URL="${SOURCE_URL}" node --experimental-strip-types --input-type=module -e 'import { probeMaskValues } from "./scripts/migrate-supabase-to-neon.mjs"; process.stdout.write((await probeMaskValues(process.env.SOURCE_URL || "")).join("\n"))' 2>/dev/null)"; then
+              echo "::error::Source URL could not be parsed (details omitted)."
+              exit 1
+            fi
+            while IFS= read -r value; do
+              if [ -n "${value}" ]; then echo "::add-mask::${value}"; fi
+            done <<< "${MASKS}"
+            if ! SAFE_URL="$(SOURCE_URL="${SOURCE_URL}" node --experimental-strip-types --input-type=module -e 'import { sanitizeSourceConnectionString } from "./scripts/migrate-supabase-to-neon.mjs"; process.stdout.write(sanitizeSourceConnectionString(process.env.SOURCE_URL))' 2>/dev/null)"; then
+              echo "::error::Source URL was refused by sanitizeSourceConnectionString (details omitted; run the script locally)."
+              exit 1
+            fi
+            if ! NUM="$(env "${unset_pg[@]}" PGPASSFILE=/dev/null PGSERVICEFILE=/dev/null PGSSLMODE=verify-full PGSSLROOTCERT="${CA_FILE}" PGOPTIONS='-c default_transaction_read_only=on' psql -v ON_ERROR_STOP=1 -v VERBOSITY=sqlstate -tA -d "${SAFE_URL}" -c 'SHOW server_version_num' 2>/dev/null | tr -d '[:space:]')"; then
               echo "::error::Could not read source server_version_num; cannot pick a matching pg_dump."
               exit 1
             fi
@@ -154,7 +170,7 @@ jobs:
             echo "::error::Missing repository secret SUPABASE_READONLY_URL"
             exit 1
           fi
-          if [ -z "${NEON_DIRECT_URL}" ]; then
+          if [ "${DRY_RUN}" != "true" ] && [ -z "${NEON_DIRECT_URL}" ]; then
             echo "::error::Missing repository secret NEON_DIRECT_URL"
             exit 1
           fi
@@ -162,15 +178,15 @@ jobs:
 
           ARGS=(--skip-auth-users)
           if [ "${DRY_RUN}" = "true" ]; then
-            ARGS+=(--dry-run)
-            echo "Mode: dry-run (no writes to Neon)"
+            ARGS+=(--dry-run "--report=${RUNNER_TEMP}/source-counts.json")
+            echo "Mode: dry-run (source-only; no Neon compare)"
           else
             echo "Mode: live data-only restore to Neon"
             if [ -z "${CONFIRM_DROP}" ]; then
               echo "::error::Live restore requires the confirm_drop input (target dbname)"
               exit 1
             fi
-            ARGS+=(--confirm-drop="${CONFIRM_DROP}")
+            ARGS+=(--confirm-drop="${CONFIRM_DROP}" "--report=${RUNNER_TEMP}/source-counts.json")
           fi
 
           if [ -n "${AUTH_FILE:-}" ] && [ -f "${AUTH_FILE}" ] && [ -s "${AUTH_FILE}" ]; then
@@ -188,3 +204,13 @@ jobs:
           if [ -n "${AUTH_FILE:-}" ]; then
             rm -f "${AUTH_FILE}"
           fi
+      - name: Delete source-counts and hash reports
+        if: always()
+        run: |
+          set -euo pipefail
+          rm -f "${RUNNER_TEMP}/source-counts.json" "${GITHUB_WORKSPACE}/source-counts.json"
+          find "${RUNNER_TEMP}" "${GITHUB_WORKSPACE}" -maxdepth 4 \( \
+            -name 'source-counts.json' -o \
+            -name 'source-hashes.json' -o \
+            -name 'checksums.json' \
+          \) -type f -delete
