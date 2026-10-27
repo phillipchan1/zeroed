@@ -107,7 +107,7 @@ export async function loadAthlete(
   `
   if (!athlete) throw new Error('Athlete row missing')
   const [profile] = await store.sql<{ current_phase: string | null; retest_date: string | null }[]>`
-    SELECT current_phase, retest_date FROM athlete_profile
+    SELECT current_phase, retest_date::text FROM athlete_profile
     WHERE athlete_id = ${store.athleteId}
     LIMIT 1
   `
@@ -270,7 +270,7 @@ export async function loadWorkouts(
     r_exercises: unknown
     r_program_id: string
   }[]>`
-    SELECT w.id, w.routine_id, w.performed_at::text, w.rpe, w.duration_mins,
+    SELECT w.id, w.routine_id, to_json(w.performed_at) #>> '{}' AS performed_at, w.rpe, w.duration_mins,
            w.actual_weights, w.exercises_snapshot,
            r.id AS r_id, r.name AS r_name, r.exercises AS r_exercises, r.program_id AS r_program_id
     FROM workout w
@@ -330,7 +330,7 @@ export async function selectOwnedWorkout(store: ConnectedStore, workoutId: strin
     r_exercises: unknown
     r_program_id: string
   }[]>`
-    SELECT w.id, w.routine_id, w.performed_at::text, w.rpe, w.duration_mins,
+    SELECT w.id, w.routine_id, to_json(w.performed_at) #>> '{}' AS performed_at, w.rpe, w.duration_mins,
            w.actual_weights, w.exercises_snapshot,
            r.id AS r_id, r.name AS r_name, r.exercises AS r_exercises, r.program_id AS r_program_id
     FROM workout w
@@ -446,7 +446,7 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
     readiness: number | null
     bodyweight: string | number | null
   }[]>`
-    SELECT w.id, w.performed_at::text, w.actual_weights, w.exercises_snapshot,
+    SELECT w.id, to_json(w.performed_at) #>> '{}' AS performed_at, w.actual_weights, w.exercises_snapshot,
            w.knee_pain_l, w.knee_pain_r, w.sleep_hours, w.readiness, w.bodyweight,
            r.exercises AS r_exercises
     FROM workout w
@@ -473,7 +473,7 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
   const recentIds = workouts.filter((w) => localDay(w.performed_at) >= addDays(weekStart, -14)).map((w) => w.id as string)
   const observations = recentIds.length
     ? await store.sql<{ signal: string; severity: number; logged_at: string }[]>`
-        SELECT signal, severity, logged_at::text
+        SELECT signal, severity, to_json(logged_at) #>> '{}' AS logged_at
         FROM session_observation
         WHERE workout_id = ANY(${store.sql.array(recentIds)}) AND severity >= 4
       `
@@ -576,7 +576,7 @@ export async function loadNotes(store: ConnectedStore, limit = 12): Promise<{
       `
     : []
   const coach = await store.sql<{ created_at: string; role: string; kind: string; body: string }[]>`
-    SELECT created_at::text, role, kind, body
+    SELECT to_json(created_at) #>> '{}' AS created_at, role, kind, body
     FROM coach_message
     WHERE athlete_id = ${store.athleteId}
     ORDER BY created_at DESC
