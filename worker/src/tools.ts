@@ -24,6 +24,11 @@ import {
 } from './store.ts'
 import type { Sql } from './db.ts'
 import { McpUserError } from './userError.ts'
+import {
+  ONBOARDING_TOOL_NAMES,
+  runOnboardingTool,
+} from './onboardingTools.ts'
+import { workerOnboardingIo } from './onboardingStore.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -208,9 +213,14 @@ export async function executeZeroedTool(
   athleteId: string,
   name: string,
   args: Record<string, unknown>,
-  flags?: { rpeHalfSteps?: boolean },
+  flags?: { rpeHalfSteps?: boolean; onboardingAgentV1?: boolean },
 ): Promise<string> {
   const store = storeForAthlete(sql, athleteId)
+
+  if (ONBOARDING_TOOL_NAMES.has(name)) {
+    if (!flags?.onboardingAgentV1) throw new McpUserError(`Unknown tool: ${name}`)
+    return runOnboardingTool(name, args, workerOnboardingIo(sql, athleteId))
+  }
 
   if (LIFT_MODEL_TOOL_NAMES.has(name)) {
     return runLiftModelTool(name, args, {
