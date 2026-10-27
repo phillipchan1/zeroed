@@ -213,9 +213,37 @@ export type AnswersResult =
   | { ok: true; answers: OnboardingAnswers }
   | { ok: false; error: string }
 
+/** Stored `athlete.onboarding_answers` envelope. Pack settings stay on their own column. */
+export const ONBOARDING_ANSWERS_VERSION = 1 as const
+
+export type StoredOnboardingAnswers = OnboardingAnswers & { v: typeof ONBOARDING_ANSWERS_VERSION }
+
+export function wrapStoredAnswers(answers: OnboardingAnswers): StoredOnboardingAnswers {
+  const rest = { ...answers } as OnboardingAnswers & { v?: unknown }
+  delete rest.v
+  return { v: ONBOARDING_ANSWERS_VERSION, ...rest }
+}
+
+/**
+ * Read a stored answers envelope. Requires `v: 1`. The answers body is validated
+ * the same way as a write patch. Invalid version or shape is refused.
+ */
+export function readStoredAnswers(raw: unknown): AnswersResult {
+  if (raw == null) return { ok: true, answers: {} }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: 'onboarding_answers must be an object' }
+  }
+  const src = raw as Record<string, unknown>
+  if (src.v !== ONBOARDING_ANSWERS_VERSION) {
+    return { ok: false, error: `onboarding_answers.v must be ${ONBOARDING_ANSWERS_VERSION}` }
+  }
+  return validateOnboardingAnswers(src)
+}
+
 /**
  * Validate and canonicalize a patch of answers. Unknown keys are dropped.
  * Invalid enum / range values fail the whole patch (engine disposes).
+ * A `v` key, if present, must be 1 — stored JSON always carries `{"v":1,...}`.
  */
 export function validateOnboardingAnswers(raw: unknown): AnswersResult {
   if (raw == null) return { ok: true, answers: {} }
@@ -223,6 +251,9 @@ export function validateOnboardingAnswers(raw: unknown): AnswersResult {
     return { ok: false, error: 'answers must be an object' }
   }
   const src = raw as Record<string, unknown>
+  if ('v' in src && src.v != null && src.v !== ONBOARDING_ANSWERS_VERSION) {
+    return { ok: false, error: `onboarding_answers.v must be ${ONBOARDING_ANSWERS_VERSION}` }
+  }
   const answers: OnboardingAnswers = {}
 
   if ('goal' in src && src.goal != null) {

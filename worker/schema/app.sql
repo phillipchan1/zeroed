@@ -76,7 +76,7 @@ COMMENT ON COLUMN public.athlete.starter_pack_settings IS
   'Pack settings jsonb, e.g. {sport, season, game_days}. Sport is a setting, not a library.';
 
 COMMENT ON COLUMN public.athlete.onboarding_answers IS
-  'Onboarding answers (goal, days, minutes, equipment, lifts, pain, style).';
+  'Onboarding answers envelope {"v":1,...} (goal, days, minutes, equipment, lifts, pain, style). Separate from starter_pack_settings.';
 
 -- =============================================================================
 -- DIAGNOSTIC
@@ -431,11 +431,14 @@ BEGIN
   DELETE FROM public.athlete_profile WHERE athlete_id = aid;
 
   UPDATE public.athlete
-     SET onboarding_step = 'hook',
-         obstacle        = NULL,
-         arena_type      = NULL,
-         arena_raw       = NULL,
-         limiter_choice  = NULL
+     SET onboarding_step         = 'hook',
+         obstacle                = NULL,
+         arena_type              = NULL,
+         arena_raw               = NULL,
+         limiter_choice          = NULL,
+         starter_pack            = NULL,
+         starter_pack_settings   = NULL,
+         onboarding_answers      = NULL
    WHERE id = aid;
 END;
 $$;

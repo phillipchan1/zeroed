@@ -1,9 +1,9 @@
-// Onboarding connector tools for both remote MCPs (Worker /api/mcp and the
-// Supabase edge mcp). Schemas, flag gating, and the runner live here once.
+// Onboarding connector tools for the live Worker MCP (/api/mcp, also served
+// at /functions/v1/mcp). Behind onboarding_agent_v1 (off unless exactly "1").
 // Write tools preview first; they write only with confirm=true.
 
-import type { McpTool } from './mcpProtocol.ts'
-import { jsonBlock } from './zeroedFormat.ts'
+import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
+import { jsonBlock } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import {
   formatSession1Preview,
   formatTheRead,
@@ -18,12 +18,12 @@ import {
   validateOnboardingAnswers,
   type InsightSnap,
   type OnboardingAnswers,
-} from '../../../src/engine/onboardingConnector.ts'
+} from '../../src/engine/onboardingConnector.ts'
 import {
   previewPackProvisional,
   type PackSettings,
   type StarterPackId,
-} from '../../../src/engine/starterPacks.ts'
+} from '../../src/engine/starterPacks.ts'
 
 export const ONBOARDING_SERVER_INSTRUCTIONS =
   "If get_onboarding_state shows setup isn't finished, run onboarding before coaching."
@@ -32,7 +32,16 @@ export function onboardingAgentV1On(raw: string | undefined | null): boolean {
   return raw === '1'
 }
 
-export const ONBOARDING_TOOLS: McpTool[] = [
+type ToolAnnotations = {
+  readOnlyHint?: boolean
+  destructiveHint?: boolean
+  idempotentHint?: boolean
+  openWorldHint?: boolean
+}
+
+export type OnboardingMcpTool = McpTool & { annotations?: ToolAnnotations }
+
+export const ONBOARDING_TOOLS: OnboardingMcpTool[] = [
   {
     name: 'get_onboarding_state',
     description: 'Current onboarding_step, answers so far, the next suggested question, and whether a pack or session 1 exists. Call this first when setup may be unfinished.',

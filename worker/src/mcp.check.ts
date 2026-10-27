@@ -2,11 +2,12 @@
 // Uses throwaway Postgres when ZEROED_TEST_DATABASE_URL is set, else PGlite.
 // Run: node --experimental-strip-types worker/src/mcp.check.ts
 
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import type { Env } from './env.ts'
 import { openIsolationHarness } from './isolationDb.ts'
+import { executeDataQuery } from './data.ts'
 import { handleMcp, publicMcpError } from './mcp.ts'
 import { resolveMcpToken, sha256Hex, timingSafeEqualHex } from './mcpToken.ts'
 import { ZEROED_TOOLS } from './tools.ts'
@@ -17,7 +18,7 @@ import {
   ONBOARDING_TOOLS,
   listedZeroedTools,
   onboardingAgentV1On,
-} from '../../supabase/functions/_shared/onboardingTools.ts'
+} from './onboardingTools.ts'
 import { McpUserError } from './userError.ts'
 
 const fails: string[] = []
@@ -67,13 +68,14 @@ ok(onboardingAgentV1On(undefined) === false && onboardingAgentV1On('1') === true
 ok(listedZeroedTools(ZEROED_TOOLS, false) === ZEROED_TOOLS, 'parity: flag-off listed tools is the same array')
 ok(listedZeroedTools(ZEROED_TOOLS, true).map((t) => t.name).slice(0, workerNames.length).join() === workerNames.join(), 'parity: flag-on list keeps existing tools first')
 ok(ONBOARDING_TOOLS.map((t) => t.name).join() === 'get_onboarding_state,list_starter_packs,record_onboarding_answers,preview_starter_pack,start_starter_pack', 'parity: five onboarding tools')
-ok(workerSrc.includes("from '../../supabase/functions/_shared/onboardingTools.ts'"), 'parity: worker tools import shared onboarding defs')
-ok(edgeSrc.includes("from './onboardingTools.ts'"), 'parity: edge tools import shared onboarding defs')
-ok(workerSrc.includes('runOnboardingTool') && edgeSrc.includes('runOnboardingTool'), 'parity: both runners call runOnboardingTool')
+ok(workerSrc.includes("from './onboardingTools.ts'"), 'parity: worker tools import worker onboarding defs')
+ok(!existsSync(join(here, '../../supabase/functions/_shared/onboardingTools.ts')), 'parity: edge mcp has no onboardingTools')
+ok(!existsSync(join(here, '../../supabase/functions/_shared/onboardingStore.ts')), 'parity: edge mcp has no onboardingStore')
+ok(!edgeSrc.includes('runOnboardingTool') && !edgeSrc.includes('onboardingTools'), 'parity: edge zeroedTools is unchanged')
 const workerMcpSrc = readFileSync(join(here, 'mcp.ts'), 'utf8')
 const edgeMcpSrc = readFileSync(join(here, '../../supabase/functions/mcp/index.ts'), 'utf8')
-ok(workerMcpSrc.includes('listedZeroedTools') && edgeMcpSrc.includes('listedZeroedTools'), 'parity: both MCP servers gate the list')
-ok(workerMcpSrc.includes('ONBOARDING_SERVER_INSTRUCTIONS') && edgeMcpSrc.includes('ONBOARDING_SERVER_INSTRUCTIONS'), 'parity: both servers share onboarding instructions')
+ok(workerMcpSrc.includes('listedZeroedTools') && workerMcpSrc.includes('ONBOARDING_SERVER_INSTRUCTIONS'), 'parity: worker MCP gates the list')
+ok(!edgeMcpSrc.includes('listedZeroedTools') && !edgeMcpSrc.includes('ONBOARDING_SERVER_INSTRUCTIONS'), 'parity: edge MCP is unchanged')
 ok(!workerNames.includes('get_onboarding_state'), 'parity: onboarding tools are not on the flag-off list')
 ok(workerNames.includes('get_current_program'), 'parity: get_current_program is advertised')
 ok(workerNames.includes('list_workouts') && workerNames.includes('get_workout'), 'parity: workout tools are advertised')
@@ -369,7 +371,19 @@ const recSaved = toolText((await rpcOn(TOKEN_C, 'tools/call', {
 ok(recSaved.includes('Saved.'), 'e2e: record_onboarding_answers with confirm saves')
 const [cAns] = await sql<{ onboarding_answers: unknown }[]>`SELECT onboarding_answers FROM athlete WHERE id = ${C}`
 const cAnsVal = typeof cAns?.onboarding_answers === 'string' ? JSON.parse(cAns.onboarding_answers) : cAns?.onboarding_answers
-ok((cAnsVal as { goal?: string } | null)?.goal === 'get_strong', 'e2e: C answers were saved')
+ok((cAnsVal as { v?: number; goal?: string } | null)?.v === 1, 'e2e: saved answers carry v:1')
+ok((cAnsVal as { v?: number; goal?: string } | null)?.goal === 'get_strong', 'e2e: C answers were saved')
+ok(!Object.prototype.hasOwnProperty.call(cAnsVal ?? {}, 'starter_pack'), 'e2e: answers stay off starter_pack_settings')
+const badVersion = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+  name: 'record_onboarding_answers',
+  arguments: { answers: { v: 2, goal: 'hybrid' }, confirm: true },
+})).body)
+ok(badVersion.includes('Refused') && badVersion.includes('v must be 1'), 'e2e: v!=1 answers are refused')
+const [cAnsAfterBad] = await sql<{ onboarding_answers: unknown }[]>`SELECT onboarding_answers FROM athlete WHERE id = ${C}`
+const cAnsAfterBadVal = typeof cAnsAfterBad?.onboarding_answers === 'string'
+  ? JSON.parse(cAnsAfterBad.onboarding_answers)
+  : cAnsAfterBad?.onboarding_answers
+ok((cAnsAfterBadVal as { goal?: string } | null)?.goal === 'get_strong', 'e2e: refused v!=1 write leaves prior answers')
 const [bAns] = await sql<{ onboarding_answers: unknown }[]>`SELECT onboarding_answers FROM athlete WHERE id = ${B}`
 ok(bAns?.onboarding_answers == null, 'isolation: athlete_id override cannot write B answers')
 
@@ -450,6 +464,52 @@ const [aActive] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM pro
 ok(aActive?.n === '1', 'e2e: A still has one active program after replace')
 const [bStill] = await sql<{ name: string }[]>`SELECT name FROM routine WHERE id = ${'88888888-8888-8888-8888-888888888888'}`
 ok(bStill?.name === 'B day', 'isolation: replace on A leaves B routines alone')
+
+const D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+const AUTH_D = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd'
+await sql`INSERT INTO auth.users (id, email) VALUES (${AUTH_D}, ${'d@example.com'})`
+await sql`
+  INSERT INTO athlete (id, auth_user_id, name, onboarding_step, starter_pack, starter_pack_settings, onboarding_answers)
+  VALUES (
+    ${D}, ${AUTH_D}, ${'Athlete D'}, ${'first_session_pending'}, ${'get_strong'},
+    ${JSON.stringify({ sport: 'basketball' })}::jsonb,
+    ${JSON.stringify({ v: 1, goal: 'get_strong', pain: 'nothing' })}::jsonb
+  )
+`
+const resetD = await executeDataQuery(sql, { userId: AUTH_D, athleteId: D }, {
+  table: 'athlete',
+  op: 'rpc',
+  fn: 'reset_athlete_orientation',
+})
+ok(resetD.status === 200 && resetD.error == null, 'reset: orientation wipe succeeds')
+const [dWiped] = await sql<{
+  starter_pack: string | null
+  starter_pack_settings: unknown
+  onboarding_answers: unknown
+  onboarding_step: string
+}[]>`
+  SELECT starter_pack, starter_pack_settings, onboarding_answers, onboarding_step
+  FROM athlete WHERE id = ${D}
+`
+ok(dWiped?.onboarding_step === 'hook', 'reset: step returns to hook')
+ok(dWiped?.starter_pack == null, 'reset: starter_pack is cleared')
+ok(dWiped?.starter_pack_settings == null, 'reset: starter_pack_settings is cleared')
+ok(dWiped?.onboarding_answers == null, 'reset: onboarding_answers is cleared')
+ok((await sql<{ name: string }[]>`SELECT name FROM athlete WHERE id = ${A}`)[0]?.name === 'Athlete A', 'reset: A athlete row is untouched')
+
+await sql`
+  UPDATE athlete SET
+    starter_pack = ${'layoff'},
+    starter_pack_settings = ${JSON.stringify({ season: 'off' })}::jsonb,
+    onboarding_answers = ${JSON.stringify({ v: 1, goal: 'layoff', pain: 'knee' })}::jsonb
+  WHERE id = ${D}
+`
+await sql`DELETE FROM auth.users WHERE id = ${AUTH_D}`
+const [dGone] = await sql<{ id: string }[]>`SELECT id FROM athlete WHERE id = ${D}`
+ok(dGone == null, 'account-delete: athlete row (and new columns) cascade with the auth user')
+ok((await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM athlete WHERE id = ${D}`)[0]?.n === '0', 'account-delete: no leftover D row')
+ok((await sql<{ starter_pack: string | null }[]>`SELECT starter_pack FROM athlete WHERE id = ${A}`)[0]?.starter_pack === 'get_strong', 'account-delete: A pack is untouched')
+ok((await sql<{ onboarding_answers: unknown }[]>`SELECT onboarding_answers FROM athlete WHERE id = ${B}`)[0]?.onboarding_answers == null, 'account-delete: B answers stay null')
 
 await harness.close()
 

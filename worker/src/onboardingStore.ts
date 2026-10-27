@@ -3,8 +3,13 @@ import type {
   OnboardingIo,
   OnboardingSnapshot,
   Session1Plan,
-} from '../../supabase/functions/_shared/onboardingTools.ts'
-import type { InsightSnap, OnboardingAnswers } from '../../src/engine/onboardingConnector.ts'
+} from './onboardingTools.ts'
+import {
+  readStoredAnswers,
+  wrapStoredAnswers,
+  type InsightSnap,
+  type OnboardingAnswers,
+} from '../../src/engine/onboardingConnector.ts'
 import type { PackSettings } from '../../src/engine/starterPacks.ts'
 
 function parseSettings(value: unknown): PackSettings | null {
@@ -15,8 +20,8 @@ function parseSettings(value: unknown): PackSettings | null {
 
 function parseAnswers(value: unknown): OnboardingAnswers | null {
   if (value == null) return null
-  const obj = asJson<OnboardingAnswers>(value, {})
-  return obj && typeof obj === 'object' ? obj : null
+  const parsed = readStoredAnswers(asJson<unknown>(value, null))
+  return parsed.ok ? parsed.answers : null
 }
 
 export function workerOnboardingIo(sql: Sql, athleteId: string): OnboardingIo {
@@ -83,7 +88,7 @@ export function workerOnboardingIo(sql: Sql, athleteId: string): OnboardingIo {
     async saveAnswers(answers: OnboardingAnswers): Promise<void> {
       await sql`
         UPDATE athlete
-        SET onboarding_answers = ${jsonParam(sql, answers)}
+        SET onboarding_answers = ${jsonParam(sql, wrapStoredAnswers(answers))}
         WHERE id = ${athleteId}
       `
     },
@@ -126,7 +131,7 @@ export function workerOnboardingIo(sql: Sql, athleteId: string): OnboardingIo {
         UPDATE athlete SET
           starter_pack = ${input.packId},
           starter_pack_settings = ${jsonParam(sql, input.settings)},
-          onboarding_answers = ${jsonParam(sql, input.answers)},
+          onboarding_answers = ${jsonParam(sql, wrapStoredAnswers(input.answers))},
           onboarding_step = 'first_session_pending',
           name = ${input.athletePatch.name},
           training_age = ${input.athletePatch.training_age},

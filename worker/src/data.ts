@@ -83,6 +83,7 @@ const COLUMNS: Record<string, Set<string>> = {
     'id', 'auth_user_id', 'name', 'sport', 'goals', 'obstacle', 'training_age',
     'sessions_per_week', 'training_preferences', 'arena_type', 'arena_raw',
     'limiter_choice', 'onboarding_step', 'created_at', 'training_max_overrides',
+    'starter_pack', 'starter_pack_settings', 'onboarding_answers',
   ]),
   athlete_profile: new Set(['id', 'athlete_id', 'last_updated', 'current_phase', 'retest_date']),
   diagnostic: new Set([
@@ -144,6 +145,7 @@ const JSONB = new Set([
   'routine.exercises',
   'workout.actual_weights', 'workout.actual_reps', 'workout.exercises_snapshot',
   'athlete.training_max_overrides',
+  'athlete.starter_pack_settings', 'athlete.onboarding_answers',
   'weekly_review.adjustments', 'weekly_review.next_week_prescription',
   'program_revision.requests', 'program_revision.snapshot', 'program_revision.diff',
   'workout_draft.set_logs', 'workout_draft.feedback',
@@ -698,7 +700,7 @@ async function resetOrientation(sql: Sql, athleteId: string): Promise<DataResult
   await runSql(sql, `DELETE FROM athlete_profile WHERE ${bindOwner('athlete_profile', athleteId).text}`, [athleteId])
   await runSql(
     sql,
-    `UPDATE athlete SET onboarding_step = 'hook', obstacle = NULL, arena_type = NULL, arena_raw = NULL, limiter_choice = NULL WHERE ${bindOwner('athlete', athleteId).text}`,
+    `UPDATE athlete SET onboarding_step = 'hook', obstacle = NULL, arena_type = NULL, arena_raw = NULL, limiter_choice = NULL, starter_pack = NULL, starter_pack_settings = NULL, onboarding_answers = NULL WHERE ${bindOwner('athlete', athleteId).text}`,
     [athleteId],
   )
   return { data: null, error: null, count: null, status: 200 }

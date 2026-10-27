@@ -72,6 +72,7 @@ export interface AthleteRow {
   // onboarding_agent_v1 flag is off.
   starter_pack?: string | null
   starter_pack_settings?: Record<string, unknown> | null
+  // Envelope {"v":1,...}. Separate from starter_pack_settings. Validated on read/write.
   onboarding_answers?: Record<string, unknown> | null
 }
 

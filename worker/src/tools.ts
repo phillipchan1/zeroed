@@ -27,7 +27,7 @@ import { McpUserError } from './userError.ts'
 import {
   ONBOARDING_TOOL_NAMES,
   runOnboardingTool,
-} from '../../supabase/functions/_shared/onboardingTools.ts'
+} from './onboardingTools.ts'
 import { workerOnboardingIo } from './onboardingStore.ts'
 
 const editExerciseSchema = {

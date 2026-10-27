@@ -7,9 +7,11 @@ import {
   mergeAnswers,
   nextOnboardingQuestion,
   painFlagTriggered,
+  readStoredAnswers,
   recommendStarterPack,
   setupFinished,
   validateOnboardingAnswers,
+  wrapStoredAnswers,
 } from './onboardingConnector.ts'
 
 const fails: string[] = []
@@ -29,6 +31,15 @@ ok(!validateOnboardingAnswers({ minutes: 5 }).ok, 'minutes below 15 is refused')
 ok(!validateOnboardingAnswers({ pain: 'spicy' }).ok, 'unknown pain is refused')
 ok(!validateOnboardingAnswers({ equipment: ['laser'] }).ok, 'unknown equipment is refused')
 ok(validateOnboardingAnswers({ extra: 'drop' }).ok, 'unknown keys are dropped, not rejected')
+ok(validateOnboardingAnswers({ v: 1, goal: 'get_strong' }).ok, 'v:1 on a write patch is accepted')
+ok(!validateOnboardingAnswers({ v: 2, goal: 'get_strong' }).ok, 'v:2 on a write patch is refused')
+const wrapped = wrapStoredAnswers({ goal: 'get_strong', days: 3 })
+ok(wrapped.v === 1 && wrapped.goal === 'get_strong' && wrapped.days === 3, 'wrapStoredAnswers stamps v:1')
+ok(readStoredAnswers({ v: 1, goal: 'get_strong' }).ok, 'readStoredAnswers accepts v:1')
+ok(!readStoredAnswers({ goal: 'get_strong' }).ok, 'readStoredAnswers refuses a missing version')
+ok(!readStoredAnswers({ v: 2, goal: 'get_strong' }).ok, 'readStoredAnswers refuses v:2')
+const emptyRead = readStoredAnswers(null)
+ok(emptyRead.ok && Object.keys(emptyRead.answers).length === 0, 'readStoredAnswers treats null as empty')
 
 ok(!painFlagTriggered({}), 'missing pain is not a flag')
 ok(!painFlagTriggered({ pain: 'nothing' }), 'Nothing is not a flag')

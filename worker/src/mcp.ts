@@ -14,12 +14,37 @@ import {
   ONBOARDING_SERVER_INSTRUCTIONS,
   listedZeroedTools,
   onboardingAgentV1On,
-} from '../../supabase/functions/_shared/onboardingTools.ts'
+} from './onboardingTools.ts'
 
 /** Only McpUserError messages are shown. DB / runtime errors stay generic. */
 export function publicMcpError(err: unknown): string {
   if (isMcpUserError(err)) return err.message
   return 'request failed'
+}
+
+/** Flag-on only. mcpProtocol stays unchanged so flag-off initialize/coach stay byte-identical. */
+function applyOnboardingInstructions(
+  reply: JsonRpcResponse | null,
+  method: string,
+): JsonRpcResponse | null {
+  if (!reply || !('result' in reply)) return reply
+  const extra = ` ${ONBOARDING_SERVER_INSTRUCTIONS}`
+  if (method === 'initialize') {
+    const result = reply.result as { instructions?: string }
+    if (typeof result.instructions === 'string') {
+      const whoIdx = result.instructions.lastIndexOf(' You are connected as ')
+      result.instructions = whoIdx >= 0
+        ? result.instructions.slice(0, whoIdx) + extra + result.instructions.slice(whoIdx)
+        : result.instructions + extra
+    }
+    return reply
+  }
+  if (method === 'prompts/get') {
+    const result = reply.result as { messages?: Array<{ content?: { text?: string } }> }
+    const content = result.messages?.[0]?.content
+    if (content && typeof content.text === 'string') content.text += extra
+  }
+  return reply
 }
 
 export function containsNul(value: unknown): boolean {
@@ -125,7 +150,7 @@ async function serveMcp(req: Request, sql: Sql, env?: Env): Promise<Response> {
   const onboardingOn = onboardingAgentV1On(env?.ONBOARDING_AGENT_V1)
   const tools = listedZeroedTools(ZEROED_TOOLS, onboardingOn)
   const run = async (msg: JsonRpcRequest): Promise<JsonRpcResponse | null> => {
-    return await handleMcpMethod(msg, tools, async (name, args) => {
+    const reply = await handleMcpMethod(msg, tools, async (name, args) => {
       await touchMcpToken(sql, conn.id)
       try {
         return await executeZeroedTool(sql, conn.athlete_id, name, args, {
@@ -136,7 +161,9 @@ async function serveMcp(req: Request, sql: Sql, env?: Env): Promise<Response> {
         console.error('[mcp] tool', name, err instanceof Error ? err.message : String(err))
         throw new Error(publicMcpError(err))
       }
-    }, athleteLabel, onboardingOn ? ONBOARDING_SERVER_INSTRUCTIONS : undefined)
+    }, athleteLabel)
+    if (!onboardingOn) return reply
+    return applyOnboardingInstructions(reply, typeof msg.method === 'string' ? msg.method : '')
   }
 
   if (Array.isArray(raw)) {
