@@ -51,6 +51,7 @@ import {
 import { readBalance, type BalanceRead } from './balance'
 import { isSetLogged, tallySession, sumVolume, NO_VOLUME, type VolumeTally } from './volume'
 import { validateProvisionalProgram } from './safety'
+import { timeBoxSession } from './starterPacks'
 import {
   OBSTACLE_CATEGORY_HINTS, buildReadSkeleton, READ_FLOORS,
   type ReadAxis, type ArenaType,
@@ -1704,6 +1705,10 @@ export interface ProvisionalProfile {
   trainingAge: number
   sessions: number
   obstacle: string | null
+  /** Pack-only. Safety ceiling + first-session strengthen. Unset = trainingAge. */
+  effectiveTrainingAge?: number
+  /** Pack-only. Trim sessions after the validator, before persist. */
+  timeBoxMinutes?: number
 }
 
 export interface ProvisionalBuildResult {
@@ -1839,6 +1844,9 @@ export async function buildProvisionalProgram(
   if (existing) return counts
 
   // Build the plan: agent proposes → safety disposes → deterministic floor.
+  // Packs may pass an effective training age (layoff) without changing the
+  // athlete row; unset keeps today's path (trainingAge) byte-for-byte.
+  const safetyAge = profile.effectiveTrainingAge ?? profile.trainingAge
   let plan: GeneratedProgram
   const designed = await callProgramDesign({
     profile: {
@@ -1855,7 +1863,7 @@ export async function buildProvisionalProgram(
 
   if (designed.ok) {
     try {
-      const safe = validateProvisionalProgram(designed.data, { trainingAge: profile.trainingAge })
+      const safe = validateProvisionalProgram(designed.data, { trainingAge: safetyAge })
       plan = programDesignToGenerated(safe, startDateStr, p1)
     } catch {
       plan = generateInitialProgram(ranked, startDateStr)
@@ -1865,7 +1873,15 @@ export async function buildProvisionalProgram(
   }
 
   // Make it feel like a workout for experienced lifters (the "workout half").
-  strengthenFirstSession(plan, profile.trainingAge, p1?.category ?? null)
+  strengthenFirstSession(plan, safetyAge, p1?.category ?? null)
+
+  // thirty_three: trim trailing work after the validator (and strengthen) so
+  // what we persist estimates at or under the pack cap. No-op when unset.
+  if (profile.timeBoxMinutes != null) {
+    for (const routine of plan.routines) {
+      routine.exercises = timeBoxSession(routine.exercises, profile.timeBoxMinutes)
+    }
+  }
 
   // One info-gain "test me" item — the "diagnostic half" (non-fatal).
   await tagInfoGainItem(plan, ranked, p1)

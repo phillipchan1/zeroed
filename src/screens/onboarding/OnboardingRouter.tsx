@@ -1,14 +1,19 @@
-import { useEffect, useRef, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { lazy, Suspense, useEffect, useRef, useState } from 'react'
+import { useLocation, useNavigate } from 'react-router-dom'
 import type { AuthUser } from '../../lib/authClient'
 import { supabase } from '../../lib/supabaseClient'
+import { onboardingAgentV1Enabled } from '../../lib/flags'
+import { resolveOnboardingEntry } from '../../lib/onboardingEntry'
 import { Spinner } from '../../components/ui'
 import { HookAct, OBSTACLE_STORAGE_KEY, PROBE_STORAGE_KEY, type ProbeStash } from './HookAct'
 import type { ArenaAnswer } from './ArenaScreen'
 import { OrientationAct, type OrientationFields } from './OrientationAct'
 import { CalibrateScreen } from './CalibrateScreen'
+import { readStarterPack } from './starterPackStorage'
 import type { AthleteRow, OnboardingStep, Priority } from '../../types/database'
 import type { ProvisionalProfile } from '../../engine'
+
+const PackOnboarding = lazy(() => import('./PackOnboarding'))
 
 /**
  * Onboarding state machine (Confidence-Driven Read). Renders the right screen
@@ -27,6 +32,14 @@ export function OnboardingRouter({
   refresh: () => void
 }) {
   const navigate = useNavigate()
+  const location = useLocation()
+  const flagWanted = onboardingAgentV1Enabled(
+    { VITE_ONBOARDING_AGENT_V1: import.meta.env.VITE_ONBOARDING_AGENT_V1, DEV: import.meta.env.DEV },
+    location.search,
+  )
+  const [forceClassic, setForceClassic] = useState(false)
+  const flagOn = flagWanted && !forceClassic
+  const entry = resolveOnboardingEntry({ flagOn, user, athlete })
   // Ephemeral "calibrating your first session" beat — holds the orientation
   // fields while buildProvisionalProgram runs. Not a DB step.
   const [calibrating, setCalibrating] = useState<ProvisionalProfile | null>(null)
@@ -43,6 +56,30 @@ export function OnboardingRouter({
     if (!user || athlete || bootstrappedRef.current) return
     bootstrappedRef.current = true
     void (async () => {
+      if (flagOn) {
+        const pack = readStarterPack()
+        if (pack) {
+          const { data: created } = await supabase
+            .from('athlete')
+            .insert({
+              auth_user_id: user.id,
+              obstacle: pack.obstacle,
+              arena_type: null,
+              arena_raw: null,
+              limiter_choice: null,
+              onboarding_step: 'orientation',
+              name: pack.name.trim() || null,
+              goals: pack.goals,
+              training_age: pack.trainingAge,
+              sessions_per_week: pack.sessions,
+            })
+            .select('id')
+            .single()
+          if (created) await persistProbeInsight(created.id)
+          refresh()
+          return
+        }
+      }
       const stash = readProbeStash()
       let obstacle: string | null = stash?.obstacle ?? null
       try { obstacle = obstacle ?? localStorage.getItem(OBSTACLE_STORAGE_KEY) } catch { /* ignore */ }
@@ -62,7 +99,7 @@ export function OnboardingRouter({
       if (created) await persistProbeInsight(created.id)
       refresh()
     })()
-  }, [user, athlete, refresh])
+  }, [user, athlete, refresh, flagOn])
 
   // --- Load the current P1 read for orientation -----------------------------
   // The highest-priority active insight (the same one persistProbeInsight wrote).
@@ -82,6 +119,23 @@ export function OnboardingRouter({
       if (data) setHypothesis({ claim: data.claim, category: data.category })
     })()
   }, [athlete])
+
+  // Flag-on pack path: orientation already has sessions/goals/name from the
+  // stash, so skip the classic OrientationAct and run the existing calibrate beat.
+  useEffect(() => {
+    if (!flagOn || !athlete || athlete.onboarding_step !== 'orientation') return
+    if (calibrating) return
+    const pack = readStarterPack()
+    if (!pack) return
+    setCalibrating({
+      name: pack.name.trim() || null,
+      trainingAge: pack.trainingAge,
+      sessions: pack.sessions,
+      obstacle: pack.obstacle,
+      effectiveTrainingAge: pack.effectiveTrainingAge,
+      timeBoxMinutes: pack.timeBoxMinutes ?? undefined,
+    })
+  }, [flagOn, athlete, calibrating])
 
   async function advance(step: OnboardingStep, fields?: Partial<AthleteRow>) {
     if (!athlete) return
@@ -192,6 +246,17 @@ export function OnboardingRouter({
   // carry an autoFocus input), which popped the keyboard over the splash in the
   // weird in-between frame during logout.
   if (!user) {
+    if (entry === 'pack_picker') {
+      return (
+        <Suspense fallback={<div className="screen--centered"><Spinner /></div>}>
+          <PackOnboarding
+            authed={false}
+            onSkip={() => setForceClassic(true)}
+            onAuthedComplete={() => { /* unreachable while unauthenticated */ }}
+          />
+        </Suspense>
+      )
+    }
     return (
       <HookAct
         authed={false}
@@ -216,6 +281,33 @@ export function OnboardingRouter({
   // --- Funnel steps ----------------------------------------------------------
   switch (athlete.onboarding_step) {
     case 'hook':
+      if (entry === 'pack_picker') {
+        return (
+          <Suspense fallback={<div className="screen--centered"><Spinner /></div>}>
+            <PackOnboarding
+              authed
+              onSkip={() => setForceClassic(true)}
+              onAuthedComplete={() => {
+                const pack = readStarterPack()
+                void (async () => {
+                  const stash = readProbeStash()
+                  await persistProbeInsight(athlete.id)
+                  await advance('orientation', {
+                    obstacle: pack?.obstacle ?? stash?.obstacle ?? athlete.obstacle,
+                    arena_type: stash?.arenaType ?? null,
+                    arena_raw: stash?.arenaRaw ?? null,
+                    limiter_choice: stash?.limiterChoice ?? null,
+                    name: pack?.name.trim() || athlete.name,
+                    goals: pack?.goals ?? athlete.goals,
+                    training_age: pack?.trainingAge ?? athlete.training_age,
+                    sessions_per_week: pack?.sessions ?? athlete.sessions_per_week,
+                  })
+                })()
+              }}
+            />
+          </Suspense>
+        )
+      }
       return (
         <HookAct
           authed={!!user}
