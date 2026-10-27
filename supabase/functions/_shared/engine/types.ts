@@ -13,6 +13,8 @@ export interface ExerciseTemplate {
   pattern_key?: string
   reading_why?: string
   swapped_from?: string   // a stand-in's programmed movement — see src/types/database.ts
+  added?: boolean         // added mid-session, never on the program — see src/types/database.ts
+  adjusted?: boolean      // an interval block re-dosed for one session — see src/types/database.ts
 }
 
 export interface SetLog {

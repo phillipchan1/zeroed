@@ -18,6 +18,16 @@ function ok(cond: boolean, msg: string) {
   if (!cond) fails.push(msg)
 }
 
+function hiitDraftBase(): ProgramDraft {
+  return {
+    sessionsPerWeek: 1,
+    sessions: [{
+      routineId: 'r-engine', name: 'Engine', intent: '', sessionType: 'conditioning', intendedDow: null,
+      exercises: [{ name: 'Back Squat', sets: 3, reps: '5', load: 'heavy' }],
+    }],
+  }
+}
+
 function edit(e: Partial<ProgramEdit> & { type: ProgramEdit['type'] }): ProgramEdit {
   return {
     rationale: 'because',
@@ -144,6 +154,46 @@ const logged = formatLoggedWorkout({
 }, 'lb')
 ok(logged.includes('Back Squat'), 'logged workout uses the snapshot, not the live routine')
 ok(logged.includes('315lb×5'), 'logged workout prints the top set')
+
+// ---- HIIT reads as HIIT --------------------------------------------------------
+// A block the in-app timer logged: one row holding the work of all eight rounds.
+const hiit = formatLoggedWorkout({
+  performed_at: '2026-10-28T17:00:00Z',
+  rpe: 8,
+  duration_mins: 20,
+  actual_weights: {
+    0: [{ set: 1, weight: null, reps: null, rpe: 9, done: true, duration: 120 } as SetLog],
+  },
+  exercises_snapshot: [{ name: 'Bike finisher', sets: 1, reps: '8 × 15s on / 45s off', load: 'bodyweight' }],
+  routine: { name: 'Tue Deload Lower + Bike', exercises: [] },
+}, 'lb')
+ok(hiit.includes('8/8 rounds of 8 × 15s / 45s') && hiit.includes('2:00 work @9'),
+  `a logged block reads as rounds of work, got: ${hiit.split('\n')[1]}`)
+ok(!hiit.includes('120s'), 'not as a 120-second hold')
+// …and so does the one the coach wrote with its dose in the name.
+const named = formatLoggedWorkout({
+  performed_at: '2026-10-28T17:00:00Z', rpe: null, duration_mins: null,
+  actual_weights: { 0: [{ set: 1, weight: null, reps: null, rpe: null, done: true, duration: 75 } as SetLog] },
+  exercises_snapshot: [{ name: 'Bike finisher 8x(15s hard / 45s easy)', sets: 1, reps: '8 rounds', load: 'moderate' }],
+  routine: { name: 'Tue', exercises: [] },
+}, 'lb')
+ok(named.includes('5/8 rounds'), `a block written in the name reads back too, got: ${named.split('\n')[1]}`)
+const hiitWeek = formatDraft({
+  sessionsPerWeek: 1,
+  sessions: [{
+    routineId: null, name: 'Engine', intent: '', sessionType: 'conditioning', intendedDow: null,
+    exercises: [{ name: 'Assault Bike', sets: 1, reps: '8 × 20s on / 40s off', load: 'bodyweight' }],
+  }],
+})
+ok(hiitWeek.includes('interval block 8 × 20s / 40s (7:20)'), `the program shows the block, got: ${hiitWeek.split('\n').at(-1)}`)
+const viaMcp = applyEditsToDraft(hiitDraftBase(), [toProgramEdit({
+  type: 'add_exercise', session_name: 'Engine', exercise_name: 'Bike finisher 8x(15s hard / 45s easy)',
+  sets: 1, reps: '8 rounds', load: 'moderate',
+} as EditInput)])
+const viaMcpEx = viaMcp.draft.sessions[0].exercises.at(-1)
+ok(viaMcpEx?.name === 'Bike finisher' && viaMcpEx?.reps === '8 × 15s on / 45s off',
+  `an MCP add with the dose in the name lands canonical, got ${viaMcpEx?.name} / ${viaMcpEx?.reps}`)
+ok(SERVER_INSTRUCTIONS.includes('Intervals / HIIT'), 'instructions teach Claude where a HIIT block goes')
 
 // ---- server advertises the coaching surface --------------------------------
 ok(SERVER_INSTRUCTIONS.includes('get_training_brief'), 'instructions tell Claude to start with the brief')

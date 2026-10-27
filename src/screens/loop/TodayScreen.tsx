@@ -12,7 +12,7 @@ import {
   type PagerWeekView, type WeekPagerData, type SessionActuals,
 } from '../../engine'
 import { effectiveTrackingType } from '../../engine/exerciseLibrary'
-import { fmtDose, isIntervalBlock, intervalPlanFor, roundsFromLogs, fmtClock } from '../../engine/intervals'
+import { fmtDose, isIntervalBlock, intervalPlanFor, roundsFromLogs, fmtClock, intervalTitle } from '../../engine/intervals'
 import { primeCueAudio } from '../../lib/intervalCues'
 import { tallySession } from '../../engine/volume'
 import { unitContext, type UnitContext } from '../../lib/units'
@@ -320,7 +320,7 @@ function PerformedRow({
     <div style={{ padding: '14px 0', borderBottom: '1px solid var(--line)' }}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', gap: 12 }}>
         <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
-          {ex.name}
+          {plan ? intervalTitle(ex.name) : ex.name}
           {ex.swapped_from && (
             <span className="text-xs text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
               Swapped in for {ex.swapped_from}
@@ -457,7 +457,7 @@ function SessionSheet({
                 }}
               >
                 <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
-          {ex.name}
+          {isIntervalBlock(ex) ? intervalTitle(ex.name) : ex.name}
           {ex.swapped_from && (
             <span className="text-xs text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
               Swapped in for {ex.swapped_from}

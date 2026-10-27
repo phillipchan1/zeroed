@@ -13,11 +13,12 @@
 //   · what gets logged reads back as the same rounds, and a hand-built block
 //     round-trips through the same rep spec the coach uses
 
+import { readFileSync } from 'node:fs'
 import {
   parseIntervalReps, intervalPlanFor, buildTimeline, readClock, roundsDone,
   intervalSetLogs, roundsFromLogs, blockSeconds, timelineSeconds, intervalReps,
   intervalExercise, manualPlan, describePlan, fmtDose, secondsFromReps, stepSeconds,
-  READY_SECONDS, INTERVAL_PRESETS,
+  READY_SECONDS, INTERVAL_PRESETS, intervalTitle, canonicalBlock,
 } from './intervals.ts'
 import { effectiveTrackingType, buildSwap } from './exerciseLibrary.ts'
 
@@ -74,6 +75,36 @@ const clock = intervalPlanFor(ex('Assault Bike', '30:30 x 10'))
 ok(clock?.work === 30 && clock?.rounds === 10, '"30:30" on a bike is 30 and 30, not half an hour')
 eq(intervalPlanFor(ex('Bulgarian Split Squat', '10/10', 3)), null, '"10/10" on a lift is reps a side')
 eq(intervalPlanFor(ex('DB Row', '8/8', 3)), null, 'nor on a row')
+
+// ---- 1b. a block written into the NAME ---------------------------------------
+// What a coach writing free text (over MCP) actually produced: the dose in the
+// name, "8 rounds" in reps, a load stamp meant for a lift.
+
+const inName = { name: 'Bike finisher 8x(15s hard / 45s easy)', reps: '8 rounds', sets: 1 }
+const named = intervalPlanFor(inName)
+ok(named?.work === 15 && named?.rest === 45 && named?.rounds === 8,
+  'a block in the name reads: 8 × 15s hard / 45s easy')
+eq(effectiveTrackingType({ ...inName, load: 'moderate', tracking_type: 'weight_reps' }), 'time',
+  'and logs as time, not "lb × reps"')
+eq(intervalTitle(inName.name), 'Bike finisher', 'the card is titled with the movement, not the dose')
+eq(intervalTitle('Assault Bike'), 'Assault Bike', 'a plain name is untouched')
+const countFromReps = intervalPlanFor({ name: 'Bike (15s hard / 45s easy)', reps: '10 rounds', sets: 1 })
+eq(countFromReps?.rounds, 10, 'the round count can come from reps when the name has only the pair')
+eq(intervalPlanFor({ name: 'Bike Tabata', reps: '1', sets: 1 })?.rounds, 8, 'Tabata named outright')
+eq(intervalPlanFor({ name: 'Plank 30s / Side Plank 30s', reps: '1', sets: 3 }), null,
+  'two holds in a name are not a block — no count, no on/off')
+eq(intervalPlanFor({ name: 'Plank (30s)', reps: '3', sets: 3 }), null, 'a single duration in parens is a note')
+eq(parseIntervalReps('10 (5s hold), 45s rest'), null, 'a hold note in parens stays a note, even beside a rest')
+
+// On its way into the program, code moves the dose to where it belongs.
+const canon = canonicalBlock(inName)
+ok(canon?.name === 'Bike finisher' && canon?.reps === '8 × 15s on / 45s off',
+  `canonical: "${canon?.name}" / "${canon?.reps}"`)
+const back = intervalPlanFor({ ...canon!, sets: 1 })
+ok(back?.work === 15 && back?.rest === 45 && back?.rounds === 8, 'the canonical spec reads back as the same block')
+eq(canonicalBlock({ name: 'Assault Bike', reps: '8 × 20s on / 40s off', sets: 1 }), null,
+  'a block already in reps is left alone')
+eq(canonicalBlock({ name: 'Back Squat', reps: '5', sets: 3 }), null, 'straight sets are left alone')
 
 // ---- 2. straight sets stay straight sets ------------------------------------
 
@@ -205,6 +236,17 @@ eq(stepSeconds(60, -1, 5), 55, 'stepping down from a minute stays fine')
 eq(stepSeconds(60, 1, 5), 75, 'coarser above a minute')
 eq(stepSeconds(5, -1, 5), 5, 'clamped at the floor')
 eq(stepSeconds(5, -1, 0), 0, 'rest may reach zero')
+
+// ---- drift guard ----------------------------------------------------------------
+{
+  // The edge function and the Worker apply edits with a copy; it may differ only
+  // in its type imports. A drifted copy would read a block one way on the phone
+  // and write it another way over MCP.
+  const strip = (t: string) => t.replace(/^import type \{[^}]*\} from '[^']*'\n/gm, '')
+  const here = readFileSync(new URL('./intervals.ts', import.meta.url), 'utf8')
+  const copy = readFileSync(new URL('../../supabase/functions/_shared/engine/intervals.ts', import.meta.url), 'utf8')
+  ok(strip(here) === strip(copy), 'supabase/functions/_shared/engine/intervals.ts is in sync with src/engine/intervals.ts')
+}
 
 if (fails.length) {
   console.error(`intervals.check: ${fails.length} of ${checks} failed`)
