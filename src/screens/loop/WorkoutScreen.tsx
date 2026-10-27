@@ -21,7 +21,8 @@ import {
 } from '../../engine'
 import { isUpperBody } from '../../engine/liftModel'
 import { rpeContract } from '../../engine/prescription'
-import { RPE_SCALE, roundLoggedRpe } from '../../engine/rpeScale'
+import { pickerRpeScale, roundSessionRpe } from '../../engine/rpeScale'
+import { rpeHalfStepsEnabled } from '../../lib/api'
 import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
 import { isSetLogged, tallySession } from '../../engine/volume'
 import {
@@ -304,7 +305,7 @@ function SetRow({
         <div className="rpe-pop">
           <span className="rpe-pop__label">RPE — how hard?</span>
           <div className="rpe-pop__scale">
-            {RPE_SCALE.map((v) => (
+            {pickerRpeScale(rpeHalfStepsEnabled()).map((v) => (
               <button
                 key={v}
                 type="button"
@@ -2266,7 +2267,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
       actualReps[idx]    = logs.map((l) => l.reps ?? 0)
     })
     const rpeValues = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
-    const avgRpe    = rpeValues.length ? roundLoggedRpe(rpeValues.reduce((a, b) => a + b, 0) / rpeValues.length) : null
+    const avgRpe    = rpeValues.length ? roundSessionRpe(rpeValues.reduce((a, b) => a + b, 0) / rpeValues.length, rpeHalfStepsEnabled()) : null
 
     const onboardingTransition =
       onboardingStep === 'first_session_pending'
@@ -2536,7 +2537,7 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
   // belongs at the moment the session is being looked back on — the debrief.
   const sessionVolume = tallySession(setLogs)
   const rpeLive   = allSetsFlat.filter((s) => s.rpe !== null).map((s) => s.rpe!)
-  const avgRpeLive = rpeLive.length ? roundLoggedRpe(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length) : null
+  const avgRpeLive = rpeLive.length ? roundSessionRpe(rpeLive.reduce((a, b) => a + b, 0) / rpeLive.length, rpeHalfStepsEnabled()) : null
 
   const restLeft = restEndsAt ? Math.max(0, Math.ceil((restEndsAt - Date.now()) / 1000)) : 0
 

@@ -9,7 +9,8 @@ import {
   cueCount, cueGo, cueRest, cueDone, cueHalf, intervalSoundOn, setIntervalSound, releaseCueAudio, primeCueAudio,
 } from '../lib/intervalCues'
 import { useWakeLock } from '../lib/wakeLock'
-import { RPE_SCALE } from '../engine/rpeScale'
+import { pickerRpeScale } from '../engine/rpeScale'
+import { rpeHalfStepsEnabled } from '../lib/api'
 
 // =============================================================================
 // The interval timer — HIIT inside the session, not in another app.
@@ -270,7 +271,7 @@ export function IntervalTimer({ name, plan, lastInSession, onProgress, onClose }
           <div className="ivl__rpe">
             <p className="eyebrow" style={{ marginBottom: 10 }}>How hard? <span className="text-dim">optional</span></p>
             <div className="ivl__rpe-row" role="radiogroup" aria-label="Effort, RPE">
-              {RPE_SCALE.map((v) => (
+              {pickerRpeScale(rpeHalfStepsEnabled()).map((v) => (
                 <button
                   key={v}
                   type="button"

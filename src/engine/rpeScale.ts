@@ -15,6 +15,14 @@ export const RPE_SCALE: readonly number[] = Array.from(
   (_, i) => RPE_MIN + i * RPE_STEP,
 )
 
+/** Integers only — live Supabase `workout.rpe` is still INTEGER until Neon. */
+export const RPE_SCALE_INTEGERS: readonly number[] = RPE_SCALE.filter((n) => Number.isInteger(n))
+
+/** Picker values. Half-steps stay hidden until Worker/Neon (or the opt-in flag). */
+export function pickerRpeScale(halfSteps: boolean): readonly number[] {
+  return halfSteps ? RPE_SCALE : RPE_SCALE_INTEGERS
+}
+
 /** True when `value` is empty or a 1–10 half-step (1, 1.5, …, 10). */
 export function isLoggedRpe(value: unknown): boolean {
   if (value == null || value === '') return true
@@ -33,6 +41,15 @@ export function loggedRpeError(value: unknown): string | null {
 export function roundLoggedRpe(value: number): number {
   const stepped = Math.round(value / RPE_STEP) * RPE_STEP
   return Math.min(RPE_MAX, Math.max(RPE_MIN, Math.round(stepped * 10) / 10))
+}
+
+/**
+ * Session-average rounding. When half-steps are off, a 7+8 mix must not
+ * write 7.5 into the live INTEGER column.
+ */
+export function roundSessionRpe(value: number, halfSteps: boolean): number {
+  if (halfSteps) return roundLoggedRpe(value)
+  return Math.min(RPE_MAX, Math.max(RPE_MIN, Math.round(value)))
 }
 
 function setRpesFromWeights(weights: unknown): unknown[] {

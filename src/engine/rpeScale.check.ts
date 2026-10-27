@@ -1,5 +1,5 @@
 // Run: node --experimental-strip-types src/engine/rpeScale.check.ts
-import { isLoggedRpe, loggedRpeError, roundLoggedRpe, workoutRpeError, RPE_SCALE } from './rpeScale.ts'
+import { isLoggedRpe, loggedRpeError, pickerRpeScale, roundLoggedRpe, roundSessionRpe, workoutRpeError, RPE_SCALE, RPE_SCALE_INTEGERS } from './rpeScale.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -27,6 +27,14 @@ ok(Boolean(loggedRpeError(0.5)?.startsWith('unsupported rpe')), '0.5 error is th
 
 ok(roundLoggedRpe(7.4) === 7.5 && roundLoggedRpe(7.2) === 7, 'averages round to the nearest half-step')
 ok(roundLoggedRpe(0) === 1 && roundLoggedRpe(12) === 10, 'rounding clamps to 1–10')
+
+ok(RPE_SCALE_INTEGERS.length === 10 && RPE_SCALE_INTEGERS[0] === 1 && RPE_SCALE_INTEGERS[9] === 10, 'integer scale is 1–10')
+ok(RPE_SCALE_INTEGERS.every((n) => Number.isInteger(n)), 'integer scale has no halves')
+ok(pickerRpeScale(true) === RPE_SCALE, 'picker uses full scale when half-steps are on')
+ok(pickerRpeScale(false) === RPE_SCALE_INTEGERS, 'picker hides halves when off')
+ok(roundSessionRpe(7.5, true) === 7.5, 'session avg keeps 7.5 when half-steps are on')
+ok(roundSessionRpe(7.5, false) === 8, 'session avg of 7.5 becomes 8 when halves are off')
+ok(roundSessionRpe(7.2, false) === 7, 'session avg of 7.2 becomes 7 when halves are off')
 
 ok(workoutRpeError({ rpe: 5 }) == null, 'session RPE 5 is accepted')
 ok(workoutRpeError({ rpe: 7.5 }) == null, 'session RPE 7.5 is accepted')
