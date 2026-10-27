@@ -219,9 +219,7 @@ export const ONBOARDING_ANSWERS_VERSION = 1 as const
 export type StoredOnboardingAnswers = OnboardingAnswers & { v: typeof ONBOARDING_ANSWERS_VERSION }
 
 export function wrapStoredAnswers(answers: OnboardingAnswers): StoredOnboardingAnswers {
-  const rest = { ...answers } as OnboardingAnswers & { v?: unknown }
-  delete rest.v
-  return { v: ONBOARDING_ANSWERS_VERSION, ...rest }
+  return { ...answers, v: ONBOARDING_ANSWERS_VERSION }
 }
 
 /**
