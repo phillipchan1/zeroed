@@ -6,6 +6,7 @@ import {
 import { MCP_CORS, json } from './cors.ts'
 import { withSql, type Sql, type WaitUntilArg } from './db.ts'
 import type { Env } from './env.ts'
+import { parseRpeHalfStepsFlag } from '../../src/engine/rpeScale.ts'
 import { resolveMcpToken, tokenFrom, touchMcpToken } from './mcpToken.ts'
 import { executeZeroedTool, ZEROED_TOOLS } from './tools.ts'
 import { isMcpUserError } from './userError.ts'
@@ -89,7 +90,7 @@ function mcpWaitUntil(opts?: McpHandleOpts | WaitUntilArg): WaitUntilArg | undef
   return opts.ctx
 }
 
-async function serveMcp(req: Request, sql: Sql): Promise<Response> {
+async function serveMcp(req: Request, sql: Sql, env?: Env): Promise<Response> {
   const token = tokenFrom(req)
   if (!token) return unauthorized('Missing bearer token')
   const conn = await resolveMcpToken(sql, token)
@@ -120,7 +121,9 @@ async function serveMcp(req: Request, sql: Sql): Promise<Response> {
     return await handleMcpMethod(msg, ZEROED_TOOLS, async (name, args) => {
       await touchMcpToken(sql, conn.id)
       try {
-        return await executeZeroedTool(sql, conn.athlete_id, name, args)
+        return await executeZeroedTool(sql, conn.athlete_id, name, args, {
+          rpeHalfSteps: parseRpeHalfStepsFlag(env?.RPE_HALF_STEPS),
+        })
       } catch (err) {
         console.error('[mcp] tool', name, err instanceof Error ? err.message : String(err))
         throw new Error(publicMcpError(err))
@@ -153,8 +156,8 @@ export async function handleMcp(
   if (req.method === 'OPTIONS') return new Response('ok', { headers: MCP_CORS })
 
   try {
-    if (opts && typeof opts === 'object' && 'sql' in opts && opts.sql) return await serveMcp(req, opts.sql)
-    return await withSql(env, (sql) => serveMcp(req, sql), mcpWaitUntil(opts))
+    if (opts && typeof opts === 'object' && 'sql' in opts && opts.sql) return await serveMcp(req, opts.sql, env)
+    return await withSql(env, (sql) => serveMcp(req, sql, env), mcpWaitUntil(opts))
   } catch (e) {
     console.error('[mcp]', e instanceof Error ? e.message : String(e))
     return json({ error: 'request failed' }, 500, MCP_CORS)

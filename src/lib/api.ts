@@ -48,18 +48,17 @@ export function isCloudflareApi(): boolean {
 }
 
 /**
- * Half-step RPE input. Off on the live Vercel→Supabase path (`workout.rpe`
- * is still INTEGER CHECK 1–10). On after Worker/Neon cutover, or when
- * `VITE_RPE_HALF_STEPS` is `1` / `true`.
+ * Half-step RPE input and the #35 working-max rule. Off unless
+ * `VITE_RPE_HALF_STEPS` is `1` / `true` — including after the Cloudflare
+ * cutover. The Worker / edge counterpart is `RPE_HALF_STEPS`.
  */
-export function resolveRpeHalfSteps(flag: string | undefined, cloudflare: boolean): boolean {
-  if (cloudflare) return true
+export function resolveRpeHalfSteps(flag: string | undefined): boolean {
   const v = clean(flag).toLowerCase()
   return v === '1' || v === 'true'
 }
 
 export function rpeHalfStepsEnabled(): boolean {
-  return resolveRpeHalfSteps(import.meta.env.VITE_RPE_HALF_STEPS, isCloudflareApi())
+  return resolveRpeHalfSteps(import.meta.env.VITE_RPE_HALF_STEPS)
 }
 
 export function agentUrl(): string | null {

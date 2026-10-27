@@ -1,5 +1,6 @@
 import type { McpTool } from './mcpProtocol.ts'
 import { LIFT_MODEL_TOOLS, LIFT_MODEL_TOOL_NAMES, runLiftModelTool } from './liftModelTools.ts'
+import { rpeHalfStepsOn } from './engine/liftModel.ts'
 import { applyEdits, liveToDraft, previewEdits, type EditInput } from './zeroedEdits.ts'
 import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from './zeroedFormat.ts'
 import {
@@ -212,6 +213,7 @@ export async function executeZeroedTool(
     return runLiftModelTool(name, args, {
       load: () => loadLiftModelSources(store),
       saveTrainingMax: (lift, entry) => saveTrainingMax(store, lift, entry),
+      rpeHalfSteps: rpeHalfStepsOn(),
     })
   }
 

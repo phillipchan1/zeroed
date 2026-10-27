@@ -9,7 +9,7 @@ import { getCryptoKey, makeSignature } from 'better-auth/crypto'
 import { beginAuthCors, json } from './cors.ts'
 import { withSql, type Sql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
-import { workoutRpeError } from '../../src/engine/rpeScale.ts'
+import { parseRpeHalfStepsFlag, rpeHalfStepsOn, workoutRpeError } from '../../src/engine/rpeScale.ts'
 
 export type FilterOp = 'eq' | 'neq' | 'in' | 'gte' | 'gt' | 'lte' | 'lt' | 'ilike' | 'not_in'
 
@@ -46,6 +46,7 @@ export interface DataContext {
   userId: string
   athleteId: string | null
   email?: string | null
+  rpeHalfSteps?: boolean
 }
 
 const IDENT = /^[a-z_][a-z0-9_]*$/i
@@ -770,7 +771,7 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
         if (table === 'athlete') delete row.id
         if (table !== 'athlete') delete row.auth_user_id
         if (table === 'workout') {
-          const rpeErr = workoutRpeError(row)
+          const rpeErr = workoutRpeError(row, ctx.rpeHalfSteps ?? rpeHalfStepsOn())
           if (rpeErr) return fail(rpeErr, 400)
         }
         prepared.push(row)
@@ -822,7 +823,7 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       const blocked = await assertWritableRow(sql, table, row, ctx, false)
       if (blocked) return blocked
       if (table === 'workout') {
-        const rpeErr = workoutRpeError(row)
+        const rpeErr = workoutRpeError(row, ctx.rpeHalfSteps ?? rpeHalfStepsOn())
         if (rpeErr) return fail(rpeErr, 400)
       }
       const cols = Object.keys(row).filter((k) => row[k] !== undefined)
@@ -897,7 +898,12 @@ export async function handleData(req: Request, env: Env, waitUntil?: WaitUntil):
       const user = await sessionFromRequest(sql, req, env.BETTER_AUTH_SECRET)
       if (!user) return json({ data: null, error: { message: 'unauthorized' }, count: null }, 401, cors)
       const athleteId = await resolveAthleteId(sql, user.id)
-      const result = await executeDataQuery(sql, { userId: user.id, athleteId, email: user.email }, body)
+      const result = await executeDataQuery(sql, {
+        userId: user.id,
+        athleteId,
+        email: user.email,
+        rpeHalfSteps: parseRpeHalfStepsFlag(env.RPE_HALF_STEPS),
+      }, body)
       return json(
         { data: result.data, error: result.error, count: result.count },
         result.status,

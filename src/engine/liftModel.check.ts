@@ -130,6 +130,8 @@ near(loadForReps(400, 5, 8), 324.4, 0.01, '5 @8 off a 400 max is 324.4')
 }
 
 // ---- qualifying + working max ---------------------------------------------
+// #35 tests run with the flag on. Flag-off (pre-#35) is asserted at the end.
+process.env.RPE_HALF_STEPS = '1'
 
 ok(isQualifying(s('Squat', TODAY, 315, 5, 8)), '5 @8 on the squat qualifies')
 ok(isQualifying(s('Squat', TODAY, 315, 5, 7.5)), '5 @7.5 qualifies (full weight)')
@@ -581,6 +583,25 @@ eq(prescriptionFromProgram('ohp', [
   ok(pv.includes('→ 140lb (set by hand)'), 'a TM write previews before → after')
   ok(pv.includes('This week after:'), 'and what it does to this week')
 }
+
+// ---- flag off: pre-#35 working max + integer RPE --------------------------
+process.env.RPE_HALF_STEPS = '0'
+ok(isQualifying(s('Squat', TODAY, 405, 2, 6)), 'flag off: RPE 6 still qualifies')
+ok(isQualifying(s('Squat', TODAY, 315, 5, 7)), 'flag off: RPE 7 still qualifies')
+eq(rpeEvidenceWeight(6), 1, 'flag off: RPE 6 still counts in full')
+eq(rpeEvidenceWeight(7.5), 1, 'flag off: every finite RPE has weight 1')
+{
+  const history = [s('Deadlift', '2026-10-05', 445, 1, 10)]
+  const before = workingMaxAsOf(history, 'deadlift', TODAY)!
+  const after = workingMaxAsOf([
+    ...history,
+    s('Deadlift', '2026-10-24', 275, 4, 6),
+    s('Deadlift', '2026-10-24', 405, 2, 6),
+  ], 'deadlift', TODAY)!
+  ok(after.value > 445, `flag off: 405×2 @6 still inflates the working max (got ${after.value})`)
+  ok(after.value > before.value, 'flag off: easy volume still raises the working max')
+}
+delete process.env.RPE_HALF_STEPS
 
 // ---- drift guards ---------------------------------------------------------------
 

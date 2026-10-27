@@ -1,5 +1,6 @@
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import { LIFT_MODEL_TOOLS, LIFT_MODEL_TOOL_NAMES, runLiftModelTool } from '../../supabase/functions/_shared/liftModelTools.ts'
+import { rpeHalfStepsOn } from '../../src/engine/liftModel.ts'
 import { applyEdits, liveToDraft, previewEdits, type EditInput } from './edits.ts'
 import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import {
@@ -207,6 +208,7 @@ export async function executeZeroedTool(
   athleteId: string,
   name: string,
   args: Record<string, unknown>,
+  flags?: { rpeHalfSteps?: boolean },
 ): Promise<string> {
   const store = storeForAthlete(sql, athleteId)
 
@@ -214,6 +216,7 @@ export async function executeZeroedTool(
     return runLiftModelTool(name, args, {
       load: () => loadLiftModelSources(store),
       saveTrainingMax: (lift, entry) => saveTrainingMax(store, lift, entry),
+      rpeHalfSteps: flags?.rpeHalfSteps ?? rpeHalfStepsOn(),
     })
   }
 

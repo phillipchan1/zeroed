@@ -1,11 +1,10 @@
 -- Logged RPE is 1–10 in 0.5 steps (1, 1.5, …, 10).
 --
--- workout.rpe was INTEGER CHECK (1–10): a session average could not store 7.5.
--- Set-level rpe lives in actual_weights JSONB and had no CHECK at all.
--- This migration is additive: existing integer rows (1–10) remain valid, and
--- the new CHECKs accept the same values plus the half-steps between them.
--- Safe on Postgres 17 (Neon) and on PGlite when isolation tests replay
--- supabase/migrations from scratch.
+-- Isolation / CI only: worker/src/isolationDb.ts replays supabase/migrations
+-- onto throwaway Postgres. This file is NOT the Neon snapshot.
+-- worker/schema/app.sql stays INTEGER CHECK 1–10 so migrate-supabase-to-neon
+-- cannot apply NUMERIC. The Neon follow-up is worker/schema/rpe-half-steps.sql
+-- — apply that by hand when flipping RPE_HALF_STEPS, never via an automated path.
 
 ALTER TABLE public.workout
   ALTER COLUMN rpe TYPE NUMERIC(3, 1)

@@ -26,14 +26,13 @@ try {
 }
 ok(threw, 'iOS relative /api throws at runtime')
 
-ok(resolveRpeHalfSteps(undefined, false) === false, 'half-steps default off on the Supabase path')
-ok(resolveRpeHalfSteps('', false) === false, 'blank flag stays integer')
-ok(resolveRpeHalfSteps('0', false) === false, 'VITE_RPE_HALF_STEPS=0 stays integer')
-ok(resolveRpeHalfSteps('1', false) === true, 'VITE_RPE_HALF_STEPS=1 opts in')
-ok(resolveRpeHalfSteps('true', false) === true, 'VITE_RPE_HALF_STEPS=true opts in')
-ok(resolveRpeHalfSteps('TRUE', false) === true, 'flag is case-insensitive')
-ok(resolveRpeHalfSteps('', true) === true, 'Worker/Neon enables half-steps')
-ok(resolveRpeHalfSteps('0', true) === true, 'Worker wins over a false flag')
+ok(resolveRpeHalfSteps(undefined) === false, 'half-steps default off')
+ok(resolveRpeHalfSteps('') === false, 'blank flag stays integer')
+ok(resolveRpeHalfSteps('0') === false, 'VITE_RPE_HALF_STEPS=0 stays integer')
+ok(resolveRpeHalfSteps('1') === true, 'VITE_RPE_HALF_STEPS=1 opts in')
+ok(resolveRpeHalfSteps('true') === true, 'VITE_RPE_HALF_STEPS=true opts in')
+ok(resolveRpeHalfSteps('TRUE') === true, 'flag is case-insensitive')
+ok(resolveRpeHalfSteps('1') === true, 'cutover does not auto-enable — only the flag does')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {

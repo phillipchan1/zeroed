@@ -218,7 +218,7 @@ CREATE TABLE IF NOT EXISTS public.workout (
   performed_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   actual_weights     JSONB,
   actual_reps        JSONB,
-  rpe                NUMERIC(3, 1) CHECK (rpe IS NULL OR (rpe >= 1 AND rpe <= 10 AND rpe * 2 = trunc(rpe * 2))),
+  rpe                INTEGER CHECK (rpe BETWEEN 1 AND 10),
   duration_mins      INTEGER,
   exercises_snapshot JSONB,
   -- The session check-in (migration 20261026000001), each optional.
@@ -241,50 +241,9 @@ COMMENT ON COLUMN public.workout.exercises_snapshot IS
   'is index-keyed against THIS array, not the routine''s live one, so editing a '
   'program never relabels sets that were already logged.';
 
-COMMENT ON COLUMN public.workout.rpe IS
-  'Session-average logged RPE: 1–10 in 0.5 steps. Null when no set recorded one.';
-
--- Same scale on set-level rpe inside actual_weights (migration 20261027000001).
-CREATE OR REPLACE FUNCTION public.logged_rpe_ok(value jsonb)
-RETURNS boolean
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT
-    value IS NULL
-    OR jsonb_typeof(value) = 'null'
-    OR (
-      jsonb_typeof(value) = 'number'
-      AND (value::text)::numeric >= 1
-      AND (value::text)::numeric <= 10
-      AND (value::text)::numeric * 2 = trunc((value::text)::numeric * 2)
-    );
-$$;
-
-CREATE OR REPLACE FUNCTION public.actual_weights_rpe_ok(weights jsonb)
-RETURNS boolean
-LANGUAGE sql
-IMMUTABLE
-AS $$
-  SELECT weights IS NULL
-    OR jsonb_typeof(weights) IS DISTINCT FROM 'object'
-    OR NOT EXISTS (
-      SELECT 1
-      FROM jsonb_each(weights) AS ex(k, sets)
-      CROSS JOIN LATERAL jsonb_array_elements(
-        CASE WHEN jsonb_typeof(sets) = 'array' THEN sets ELSE '[]'::jsonb END
-      ) AS s(set)
-      WHERE (s.set ? 'rpe')
-        AND s.set->'rpe' IS NOT NULL
-        AND jsonb_typeof(s.set->'rpe') <> 'null'
-        AND NOT public.logged_rpe_ok(s.set->'rpe')
-    );
-$$;
-
-ALTER TABLE public.workout DROP CONSTRAINT IF EXISTS workout_actual_weights_rpe_check;
-ALTER TABLE public.workout
-  ADD CONSTRAINT workout_actual_weights_rpe_check
-  CHECK (public.actual_weights_rpe_ok(actual_weights));
+-- NUMERIC half-step RPE is NOT in this snapshot. migrate-supabase-to-neon
+-- applies this file to Neon; keep INTEGER CHECK 1–10 to match live Supabase.
+-- Hand-apply worker/schema/rpe-half-steps.sql only when flipping RPE_HALF_STEPS.
 
 -- =============================================================================
 -- SESSION_OBSERVATION
