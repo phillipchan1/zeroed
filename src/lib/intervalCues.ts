@@ -43,6 +43,11 @@ function nativeCues(): boolean {
 let ctx: AudioContext | null = null
 const buffers = new Map<CueName, AudioBuffer>()
 
+// Set when the native player has failed this block, so the web path takes over.
+// Until then the iPhone app keeps Web Audio shut: a context running in the web
+// view holds its own audio session, and that is what stops the athlete's music.
+let nativeFailed = false
+
 /** On by default: an interval timer you have to watch is a stopwatch. */
 export function intervalSoundOn(): boolean {
   try {
@@ -77,11 +82,12 @@ function renderBuffers(c: AudioContext): void {
 /**
  * Get the cues ready. Call it synchronously inside a tap handler — that is
  * what unlocks Web Audio on iOS for the rest of the block. Natively it loads
- * the players so the first cue isn't late.
+ * the players so the first cue isn't late, and leaves Web Audio alone.
  */
 export function primeCueAudio(): void {
   if (nativeCues()) {
-    void ZeroedCues.preload({ names: [...CUE_NAMES] }).catch(() => {})
+    void ZeroedCues.preload({ names: [...CUE_NAMES] }).catch(() => { nativeFailed = true })
+    if (!nativeFailed) return
   }
   try {
     const Ctor = window.AudioContext ?? (window as WindowWithAudio).webkitAudioContext
@@ -105,6 +111,7 @@ export function primeCueAudio(): void {
 /** Let the hardware go once the block is over; a held session can duck music. */
 export function releaseCueAudio(): void {
   if (nativeCues()) void ZeroedCues.release().catch(() => {})
+  nativeFailed = false
   const c = ctx
   ctx = null
   buffers.clear()
@@ -133,10 +140,10 @@ function playWeb(name: CueName): void {
 
 function play(name: CueName): void {
   if (!intervalSoundOn()) return
-  if (nativeCues()) {
+  if (nativeCues() && !nativeFailed) {
     // The native player failing (a missing file, a session it couldn't get)
     // falls back to the web — silent in Silent Mode, but never worse than that.
-    void ZeroedCues.play({ name }).catch(() => playWeb(name))
+    void ZeroedCues.play({ name }).catch(() => { nativeFailed = true; playWeb(name) })
     return
   }
   playWeb(name)

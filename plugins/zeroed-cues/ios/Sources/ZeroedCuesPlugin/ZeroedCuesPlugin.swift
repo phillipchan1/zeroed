@@ -27,6 +27,11 @@ public class ZeroedCuesPlugin: CAPPlugin, CAPBridgedPlugin, AVAudioPlayerDelegat
     @objc func preload(_ call: CAPPluginCall) {
         let names = call.getArray("names", String.self) ?? []
         DispatchQueue.main.async {
+            // The category goes in first, and the session stays inactive: the
+            // app's default category (solo ambient) doesn't mix, so anything
+            // that touches the hardware before this would stop the music the
+            // moment the athlete taps Start.
+            try? self.configureCategory()
             for name in names { _ = self.player(for: name) }
             call.resolve()
         }
@@ -82,12 +87,18 @@ public class ZeroedCuesPlugin: CAPPlugin, CAPBridgedPlugin, AVAudioPlayerDelegat
 
     // MARK: - session
 
-    private func activateSession() throws {
+    // Setting the category on an inactive session touches nobody else's audio;
+    // only activating it does.
+    private func configureCategory() throws {
         let session = AVAudioSession.sharedInstance()
         if session.category != .playback || !session.categoryOptions.contains(.duckOthers) {
             try session.setCategory(.playback, mode: .default, options: [.mixWithOthers, .duckOthers])
         }
-        try session.setActive(true)
+    }
+
+    private func activateSession() throws {
+        try configureCategory()
+        try AVAudioSession.sharedInstance().setActive(true)
     }
 
     // Held a moment past the last cue, so a 3-2-1 ducks the music once rather
@@ -118,7 +129,9 @@ public class ZeroedCuesPlugin: CAPPlugin, CAPBridgedPlugin, AVAudioPlayerDelegat
         guard let player = try? AVAudioPlayer(contentsOf: url) else { return nil }
         player.delegate = self
         player.volume = 1.0
-        player.prepareToPlay()
+        // No prepareToPlay() here: it acquires the audio hardware, which
+        // activates the session — ducking the music for a second before any
+        // cue has sounded. play() prepares the player when its cue is due.
         players[name] = player
         return player
     }
