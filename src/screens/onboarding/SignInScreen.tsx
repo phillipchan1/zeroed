@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
-import { ChevronLeft } from 'lucide-react'
 import { lastSignInEmail, sendSignInCode, verifySignInCode } from '../../lib/authClient'
-import { Button, Input } from '../../components/ui'
+import { BackButton, Button, Input } from '../../components/ui'
 import { FunnelFrame } from '../../components/layout/FunnelFrame'
 
 const CODE_LENGTH = 6
@@ -99,14 +98,9 @@ export function SignInScreen({
   return (
     <FunnelFrame>
       <div className="signin">
-        <button
-          type="button"
-          className="signin__back"
+        <BackButton
           onClick={onCode ? () => { setPhase('email'); setCode(''); setError(null); setNotice(null) } : onBack}
-          aria-label="Back"
-        >
-          <ChevronLeft size={22} strokeWidth={2} />
-        </button>
+        />
 
         {!onCode ? (
           <form className="signin__body fade-rise" onSubmit={send}>

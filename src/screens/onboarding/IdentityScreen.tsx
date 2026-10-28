@@ -9,10 +9,12 @@ export function IdentityScreen({
   name,
   onChange,
   onNext,
+  onBack,
 }: {
   name: string
   onChange: (value: string) => void
   onNext: () => void
+  onBack: () => void
 }) {
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
@@ -40,8 +42,9 @@ export function IdentityScreen({
           />
         </div>
 
-        <div className="fade-rise fade-rise-delay-2" style={{ marginTop: 32 }}>
-          <Button variant="primary" full onClick={onNext}>
+        <div className="fade-rise fade-rise-delay-2" style={{ marginTop: 32, display: 'flex', gap: 8 }}>
+          <Button variant="ghost" onClick={onBack} style={{ flex: 1 }}>← Back</Button>
+          <Button variant="primary" onClick={onNext} style={{ flex: 2 }}>
             {name.trim() ? 'Continue →' : 'Skip →'}
           </Button>
         </div>

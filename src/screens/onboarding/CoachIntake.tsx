@@ -1,6 +1,6 @@
 import { useState, type ReactNode } from 'react'
-import { ChevronLeft } from 'lucide-react'
-import { Button, Input, PresenceDot } from '../../components/ui'
+import { Pencil } from 'lucide-react'
+import { BackButton, Button, Input, PresenceDot } from '../../components/ui'
 import { FunnelFrame } from '../../components/layout/FunnelFrame'
 import { SignInScreen } from './SignInScreen'
 import { visibleStarterPacks, type StarterPackId } from '../../engine/starterPacks'
@@ -97,9 +97,7 @@ export function CoachIntake({
       <div className="intake">
         <div className="intake__top">
           {(at > 0 || onExit) ? (
-            <button type="button" className="signin__back intake__back" onClick={back} aria-label="Back">
-              <ChevronLeft size={22} strokeWidth={2} />
-            </button>
+            <BackButton onClick={back} className="intake__back" />
           ) : <span />}
           <div className="intake__progress" aria-hidden>
             {steps.map((s, i) => (
@@ -111,9 +109,18 @@ export function CoachIntake({
         {at > 0 && (
           <div className="intake__thread">
             {steps.slice(0, at).map((s) => (
-              <button key={s} type="button" className="intake__said" onClick={() => setStep(s)}>
+              <button
+                key={s}
+                type="button"
+                className="intake__said"
+                onClick={() => setStep(s)}
+                aria-label={`Change your answer to “${question(s, a)}”: ${answerOf(s, a)}`}
+              >
                 <span className="intake__said-q">{question(s, a)}</span>
-                <span className="intake__said-a">{answerOf(s, a)}</span>
+                <span className="intake__said-a">
+                  {answerOf(s, a)}
+                  <Pencil size={12} strokeWidth={2} className="intake__said-edit" aria-hidden />
+                </span>
               </button>
             ))}
           </div>

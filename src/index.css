@@ -3431,7 +3431,7 @@ textarea.input {
   padding: calc(var(--sp-4) + env(safe-area-inset-top, 0px)) var(--sp-5)
            calc(var(--sp-6) + env(safe-area-inset-bottom, 0px));
 }
-.signin__back {
+.back-btn {
   width: var(--tap);
   height: var(--tap);
   margin-left: -10px;
@@ -3444,8 +3444,8 @@ textarea.input {
   cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
-.signin__back:hover { color: var(--text); }
-.hook__back {
+.back-btn:hover { color: var(--text); }
+.back-btn--floating {
   position: absolute;
   top: calc(var(--sp-4) + env(safe-area-inset-top, 0px));
   left: var(--sp-5);
@@ -3584,6 +3584,8 @@ textarea.input {
   font-size: var(--fs-sm);
   font-weight: 600;
 }
+.intake__said-a { display: inline-flex; align-items: center; gap: 8px; }
+.intake__said-edit { color: var(--text-dim); flex-shrink: 0; }
 .intake__said:hover .intake__said-a { border-color: #3A3A3A; }
 .intake__turn { max-width: 480px; margin: 28px auto 0; }
 .intake__signed { max-width: 480px; margin: 12px auto 0; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.5; }

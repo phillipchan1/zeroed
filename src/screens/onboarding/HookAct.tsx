@@ -1,10 +1,10 @@
 import { useState } from 'react'
-import { ChevronLeft } from 'lucide-react'
 import { ArenaScreen, type ArenaAnswer } from './ArenaScreen'
 import { LimiterScreen, type LimiterAnswer } from './LimiterScreen'
 import { ProbeScreen } from './ProbeScreen'
 import { SignInScreen } from './SignInScreen'
 import { FunnelFrame } from '../../components/layout/FunnelFrame'
+import { BackButton } from '../../components/ui'
 import type { ReadSynthesis } from '../../engine'
 import type { ArenaType, ReadAxis } from '../../engine/demandTables'
 
@@ -115,16 +115,13 @@ export function HookAct({
     <>
       {sub === 'arena'   && (
         <FunnelFrame>
-          {onExit && (
-            <button type="button" className="signin__back hook__back" onClick={onExit} aria-label="Back">
-              <ChevronLeft size={22} strokeWidth={2} />
-            </button>
-          )}
+          {onExit && <BackButton floating onClick={onExit} />}
           <ArenaScreen initial={arena} onSubmit={handleArenaSubmit} />
         </FunnelFrame>
       )}
       {sub === 'limiter' && arena && (
         <FunnelFrame>
+          <BackButton floating onClick={() => setSub('arena')} />
           <LimiterScreen
             arenaType={arena.type}
             arenaRaw={arena.raw}
@@ -144,6 +141,7 @@ export function HookAct({
             obstacle={obstacle}
             arenaConfidence={arena.confidence}
             onSaveRead={handleSaveRead}
+            onBack={() => setSub('limiter')}
           />
         </div>
       )}

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import { Logo, Button, TypeOn, PresenceDot } from '../../components/ui'
+import { BackButton, Logo, Button, TypeOn, PresenceDot } from '../../components/ui'
 import { ConvergenceReticle } from '../../components/convergence/ConvergenceReticle'
 import { synthesizeRead, type ReadSynthesis } from '../../engine'
 import type { ArenaType, ReadAxis } from '../../engine/demandTables'
@@ -26,6 +26,7 @@ export function ProbeScreen({
   obstacle,
   arenaConfidence,
   onSaveRead,
+  onBack,
 }: {
   arenaType: ArenaType
   arenaRaw: string | null
@@ -33,6 +34,8 @@ export function ProbeScreen({
   obstacle: string
   arenaConfidence: 'high' | 'low'
   onSaveRead: (read: ReadSynthesis, followupAnswer: string | null) => void
+  /** Back to the limiter, to change an answer. Offered once the read lands. */
+  onBack: () => void
 }) {
   const [phase, setPhase] = useState<Phase>('reading')
   const [firstRead, setFirstRead] = useState<ReadSynthesis | null>(null)
@@ -113,6 +116,7 @@ export function ProbeScreen({
         onChange={setAnswer}
         onContinue={() => sharpen(answer.trim())}
         onSkip={skip}
+        onBack={onBack}
       />
     )
   }
@@ -120,7 +124,7 @@ export function ProbeScreen({
   const read = finalRead ?? firstRead
   if (!read) return <ReadingBeat lines={['Reading what you told me']} />
 
-  return <Reveal read={read} onSave={() => onSaveRead(read, answer.trim() || null)} />
+  return <Reveal read={read} onSave={() => onSaveRead(read, answer.trim() || null)} onBack={onBack} />
 }
 
 // ---- sub-views -------------------------------------------------------------
@@ -162,15 +166,18 @@ function FollowupQuestion({
   onChange,
   onContinue,
   onSkip,
+  onBack,
 }: {
   question: string
   value: string
   onChange: (v: string) => void
   onContinue: () => void
   onSkip: () => void
+  onBack: () => void
 }) {
   return (
-    <div className="screen--centered">
+    <div className="screen--centered" style={{ position: 'relative' }}>
+      <BackButton floating onClick={onBack} />
       <div style={{ width: '100%', maxWidth: 420 }}>
         <p className="eyebrow fade-rise" style={{ marginBottom: 16, textAlign: 'center' }}>
           One more thing
@@ -221,7 +228,7 @@ function AxisRow({ axis, index }: { axis: ReadAxis; index: number }) {
   )
 }
 
-function Reveal({ read, onSave }: { read: ReadSynthesis; onSave: () => void }) {
+function Reveal({ read, onSave, onBack }: { read: ReadSynthesis; onSave: () => void; onBack: () => void }) {
   // Order: heading first, then the limiter stack, durability, capacity.
   const order: Record<string, number> = { heading: 0, limiter_p1: 1, limiter_p2: 2, durability: 3, capacity: 4 }
   const axes = [...read.axes].sort((a, b) => (order[a.id] ?? 9) - (order[b.id] ?? 9))
@@ -231,7 +238,8 @@ function Reveal({ read, onSave }: { read: ReadSynthesis; onSave: () => void }) {
 
   return (
     <div className="screen" style={{ minHeight: '100dvh' }}>
-      <div style={{ padding: '24px 20px 0', borderBottom: '1px solid var(--line)', paddingBottom: 20 }}>
+      <div style={{ padding: '12px 20px', borderBottom: '1px solid var(--line)', display: 'flex', alignItems: 'center', gap: 6 }}>
+        <BackButton onClick={onBack} />
         <Logo />
       </div>
 

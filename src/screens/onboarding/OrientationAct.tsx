@@ -56,6 +56,7 @@ export function OrientationAct({
           name={fields.name}
           onChange={(value) => setFields((f) => ({ ...f, name: value }))}
           onNext={() => setSub('context')}
+          onBack={() => setSub('target')}
         />
       )}
 

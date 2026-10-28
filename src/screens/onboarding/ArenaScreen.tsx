@@ -29,7 +29,11 @@ export function ArenaScreen({
   onSubmit: (answer: ArenaAnswer) => void
 }) {
   const [selected, setSelected] = useState<ArenaType | null>(initial?.type ?? null)
-  const [text, setText] = useState(initial?.raw ?? '')
+  // A tap with no typing stores the chip label as `raw`; coming back, the field
+  // should hold only what they actually typed.
+  const [text, setText] = useState(
+    initial && initial.raw !== ARENA_META[initial.type].label ? initial.raw : '',
+  )
 
   const canContinue = selected !== null || text.trim().length > 0
 

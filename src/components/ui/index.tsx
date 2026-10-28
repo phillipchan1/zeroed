@@ -49,6 +49,21 @@ export function Button({ variant = 'primary', full, children, className = '', ..
   )
 }
 
+/** The onboarding back affordance: a bare chevron, top-left, full tap size.
+ *  `floating` pins it over a full-bleed step that has no header row. */
+export function BackButton({ onClick, floating, className = '' }: { onClick: () => void; floating?: boolean; className?: string }) {
+  return (
+    <button
+      type="button"
+      className={`back-btn${floating ? ' back-btn--floating' : ''} ${className}`}
+      onClick={onClick}
+      aria-label="Back"
+    >
+      <ChevronLeft size={22} strokeWidth={2} />
+    </button>
+  )
+}
+
 // ---- Input -----------------------------------------------------------------
 
 interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
