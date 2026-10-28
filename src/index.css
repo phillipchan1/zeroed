@@ -3375,11 +3375,300 @@ textarea.input {
   animation: fadeRise var(--dur-mid) var(--ease-out) 700ms backwards;
 }
 .splash__line { animation: fadeRise var(--dur-mid) var(--ease-out) 850ms backwards; }
-.splash__cta  { animation: splash-breathe 2600ms ease-in-out 1200ms infinite backwards; }
-@keyframes splash-breathe {
-  0%, 100% { opacity: 0.35; }
-  50%      { opacity: 0.8; }
+
+/* --- Welcome -------------------------------------------------------------- */
+/* Two doors, thumb-height at the bottom; the mark keeps the top half. */
+.welcome {
+  min-height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  background: var(--ground);
+  padding: calc(var(--sp-6) + env(safe-area-inset-top, 0px)) var(--sp-6)
+           calc(var(--sp-6) + env(safe-area-inset-bottom, 0px));
 }
+.welcome__hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+}
+.welcome__line {
+  margin-top: 28px;
+  max-width: 320px;
+  font-size: var(--fs-xl);
+  font-weight: 700;
+  line-height: 1.3;
+  color: var(--text);
+}
+.welcome__lanes {
+  margin-top: 14px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.welcome__sep { margin: 0 8px; opacity: 0.5; }
+.welcome__actions {
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  animation: fadeRise var(--dur-mid) var(--ease-out) 1000ms backwards;
+}
+
+/* --- Sign in -------------------------------------------------------------- */
+/* Top-aligned, not centred: the keyboard comes up under the field instead of
+   shoving it around. */
+.signin {
+  position: relative;
+  min-height: 100dvh;
+  background: var(--ground);
+  padding: calc(var(--sp-4) + env(safe-area-inset-top, 0px)) var(--sp-5)
+           calc(var(--sp-6) + env(safe-area-inset-bottom, 0px));
+}
+.signin__back {
+  width: var(--tap);
+  height: var(--tap);
+  margin-left: -10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.signin__back:hover { color: var(--text); }
+.hook__back {
+  position: absolute;
+  top: calc(var(--sp-4) + env(safe-area-inset-top, 0px));
+  left: var(--sp-5);
+  z-index: 1;
+}
+.funnel-frame__content { position: relative; }
+.signin__body {
+  max-width: 420px;
+  margin: 8vh auto 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.signin__title { margin: 0; }
+.signin__sub { margin: -4px 0 10px; }
+.signin__email { color: var(--text); }
+.signin__error { color: var(--veto); font-size: var(--fs-sm); }
+.signin__status { min-height: 1.5em; font-size: var(--fs-sm); color: var(--text-dim); text-align: center; }
+.signin__row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+.signin__link {
+  background: none;
+  border: none;
+  padding: 10px 0;
+  min-height: var(--tap);
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  -webkit-tap-highlight-color: transparent;
+}
+.signin__link:hover:not(:disabled) { color: var(--text); }
+.signin__link:disabled { opacity: 0.55; cursor: default; text-decoration: none; }
+.signin__plan {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+.signin__plan-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--signal); flex-shrink: 0; }
+
+/* The code: one real input (so iOS one-time-code autofill and paste work)
+   laid over six cells that only display it. The input's own text is
+   transparent, never opacity:0 — autofill skips invisible fields. */
+.otp { position: relative; display: block; margin-top: 6px; }
+.otp__input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: transparent;
+  font-size: 16px;
+  letter-spacing: 2em;
+  z-index: 1;
+}
+.otp__input::selection { background: transparent; }
+.otp__cells { display: grid; grid-template-columns: repeat(6, 1fr); gap: 8px; }
+.otp__cell {
+  height: 60px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  font-family: var(--font-mono);
+  font-size: var(--fs-2xl);
+  font-weight: 700;
+  color: var(--text);
+  transition: border-color var(--dur-fast) var(--ease-out);
+}
+.otp__input:focus + .otp__cells .otp__cell--next { border-color: var(--signal); }
+.otp--error .otp__cell { border-color: var(--veto); }
+.otp--busy .otp__cell { color: var(--text-dim); }
+
+/* --- Coach intake ---------------------------------------------------------- */
+.intake {
+  min-height: 100dvh;
+  background: var(--ground);
+  padding: calc(var(--sp-4) + env(safe-area-inset-top, 0px)) var(--sp-5)
+           calc(var(--sp-8) + env(safe-area-inset-bottom, 0px));
+}
+.intake__top {
+  max-width: 480px;
+  margin: 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-height: var(--tap);
+}
+.intake__back { flex-shrink: 0; }
+.intake__progress { flex: 1; display: flex; gap: 4px; }
+.intake__tick { flex: 1; height: 2px; border-radius: 2px; background: var(--line); transition: background var(--dur-mid) var(--ease-out); }
+.intake__tick--on { background: var(--signal); }
+.intake__thread {
+  max-width: 480px;
+  margin: 16px auto 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* An answered turn: the coach's question dim, the athlete's answer to the
+   right. Tap it to change that answer. */
+.intake__said {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 2px;
+  padding: 6px 0;
+  background: none;
+  border: none;
+  text-align: right;
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.intake__said-q { font-size: var(--fs-xs); color: var(--text-dim); }
+.intake__said-a {
+  display: inline-block;
+  padding: 6px 12px;
+  border-radius: 14px 14px 4px 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+}
+.intake__said:hover .intake__said-a { border-color: #3A3A3A; }
+.intake__turn { max-width: 480px; margin: 28px auto 0; }
+.intake__signed { max-width: 480px; margin: 12px auto 0; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.5; }
+.intake__signed .signin__link { min-height: 0; padding: 0; font-size: inherit; }
+.intake__who { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
+.intake__q { margin: 0 0 14px; }
+.intake__hint { margin: -6px 0 16px; }
+.intake__chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.intake__chip {
+  min-height: 44px;
+  padding: 8px 16px;
+  border-radius: var(--radius-pill);
+  border: 1px solid var(--line);
+  background: transparent;
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+}
+.intake__chip--on { border-color: var(--signal); background: rgba(232, 204, 10, 0.08); color: var(--signal); }
+.intake__chips--big .intake__chip { min-width: 56px; min-height: 52px; font-size: var(--fs-lg); font-family: var(--font-mono); }
+.intake__words { margin-top: 16px; }
+.intake__next { margin-top: 24px; }
+.intake__options { display: flex; flex-direction: column; gap: 10px; }
+.intake__option {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-height: 64px;
+  padding: 14px 16px;
+  border-radius: var(--radius-card);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--dur-fast) var(--ease-out), background var(--dur-fast) var(--ease-out);
+  -webkit-tap-highlight-color: transparent;
+}
+.intake__option--on { border-color: var(--signal); background: rgba(232, 204, 10, 0.06); }
+.intake__option-label { font-size: var(--fs-lg); font-weight: 700; color: var(--text); }
+.intake__option--on .intake__option-label { color: var(--signal); }
+.intake__option-sub { font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.4; }
+.intake__fields { display: flex; flex-direction: column; gap: 22px; }
+.intake__fields .intake__next { margin-top: 2px; }
+.intake__field-label { display: block; margin-bottom: 10px; }
+.intake__lifts { display: flex; flex-direction: column; gap: 10px; }
+.intake__read { font-size: var(--fs-lg); line-height: 1.45; color: var(--text); margin: -4px 0 0; }
+
+/* The plan: one lane per thing they train. Work Zeroed programs is filled
+   signal; everything else is a hairline the coach plans around. */
+.plan-week { border: 1px solid var(--line); border-radius: var(--radius-card); padding: 6px 16px; }
+.plan-week__head { display: block; padding: 10px 0 4px; }
+.plan-lane {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  grid-template-areas: 'main tag' 'dots dots';
+  gap: 6px 12px;
+  padding: 12px 0;
+  border-top: 1px solid var(--line);
+}
+.plan-week__head + .plan-lane { border-top: none; }
+.plan-lane__main { grid-area: main; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.plan-lane__label { font-weight: 700; color: var(--text); }
+.plan-lane__detail { font-size: var(--fs-xs); color: var(--text-dim); }
+.plan-lane__tag {
+  grid-area: tag;
+  align-self: start;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.plan-lane--planned .plan-lane__tag { color: var(--signal); }
+.plan-lane__dots { grid-area: dots; display: flex; gap: 6px; }
+.plan-lane__dots:empty { display: none; }
+.plan-lane__dots i { width: 22px; height: 6px; border-radius: 3px; border: 1px solid var(--text-dim); }
+.plan-lane--planned .plan-lane__dots i { background: var(--signal); border-color: var(--signal); }
+.plan-start { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.plan-start__label { display: block; font-size: var(--fs-xs); color: var(--text-dim); }
+.plan-start__title { display: block; font-weight: 700; color: var(--text); }
+.plan-packs { margin-top: -8px; }
+.plan-fine { margin: -10px 0 0; text-align: center; line-height: 1.5; }
 
 /* --- Bottom nav ----------------------------------------------------------- */
 /* The active marker draws out from the centre and the icon gives a small kick,

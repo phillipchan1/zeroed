@@ -15,7 +15,7 @@ import { OfflineBar } from './components/OfflineBar'
 import { ONBOARDING_FUNNEL_STEPS } from './types/database'
 
 // Onboarding (six-act "First Read")
-import { OnboardingRouter }             from './screens/onboarding/OnboardingRouter'
+import { OnboardingRouter, clearOnboardingCarry } from './screens/onboarding/OnboardingRouter'
 import { PostSessionRevelationScreen }  from './screens/onboarding/PostSessionRevelationScreen'
 
 // Loop
@@ -103,13 +103,18 @@ function AppRoutes() {
   // Flush any sessions completed offline once we're back (and on every launch).
   useOutboxSync()
 
-  if (authLoading || stateLoading) return <Splash />
-
   // Onboarding owns the athlete until they finish the first session. That's
   // every state before auth, the brief no-athlete beat after sign-in, and every
   // funnel step (hook → zeroed_in). Everything else is the daily loop.
   const inOnboarding =
     !user || !athlete || ONBOARDING_FUNNEL_STEPS.has(athlete.onboarding_step)
+
+  // In the loop, nothing stashed for the trip across sign-in is needed again.
+  useEffect(() => {
+    if (!inOnboarding) clearOnboardingCarry()
+  }, [inOnboarding])
+
+  if (authLoading || stateLoading) return <Splash />
 
   if (inOnboarding) {
     return <OnboardingRouter user={user} athlete={athlete} refresh={refresh} />

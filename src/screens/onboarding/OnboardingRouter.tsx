@@ -9,18 +9,38 @@ import { HookAct, OBSTACLE_STORAGE_KEY, PROBE_STORAGE_KEY, type ProbeStash } fro
 import type { ArenaAnswer } from './ArenaScreen'
 import { OrientationAct, type OrientationFields } from './OrientationAct'
 import { CalibrateScreen } from './CalibrateScreen'
-import { readStarterPack } from './starterPackStorage'
+import { WelcomeScreen } from './WelcomeScreen'
+import { SignInScreen } from './SignInScreen'
+import { STARTER_PACK_STORAGE_KEY, readStarterPack } from './starterPackStorage'
 import type { AthleteRow, OnboardingStep, Priority } from '../../types/database'
 import type { ProvisionalProfile } from '../../engine'
 
-const PackOnboarding = lazy(() => import('./PackOnboarding'))
+const CoachIntake = lazy(() => import('./CoachIntake'))
+
+/**
+ * Drop everything the pre-auth funnel stashed for the trip across sign-in. Called
+ * once the athlete is in the loop, so a returning athlete who tapped "Get
+ * started" by mistake, then signed in, carries nothing into a later reset.
+ */
+export function clearOnboardingCarry(): void {
+  try {
+    localStorage.removeItem(PROBE_STORAGE_KEY)
+    localStorage.removeItem(OBSTACLE_STORAGE_KEY)
+    localStorage.removeItem(STARTER_PACK_STORAGE_KEY)
+  } catch { /* private mode */ }
+}
+
+/** Signed out, which door they're at. Local: a reload lands back on welcome. */
+type Door = 'welcome' | 'sign_in' | 'start'
 
 /**
  * Onboarding state machine (Confidence-Driven Read). Renders the right screen
- * for the athlete's onboarding_step. Gates the SESSION, not the read: the probe
- * runs pre-auth in HookAct; after auth, orientation calibrates a provisional
- * first session (an ephemeral build beat, no DB step) and hands it straight over.
- * Loop steps (first_session_*, complete) are routed by App, not here.
+ * for the athlete's onboarding_step. Signed out, it opens on two doors: "Get
+ * started" (the intake, then sign-in to save it) or "I have an account" (sign-in
+ * only). Either door works for either athlete — the row decides what's next.
+ * After auth, orientation calibrates a provisional first session (an ephemeral
+ * build beat, no DB step) and hands it straight over. Loop steps
+ * (first_session_*, complete) are routed by App, not here.
  */
 export function OnboardingRouter({
   user,
@@ -33,13 +53,12 @@ export function OnboardingRouter({
 }) {
   const navigate = useNavigate()
   const location = useLocation()
-  const flagWanted = onboardingAgentV1Enabled(
+  const flagOn = onboardingAgentV1Enabled(
     { VITE_ONBOARDING_AGENT_V1: import.meta.env.VITE_ONBOARDING_AGENT_V1, DEV: import.meta.env.DEV },
     location.search,
   )
-  const [forceClassic, setForceClassic] = useState(false)
-  const flagOn = flagWanted && !forceClassic
   const entry = resolveOnboardingEntry({ flagOn, user, athlete })
+  const [door, setDoor] = useState<Door>('welcome')
   // Ephemeral "calibrating your first session" beat — holds the orientation
   // fields while buildProvisionalProgram runs. Not a DB step.
   const [calibrating, setCalibrating] = useState<ProvisionalProfile | null>(null)
@@ -51,7 +70,9 @@ export function OnboardingRouter({
 
   // --- Bootstrap: just signed in, no athlete row yet -------------------------
   // Create it from the stashed obstacle, write the probe read as the first
-  // insight, and drop into orientation.
+  // insight, and drop into orientation. No stash means they came through "I
+  // have an account" with an email that has no plan yet: start them at the
+  // intake, already signed in, rather than in orientation with nothing to go on.
   useEffect(() => {
     if (!user || athlete || bootstrappedRef.current) return
     bootstrappedRef.current = true
@@ -91,7 +112,7 @@ export function OnboardingRouter({
           arena_type: stash?.arenaType ?? null,
           arena_raw: stash?.arenaRaw ?? null,
           limiter_choice: stash?.limiterChoice ?? null,
-          onboarding_step: 'orientation',
+          onboarding_step: stash || obstacle ? 'orientation' : 'hook',
         })
         .select('id')
         .single()
@@ -246,12 +267,24 @@ export function OnboardingRouter({
   // carry an autoFocus input), which popped the keyboard over the splash in the
   // weird in-between frame during logout.
   if (!user) {
+    if (door === 'welcome') {
+      return <WelcomeScreen onGetStarted={() => setDoor('start')} onSignIn={() => setDoor('sign_in')} />
+    }
+    if (door === 'sign_in') {
+      return (
+        <SignInScreen
+          intent="returning"
+          onBack={() => setDoor('welcome')}
+          onGetStarted={() => setDoor('start')}
+        />
+      )
+    }
     if (entry === 'pack_picker') {
       return (
         <Suspense fallback={<div className="screen--centered"><Spinner /></div>}>
-          <PackOnboarding
+          <CoachIntake
             authed={false}
-            onSkip={() => setForceClassic(true)}
+            onExit={() => setDoor('welcome')}
             onAuthedComplete={() => { /* unreachable while unauthenticated */ }}
           />
         </Suspense>
@@ -264,6 +297,7 @@ export function OnboardingRouter({
         initialArena={null}
         initialLimiterChoice={null}
         onAuthedAdvance={() => { /* unreachable while unauthenticated */ }}
+        onExit={() => setDoor('welcome')}
       />
     )
   }
@@ -284,9 +318,9 @@ export function OnboardingRouter({
       if (entry === 'pack_picker') {
         return (
           <Suspense fallback={<div className="screen--centered"><Spinner /></div>}>
-            <PackOnboarding
+            <CoachIntake
               authed
-              onSkip={() => setForceClassic(true)}
+              signedInAs={user.email}
               onAuthedComplete={() => {
                 const pack = readStarterPack()
                 void (async () => {

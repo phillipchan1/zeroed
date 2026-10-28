@@ -12,6 +12,24 @@ export interface AuthSession {
 
 const PERSIST_KEY = 'zeroed_auth_user'
 const BEARER_KEY = 'zeroed_auth_bearer'
+const LAST_EMAIL_KEY = 'zeroed.lastEmail'
+
+/** The address this device last signed in with, so a returning athlete only taps "Send code". */
+export function lastSignInEmail(): string {
+  try {
+    return localStorage.getItem(LAST_EMAIL_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function rememberSignInEmail(email: string): void {
+  try {
+    localStorage.setItem(LAST_EMAIL_KEY, email)
+  } catch {
+    /* private mode */
+  }
+}
 
 /** Better Auth bearer is `token.signature`. Reject leftover raw session tokens. */
 export function persistSignedBearer(token: string | null): void {
@@ -73,6 +91,7 @@ type BetterAuthClient = {
       user?: { id: string; email?: string | null } | null
       session?: { token?: string } | null
     } | null
+    error?: { status?: number; message?: string } | null
   }>
 }
 
@@ -91,8 +110,15 @@ async function betterAuthClient(): Promise<BetterAuthClient> {
         plugins: [plugins.emailOTPClient()],
         fetchOptions: {
           credentials: 'include',
+          // The iOS shell (capacitor://localhost) is cross-site to the Worker,
+          // so the SameSite=Lax session cookie never rides these requests. Send
+          // the signed bearer too, or get-session reads every cold launch as
+          // signed out.
           customFetchImpl: async (input: RequestInfo | URL, init?: RequestInit) => {
-            const res = await fetch(input, { ...init, credentials: 'include' })
+            const headers = new Headers(init?.headers)
+            const bearer = persistedSignedBearer()
+            if (bearer && !headers.has('authorization')) headers.set('authorization', `Bearer ${bearer}`)
+            const res = await fetch(input, { ...init, headers, credentials: 'include' })
             captureSignedBearer(res)
             return res
           },
@@ -128,10 +154,12 @@ export async function verifySignInCode(
       token: otp,
       type: 'email',
     })
+    if (!error) rememberSignInEmail(email)
     return { error: error ? { message: error.message } : null }
   }
   const { data, error } = await (await betterAuthClient()).signIn.emailOtp({ email, otp })
   if (error) return { error: { message: error.message || 'Invalid code' } }
+  rememberSignInEmail(email)
   const user = data?.user
   if (user?.id) persistAuthUser({ id: user.id, email: user.email })
   window.dispatchEvent(new CustomEvent('zeroed:auth-changed', {
@@ -141,17 +169,20 @@ export async function verifySignInCode(
 }
 
 export async function signOutLocal(): Promise<void> {
-  persistAuthUser(null)
-  persistSignedBearer(null)
   if (!isCloudflareApi()) {
+    persistAuthUser(null)
+    persistSignedBearer(null)
     await supabase.auth.signOut({ scope: 'local' })
     return
   }
+  // Revoke while the bearer is still here to name the session, then clear.
   try {
     await (await betterAuthClient()).signOut()
   } catch {
     /* local clear is enough */
   }
+  persistAuthUser(null)
+  persistSignedBearer(null)
   window.dispatchEvent(new CustomEvent('zeroed:auth-changed', {
     detail: { user: null, event: 'SIGNED_OUT' },
   }))
@@ -163,10 +194,21 @@ export async function getSessionUser(): Promise<AuthUser | null> {
     const user = session?.user
     return user ? { id: user.id, email: user.email } : null
   }
-  const { data } = await (await betterAuthClient()).getSession()
-  const user = data?.user
+  // Only the server saying "no session" signs this device out. Offline, a
+  // timeout or a 5xx keeps the athlete who was here: a launch in a basement gym
+  // must open on their week, not the welcome screen.
+  let res: Awaited<ReturnType<BetterAuthClient['getSession']>>
+  try {
+    res = await (await betterAuthClient()).getSession()
+  } catch {
+    return persistedBetterAuthUser()
+  }
+  const status = res.error?.status
+  if (res.error && status !== 401 && status !== 403) return persistedBetterAuthUser()
+  const user = res.data?.user
   if (!user?.id) {
     persistAuthUser(null)
+    persistSignedBearer(null)
     return null
   }
   const next = { id: user.id, email: user.email }

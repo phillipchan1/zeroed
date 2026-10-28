@@ -1,9 +1,9 @@
 import { useState } from 'react'
-import { SplashScreen } from './SplashScreen'
+import { ChevronLeft } from 'lucide-react'
 import { ArenaScreen, type ArenaAnswer } from './ArenaScreen'
 import { LimiterScreen, type LimiterAnswer } from './LimiterScreen'
 import { ProbeScreen } from './ProbeScreen'
-import { AuthSheet } from './AuthSheet'
+import { SignInScreen } from './SignInScreen'
 import { FunnelFrame } from '../../components/layout/FunnelFrame'
 import type { ReadSynthesis } from '../../engine'
 import type { ArenaType, ReadAxis } from '../../engine/demandTables'
@@ -30,12 +30,13 @@ export interface ProbeStash {
   }
 }
 
-type HookSub = 'splash' | 'arena' | 'limiter' | 'probe'
+type HookSub = 'arena' | 'limiter' | 'probe'
 
 /**
- * Act 1+2 — Hook + Probe. Runs before auth for first-timers, and again after a
- * DebugReset for an already-authed athlete. Sequencing (Convergence Model):
- *   splash → ARENA (Move 1) → LIMITER (Move 2, w/ obstacle feeder) → PROBE → auth.
+ * Act 1+2 — Hook + Probe. Runs before auth for first-timers (after "Get started"
+ * on the welcome screen), and again after a DebugReset for an already-authed
+ * athlete. Sequencing (Convergence Model):
+ *   ARENA (Move 1) → LIMITER (Move 2, w/ obstacle feeder) → PROBE → save (auth).
  *
  * The standalone obstacle question is gone: obstacle is now the optional
  * free-text feeder ON the Limiter screen (Convergence §4c — feeds the limiter
@@ -46,7 +47,7 @@ type HookSub = 'splash' | 'arena' | 'limiter' | 'probe'
  * read are stashed in localStorage so they survive the magic-link round trip;
  * OnboardingRouter's bootstrap hydrates the row + writes the insight.
  *   • authed (e.g. post-reset)  → persist the read + advance to orientation
- *   • not authed                → slide up the auth sheet; bootstrap picks it up
+ *   • not authed                → the email-code sign-in; bootstrap picks it up
  */
 export function HookAct({
   authed,
@@ -54,14 +55,17 @@ export function HookAct({
   initialArena,
   initialLimiterChoice,
   onAuthedAdvance,
+  onExit,
 }: {
   authed: boolean
   initialObstacle: string
   initialArena: ArenaAnswer | null
   initialLimiterChoice: string | null
   onAuthedAdvance: (obstacle: string) => void
+  /** Back from the first question (signed out: to the welcome screen). */
+  onExit?: () => void
 }) {
-  const [sub, setSub] = useState<HookSub>('splash')
+  const [sub, setSub] = useState<HookSub>('arena')
   const [arena, setArena] = useState<ArenaAnswer | null>(initialArena)
   const [limiterChoice, setLimiterChoice] = useState<string | null>(initialLimiterChoice)
   const [obstacle, setObstacle] = useState(initialObstacle)
@@ -109,9 +113,15 @@ export function HookAct({
 
   return (
     <>
-      {sub === 'splash'  && <SplashScreen onBegin={() => setSub('arena')} />}
       {sub === 'arena'   && (
-        <FunnelFrame><ArenaScreen initial={arena} onSubmit={handleArenaSubmit} /></FunnelFrame>
+        <FunnelFrame>
+          {onExit && (
+            <button type="button" className="signin__back hook__back" onClick={onExit} aria-label="Back">
+              <ChevronLeft size={22} strokeWidth={2} />
+            </button>
+          )}
+          <ArenaScreen initial={arena} onSubmit={handleArenaSubmit} />
+        </FunnelFrame>
       )}
       {sub === 'limiter' && arena && (
         <FunnelFrame>
@@ -124,18 +134,21 @@ export function HookAct({
           />
         </FunnelFrame>
       )}
+      {/* Kept mounted (hidden) under the sign-in so Back doesn't re-run the read. */}
       {sub === 'probe'   && arena && (
-        <ProbeScreen
-          arenaType={arena.type}
-          arenaRaw={arena.raw}
-          limiterChoice={limiterChoice}
-          obstacle={obstacle}
-          arenaConfidence={arena.confidence}
-          onSaveRead={handleSaveRead}
-        />
+        <div hidden={showAuth}>
+          <ProbeScreen
+            arenaType={arena.type}
+            arenaRaw={arena.raw}
+            limiterChoice={limiterChoice}
+            obstacle={obstacle}
+            arenaConfidence={arena.confidence}
+            onSaveRead={handleSaveRead}
+          />
+        </div>
       )}
 
-      {showAuth && <AuthSheet onClose={() => setShowAuth(false)} />}
+      {showAuth && <SignInScreen intent="save" onBack={() => setShowAuth(false)} />}
     </>
   )
 }
