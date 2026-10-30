@@ -1,6 +1,6 @@
 import { Hono } from 'hono'
 import { handleAgent } from './agent.ts'
-import { API_SECURITY, beginAuthCors } from './cors.ts'
+import { API_SECURITY, HEALTH_CORS, beginAuthCors, json } from './cors.ts'
 import { handleData } from './data.ts'
 import { authFailureMessage, handleAuthRequest } from './auth.ts'
 import type { Env } from './env.ts'
@@ -30,13 +30,14 @@ function missingAsset(): Response {
   })
 }
 
-app.get('/api/health', (c) =>
-  c.json({
+app.on(['OPTIONS', 'GET'], '/api/health', (c) => {
+  if (c.req.method === 'OPTIONS') return new Response(null, { status: 204, headers: HEALTH_CORS })
+  return json({
     ok: true,
     service: 'zeroed',
     runtime: 'cloudflare-workers',
-  }),
-)
+  }, 200, HEALTH_CORS)
+})
 
 function waitUntilOf(c: { executionCtx?: { waitUntil?: WaitUntil } }): WaitUntil | undefined {
   const wait = c.executionCtx?.waitUntil

@@ -5,20 +5,27 @@
  * offline — the network fetch then revalidates in the background. Every field is
  * serializable so it round-trips through localStorage.
  *
- * `seedWorkoutBootstrap` covers the one case a per-routine cache can't: the
- * FIRST time a session is opened, when nothing has been cached for it yet. The
- * routine row is already in hand from the app-state snapshot, and the routine is
- * all the screen needs to lay down the exercise list and the empty set grid —
- * so we plant a minimal bootstrap ahead of time and the first open paints with
- * no spinner. The richer parts (last session's numbers, the prescription, the
- * per-exercise reads) fill in from the background fetch.
+ * `seedWorkoutBootstrap` plants a minimal bootstrap from the app-state snapshot
+ * so the first open paints with no spinner. A fetched bootstrap is left alone
+ * while its routine still matches that snapshot. A rewrite under the same id
+ * (MCP / editor) reseeds from the snapshot and drops an empty local draft of
+ * the old version. Logged drafts and the outbox stay. The richer parts (last
+ * session's numbers, the prescription, the per-exercise reads) fill in from
+ * the background fetch.
  */
 import { loadCache, saveCache } from './cache'
+import { clearDraftLocal, loadDraftLocal } from './workoutDraft'
+import {
+  draftHasLoggedSets,
+  reconcileWorkoutBootstrap,
+} from './routineVersion'
 import type {
   RoutineRow, SetLog, InsightRow, OnboardingStep,
 } from '../types/database'
 import type { SessionPrescription } from '../engine'
 import type { LiftBest } from '../engine/prs'
+
+export { routineContentDiffers, routineVersionMarker, reconcileWorkoutBootstrap } from './routineVersion'
 
 export interface WorkoutBootstrap {
   routine: RoutineRow
@@ -47,9 +54,25 @@ export interface WorkoutBootstrap {
 export const workoutBootKey = (routineId: string) => `workout:${routineId}`
 
 /**
+ * Drop a local draft that has no logged sets. A draft with any logged set is
+ * left alone — the athlete's numbers outrank a rewritten template. The outbox
+ * is not touched.
+ */
+export function discardEmptyStaleDraft(routineId: string): void {
+  const draft = loadDraftLocal(routineId)
+  if (!draft || draftHasLoggedSets(draft.setLogs)) return
+  clearDraftLocal(routineId)
+}
+
+/**
  * Plant a minimal bootstrap for a routine that has none, so its first open
- * paints immediately. Never overwrites a real (fetched) bootstrap — that one
- * carries the previous session's numbers and the prescription.
+ * paints immediately. A fetched bootstrap is left alone while its routine
+ * still matches the snapshot (name / exercises / updated marker) — that one
+ * carries last session's numbers and the prescription.
+ *
+ * When the snapshot routine has been rewritten under the same id, the stale
+ * bootstrap is replaced from the snapshot and an empty local draft of the
+ * old version is discarded. Logged drafts stay.
  */
 export function seedWorkoutBootstrap(
   routine: RoutineRow,
@@ -58,7 +81,14 @@ export function seedWorkoutBootstrap(
   onboardingStep: OnboardingStep | null,
 ): void {
   const key = workoutBootKey(routine.id)
-  if (loadCache<WorkoutBootstrap>(key)) return
+  const existing = loadCache<WorkoutBootstrap>(key)
+  const action = reconcileWorkoutBootstrap(
+    routine,
+    existing?.routine ?? null,
+    existing ? draftHasLoggedSets(loadDraftLocal(routine.id)?.setLogs) : false,
+  )
+  if (!action.reseed) return
+  if (action.discardEmptyDraft) discardEmptyStaleDraft(routine.id)
   saveCache<WorkoutBootstrap>(key, {
     routine,
     athleteId,

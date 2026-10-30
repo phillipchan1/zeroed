@@ -6,7 +6,7 @@ import {
   restoreDraft, loadDraftLocal, saveDraftLocal, saveDraftRemote, clearDraft, type DraftPayload,
 } from '../../lib/workoutDraft'
 import { loadCache, saveCache, useCachedLoader } from '../../lib/cache'
-import { workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
+import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
 import { invalidateLoopViews, cacheKeys } from '../../lib/loopCache'
 import {
   enqueueSession, commitPending, parsePendingRef, pendingSessionById, committedWorkoutIdFor,
@@ -1349,7 +1349,13 @@ function withoutSlot<T>(m: Record<number, T>, removed: number): Record<number, T
   return out
 }
 
-export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}) {
+export function WorkoutScreen({
+  onCommitted,
+  routines = [],
+}: {
+  onCommitted?: () => void
+  routines?: RoutineRow[]
+} = {}) {
   const { routineId } = useParams<{ routineId: string }>()
   const navigate      = useNavigate()
   const [searchParams, setSearchParams] = useSearchParams()
@@ -1398,6 +1404,19 @@ export function WorkoutScreen({ onCommitted }: { onCommitted?: () => void } = {}
     // The outbox is localStorage, so an uncommitted session hydrates on the
     // first frame — no network, works offline, no blank grid to type into.
     const pending = pendingEditId ? pendingSessionById(pendingEditId) : null
+    // Snapshot wins over a per-routine bootstrap that still names the previous
+    // rewrite of this id (same Friday row, new work). Must run before the
+    // seed read so the first paint is the current session, not the cached one.
+    const snapshot = routineId ? routines.find((r) => r.id === routineId) : undefined
+    if (snapshot) {
+      const existing = loadCache<WorkoutBootstrap>(bootKey(snapshot.id))
+      seedWorkoutBootstrap(
+        snapshot,
+        existing?.athleteId ?? null,
+        existing?.athleteName ?? null,
+        existing?.onboardingStep ?? null,
+      )
+    }
     seedRef.current = {
       boot: routineId ? loadCache<WorkoutBootstrap>(bootKey(routineId)) : null,
       draft: routineId && !isEdit ? loadDraftLocal(routineId) : null,
