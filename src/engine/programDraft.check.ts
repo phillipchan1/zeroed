@@ -206,6 +206,48 @@ const retDiff = diffDraft(base, retuned.draft)
 ok(retDiff.changed === 1 && retDiff.added === 0 && retDiff.removed === 0,
   `a retune is a change, not a swap (+${retDiff.added} −${retDiff.removed} ~${retDiff.changed})`)
 
+// Word bucket → written/numeric load (MCP: update_exercise load: '~170 lb'
+// against a stored 'light'). cleanLoad used to drop anything outside
+// light/moderate/heavy/bodyweight, so the edit skipped as "nothing to change".
+const friday: ProgramDraft = {
+  sessionsPerWeek: 3,
+  sessions: [{
+    routineId: 'fri', name: 'Fri Power Baseline', intent: '', sessionType: 'power', intendedDow: 4,
+    exercises: [{ name: 'Bench press', sets: 5, reps: '2', load: 'light' }],
+  }],
+}
+const toPounds = applyEditsToDraft(friday, [
+  edit({ type: 'update_exercise', session_name: 'Fri Power Baseline', exercise_name: 'Bench press', load: '~170 lb' }),
+])
+ok(toPounds.outcomes[0]?.applied === true, 'word → ~170 lb must apply, not skip')
+ok(toPounds.draft.sessions[0].exercises[0].load === '~170 lb', 'stored load becomes ~170 lb')
+ok(diffDraft(friday, toPounds.draft).changed === 1, 'explicit load is a retune')
+
+const toRpe = applyEditsToDraft(friday, [
+  edit({ type: 'update_exercise', session_name: 'Fri Power Baseline', exercise_name: 'Bench press', load: 'RPE 5 · ~170 lb' }),
+])
+ok(toRpe.outcomes[0]?.applied === true && toRpe.draft.sessions[0].exercises[0].load === 'RPE 5 · ~170 lb',
+  'RPE-prefixed explicit load replaces a word load')
+
+const toPct = applyEditsToDraft(friday, [
+  edit({ type: 'update_exercise', session_name: 'Fri Power Baseline', exercise_name: 'Bench press', load: '70%' }),
+])
+ok(toPct.outcomes[0]?.applied === true && toPct.draft.sessions[0].exercises[0].load === '70%',
+  'percent load replaces a word load')
+
+const sameExplicit = applyEditsToDraft(toPounds.draft, [
+  edit({ type: 'update_exercise', session_name: 'Fri Power Baseline', exercise_name: 'Bench press', load: '~170 lb' }),
+])
+ok(sameExplicit.outcomes[0]?.applied === false, 'identical explicit load is a no-op')
+ok((sameExplicit.outcomes[0]?.reason ?? '').includes('nothing to change'),
+  'identical load skip says nothing to change')
+ok(!diffDraft(toPounds.draft, sameExplicit.draft).dirty, 'identical load leaves the draft clean')
+
+const sameWord = applyEditsToDraft(friday, [
+  edit({ type: 'update_exercise', session_name: 'Fri Power Baseline', exercise_name: 'Bench press', load: 'light' }),
+])
+ok(sameWord.outcomes[0]?.applied === false, 'identical word load is still a no-op')
+
 // A rename is not a new session.
 const renamed = applyEditsToDraft(base, [
   edit({ type: 'update_session', session_name: 'Session A', set_name: 'Lower — Bounce' }),

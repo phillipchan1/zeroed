@@ -69,9 +69,18 @@ function cleanText(s: unknown, max: number): string {
   return String(s ?? '').trim().slice(0, max)
 }
 
+/** A written load: "~170 lb", "RPE 5 · ~170 lb", "70%". Word buckets stay separate. */
+function isExplicitLoad(s: string): boolean {
+  return /\d/.test(s)
+}
+
 function cleanLoad(s: unknown): string | undefined {
-  const v = String(s ?? '').trim().toLowerCase()
-  return LOADS.includes(v) ? v : undefined
+  const raw = String(s ?? '').trim()
+  if (!raw) return undefined
+  const word = raw.toLowerCase()
+  if (LOADS.includes(word)) return word
+  const explicit = cleanText(raw, 40)
+  return explicit && isExplicitLoad(explicit) ? explicit : undefined
 }
 
 function cleanSessionType(s: unknown): string | null {
@@ -273,7 +282,10 @@ export function applyEditsToDraft(
         if (e.sets != null) { ex.sets = clampInt(e.sets, 1, MAX_SETS, ex.sets); touched = true }
         if (e.reps) { ex.reps = cleanText(e.reps, 40) || ex.reps; touched = true }
         const load = cleanLoad(e.load)
-        if (load) { ex.load = load; touched = true }
+        if (load && load.toLowerCase() !== String(ex.load ?? '').trim().toLowerCase()) {
+          ex.load = load
+          touched = true
+        }
         if (e.cue) { ex.cue = cleanText(e.cue, 160); touched = true }
         if (e.target_rpe != null && Number.isFinite(Number(e.target_rpe))) {
           ex.target_rpe = Math.max(1, Math.min(10, Math.round(Number(e.target_rpe) * 10) / 10)); touched = true
