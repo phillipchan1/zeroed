@@ -863,8 +863,8 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
 
   // Plant a bootstrap for every session on the week list, so the FIRST tap on
   // one paints its exercises immediately instead of spinning on the network.
-  // Existing (fetched) bootstraps — which carry last session's numbers and the
-  // prescription — are left alone; the workout screen revalidates either way.
+  // A fetched bootstrap is left alone while its routine still matches; a
+  // rewrite under the same id reseeds from this snapshot.
   useEffect(() => {
     routines.forEach((r) => seedWorkoutBootstrap(r, athleteId, athleteName, onboardingStep ?? null))
     for (const r of pager?.upcoming?.routines ?? []) {

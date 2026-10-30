@@ -6,6 +6,15 @@ export const API_SECURITY = {
   'X-Content-Type-Options': 'nosniff',
 }
 
+/** Unauthenticated GET — the iOS connectivity probe. Must answer OPTIONS
+ *  itself; falling through to ASSETS 500s and a preflight then fails. */
+export const HEALTH_CORS = {
+  'Access-Control-Allow-Origin': '*',
+  'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Allow-Headers': 'content-type',
+  ...API_SECURITY,
+}
+
 export const AGENT_CORS = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers':

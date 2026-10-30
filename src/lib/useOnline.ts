@@ -27,6 +27,12 @@
 import { useEffect, useState, useSyncExternalStore } from 'react'
 import { supabaseUrl } from './supabaseClient'
 import { healthUrl } from './api'
+import {
+  CONNECTIVITY_PROBE_INIT,
+  connectivityProbeUrl,
+} from './connectivityProbe'
+
+export { CONNECTIVITY_PROBE_INIT, connectivityProbeUrl, isSimpleConnectivityProbe, PROBE_PARAM } from './connectivityProbe'
 
 // Reaching the app's own origin proves very little (a service worker or the
 // bundled native shell can answer it), so the probe targets the API the loop
@@ -37,7 +43,6 @@ const PROBE_URL = healthUrl()
   ?? (supabaseUrl.includes('placeholder')
     ? '/favicon.ico'
     : `${supabaseUrl}/auth/v1/health`)
-const PROBE_PARAM = 'zeroed-ping'     // sw.js passes these straight to the network
 const PROBE_TIMEOUT_MS = 6_000
 
 // Two failed probes before we say "offline" out loud. The first failure schedules
@@ -124,15 +129,12 @@ async function probeOnce(): Promise<boolean> {
   if (typeof fetch === 'undefined') return true
   const ctrl = new AbortController()
   const bail = setTimeout(() => ctrl.abort(), PROBE_TIMEOUT_MS)
-  const sep = PROBE_URL.includes('?') ? '&' : '?'
   try {
-    // Cache-busted, `no-store`, and (same-origin) service-worker-bypassed, so a
-    // resolved fetch can only mean the network actually answered. Any HTTP
-    // status counts — even a 404 proves we reached a server.
-    await fetch(`${PROBE_URL}${sep}${PROBE_PARAM}=${++probeSeq}`, {
-      method: 'GET',
-      cache: 'no-store',
-      mode: 'no-cors',
+    // Cache-busted via the query param, service-worker-bypassed (sw.js lets
+    // `zeroed-ping` through). Any HTTP status counts — even a 404 proves we
+    // reached a server. `cache` is omitted on purpose: see CONNECTIVITY_PROBE_INIT.
+    await fetch(connectivityProbeUrl(PROBE_URL, ++probeSeq), {
+      ...CONNECTIVITY_PROBE_INIT,
       signal: ctrl.signal,
     })
     return true
