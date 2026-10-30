@@ -227,7 +227,8 @@ export function revalidate<T>(
     // This gate asks the connectivity store, NOT `navigator.onLine` — the flag
     // reads false on a healthy iOS PWA often enough that trusting it here meant
     // skipping every revalidation and serving stale data indefinitely. The store
-    // only reports offline once a probe has actually failed.
+    // only reports offline after hard network failures (a probe *timeout* is
+    // degraded, and revalidation still runs).
     if (isKnownOffline()) return Promise.resolve(entry ? entry.data : null)
   }
 

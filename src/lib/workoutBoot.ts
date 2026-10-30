@@ -25,7 +25,12 @@ import type {
 import type { SessionPrescription } from '../engine'
 import type { LiftBest } from '../engine/prs'
 
-export { routineContentDiffers, routineVersionMarker, reconcileWorkoutBootstrap } from './routineVersion'
+export {
+  routineContentDiffers,
+  routineVersionMarker,
+  reconcileWorkoutBootstrap,
+  liveWorkoutReconcile,
+} from './routineVersion'
 
 export interface WorkoutBootstrap {
   routine: RoutineRow
