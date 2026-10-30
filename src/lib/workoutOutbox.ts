@@ -271,7 +271,9 @@ export function pendingSessionById(id: string): PendingSession | null {
 // ---- committing ------------------------------------------------------------
 
 // Ids currently being committed — guards against the live commit and a concurrent
-// flush (e.g. reconnecting mid-submit) double-inserting the workout.
+// flush (e.g. reconnecting mid-submit) double-inserting the workout. The server
+// also keys the row on this id (workout.client_key), so a retry after the
+// committed-id trail is lost returns the existing row instead of a second copy.
 const inFlight = new Set<string>()
 
 function entryRev(id: string): number {
