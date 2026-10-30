@@ -980,6 +980,50 @@ const rpeSetLow = await executeDataQuery(sql, ctxA, {
 })
 ok(Boolean(rpeSetLow.error), 'set RPE 0.5 is rejected')
 
+const CLIENT_KEY = 'cccccccc-0000-4000-8000-000000000001'
+const idempotentValues = {
+  routine_id: ROUTINE_A,
+  performed_at: '2026-10-30T16:00:00Z',
+  rpe: 8,
+  client_key: CLIENT_KEY,
+  actual_weights: { '0': [{ set: 1, weight: 225, reps: 2, rpe: 8, done: true }] },
+}
+const firstKey = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: idempotentValues,
+  returning: '*',
+  single: 'one',
+})
+const firstKeyId = (firstKey.data as { id: string } | null)?.id
+ok(firstKey.error == null && firstKeyId != null, `idempotent insert: first commit succeeds (${firstKey.error?.message ?? 'ok'})`)
+
+const secondKey = await executeDataQuery(sql, ctxA, {
+  table: 'workout',
+  op: 'insert',
+  values: { ...idempotentValues, rpe: 9, actual_weights: { '0': [{ set: 1, weight: 240, reps: 2, rpe: 9, done: true }] } },
+  returning: '*',
+  single: 'one',
+})
+const secondKeyId = (secondKey.data as { id: string } | null)?.id
+ok(secondKey.error == null, `idempotent insert: same key is not an error (${secondKey.error?.message ?? 'ok'})`)
+ok(secondKeyId === firstKeyId, `idempotent insert: same key returns the same id (${secondKeyId} vs ${firstKeyId})`)
+ok((await count('workout', 'client_key = $1', [CLIENT_KEY])) === 1, 'idempotent insert: one row for the key')
+ok(Number((secondKey.data as { rpe?: number | string } | null)?.rpe) === 8, 'idempotent insert: conflict returns the original row, not a rewrite')
+
+const bSameKey = await executeDataQuery(sql, ctxB, {
+  table: 'workout',
+  op: 'insert',
+  values: { routine_id: ROUTINE_B, performed_at: '2026-10-30T16:00:00Z', rpe: 6, client_key: CLIENT_KEY },
+  returning: '*',
+  single: 'one',
+})
+const bKeyId = (bSameKey.data as { id: string } | null)?.id
+ok(bSameKey.error == null && bKeyId != null && bKeyId !== firstKeyId, 'idempotent insert: B can reuse the key on B')
+ok((await count('workout', 'client_key = $1', [CLIENT_KEY])) === 2, 'idempotent insert: key is unique per athlete')
+ok((await scalar<string>('SELECT athlete_id::text FROM workout WHERE id = $1', [firstKeyId ?? ''])) === A, 'idempotent insert: A row is stamped with A')
+ok((await scalar<string>('SELECT athlete_id::text FROM workout WHERE id = $1', [bKeyId ?? ''])) === B, 'idempotent insert: B row is stamped with B')
+
 await harness.close()
 
 console.log(`${checks} checks, ${fails.length} failed (${harness.backend})`)

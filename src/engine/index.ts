@@ -3969,6 +3969,18 @@ function isMissingColumn(err: { code?: string; message?: string } | null | undef
     || /column .*(does not exist|could not find)|could not find the .* column|unknown column/i.test(err.message ?? '')
 }
 
+/** The workout this outbox entry already became, if a prior attempt landed. */
+async function existingWorkoutIdForClientKey(clientKey: string | null | undefined): Promise<string | null> {
+  if (!clientKey) return null
+  const { data, error } = await supabase
+    .from('workout')
+    .select('id')
+    .eq('client_key', clientKey)
+    .maybeSingle()
+  if (error || !data) return null
+  return (data as { id: string }).id
+}
+
 // ---- Sessions outside the plan (arc_load_v1) --------------------------------
 // A workout needs a routine (routine_id is NOT NULL), and a routine a program.
 // Each athlete gets one program with status 'external' holding one routine for
@@ -4092,18 +4104,31 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     // the athlete's history as a side effect.
     if (p.exercisesSnapshot?.length) insert.exercises_snapshot = p.exercisesSnapshot
     if (p.performedAt) insert.performed_at = p.performedAt
+    // Newest dropped first on a missing-column error, so the key stays on as
+    // long as the database has the column. The Worker stamps athlete_id from
+    // the session; sending it here covers the PostgREST path.
     const { data: workout, error } = await writeDroppingMissing(
       insert,
-      [hasCheckin(p.checkin) ? checkinColumns(p.checkin) : null, arcColumns(p)],
+      [
+        p.id ? { client_key: p.id, athlete_id: p.athleteId } : null,
+        hasCheckin(p.checkin) ? checkinColumns(p.checkin) : null,
+        arcColumns(p),
+      ],
       (row) => supabase.from('workout').insert(row).select().single(),
     )
     if (error || !workout) {
-      // The cached external routine is gone (a debug reset): forget it, so the
-      // outbox's retry files the session under a fresh one.
-      if (p.outsidePlan) forgetOutsidePlanRoutine(p.athleteId)
-      throw error ?? new Error('workout insert failed')
+      const existingId = await existingWorkoutIdForClientKey(p.id)
+      if (existingId) {
+        workoutId = existingId
+      } else {
+        // The cached external routine is gone (a debug reset): forget it, so the
+        // outbox's retry files the session under a fresh one.
+        if (p.outsidePlan) forgetOutsidePlanRoutine(p.athleteId)
+        throw error ?? new Error('workout insert failed')
+      }
+    } else {
+      workoutId = (workout as { id: string }).id
     }
-    workoutId = (workout as { id: string }).id
   }
 
   // The workout row now exists. Everything below is best-effort and must NOT

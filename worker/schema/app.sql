@@ -244,11 +244,20 @@ CREATE TABLE IF NOT EXISTS public.workout (
   -- arc_load_v1 (migration 20261028000001): Foster session RPE for the whole
   -- session, and 'external' for a session logged outside the plan.
   session_rpe        NUMERIC(3, 1) CHECK (session_rpe IS NULL OR (session_rpe >= 0 AND session_rpe <= 10)),
-  source             TEXT CHECK (source IS NULL OR source IN ('plan', 'external'))
+  source             TEXT CHECK (source IS NULL OR source IN ('plan', 'external')),
+  -- Idempotent commit (migration 20261030000001): the client's outbox entry id,
+  -- unique per athlete so a retry returns the existing row. Null on older rows.
+  athlete_id         UUID REFERENCES public.athlete(id) ON DELETE RESTRICT,
+  client_key         TEXT,
+  CONSTRAINT workout_client_key_needs_athlete
+    CHECK (client_key IS NULL OR athlete_id IS NOT NULL)
 );
 
 CREATE INDEX IF NOT EXISTS workout_routine_id_idx   ON public.workout(routine_id);
 CREATE INDEX IF NOT EXISTS workout_performed_at_idx ON public.workout(performed_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS workout_athlete_client_key_uidx
+  ON public.workout (athlete_id, client_key)
+  WHERE client_key IS NOT NULL;
 
 COMMENT ON TABLE public.workout IS
   'Executed sessions. Append-only in the sense that matters: no DELETE, ever. '
@@ -266,6 +275,10 @@ COMMENT ON COLUMN public.workout.exercises_snapshot IS
 -- arc_load_v1's columns ARE in this snapshot (session_rpe, source above;
 -- athlete.flags / time_zone; program status 'external'): migration
 -- 20261028000001 is live on Supabase, Neon production and the dev branch.
+--
+-- workout.athlete_id / client_key ARE in this snapshot (migration
+-- 20261030000001). Hand-apply worker/schema/workout-client-key.sql on a
+-- Neon created before they landed.
 
 -- =============================================================================
 -- SESSION_OBSERVATION

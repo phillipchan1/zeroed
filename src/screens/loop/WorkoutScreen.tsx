@@ -26,6 +26,9 @@ import { rpeHalfStepsEnabled } from '../../lib/api'
 import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
 import { isSetLogged, tallySession } from '../../engine/volume'
 import {
+  applySetField, completeSetLog, revertSetAutofill, type SetMetricField,
+} from '../../engine/setLogger'
+import {
   effectiveTrackingType, suggestSwaps, searchLibrary, buildSwap,
   EQUIPMENT_LABEL, PATTERN_LABEL, TRACKING_LABEL, type Equipment,
 } from '../../engine/exerciseLibrary'
@@ -170,9 +173,6 @@ function SetHeader({
 
 // ---- Set row (tracking-type aware) -----------------------------------------
 
-// Numeric metric fields that the check-to-complete autofill can touch.
-type MetricField = 'weight' | 'reps' | 'rpe' | 'duration' | 'distance'
-
 interface SetRowProps {
   setNum: number
   log: SetLog
@@ -199,6 +199,11 @@ function SetRow({
 }: SetRowProps) {
   const [rpeOpen, setRpeOpen] = useState(false)
   const rpeRef = useRef<HTMLDivElement>(null)
+  // Latest numbers for this row, including keystrokes the parent has not
+  // re-rendered yet. Spreading the `log` prop on each edit was dropping the
+  // just-typed weight when reps (or Done) landed in the same turn.
+  const logRef = useRef(log)
+  useEffect(() => { logRef.current = log }, [log])
 
   // Dismiss the RPE popover on any interaction outside it — tapping
   // elsewhere in the set row shouldn't leave it hanging open.
@@ -213,7 +218,7 @@ function SetRow({
 
   // Which fields *this row's* check auto-filled — so un-checking can revert
   // exactly those, while anything the athlete typed by hand is left alone.
-  const [autofilled, setAutofilled] = useState<MetricField[]>([])
+  const [autofilled, setAutofilled] = useState<SetMetricField[]>([])
   // The lock-on animation plays for the tap that completes the set — not when a
   // resumed session repaints sets that were already done.
   const [snap, setSnap] = useState(false)
@@ -227,11 +232,16 @@ function SetRow({
     return Number.isFinite(n) ? Math.max(0, n) : null
   }
 
+  function commit(next: SetLog) {
+    logRef.current = next
+    onChange(next)
+  }
+
   // Any manual edit means the athlete owns that field now: drop it from the
   // autofill set so a later un-check won't wipe their number.
-  function setField(field: MetricField, value: number | null) {
+  function setField(field: SetMetricField, value: number | null) {
     setAutofilled((a) => (a.includes(field) ? a.filter((f) => f !== field) : a))
-    onChange({ ...log, [field]: value })
+    commit(applySetField(logRef.current, field, value))
   }
 
   // Tap-to-complete: toggling a set ON carries the previous set's numbers into
@@ -239,36 +249,23 @@ function SetRow({
   // set) is one tap, not a retype. Where there's nothing to carry we fall back
   // to the prescription. Un-checking reverts only what we filled.
   function toggleDone() {
-    if (log.done) {
-      const reverted: SetLog = { ...log, done: false }
-      autofilled.forEach((f) => { reverted[f] = null })
+    const current = logRef.current
+    if (current.done) {
       setAutofilled([])
-      onChange(reverted)
+      commit(revertSetAutofill(current, autofilled))
       return
     }
-    const next: SetLog = { ...log, done: true }
-    const filled: MetricField[] = []
-    const fill = (field: MetricField, value: number | null | undefined) => {
-      if (value != null && next[field] == null) { next[field] = value; filled.push(field) }
-    }
-    if (trackingType === 'weight_reps') {
-      // carry.weight is already stored-unit; prescribedLoad was parsed out of
-      // the prescription text the athlete READS, so it has to be converted in.
-      fill('weight', carry.weight ?? (prescribedLoad != null ? u.store(prescribedLoad) : null))
-      fill('reps', carry.reps ?? prescribedReps)
-      fill('rpe', carry.rpe)
-    } else if (trackingType === 'bodyweight_reps') {
-      fill('reps', carry.reps ?? prescribedReps)
-      fill('weight', carry.weight)
-      fill('rpe', carry.rpe)
-    } else if (trackingType === 'time') {
-      fill('duration', carry.duration ?? prescribedDuration)
-      fill('rpe', carry.rpe)
-    } else if (trackingType === 'distance') {
-      fill('distance', carry.distance)
-    }
+    // carry.weight is already stored-unit; prescribedLoad was parsed out of
+    // the prescription text the athlete READS, so it has to be converted in.
+    const { next, autofilled: filled } = completeSetLog(current, {
+      trackingType,
+      carry,
+      prescribedWeight: prescribedLoad != null ? u.store(prescribedLoad) : null,
+      prescribedReps,
+      prescribedDuration,
+    })
     setAutofilled(filled)
-    onChange(next)
+    commit(next)
     setSnap(true)
     tick()
     playSetClick()
@@ -334,7 +331,7 @@ function SetRow({
                     key={v}
                     type="button"
                     className={`rpe-pop__btn${missed === v ? ' rpe-pop__btn--on' : ''}`}
-                    onClick={() => onChange({ ...log, missed_reps: v || null })}
+                    onClick={() => commit({ ...logRef.current, missed_reps: v || null })}
                   >
                     {v === 3 ? '3+' : v}
                   </button>

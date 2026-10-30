@@ -118,6 +118,9 @@ const COLUMNS: Record<string, Set<string>> = {
     // arc_load_v1: Foster session RPE, and 'external' for a session logged
     // outside the plan.
     'session_rpe', 'source',
+    // Idempotent commit (migration 20261030000001): outbox entry id, unique
+    // per athlete. athlete_id is stamped from the session, never the client.
+    'athlete_id', 'client_key',
   ]),
   session_observation: new Set([
     'id', 'workout_id', 'category', 'signal', 'severity', 'logged_at',
@@ -310,6 +313,36 @@ export async function runSql<T extends object>(sql: Sql, text: string, params: u
   const unsafe = (sql as unknown as { unsafe: (q: string, p?: unknown[]) => Promise<T[]> }).unsafe
   if (typeof unsafe !== 'function') throw new Error('sql.unsafe is required')
   return unsafe.call(sql, text, params)
+}
+
+function uniqueViolation(err: unknown): boolean {
+  if (!err || typeof err !== 'object') return false
+  const code = 'code' in err ? String((err as { code: unknown }).code) : ''
+  const cause = 'cause' in err ? (err as { cause?: { code?: unknown } }).cause : undefined
+  const causeCode = cause && typeof cause === 'object' && 'code' in cause ? String(cause.code) : ''
+  const message = err instanceof Error ? err.message : String(err)
+  return code === '23505' || causeCode === '23505' || /duplicate key value|unique constraint/i.test(message)
+}
+
+async function existingWorkoutForClientKey(
+  sql: Sql,
+  athleteId: string,
+  clientKey: string,
+): Promise<object | null> {
+  const owner = bindOwner('workout', athleteId, 2, 'workout')
+  const rows = await runSql<object>(
+    sql,
+    `SELECT workout.* FROM workout WHERE workout.client_key = $1 AND ${owner.text} LIMIT 1`,
+    [clientKey, ...owner.params],
+  )
+  return rows[0] ?? null
+}
+
+function firstClientKey(rows: Record<string, unknown>[]): string | null {
+  for (const row of rows) {
+    if (typeof row.client_key === 'string' && row.client_key.length > 0) return row.client_key
+  }
+  return null
 }
 
 export async function resolveAthleteId(sql: Sql, userId: string): Promise<string | null> {
@@ -777,6 +810,9 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
         if (table === 'athlete') { delete row.id; delete row.flags }
         if (table !== 'athlete') delete row.auth_user_id
         if (table === 'workout') {
+          // Owner comes from the session, never the payload — otherwise a unique
+          // (athlete, client_key) could be pointed at someone else.
+          if (ctx.athleteId) row.athlete_id = ctx.athleteId
           const rpeErr = workoutRpeError(row, ctx.rpeHalfSteps ?? rpeHalfStepsOn())
           if (rpeErr) return fail(rpeErr, 400)
         }
@@ -811,8 +847,31 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
         }
       }
       text += ` ${returningSql(table, query.returning)}`
-      const rows = await runSql<object>(sql, text, params)
+      let rows: object[]
+      try {
+        rows = await runSql<object>(sql, text, params)
+      } catch (err) {
+        if (query.op === 'insert' && table === 'workout' && uniqueViolation(err) && ctx.athleteId) {
+          const key = firstClientKey(prepared)
+          const existing = key ? await existingWorkoutForClientKey(sql, ctx.athleteId, key) : null
+          if (existing) {
+            if (!query.returning) return { data: null, error: null, count: 1, status: 201 }
+            return shapeResult([existing], query, 1)
+          }
+        }
+        throw err
+      }
       if (query.op === 'upsert' && rows.length === 0 && ctx.athleteId) return fail('not found', 404)
+      if (
+        query.op === 'insert' && table === 'workout' && rows.length === 0 && ctx.athleteId
+      ) {
+        const key = firstClientKey(prepared)
+        const existing = key ? await existingWorkoutForClientKey(sql, ctx.athleteId, key) : null
+        if (existing) {
+          if (!query.returning) return { data: null, error: null, count: 1, status: 201 }
+          return shapeResult([existing], query, 1)
+        }
+      }
       if (!query.returning) return { data: null, error: null, count: rows.length, status: 201 }
       return shapeResult(rows, query, rows.length)
     }
@@ -826,6 +885,9 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       delete row.auth_user_id
       if (ATHLETE_COL.has(table)) row.athlete_id = ctx.athleteId
       if (table === 'athlete') { delete row.athlete_id; delete row.flags }
+      // athlete_id on workout is a denormalized unique-index column, not a
+      // writable owner. An update must not re-point it.
+      if (table === 'workout') delete row.athlete_id
       const blocked = await assertWritableRow(sql, table, row, ctx, false)
       if (blocked) return blocked
       if (table === 'workout') {
