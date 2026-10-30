@@ -7,6 +7,7 @@ import {
 } from '../../lib/workoutDraft'
 import { loadCache, saveCache, useCachedLoader } from '../../lib/cache'
 import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
+import { draftHasLoggedSets, liveWorkoutReconcile } from '../../lib/routineVersion'
 import { invalidateLoopViews, cacheKeys } from '../../lib/loopCache'
 import {
   enqueueSession, commitPending, parsePendingRef, pendingSessionById, committedWorkoutIdFor,
@@ -1603,6 +1604,10 @@ export function WorkoutScreen({
   // Flips once the athlete edits anything this open, so a late network draft
   // restore can't clobber numbers they've already entered.
   const startedLoggingRef = useRef(false)
+  const setLogsRef = useRef(setLogs)
+  setLogsRef.current = setLogs
+  const routineRef = useRef(routine)
+  routineRef.current = routine
 
   useEffect(() => {
     if (!routineId) return
@@ -1621,6 +1626,35 @@ export function WorkoutScreen({
     return () => { if (timerRef.current) clearInterval(timerRef.current) }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [routineId])
+
+  // App-state can land after first paint on a slow gym link. Today already
+  // shows the rewritten session; this screen must not stay on the stale
+  // cached bootstrap. Same reconcile as the seed (name / exercises /
+  // updated_at). A draft with logged sets is left on the grid the athlete
+  // is typing into.
+  useEffect(() => {
+    if (!routineId || isEdit) return
+    const snapshot = routines.find((r) => r.id === routineId)
+    if (!snapshot) return
+    const existing = loadCache<WorkoutBootstrap>(bootKey(snapshot.id))
+    seedWorkoutBootstrap(
+      snapshot,
+      existing?.athleteId ?? athleteId,
+      existing?.athleteName ?? athleteName,
+      existing?.onboardingStep ?? onboardingStep,
+    )
+    const logged = startedLoggingRef.current
+      || draftHasLoggedSets(setLogsRef.current)
+      || draftHasLoggedSets(seedDraft?.setLogs)
+    const live = liveWorkoutReconcile(snapshot, routineRef.current, logged)
+    if (live.adoptRoutine) {
+      setRoutine(snapshot)
+      if (live.rebuildGrid) {
+        setSetLogs(buildTemplate(snapshot))
+        setLoading(false)
+      }
+    }
+  }, [routines, routineId, isEdit, athleteId, athleteName, onboardingStep, seedDraft])
 
   // Rest-timer ticker — only runs while a rest is active. The alert fires on the
   // transition to zero and nowhere else: this effect re-runs whenever restEndsAt
@@ -1801,12 +1835,19 @@ export function WorkoutScreen({
     }
 
     const r = data as RoutineRow
-    setRoutine(r)
     const exs = r.exercises as ExerciseTemplate[]
     const initial = buildTemplate(r)
+    const logged = startedLoggingRef.current
+      || draftHasLoggedSets(setLogsRef.current)
+      || draftHasLoggedSets(seedDraft?.setLogs)
+    const live = liveWorkoutReconcile(r, routineRef.current, logged)
+    // Network (or a late snapshot) can be a rewrite under the same id. Adopt
+    // it unless the athlete already has numbers on the stale grid.
+    if (live.adoptRoutine || !routineRef.current) setRoutine(r)
     // Cold open only: no cached template was seeded, so lay down the empty grid
-    // now. A warm open already painted it (plus any local draft) synchronously.
-    if (cold) setSetLogs(initial)
+    // now. A warm open already painted it (plus any local draft) synchronously
+    // — unless the painted routine is a stale rewrite and the grid is empty.
+    if (cold || live.rebuildGrid) setSetLogs(initial)
 
     if (isEdit && !hydrateEdit(initial, editRow.data)) {
       setEditHydrating(false)

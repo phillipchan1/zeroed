@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   draftHasLoggedSets,
+  liveWorkoutReconcile,
   reconcileWorkoutBootstrap,
   routineContentDiffers,
   routineVersionMarker,
@@ -86,6 +87,24 @@ ok(!bootSrc.includes('clearDraft('), 'stale path does not call the remote-cleari
 const screenSrc = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../screens/loop/WorkoutScreen.tsx'), 'utf8')
 ok(screenSrc.includes('seedWorkoutBootstrap'), 'workout screen reseeds from the snapshot before painting')
 ok(screenSrc.includes('routines.find'), 'workout screen looks up the snapshot routine by id')
+ok(screenSrc.includes('liveWorkoutReconcile'), 'workout screen reconciles when a late snapshot arrives')
+ok(screenSrc.includes('draftHasLoggedSets'), 'late reconcile checks the live grid for logged sets')
+
+const lateEmpty = liveWorkoutReconcile(currentFriday, staleFriday, false)
+ok(lateEmpty.adoptRoutine === true, 'late snapshot adopts the fresher routine when the grid is empty')
+ok(lateEmpty.rebuildGrid === true, 'late snapshot rebuilds an empty grid to the snapshot')
+
+const lateLogged = liveWorkoutReconcile(currentFriday, staleFriday, true)
+ok(lateLogged.adoptRoutine === false, 'late snapshot does not swap the exercise list under logged sets')
+ok(lateLogged.rebuildGrid === false, 'late snapshot does not rebuild a grid with logged sets')
+
+const lateSame = liveWorkoutReconcile(currentFriday, currentFriday, false)
+ok(lateSame.adoptRoutine === false && lateSame.rebuildGrid === false, 'late snapshot matching the paint is a no-op')
+
+const lateCold = liveWorkoutReconcile(currentFriday, null, false)
+ok(lateCold.adoptRoutine === true && lateCold.rebuildGrid === true, 'late snapshot on a cold paint adopts and builds the grid')
+
+ok(bootSrc.includes('liveWorkoutReconcile'), 'workoutBoot re-exports the live reconcile')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {

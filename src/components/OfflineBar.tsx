@@ -1,21 +1,23 @@
 /* Connectivity surface — a small status pill in the top corner, not a banner.
  *
- * Two states, both deliberately quiet. "Offline" exists so cached data isn't
+ * Three states, all deliberately quiet. "Offline" exists so cached data isn't
  * mistaken for live; it's a badge, not an alert — the app is fully usable
  * offline, so a full-width strip across the top overstated a condition the
- * athlete can't act on and doesn't need to think about mid-session. The update
- * prompt is the only tappable one, since it's the only one that asks for
+ * athlete can't act on and doesn't need to think about mid-session. A timed-out
+ * or slow probe is `degraded`: a subtle "Slow connection", never Offline. The
+ * update prompt is the only tappable one, since it's the only one that asks for
  * anything.
  *
- * The offline state comes from the verified connectivity store (useOnline.ts),
- * so it appears only when a probe has actually failed — never off a stale
- * `navigator.onLine` reading.
+ * The state comes from the verified connectivity store (useOnline.ts), so
+ * Offline appears only after hard network failures — never off a stale
+ * `navigator.onLine` reading, and never off a probe timeout.
  */
 import { RefreshCw } from 'lucide-react'
-import { useOnline, useServiceWorkerUpdate } from '../lib/useOnline'
+import { useConnectivity, useServiceWorkerUpdate } from '../lib/useOnline'
+import { connectivityBadge, connectivityBadgeLabel } from '../lib/connectivityProbe'
 
 export function OfflineBar() {
-  const online = useOnline()
+  const status = useConnectivity()
   const { updateReady, applyUpdate } = useServiceWorkerUpdate()
 
   if (updateReady) {
@@ -32,11 +34,21 @@ export function OfflineBar() {
     )
   }
 
-  if (!online) {
+  const badge = connectivityBadge(status)
+  const label = connectivityBadgeLabel(badge)
+  if (badge === 'offline') {
     return (
       <div className="conn-pill conn-pill--offline" role="status" aria-live="polite">
         <span className="conn-pill__dot" aria-hidden="true" />
-        <span>Offline</span>
+        <span>{label}</span>
+      </div>
+    )
+  }
+
+  if (badge === 'slow') {
+    return (
+      <div className="conn-pill conn-pill--degraded" role="status" aria-live="polite">
+        <span>{label}</span>
       </div>
     )
   }

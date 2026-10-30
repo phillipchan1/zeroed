@@ -54,3 +54,29 @@ export function reconcileWorkoutBootstrap(
   }
   return { reseed: true, discardEmptyDraft: !draftLoggedSets }
 }
+
+export interface LiveWorkoutReconcile {
+  /** Paint the snapshot's name / exercises on the open workout screen. */
+  adoptRoutine: boolean
+  /** Rebuild the empty set grid to match the snapshot. Never true when sets are logged. */
+  rebuildGrid: boolean
+}
+
+/**
+ * The open workout screen vs a snapshot that arrived late (slow app-state).
+ * Same version compare as the bootstrap seed. A draft with logged sets keeps
+ * the grid the athlete is typing into — we never swap the exercise list under
+ * numbers they already logged.
+ */
+export function liveWorkoutReconcile(
+  snapshot: RoutineVersioned,
+  painted: RoutineVersioned | null,
+  draftLoggedSets: boolean,
+): LiveWorkoutReconcile {
+  if (draftLoggedSets) return { adoptRoutine: false, rebuildGrid: false }
+  if (!painted) return { adoptRoutine: true, rebuildGrid: true }
+  if (!routineContentDiffers(painted, snapshot)) {
+    return { adoptRoutine: false, rebuildGrid: false }
+  }
+  return { adoptRoutine: true, rebuildGrid: true }
+}

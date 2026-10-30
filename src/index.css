@@ -2398,6 +2398,16 @@ textarea.input {
   color: var(--text-dim);
   pointer-events: none;
 }
+.conn-pill--degraded {
+  background: rgba(18, 18, 18, 0.45);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  color: var(--text-dim);
+  pointer-events: none;
+  text-transform: none;
+  letter-spacing: 0.02em;
+  opacity: 0.8;
+}
 .conn-pill__dot {
   width: 5px;
   height: 5px;

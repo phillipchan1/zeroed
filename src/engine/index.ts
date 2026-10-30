@@ -31,6 +31,7 @@ import type {
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
+import { resolveWorkoutInsert } from '../lib/workoutCommit'
 import { orderByPlannedDay } from '../lib/weekOrder'
 import {
   callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callPhaseDesign, callInfoGain, callTarget,
@@ -4116,19 +4117,21 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
       ],
       (row) => supabase.from('workout').insert(row).select().single(),
     )
-    if (error || !workout) {
-      const existingId = await existingWorkoutIdForClientKey(p.id)
-      if (existingId) {
-        workoutId = existingId
-      } else {
-        // The cached external routine is gone (a debug reset): forget it, so the
-        // outbox's retry files the session under a fresh one.
-        if (p.outsidePlan) forgetOutsidePlanRoutine(p.athleteId)
-        throw error ?? new Error('workout insert failed')
-      }
-    } else {
-      workoutId = (workout as { id: string }).id
+    const existingId = (error || !workout)
+      ? await existingWorkoutIdForClientKey(p.id)
+      : null
+    const resolved = resolveWorkoutInsert({
+      insertedId: workout ? (workout as { id: string }).id : null,
+      error: error ? { code: error.code, message: error.message } : null,
+      existingId,
+    })
+    if (!resolved.ok) {
+      // The cached external routine is gone (a debug reset): forget it, so the
+      // outbox's retry files the session under a fresh one.
+      if (p.outsidePlan) forgetOutsidePlanRoutine(p.athleteId)
+      throw error ?? new Error(resolved.error.message ?? 'workout insert failed')
     }
+    workoutId = resolved.workoutId
   }
 
   // The workout row now exists. Everything below is best-effort and must NOT
