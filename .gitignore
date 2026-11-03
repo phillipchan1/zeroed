@@ -9,6 +9,9 @@ dist/
 .env.*.local
 .env
 .dev.vars
+
+# Operator-only athlete seed (emails, loads, health notes)
+local/
 mcp/.env
 supabase/functions/.env       # Edge Function secrets for local `functions serve`
 supabase/.temp/

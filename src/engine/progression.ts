@@ -1,7 +1,7 @@
 /**
  * Progression engines. Propose next week's prescription; never write it.
  *
- * Phil fixtures (spec §2 / §8):
+ * Fixtures (spec §2 / §8):
  *   OHP 4x4 @115 all ≤ RPE 7 → 120; one set at 7.5 → hold
  *   DB bench 4x8 @100 → 105; 8/8/7/7 → 100
  *   Alactic 8 rounds → 10, lifts untouched

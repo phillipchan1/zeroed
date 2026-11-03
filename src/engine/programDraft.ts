@@ -189,7 +189,10 @@ function buildExercise(
   const cueText = cleanText(cue, 160)
   if (cueText) ex.cue = cueText
   const rpe = Number(targetRpe)
-  if (Number.isFinite(rpe)) ex.target_rpe = Math.max(1, Math.min(10, Math.round(rpe * 10) / 10))
+  if (Number.isFinite(rpe)) {
+    ex.target_rpe = Math.max(1, Math.min(10, Math.round(rpe * 10) / 10))
+    ex.rpe_source = 'coach'
+  }
   return ex
 }
 
@@ -319,7 +322,9 @@ export function applyEditsToDraft(
         }
         if (e.cue) { ex.cue = cleanText(e.cue, 160); touched = true }
         if (e.target_rpe != null && Number.isFinite(Number(e.target_rpe))) {
-          ex.target_rpe = Math.max(1, Math.min(10, Math.round(Number(e.target_rpe) * 10) / 10)); touched = true
+          ex.target_rpe = Math.max(1, Math.min(10, Math.round(Number(e.target_rpe) * 10) / 10))
+          ex.rpe_source = 'coach'
+          touched = true
         }
         if (applyTrackFields(ex, e)) touched = true
         if (!touched) { skip('nothing to change'); break }

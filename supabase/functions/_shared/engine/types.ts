@@ -7,6 +7,7 @@ export interface ExerciseTemplate {
   load?: string
   cue?: string
   target_rpe?: number
+  rpe_source?: 'coach'
   insight_id?: string
   tracking_type?: TrackingType
   reading?: boolean

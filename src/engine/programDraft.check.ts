@@ -205,6 +205,8 @@ const retuned = applyEditsToDraft(base, [
 const retDiff = diffDraft(base, retuned.draft)
 ok(retDiff.changed === 1 && retDiff.added === 0 && retDiff.removed === 0,
   `a retune is a change, not a swap (+${retDiff.added} −${retDiff.removed} ~${retDiff.changed})`)
+ok(retuned.draft.sessions[1].exercises.find((e) => /bench/i.test(e.name))?.rpe_source === 'coach',
+  'a coach/MCP target_rpe write stamps rpe_source')
 
 // Word bucket → written/numeric load (MCP: update_exercise load: '~170 lb'
 // against a stored 'light'). cleanLoad used to drop anything outside

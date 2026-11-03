@@ -2,11 +2,11 @@
  * tracks_v1 MCP tools. Writes preview unless confirm=true.
  * SQL is scoped to store.athleteId on every query.
  */
-import { applyMeasurement, computeGoalStatus, isGoalDirection, isGoalSide, pairKey, projectedAtDue, type GoalMeasurement } from '../../src/engine/goals.ts'
+import { applyMeasurement, computeGoalStatus, goalNumber, isGoalDirection, isGoalSide, lastMeasuredOn, pairKey, projectedAtDue, type GoalMeasurement } from '../../src/engine/goals.ts'
 import { mcpStamp, writePreview } from '../../src/engine/mcpStamp.ts'
 import { evaluateAutoregRules, type AutoregRule } from '../../src/engine/autoreg.ts'
 import { proposeNextWeek, type PerformedExercise, type ProgressionRule } from '../../src/engine/progression.ts'
-import { daysHitByTrack, findTrack, isEngineType, resolveTrack, suggestTrackName, type TrackRef } from '../../src/engine/tracks.ts'
+import { daysHitByTrack, findTrack, GENERAL_TRACK_SEED, isEngineType, resolveTrack, suggestTrackName, type TrackRef } from '../../src/engine/tracks.ts'
 import { jsonParam } from './db.ts'
 import type { ConnectedStore, LiveProgram } from './store.ts'
 import { McpUserError } from './userError.ts'
@@ -254,6 +254,19 @@ async function createTrack(store: ConnectedStore, args: Record<string, unknown>)
     if (asString(args.client_key)) return getTrack(store, existing.id)
     throw new McpUserError(`Track "${name}" already exists.`)
   }
+  await store.sql`
+    INSERT INTO track (program_id, name, color, icon, sort_order, purpose)
+    SELECT ${program.id}, ${GENERAL_TRACK_SEED.name}, ${GENERAL_TRACK_SEED.color},
+           ${GENERAL_TRACK_SEED.icon}, ${GENERAL_TRACK_SEED.sort_order}, ${GENERAL_TRACK_SEED.purpose}
+    WHERE EXISTS (
+      SELECT 1 FROM program
+      WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
+        AND status IS DISTINCT FROM 'external'
+    )
+      AND NOT EXISTS (
+        SELECT 1 FROM track WHERE program_id = ${program.id} AND name = ${GENERAL_TRACK_SEED.name}
+      )
+  `
   const [row] = await store.sql<{ id: string }[]>`
     INSERT INTO track (program_id, name, color, icon, sort_order, purpose, methodology_text, sources, deload_policy, retest_policy)
     SELECT ${program.id}, ${name}, ${asString(args.color) ?? '#9A9A9A'}, ${asString(args.icon) ?? 'circle'},
@@ -453,27 +466,42 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
   const rows = await store.sql<{
     id: string; name: string; metric: string; unit: string | null; side: string | null
     direction: string
-    target: number | null; baseline: number | null; current: number | null; best: number | null
+    target: number | null; target_range_hi: number | null
+    baseline: number | null; current: number | null; best: number | null
     due_date: string | null; status: string; track_id: string | null
   }[]>`
-    SELECT id, name, metric, unit, side, direction, target, baseline, current, best, due_date::text, status, track_id
+    SELECT id, name, metric, unit, side, direction, target, target_range_hi, baseline, current, best, due_date::text, status, track_id
     FROM athlete_goal WHERE athlete_id = ${store.athleteId}
     ORDER BY name
   `
-  const measurements = await store.sql<{ goal_id: string; measured_on: string }[]>`
-    SELECT DISTINCT ON (goal_id) goal_id, measured_on::text
+  const measurements = await store.sql<{
+    goal_id: string; measured_on: string; value: number | string; client_key: string | null
+  }[]>`
+    SELECT goal_id, measured_on::text, value, client_key
     FROM goal_measurement WHERE athlete_id = ${store.athleteId}
-    ORDER BY goal_id, measured_on DESC
+    ORDER BY measured_on
   `
-  const last: Record<string, string> = {}
-  for (const m of measurements) last[m.goal_id] = m.measured_on
+  const historyByGoal = new Map<string, GoalMeasurement[]>()
+  for (const m of measurements) {
+    const list = historyByGoal.get(m.goal_id) ?? []
+    list.push({
+      date: m.measured_on,
+      value: goalNumber(m.value) ?? 0,
+      source: 'manual',
+      client_key: m.client_key,
+    })
+    historyByGoal.set(m.goal_id, list)
+  }
   const today = todayISO(await athleteZone(store))
-  let list = rows.map((g) => ({
-    ...g,
-    status: computeGoalStatus(g, [], today),
-    last_measured: last[g.id] ?? null,
-    pair: pairKey(g.name),
-  }))
+  let list = rows.map((g) => {
+    const history = historyByGoal.get(g.id) ?? []
+    return {
+      ...g,
+      status: computeGoalStatus(g, history, today),
+      last_measured: lastMeasuredOn(history),
+      pair: pairKey(g.name),
+    }
+  })
   if (track) list = list.filter((g) => g.track_id === track.id)
   if (status) list = list.filter((g) => g.status === status)
   return { ...mcpStamp(new Date(), await athleteZone(store)), goals: list }
@@ -601,18 +629,28 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
   `
   if (!goal) throw new McpUserError(`No goal "${ident}".`)
   const since = asString(args.since)
-  const rows = await store.sql<{ measured_on: string; value: number; side: string | null; source: string; note: string | null }[]>`
-    SELECT measured_on::text, value, side, source, note
+  const rows = await store.sql<{
+    measured_on: string; value: number | string; side: string | null; source: string; note: string | null
+    client_key: string | null
+  }[]>`
+    SELECT measured_on::text, value, side, source, note, client_key
     FROM goal_measurement
     WHERE athlete_id = ${store.athleteId} AND goal_id = ${goal.id}
       AND (${since ?? null}::date IS NULL OR measured_on >= ${since ?? null}::date)
     ORDER BY measured_on
   `
-  const history: GoalMeasurement[] = rows.map((r) => ({ date: r.measured_on, value: Number(r.value), side: r.side, source: r.source, note: r.note }))
+  const history: GoalMeasurement[] = rows.map((r) => ({
+    date: r.measured_on,
+    value: goalNumber(r.value) ?? 0,
+    side: r.side,
+    source: r.source,
+    note: r.note,
+    client_key: r.client_key,
+  }))
   const today = todayISO(await athleteZone(store))
   return {
     ...mcpStamp(new Date(), await athleteZone(store)),
-    goal: { ...goal, status: computeGoalStatus(goal, history, today) },
+    goal: { ...goal, status: computeGoalStatus(goal, history, today), last_measured: lastMeasuredOn(history) },
     measurements: history,
     trend: history.length >= 2 ? history[history.length - 1].value - history[0].value : 0,
     projected_at_due: projectedAtDue(history, goal.due_date),

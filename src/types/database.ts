@@ -406,6 +406,9 @@ export interface ExerciseTemplate {
   // in gatherSessionPrescription — each lift tunes to its own target rather than a
   // single program-wide number. Optional; falls back to the week's target.
   target_rpe?: number
+  // Set when a coach / MCP write stamps the target. A stored 1 without this
+  // is treated as a placeholder and proposed on Coach — never rewritten silently.
+  rpe_source?: 'coach'
   insight_id?: string // the insight this exercise was placed to address (Shift 5)
   // How this movement is logged. Optional on disk: legacy/agent routines omit it
   // and the WorkoutScreen resolves an effective type from the library at render.

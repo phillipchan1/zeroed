@@ -1,6 +1,6 @@
 // Run: node --experimental-strip-types src/engine/tracks.check.ts
 import {
-  daysHitByTrack, formatSuperset, groupByTrack, suggestTrackName,
+  daysHitByTrack, formatSuperset, groupByTrack, suggestTrackName, wantsGeneralTrack,
 } from './tracks.ts'
 
 const fails: string[] = []
@@ -28,6 +28,9 @@ ok(suggestTrackName('Tib Raise') === 'Mobility', 'tib → Mobility')
 ok(suggestTrackName('Reverse Nordic') === 'Mobility', 'nordic → Mobility')
 ok(suggestTrackName('Band Walk', 'Basketball') === 'Basketball', 'session named basketball wins')
 ok(suggestTrackName('Face Pull') === 'Hypertrophy', 'face pull → Hypertrophy')
+ok(wantsGeneralTrack('active') && wantsGeneralTrack('draft') && wantsGeneralTrack('paused'), 'planned programs get General')
+ok(!wantsGeneralTrack('external'), 'external / outside-plan programs do not get General')
+ok(!wantsGeneralTrack(null) && !wantsGeneralTrack(undefined), 'missing status does not invent a program')
 
 const lifting = { id: 't-lift', name: 'Lifting', color: '#5A8FB8', icon: 'dumbbell', order: 1 }
 const cond = { id: 't-cond', name: 'Conditioning', color: '#D4A848', icon: 'zap', order: 2 }

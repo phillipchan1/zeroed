@@ -19,7 +19,7 @@ export const ENGINE_TYPES = [
 
 export type EngineType = (typeof ENGINE_TYPES)[number]
 
-export const PHIL_TRACKS = [
+export const EXAMPLE_NAMED_TRACKS = [
   { name: 'Lifting', color: '#5A8FB8', icon: 'dumbbell', order: 1, purpose: 'Main lifts — Wendler TM, RTS, Westside speed, minimum dose', methodology_text: 'Wendler 5/3/1 TM, RTS autoregulation, Westside dynamic effort, Bickel 2011 minimum dose' },
   { name: 'Conditioning', color: '#D4A848', icon: 'zap', order: 2, purpose: 'Engine, sprints, plyos', methodology_text: 'Jamieson (8 Weeks Out), ALTIS acceleration, HWPO/Mayhem finishers, NSCA plyo contacts' },
   { name: 'Basketball', color: '#5FB87A', icon: 'circle', order: 3, purpose: 'Sport as conditioning; post-game ratings', methodology_text: 'Vermeil hierarchy; game as conditioning' },
@@ -78,6 +78,19 @@ export function findTrack(tracks: TrackRef[], idOrName: string | null | undefine
       return other.includes(want) || want.includes(other)
     })
     ?? null
+}
+
+export const GENERAL_TRACK_SEED = {
+  name: 'General',
+  color: '#9A9A9A',
+  icon: 'circle',
+  sort_order: 0,
+  purpose: 'Default track for unassigned work',
+} as const
+
+/** External / outside-plan programs do not get a General track. */
+export function wantsGeneralTrack(status: string | null | undefined): boolean {
+  return status != null && status !== 'external'
 }
 
 export function generalTrack(tracks: TrackRef[]): TrackRef | null {

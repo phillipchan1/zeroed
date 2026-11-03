@@ -119,10 +119,11 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
                       </p>
                       <GoalBar goal={g} />
                       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
-                        <Sparkline values={g.history.map((h) => h.value)} />
-                        {g.due_date && (
-                          <span className="num text-xs text-dim">due {g.due_date.slice(5)}</span>
-                        )}
+                        <Sparkline values={g.history.filter((h) => !h.client_key?.startsWith('seed:')).map((h) => h.value)} />
+                        <span className="num text-xs text-dim">
+                          {g.last_measured ? `last ${g.last_measured}` : 'no measurement'}
+                          {g.due_date ? ` · due ${g.due_date.slice(5)}` : ''}
+                        </span>
                       </div>
                     </button>
                   ))}

@@ -19,6 +19,7 @@ export interface GoalMeasurement {
   side?: string | null
   source: string
   note?: string | null
+  client_key?: string | null
 }
 
 export interface GoalFields {
@@ -44,11 +45,40 @@ export function isGoalDirection(v: unknown): v is GoalDirection {
   return typeof v === 'string' && (GOAL_DIRECTIONS as readonly string[]).includes(v)
 }
 
-function meetsTarget(direction: string, current: number, target: number, hi?: number | null): boolean {
-  if (direction === 'lower') return current <= target
-  if (direction === 'pass') return current >= 1
-  if (hi != null && Number.isFinite(hi)) return current >= target
-  return current >= target
+/** Postgres NUMERIC often arrives as a string. Never compare those lexicographically. */
+export function goalNumber(value: unknown): number | null {
+  if (value == null || value === '') return null
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+export function isSeedMeasurement(m: { client_key?: string | null }): boolean {
+  return typeof m.client_key === 'string' && m.client_key.startsWith('seed:')
+}
+
+/** Latest real measured_on. Seed rows (client_key seed:*) do not count. */
+export function lastMeasuredOn(
+  history: Array<Pick<GoalMeasurement, 'date' | 'client_key'> | GoalMeasurement>,
+): string | null {
+  let latest: string | null = null
+  for (const m of history) {
+    const day = String(m.date ?? '').slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || isSeedMeasurement(m)) continue
+    if (!latest || day > latest) latest = day
+  }
+  return latest
+}
+
+function meetsTarget(direction: string, current: unknown, target: unknown, hi?: unknown): boolean {
+  const c = goalNumber(current)
+  if (c == null) return false
+  if (direction === 'pass') return c >= 1
+  const t = goalNumber(target)
+  if (t == null) return false
+  if (direction === 'lower') return c <= t
+  const ceiling = goalNumber(hi)
+  if (ceiling != null) return c >= t && c <= ceiling
+  return c >= t
 }
 
 function daysUntil(due: string | null | undefined, today: string): number | null {
@@ -60,7 +90,7 @@ function daysUntil(due: string | null | undefined, today: string): number | null
 }
 
 function slope(history: GoalMeasurement[]): number | null {
-  const pts = history.filter((h) => Number.isFinite(h.value)).slice(-6)
+  const pts = history.filter((h) => Number.isFinite(h.value) && !isSeedMeasurement(h)).slice(-6)
   if (pts.length < 2) return 0
   const first = pts[0].value
   const last = pts[pts.length - 1].value
@@ -77,14 +107,14 @@ export function computeGoalStatus(
   history: GoalMeasurement[],
   today: string,
 ): GoalStatus {
-  const current = goal.current
-  const target = goal.target
-  if (current != null && target != null && meetsTarget(goal.direction, current, target, goal.target_range_hi)) {
+  const current = goalNumber(goal.current)
+  const target = goalNumber(goal.target)
+  if (meetsTarget(goal.direction, current, target, goal.target_range_hi)) {
     return 'hit'
   }
   const dueIn = daysUntil(goal.due_date, today)
   const trend = slope(history)
-  const pending = current == null && (goal.baseline == null)
+  const pending = current == null && goalNumber(goal.baseline) == null
   if (pending) {
     if (dueIn != null && dueIn <= 21) return 'behind'
     return 'on_track'
@@ -102,18 +132,18 @@ export function applyMeasurement(
 ): { current: number; best: number | null; baseline: number | null } {
   const current = measurement.value
   const direction = goal.direction
-  let best = goal.best ?? null
+  let best = goalNumber(goal.best)
   if (best == null) best = current
   else if (direction === 'lower') best = Math.min(best, current)
   else best = Math.max(best, current)
-  const baseline = goal.baseline ?? current
+  const baseline = goalNumber(goal.baseline) ?? current
   return { current, best, baseline }
 }
 
 export function progressRatio(goal: GoalFields): number | null {
-  const current = goal.current
-  const target = goal.target
-  const baseline = goal.baseline
+  const current = goalNumber(goal.current)
+  const target = goalNumber(goal.target)
+  const baseline = goalNumber(goal.baseline)
   if (current == null || target == null) return null
   if (goal.direction === 'pass') return current >= 1 ? 1 : 0
   if (baseline == null || baseline === target) {
@@ -148,19 +178,3 @@ export function projectedAtDue(
   const slopePerMs = (pts[pts.length - 1].value - pts[0].value) / (last - first)
   return pts[pts.length - 1].value + slopePerMs * (dueMs - last)
 }
-
-export const PHIL_GOAL_SEED: Array<GoalFields & { note?: string; test_protocol?: string }> = [
-  { name: 'Bench 1RM', metric: 'e1rm', unit: 'lb', side: 'none', direction: 'higher', target: 295, target_range_hi: 300, current: 285, best: 285, baseline: 285, due_date: '2026-12-11', cadence: 'block', test_protocol: 'Paused or competition bench, Dec 7–11. Long-term 315.' },
-  { name: 'Strict OHP', metric: 'load_x_reps', unit: 'lb', side: 'none', direction: 'higher', target: 155, current: 125, best: 125, due_date: null, cadence: 'open', test_protocol: 'Strict press. Last best 125×5 (Aug 26).' },
-  { name: 'Squat held', metric: 'held_load', unit: 'lb', side: 'none', direction: 'higher', target: 375, due_date: '2026-12-11', cadence: 'block', test_protocol: 'Maintenance. A rep PR at RPE 8 counts as held. No maxing.' },
-  { name: 'Deadlift held', metric: 'held_load', unit: 'lb', side: 'none', direction: 'higher', target: 410, current: 350, due_date: '2026-12-11', cadence: 'block', test_protocol: 'TM 410 (hand-set) / best 445. 3×3 @350. No maxing.', note: 'Deadlift TM is 410 and must stay 410.' },
-  { name: 'Hip IR L', metric: 'hip_ir', unit: 'deg', side: 'L', direction: 'higher', target: 35, due_date: null, cadence: 'monthly', test_protocol: 'Seated or supine IR, each side.' },
-  { name: 'Hip IR R', metric: 'hip_ir', unit: 'deg', side: 'R', direction: 'higher', target: 35, due_date: null, cadence: 'monthly', test_protocol: 'Seated or supine IR, each side.' },
-  { name: 'Knee-to-wall L', metric: 'knee_to_wall', unit: 'in', side: 'L', direction: 'higher', target: 4, due_date: null, cadence: 'monthly' },
-  { name: 'Knee-to-wall R', metric: 'knee_to_wall', unit: 'in', side: 'R', direction: 'higher', target: 4, due_date: null, cadence: 'monthly' },
-  { name: 'Wall test', metric: 'wall_test', unit: 'pass', side: 'none', direction: 'pass', due_date: null, cadence: 'monthly', test_protocol: 'Pass / fail screen.' },
-  { name: 'Broad jump', metric: 'distance', unit: 'in', side: 'none', direction: 'higher', target: 100, current: 95, best: 95, baseline: 95, due_date: '2026-12-11', cadence: 'block' },
-  { name: 'Assault Bike 10-min calories', metric: 'calories', unit: 'cal', side: 'none', direction: 'higher', due_date: '2026-12-11', cadence: 'block', test_protocol: 'Set at first test.' },
-  { name: 'Repeat sprint drop-off', metric: 'dropoff_pct', unit: '%', side: 'none', direction: 'lower', target: 5, due_date: '2026-12-11', cadence: 'block', test_protocol: '6 × 20 m, drop-off %.' },
-  { name: 'Basketball gas tank', metric: 'rating', unit: '/10', side: 'none', direction: 'higher', target: 8, due_date: null, cadence: 'weekly', test_protocol: 'Post-game 1–10.' },
-]

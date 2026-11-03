@@ -9,6 +9,7 @@ import type { ProgramEdit } from '../../src/engine/agentClient.ts'
 import type { DraftSession } from '../../src/engine/programDraft.ts'
 import { formatDiff, formatDraft } from './format.ts'
 import { loadLiveProgram, type ConnectedStore, type LiveProgram } from './store.ts'
+import { placeholderRpePreviewSection } from '../../src/engine/rpePlaceholder.ts'
 
 export type ApplyTiming = 'now' | 'next_week'
 
@@ -161,12 +162,14 @@ export function previewEdits(live: LiveProgram, inputs: EditInput[], weekStart?:
     : want && want !== live.weekStart
       ? `# Preview against ${live.phaseName} (live template, labeled ${want})`
       : `# Preview against ${live.phaseName} (${live.weekStart} → ${live.weekEnd})`
+  const suggested = placeholderRpePreviewSection(base.sessions, live.phaseName)
   const text = [
     header,
     '',
     '## Outcomes',
     outcomeLines.join('\n') || 'No edits sent.',
     notes.length ? `\nCoach notes that would be stored:\n${notes.map((n) => `- ${n}`).join('\n')}` : '',
+    suggested ? `\n${suggested}` : '',
     '',
     '## Diff',
     formatDiff(diff),

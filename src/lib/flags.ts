@@ -57,7 +57,7 @@ export function arcLoadV1Enabled(env: FlagEnv, athleteFlags: unknown, search: st
 
 /**
  * Multi-track programs, structured goals, workout notes.
- * Athlete-row only — no build-time ceiling — so Phil sees it the day
+ * Athlete-row only — no build-time ceiling — so the UI appears the day
  * the flag is written. DEV builds also take `?flag=tracks_v1`.
  *
  *   UPDATE athlete SET flags = flags - 'tracks_v1';
