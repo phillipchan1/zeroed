@@ -974,9 +974,9 @@ textarea.input {
 }
 
 .nav__item {
-  /* Equal quarter-width columns: each item takes exactly 1/4 of the bar so the
-     icon + label always centre together and a wider label (PROGRAM) can't widen
-     its column, shove the icons out of line, or overflow on a narrow screen. */
+  /* Equal-width columns: each item takes the same share of the bar (four or
+     five, depending on tracks_v1) so the icon + label always centre together
+     and a wider label (PROGRAM) can't shove the icons out of line. */
   flex: 1 1 0;
   min-width: 0;
   display: flex;
@@ -4788,3 +4788,98 @@ textarea.input {
 .ivb__moves { display: flex; flex-wrap: wrap; gap: 6px; }
 .howto-tag--on { border-color: var(--signal); color: var(--signal); }
 .howto-tag--on:hover { color: var(--signal); border-color: var(--signal); }
+
+/* tracks_v1 — only painted when the athlete flag is on */
+.track-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.track-group { margin-top: 4px; }
+.track-group__head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 4px;
+}
+.track-group__bar {
+  width: 3px;
+  height: 14px;
+  border-radius: 2px;
+  flex-shrink: 0;
+}
+.track-group__row { position: relative; }
+.superset-tag {
+  position: absolute;
+  left: 0;
+  top: 12px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--computing);
+  letter-spacing: 0.04em;
+}
+.coverage { display: flex; flex-direction: column; gap: 8px; }
+.coverage__head, .coverage__row {
+  display: grid;
+  grid-template-columns: minmax(88px, 1.4fr) repeat(7, 1fr);
+  gap: 6px;
+  align-items: center;
+}
+.coverage__dow, .coverage__name {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+}
+.coverage__name { display: flex; align-items: center; gap: 7px; color: var(--text); }
+.coverage__cell {
+  height: 10px;
+  border-radius: 3px;
+  background: var(--line);
+}
+.coverage__cell--on { opacity: 0.85; }
+.goal-pair {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 16px;
+}
+@media (min-width: 640px) {
+  .goal-pair { grid-template-columns: 1fr 1fr; }
+}
+.goal-card {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: 0;
+  color: var(--text);
+  cursor: pointer;
+  padding: 0;
+}
+.goal-bar {
+  position: relative;
+  height: 6px;
+  margin-top: 12px;
+  border-radius: 99px;
+  background: var(--line);
+  overflow: hidden;
+}
+.goal-bar__fill {
+  height: 100%;
+  background: var(--computing);
+  border-radius: 99px;
+}
+.goal-bar__label {
+  display: inline-block;
+  margin-top: 6px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  color: var(--text-dim);
+}
+.goal-bar__label--end { float: right; }
+.goal-spark { display: block; }

@@ -1,6 +1,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import { applyEdits, previewEdits, type EditInput } from './edits.ts'
+import { TRACK_TOOLS } from '../../supabase/functions/_shared/trackToolDefs.ts'
 import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from './format.ts'
 import { liveToDraft } from './edits.ts'
 import {
@@ -33,6 +34,11 @@ const editExercise = z.object({
   load: z.string().optional().describe('bodyweight | light | moderate | heavy'),
   cue: z.string().optional(),
   target_rpe: z.number().min(1).max(10).nullable().optional(),
+  track: z.string().optional(),
+  track_id: z.string().optional(),
+  superset_group: z.string().optional(),
+  rest_s: z.number().int().min(0).max(600).optional(),
+  contacts: z.number().int().min(0).max(200).optional(),
 })
 
 const editObject = z.object({
@@ -56,6 +62,11 @@ const editObject = z.object({
   sessions_per_week: z.number().int().min(1).max(7).nullable().optional(),
   note: z.string().nullable().optional(),
   exercises: z.array(editExercise).optional().describe('Required for add_session.'),
+  track: z.string().nullable().optional(),
+  track_id: z.string().nullable().optional(),
+  superset_group: z.string().nullable().optional(),
+  rest_s: z.number().int().min(0).max(600).nullable().optional(),
+  contacts: z.number().int().min(0).max(200).nullable().optional(),
 })
 
 function text(body: string, isError = false) {
@@ -77,6 +88,7 @@ export const SERVER_INSTRUCTIONS = [
   'Chat against the record: list_workouts, get_workout, search_lifts, get_program_journey, get_coach_notes.',
   'For what a main lift (squat, bench, deadlift, ohp) should be this week, call get_lift_model — it returns the working max, training max, trend, all-time best, last qualifying sets and the next prescription with its reason line. Quote its numbers; never compute a load yourself.',
   'If the athlete tells you how they slept, how ready they feel, or how their knees are today, pass it to get_lift_model so the modifiers apply. A training-max change goes through set_training_max: preview first, confirm=true only after the athlete agrees.',
+  'Tracks, structured goals, and workout notes live on list_tracks / get_track / get_goals / add_workout_note. Writes preview unless confirm=true. Progression proposes; never auto-apply a next week.',
   'To change the program: propose surgical edits (add/update/remove exercise or session), call preview_program_edits, show the diff, then apply_program_edits with confirm=true only after the athlete agrees.',
   'Never dump a whole new week. Code — not you — clamps sets, loads, and tracking types. Sessions cannot be deleted; drop work by removing exercises.',
   'Intervals / HIIT: put the whole block in reps ("8 × 15s on / 45s off", "Tabata", "EMOM 10 min"), sets 1, load bodyweight, and keep the exercise name to the movement ("Assault Bike", not "Bike finisher 8x15s") — the app runs it on a one-tap interval timer, and a logged block reads back as rounds of work.',
@@ -308,12 +320,12 @@ export function createZeroedServer(): McpServer {
   server.tool(
     'preview_program_edits',
     'Apply surgical edits in memory against the live week and return the deterministic diff. Writes nothing. Always preview before apply_program_edits.',
-    { edits: z.array(editObject).min(1) },
-    async ({ edits }) => safe(async () => {
+    { edits: z.array(editObject).min(1), week_start: z.string().optional() },
+    async ({ edits, week_start }) => safe(async () => {
       const store = await connectStore()
       const live = await loadLiveProgram(store)
       if (!live) return 'No active program/phase to edit.'
-      return previewEdits(live, edits as EditInput[]).text
+      return previewEdits(live, edits as EditInput[], week_start).text
     }),
   )
 
@@ -352,6 +364,17 @@ export function createZeroedServer(): McpServer {
       })
     }),
   )
+
+  for (const tool of TRACK_TOOLS) {
+    server.tool(
+      tool.name,
+      tool.description,
+      {},
+      async () => safe(async () => {
+        return `${tool.name} is implemented on the hosted Worker MCP (zeroed.madeforgreatnesslabs.com). This local server advertises it for schema parity.`
+      }),
+    )
+  }
 
   return server
 }

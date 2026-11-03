@@ -1,5 +1,6 @@
 import { NavLink } from 'react-router-dom'
-import { Activity, User, LayoutGrid, MessageSquare } from 'lucide-react'
+import { Activity, User, LayoutGrid, MessageSquare, Target } from 'lucide-react'
+import { tracksOn } from '../../lib/tracksFlag'
 import { Logo } from '../ui'
 import { MonitorReticle } from '../convergence/MonitorReticle'
 
@@ -13,11 +14,22 @@ const ITEMS = [
   { to: '/app/profile', label: 'You',     Icon: User          },
 ]
 
+function navItems() {
+  if (!tracksOn()) return ITEMS
+  return [
+    ITEMS[0],
+    ITEMS[1],
+    { to: '/app/goals', label: 'Goals', Icon: Target },
+    ITEMS[2],
+    ITEMS[3],
+  ]
+}
+
 // Bottom tab bar — the mobile surface. Hidden on desktop, where Sidebar takes over.
 export function Nav() {
   return (
     <nav className="nav">
-      {ITEMS.map(({ to, label, Icon }) => (
+      {navItems().map(({ to, label, Icon }) => (
         <NavLink
           key={to}
           to={to}
@@ -52,7 +64,7 @@ export function Sidebar({ athleteId }: { athleteId: string }) {
       <div className="sidebar__brand"><Logo /></div>
 
       <nav className="sidebar__nav">
-        {ITEMS.map(({ to, label, Icon }) => (
+        {navItems().map(({ to, label, Icon }) => (
           <NavLink
             key={to}
             to={to}

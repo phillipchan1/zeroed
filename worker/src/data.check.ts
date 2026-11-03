@@ -308,7 +308,7 @@ ok(
   migrateSrc.indexOf('probing target identity before drop') < migrateSrc.indexOf('DROP SCHEMA IF EXISTS public CASCADE'),
   'fingerprint probe runs before DROP',
 )
-ok(CHECKSUM_TABLES.length === 16, 'checksum covers all 16 public tables')
+ok(CHECKSUM_TABLES.length === 22, 'checksum covers all 22 public tables')
 ok(CHECKSUM_TABLES.includes('coach_message') && CHECKSUM_TABLES.includes('weekly_review'), 'checksum includes coach_message and weekly_review')
 const toc = '1; 3079 1 EXTENSION - pgcrypto\n2; 1259 2 TABLE public athlete\n'
 ok(!filterRestoreToc(toc).includes('EXTENSION') && filterRestoreToc(toc).includes('TABLE public athlete'), 'restore TOC drops EXTENSION')

@@ -1011,6 +1011,12 @@ export const PUBLIC_RESTORE_ORDER = [
   'workout_draft',
   'program_revision',
   'mcp_token',
+  'track',
+  'progression_rule',
+  'autoreg_rule',
+  'athlete_goal',
+  'goal_measurement',
+  'workout_note',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]

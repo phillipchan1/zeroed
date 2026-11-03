@@ -15,6 +15,11 @@ INSERT INTO athlete_profile (athlete_id, current_phase, retest_date)
 VALUES ('11111111-1111-1111-1111-111111111111', 'Strength', '2026-12-01');
 INSERT INTO program (id, athlete_id, goal, status)
 VALUES ('33333333-3333-3333-3333-333333333333', '11111111-1111-1111-1111-111111111111', 'A program', 'active');
+INSERT INTO track (program_id, name, color, icon, sort_order, purpose)
+VALUES (
+  '33333333-3333-3333-3333-333333333333',
+  'General', '#9A9A9A', 'circle', 0, 'Default track for unassigned work'
+);
 INSERT INTO phase (id, program_id, name, week_start, week_end, non_negotiables, advancement_criteria, status)
 VALUES (
   '55555555-5555-5555-5555-555555555555',
@@ -107,6 +112,11 @@ INSERT INTO athlete_profile (athlete_id, current_phase, retest_date)
 VALUES ('22222222-2222-2222-2222-222222222222', 'Power', '2026-12-15');
 INSERT INTO program (id, athlete_id, goal, status)
 VALUES ('44444444-4444-4444-4444-444444444444', '22222222-2222-2222-2222-222222222222', 'B program', 'active');
+INSERT INTO track (program_id, name, color, icon, sort_order, purpose)
+VALUES (
+  '44444444-4444-4444-4444-444444444444',
+  'General', '#9A9A9A', 'circle', 0, 'Default track for unassigned work'
+);
 INSERT INTO phase (id, program_id, name, week_start, week_end, non_negotiables, advancement_criteria, status)
 VALUES (
   '66666666-6666-6666-6666-666666666666',

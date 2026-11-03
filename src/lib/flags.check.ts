@@ -1,5 +1,5 @@
 // Run: node --experimental-strip-types src/lib/flags.check.ts
-import { arcLoadV1Enabled, onboardingAgentV1Enabled, readAthleteFlags } from './flags.ts'
+import { arcLoadV1Enabled, onboardingAgentV1Enabled, readAthleteFlags, tracksV1Enabled } from './flags.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -62,6 +62,19 @@ ok(
 ok(Object.keys(readAthleteFlags([true])).length === 0, 'readAthleteFlags: an array is no flags')
 ok(readAthleteFlags({ a: true, b: 1, c: 'yes' }).a === true && Object.keys(readAthleteFlags({ a: true, b: 1 })).length === 1,
   'readAthleteFlags: only literal true survives')
+
+// ---- tracks_v1: athlete row only, no build ceiling --------------------------
+ok(tracksV1Enabled({}, { tracks_v1: true }, '') === true, 'tracks: athlete row on is enough (no VITE ceiling)')
+ok(tracksV1Enabled({}, null, '') === false, 'tracks: missing row is off')
+ok(tracksV1Enabled({}, {}, '') === false, 'tracks: empty flags is off')
+ok(tracksV1Enabled({}, { tracks_v1: 'true' }, '') === false, 'tracks: a string "true" is off')
+ok(tracksV1Enabled({}, { tracks_v1: false }, '') === false, 'tracks: false is the rollback')
+ok(tracksV1Enabled({ DEV: true }, null, '?flag=tracks_v1') === true, 'tracks: DEV query override works without the row')
+ok(tracksV1Enabled({ DEV: false }, null, '?flag=tracks_v1') === false, 'tracks: production ignores the query override')
+ok(
+  tracksV1Enabled({ DEV: true }, null, '?flag=arc_load_v1&flag=tracks_v1') === true,
+  'tracks: a second ?flag= is read too',
+)
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {

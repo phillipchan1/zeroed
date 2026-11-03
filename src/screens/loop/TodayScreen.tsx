@@ -29,6 +29,10 @@ import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, LockOn, Row
 import { OutsidePlanSheet } from '../../components/OutsidePlanSheet'
 import { OneOffSheet } from '../../components/OneOffSheet'
 import { arcLoadOn } from '../../lib/arcLoad'
+import { tracksOn } from '../../lib/tracksFlag'
+import { useProgramTracks } from '../../lib/tracksData'
+import { TrackedExerciseList } from './tracksUi'
+import type { TrackRef } from '../../engine/tracks'
 import { isOffPlan } from '../../engine/outsidePlan'
 import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate, WeeklyDirective } from '../../types/database'
 
@@ -360,10 +364,11 @@ function PerformedRow({
  * here, one tap away, so the week list stays scannable.
  */
 function SessionSheet({
-  routine, state, targets, actuals, u, plannedDow, onPlanDay, onClose, onStart, onStartIntervals, onEdit, onLogAgain,
+  routine, state, targets, actuals, u, plannedDow, onPlanDay, onClose, onStart, onStartIntervals, onEdit, onLogAgain, tracks = [],
 }: {
   routine: RoutineRow
   state: SessionState
+  tracks?: TrackRef[]
   // Per-exercise recommended working load (athlete's unit), from the same
   // prescription the workout screen shows. Null/missing → no history yet.
   targets: Record<number, number | null> | null
@@ -447,6 +452,33 @@ function SessionSheet({
                 u={u}
               />
             ))
+          : (tracksOn() && tracks.length
+            ? (
+              <TrackedExerciseList
+                exercises={exercises}
+                tracks={tracks}
+                render={(ex, i) => {
+                  const target = targets?.[i]
+                  return (
+                    <div
+                      style={{
+                        display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                        gap: 14, padding: '12px 0', borderBottom: '1px solid var(--line)',
+                      }}
+                    >
+                      <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
+                        {isIntervalBlock(ex) ? intervalTitle(ex.name) : ex.name}
+                      </span>
+                      <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
+                        {isIntervalBlock(ex)
+                          ? fmtDose(ex)
+                          : <>{ex.sets}×{ex.reps}{target != null ? ` · ${target}${u.unit}` : ex.load ? ` · ${ex.load}` : ''}{ex.target_rpe != null ? ` · RPE ${ex.target_rpe}` : ' · RPE —'}</>}
+                      </span>
+                    </div>
+                  )
+                }}
+              />
+            )
           : exercises.map((ex, i) => {
             // The concrete recommended weight beats the vague label ("50lb" over
             // "moderate") — it's the number you prep the bar with. The label is
@@ -475,7 +507,7 @@ function SessionSheet({
                 </span>
               </div>
             )
-          })}
+          }))}
       </div>
 
       {/* Day-pinning — a suggestion, never enforced. */}
@@ -788,6 +820,7 @@ function StuckSessionsSheet({
  * Detail lives in sheets, never inline.
  */
 export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreenProps) {
+  const tracks = useProgramTracks(routines[0]?.program_id)
   const navigate   = useNavigate()
   const location   = useLocation()
   // A session finished a moment ago rides in on router state. Cleared on dismiss
@@ -1370,6 +1403,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
           state={statusFor(openSession.id)}
           targets={openTargets}
           actuals={openActuals}
+          tracks={tracks}
           u={u}
           plannedDow={plannedDowFor(openSession)}
           onPlanDay={(dow) => handlePlanDay(openSession.id, dow)}

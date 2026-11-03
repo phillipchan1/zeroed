@@ -42,6 +42,8 @@ export function formatPrescription(ex: ExerciseTemplate): string {
   const bits = [`${ex.sets}×${ex.reps}`]
   if (ex.load) bits.push(ex.load)
   if (ex.target_rpe != null) bits.push(`RPE ${ex.target_rpe}`)
+  if (ex.superset_group) bits.push(ex.superset_group)
+  if (ex.contacts != null) bits.push(`${ex.contacts} contacts`)
   return bits.join(' · ')
 }
 

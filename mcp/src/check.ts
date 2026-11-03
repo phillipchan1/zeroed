@@ -213,6 +213,11 @@ for (const need of [
   'get_training_brief', 'get_athlete', 'get_insights', 'get_current_program',
   'list_workouts', 'get_workout', 'search_lifts', 'get_program_journey',
   'get_coach_notes', 'preview_program_edits', 'apply_program_edits',
+  'list_tracks', 'get_track', 'create_track', 'update_track',
+  'assign_exercise_to_track', 'get_track_progression', 'set_track_progression_rule',
+  'list_autoreg_rules', 'upsert_autoreg_rule',
+  'get_goals', 'upsert_goal', 'log_goal_measurement', 'get_goal_history',
+  'add_workout_note', 'update_athlete_target', 'update_program_meta',
 ]) {
   ok(names.includes(need), `protocol lists ${need}`)
 }

@@ -61,6 +61,10 @@ const ATHLETE_COL = new Set([
   'coach_message',
   'mcp_token',
   'workout_draft',
+  'autoreg_rule',
+  'athlete_goal',
+  'goal_measurement',
+  'workout_note',
 ])
 
 const VIA_PROGRAM = new Set([
@@ -68,6 +72,8 @@ const VIA_PROGRAM = new Set([
   'routine',
   'weekly_review',
   'program_revision',
+  'track',
+  'progression_rule',
 ])
 
 const TABLES = new Set([
@@ -101,7 +107,37 @@ const COLUMNS: Record<string, Set<string>> = {
     'status', 'evidence', 'source', 'program_impact', 'generated_at', 'resolved_at',
     'reviewed',
   ]),
-  program: new Set(['id', 'athlete_id', 'goal', 'start_date', 'retest_date', 'status']),
+  program: new Set([
+    'id', 'athlete_id', 'goal', 'start_date', 'retest_date', 'status',
+    'name', 'block_phase', 'end_date', 'deload_week_start', 'retest_start', 'retest_end',
+  ]),
+  track: new Set([
+    'id', 'program_id', 'name', 'color', 'icon', 'sort_order', 'purpose',
+    'methodology_text', 'sources', 'parent_track_id', 'deload_policy', 'retest_policy',
+    'created_at',
+  ]),
+  progression_rule: new Set([
+    'id', 'program_id', 'track_id', 'exercise_name', 'engine_type', 'params',
+    'active_from', 'active_to', 'created_at',
+  ]),
+  autoreg_rule: new Set([
+    'id', 'athlete_id', 'scope_type', 'scope_id', 'scope_name', 'signal', 'op',
+    'value', 'action', 'action_params', 'message', 'created_at',
+  ]),
+  athlete_goal: new Set([
+    'id', 'athlete_id', 'track_id', 'name', 'metric', 'unit', 'side', 'direction',
+    'target', 'target_range_hi', 'baseline', 'current', 'best', 'due_date',
+    'test_protocol', 'cadence', 'status', 'source_metric', 'note', 'created_at',
+    'updated_at',
+  ]),
+  goal_measurement: new Set([
+    'id', 'athlete_id', 'goal_id', 'measured_on', 'value', 'side', 'source',
+    'workout_id', 'note', 'client_key', 'created_at',
+  ]),
+  workout_note: new Set([
+    'id', 'athlete_id', 'workout_id', 'session_id', 'author', 'body', 'client_key',
+    'created_at',
+  ]),
   phase: new Set([
     'id', 'program_id', 'name', 'week_start', 'week_end', 'non_negotiables',
     'advancement_criteria', 'status',
@@ -156,6 +192,8 @@ const JSONB = new Set([
   'weekly_review.adjustments', 'weekly_review.next_week_prescription',
   'program_revision.requests', 'program_revision.snapshot', 'program_revision.diff',
   'workout_draft.set_logs', 'workout_draft.feedback',
+  'track.sources', 'track.deload_policy', 'track.retest_policy',
+  'progression_rule.params', 'autoreg_rule.action_params',
 ])
 
 /** child.rel → parent table + fk on the child */
@@ -169,6 +207,20 @@ const REL: Record<string, Record<string, { table: string; from: string }>> = {
   phase: { program: { table: 'program', from: 'program_id' } },
   program: { athlete: { table: 'athlete', from: 'athlete_id' } },
   weekly_review: { program: { table: 'program', from: 'program_id' } },
+  track: { program: { table: 'program', from: 'program_id' } },
+  progression_rule: {
+    program: { table: 'program', from: 'program_id' },
+    track: { table: 'track', from: 'track_id' },
+  },
+  athlete_goal: { track: { table: 'track', from: 'track_id' } },
+  goal_measurement: {
+    athlete_goal: { table: 'athlete_goal', from: 'goal_id' },
+    workout: { table: 'workout', from: 'workout_id' },
+  },
+  workout_note: {
+    workout: { table: 'workout', from: 'workout_id' },
+    routine: { table: 'routine', from: 'session_id' },
+  },
 }
 
 const FK_TO_TABLE: Record<string, string> = {
@@ -177,6 +229,9 @@ const FK_TO_TABLE: Record<string, string> = {
   workout_id: 'workout',
   phase_id: 'phase',
   athlete_id: 'athlete',
+  track_id: 'track',
+  goal_id: 'athlete_goal',
+  session_id: 'routine',
 }
 
 /** Child FK → parent table. Re-checked on insert, update, and upsert. */
@@ -204,6 +259,26 @@ const FOREIGN_KEYS: Record<string, readonly { column: string; parent: string; re
   ],
   workout: [{ column: 'routine_id', parent: 'routine', required: true }],
   session_observation: [{ column: 'workout_id', parent: 'workout', required: true }],
+  track: [{ column: 'program_id', parent: 'program', required: true }],
+  progression_rule: [
+    { column: 'program_id', parent: 'program', required: true },
+    { column: 'track_id', parent: 'track', required: true },
+  ],
+  autoreg_rule: [{ column: 'athlete_id', parent: 'athlete' }],
+  athlete_goal: [
+    { column: 'athlete_id', parent: 'athlete' },
+    { column: 'track_id', parent: 'track' },
+  ],
+  goal_measurement: [
+    { column: 'athlete_id', parent: 'athlete' },
+    { column: 'goal_id', parent: 'athlete_goal', required: true },
+    { column: 'workout_id', parent: 'workout' },
+  ],
+  workout_note: [
+    { column: 'athlete_id', parent: 'athlete' },
+    { column: 'workout_id', parent: 'workout' },
+    { column: 'session_id', parent: 'routine' },
+  ],
 }
 
 const DELETABLE = new Set(['workout_draft', 'mcp_token', 'session_observation'])
@@ -273,11 +348,17 @@ export function ownerPredicate(table: string): string {
     case 'coach_message':
     case 'mcp_token':
     case 'workout_draft':
+    case 'autoreg_rule':
+    case 'athlete_goal':
+    case 'goal_measurement':
+    case 'workout_note':
       return 'athlete_id = ${athleteId}'
     case 'phase':
     case 'routine':
     case 'weekly_review':
     case 'program_revision':
+    case 'track':
+    case 'progression_rule':
       return 'program_id IN (SELECT id FROM program WHERE athlete_id = ${athleteId})'
     case 'workout':
       return 'routine_id IN (SELECT r.id FROM routine r JOIN program p ON p.id = r.program_id WHERE p.athlete_id = ${athleteId})'
@@ -329,10 +410,19 @@ async function existingWorkoutForClientKey(
   athleteId: string,
   clientKey: string,
 ): Promise<object | null> {
-  const owner = bindOwner('workout', athleteId, 2, 'workout')
+  return existingOwnedClientKey(sql, 'workout', athleteId, clientKey)
+}
+
+async function existingOwnedClientKey(
+  sql: Sql,
+  table: string,
+  athleteId: string,
+  clientKey: string,
+): Promise<object | null> {
+  const owner = bindOwner(table, athleteId, 2, table)
   const rows = await runSql<object>(
     sql,
-    `SELECT workout.* FROM workout WHERE workout.client_key = $1 AND ${owner.text} LIMIT 1`,
+    `SELECT ${table}.* FROM ${table} WHERE ${table}.client_key = $1 AND ${owner.text} LIMIT 1`,
     [clientKey, ...owner.params],
   )
   return rows[0] ?? null
@@ -729,6 +819,10 @@ async function assertWritableRow(
 
 async function resetOrientation(sql: Sql, athleteId: string): Promise<DataResult> {
   await runSql(sql, `DELETE FROM session_observation WHERE ${bindOwner('session_observation', athleteId).text}`, [athleteId])
+  await runSql(sql, `DELETE FROM workout_note WHERE ${bindOwner('workout_note', athleteId).text}`, [athleteId])
+  await runSql(sql, `DELETE FROM goal_measurement WHERE ${bindOwner('goal_measurement', athleteId).text}`, [athleteId])
+  await runSql(sql, `DELETE FROM athlete_goal WHERE ${bindOwner('athlete_goal', athleteId).text}`, [athleteId])
+  await runSql(sql, `DELETE FROM autoreg_rule WHERE ${bindOwner('autoreg_rule', athleteId).text}`, [athleteId])
   await runSql(sql, `DELETE FROM workout WHERE ${bindOwner('workout', athleteId).text}`, [athleteId])
   await runSql(sql, `DELETE FROM program WHERE ${bindOwner('program', athleteId).text}`, [athleteId])
   await runSql(sql, `DELETE FROM insight WHERE ${bindOwner('insight', athleteId).text}`, [athleteId])
@@ -851,9 +945,10 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       try {
         rows = await runSql<object>(sql, text, params)
       } catch (err) {
-        if (query.op === 'insert' && table === 'workout' && uniqueViolation(err) && ctx.athleteId) {
+        if (query.op === 'insert' && uniqueViolation(err) && ctx.athleteId) {
           const key = firstClientKey(prepared)
-          const existing = key ? await existingWorkoutForClientKey(sql, ctx.athleteId, key) : null
+          const keyed = table === 'workout' || table === 'goal_measurement' || table === 'workout_note'
+          const existing = keyed && key ? await existingOwnedClientKey(sql, table, ctx.athleteId, key) : null
           if (existing) {
             if (!query.returning) return { data: null, error: null, count: 1, status: 201 }
             return shapeResult([existing], query, 1)

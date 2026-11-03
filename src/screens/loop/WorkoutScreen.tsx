@@ -45,6 +45,11 @@ import { getMovementDemo, videoSearchUrl } from '../../engine/movementDemos'
 import { MovementDemo } from '../../components/MovementDemo'
 import { SessionEffort } from '../../components/SessionEffort'
 import { arcLoadOn } from '../../lib/arcLoad'
+import { tracksOn } from '../../lib/tracksFlag'
+import { fetchAutoregRules, useProgramTracks } from '../../lib/tracksData'
+import { evaluateAutoregRules } from '../../engine/autoreg'
+import { groupByTrack, type TrackRef } from '../../engine/tracks'
+import { TrackLabel } from './tracksUi'
 import { IntervalTimer, type IntervalResult } from '../../components/IntervalTimer'
 import { IntervalBlock } from '../../components/IntervalBlock'
 import { AddToSessionSheet, AdjustIntervalsSheet } from '../../components/AddToSession'
@@ -1746,11 +1751,23 @@ export function WorkoutScreen({
   // filed against — reads this, never routine.exercises directly.
   //
   // Movements added mid-session follow the programmed slots.
+  const tracks = useProgramTracks(routine?.program_id)
+  const { data: autoregRules } = useCachedLoader(
+    athleteId && tracksOn() ? `autoreg:${athleteId}` : 'autoreg:off',
+    () => (athleteId && tracksOn() ? fetchAutoregRules(athleteId) : Promise.resolve([])),
+  )
   const programmedExercises = (routine?.exercises ?? []) as ExerciseTemplate[]
   const sessionExercises = [
     ...programmedExercises.map((ex, i) => feedback[i]?.swap ?? ex),
     ...addedExercises(feedback, programmedExercises.length),
   ]
+  const fired = tracksOn() && (autoregRules?.length ?? 0)
+    ? evaluateAutoregRules(autoregRules ?? [], {
+        pain_knee_L: checkin.kneePainL,
+        pain_knee_R: checkin.kneePainR,
+        sleep_hours: checkin.sleepHours,
+      }, sessionExercises)
+    : []
   const sessionKey = sessionExercises.map((ex) => ex.name).join('\n')
 
   // Re-prescribe when the session's movements and the prescription's disagree —
@@ -2696,6 +2713,14 @@ export function WorkoutScreen({
             with the way OUT of it directly underneath. A cap the athlete can't
             see an exit from reads as the app being timid; naming the exit turns
             it into something to train at. */}
+        {fired.length > 0 && (
+          <div className="card" style={{ marginTop: 20, borderLeft: '3px solid var(--pending)' }}>
+            <p className="section-header" style={{ marginBottom: 8, color: 'var(--pending)' }}>Today's rules</p>
+            {fired.map((f, i) => (
+              <p key={i} className="text-base" style={{ lineHeight: 1.5, marginTop: i ? 8 : 0 }}>{f.message}</p>
+            ))}
+          </div>
+        )}
         {prescription?.rule && (
           <div
             className="card"
@@ -2726,7 +2751,12 @@ export function WorkoutScreen({
           </div>
         )}
 
-        {exercises.map((ex, exIdx) => {
+        {(tracksOn() && tracks.length
+          ? groupByTrack(exercises, tracks).flatMap((g) =>
+              g.exercises.map((item, i) => ({ ex: item.exercise, exIdx: item.index, header: i === 0 ? g.track : null }))
+            )
+          : exercises.map((ex, exIdx) => ({ ex, exIdx, header: null as TrackRef | null }))
+        ).map(({ ex, exIdx, header }) => {
           const logs = setLogs[exIdx] ?? []
           const trackingType = effectiveTrackingType(ex)
           // A prescription is only this slot's if it was written for this
@@ -2796,6 +2826,12 @@ export function WorkoutScreen({
               className={arrived ? 'ex-arrive' : undefined}
               style={{ paddingTop: 26, paddingBottom: 16, borderBottom: '1px solid var(--line)' }}
             >
+              {header && (
+                <div className="track-group__head" style={{ marginBottom: 12 }}>
+                  <span className="track-group__bar" style={{ background: header.color }} />
+                  <TrackLabel track={header} />
+                </div>
+              )}
               <div style={{ marginBottom: 14 }}>
                 <div style={{ display: 'flex', alignItems: 'flex-start', gap: 10 }}>
                   <div style={{ flex: 1, minWidth: 0 }}>

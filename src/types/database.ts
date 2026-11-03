@@ -127,6 +127,74 @@ export interface ProgramRow {
   start_date: string
   retest_date: string | null
   status: ProgramStatus
+  // tracks_v1 block metadata. Distinct from phase.name.
+  name?: string | null
+  block_phase?: string | null
+  end_date?: string | null
+  deload_week_start?: string | null
+  retest_start?: string | null
+  retest_end?: string | null
+}
+
+export interface TrackRow {
+  id: string
+  program_id: string
+  name: string
+  color: string | null
+  icon: string | null
+  sort_order: number
+  purpose: string | null
+  methodology_text: string | null
+  sources: unknown
+  parent_track_id: string | null
+  deload_policy: unknown
+  retest_policy: unknown
+}
+
+export interface AthleteGoalRow {
+  id: string
+  athlete_id: string
+  track_id: string | null
+  name: string
+  metric: string
+  unit: string | null
+  side: string | null
+  direction: string
+  target: number | null
+  target_range_hi: number | null
+  baseline: number | null
+  current: number | null
+  best: number | null
+  due_date: string | null
+  test_protocol: string | null
+  cadence: string | null
+  status: string | null
+  source_metric: string | null
+  note: string | null
+}
+
+export interface GoalMeasurementRow {
+  id: string
+  goal_id: string
+  athlete_id: string
+  measured_on: string
+  value: number
+  side: string | null
+  source: string
+  workout_id: string | null
+  note: string | null
+  client_key: string | null
+}
+
+export interface WorkoutNoteRow {
+  id: string
+  athlete_id: string
+  workout_id: string | null
+  session_id: string | null
+  author: string
+  body: string
+  client_key: string | null
+  created_at: string
 }
 
 export interface PhaseRow {
@@ -366,6 +434,12 @@ export interface ExerciseTemplate {
   // A session logged outside the plan (arc_load_v1): what it did to the body.
   // Lives on the session's own snapshot entry, never on a program.
   exposure?: ExposureTags
+  // tracks_v1 (migration 20261103000001). Missing track_id resolves to the
+  // program's General track at read time. The other keys are ignored when unset.
+  track_id?: string
+  superset_group?: string
+  rest_s?: number
+  contacts?: number
 }
 
 // Three taps on a session the plan didn't write. Read later by the tissue

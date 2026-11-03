@@ -15,6 +15,10 @@ export interface ExerciseTemplate {
   swapped_from?: string   // a stand-in's programmed movement — see src/types/database.ts
   added?: boolean         // added mid-session, never on the program — see src/types/database.ts
   adjusted?: boolean      // an interval block re-dosed for one session — see src/types/database.ts
+  track_id?: string
+  superset_group?: string
+  rest_s?: number
+  contacts?: number
 }
 
 export interface SetLog {
@@ -35,6 +39,11 @@ export interface ProgramEditExercise {
   load: string
   cue: string
   target_rpe: number | null
+  track?: string | null
+  track_id?: string | null
+  superset_group?: string | null
+  rest_s?: number | null
+  contacts?: number | null
 }
 
 export interface ProgramEdit {
@@ -57,4 +66,9 @@ export interface ProgramEdit {
   sessions_per_week: number | null
   note: string | null
   exercises: ProgramEditExercise[]
+  track?: string | null
+  track_id?: string | null
+  superset_group?: string | null
+  rest_s?: number | null
+  contacts?: number | null
 }

@@ -23,6 +23,7 @@ import {
   type ConnectedStore,
 } from './zeroedStore.ts'
 import { admin } from './admin.ts'
+import { TRACK_TOOLS } from './trackToolDefs.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -33,6 +34,11 @@ const editExerciseSchema = {
     load: { type: 'string', description: 'bodyweight | light | moderate | heavy' },
     cue: { type: 'string' },
     target_rpe: { type: ['number', 'null'], minimum: 1, maximum: 10 },
+    track: { type: 'string', description: 'Track id or name to stamp on the exercise.' },
+    track_id: { type: 'string' },
+    superset_group: { type: 'string', description: 'A1 / A2 pairing.' },
+    rest_s: { type: 'integer', minimum: 0, maximum: 600 },
+    contacts: { type: 'integer', minimum: 0, maximum: 200 },
   },
   required: ['name'],
 }
@@ -64,6 +70,11 @@ const editObjectSchema = {
     sessions_per_week: { type: ['integer', 'null'], minimum: 1, maximum: 7 },
     note: { type: ['string', 'null'] },
     exercises: { type: 'array', items: editExerciseSchema, description: 'Required for add_session.' },
+    track: { type: ['string', 'null'] },
+    track_id: { type: ['string', 'null'] },
+    superset_group: { type: ['string', 'null'] },
+    rest_s: { type: ['integer', 'null'], minimum: 0, maximum: 600 },
+    contacts: { type: ['integer', 'null'], minimum: 0, maximum: 200 },
   },
   required: ['type'],
 }
@@ -156,6 +167,7 @@ export const ZEROED_TOOLS: McpTool[] = [
       type: 'object',
       properties: {
         edits: { type: 'array', items: editObjectSchema, minItems: 1 },
+        week_start: { type: 'string', description: 'YYYY-MM-DD Monday. Queued block if it matches; otherwise the live template, labeled with this week.' },
       },
       required: ['edits'],
       additionalProperties: false,
@@ -183,6 +195,7 @@ export const ZEROED_TOOLS: McpTool[] = [
       additionalProperties: false,
     },
   },
+  ...TRACK_TOOLS,
   ...LIFT_MODEL_TOOLS,
 ]
 

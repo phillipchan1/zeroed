@@ -24,6 +24,8 @@ import {
 } from './store.ts'
 import type { Sql } from './db.ts'
 import { McpUserError } from './userError.ts'
+import { TRACK_TOOLS } from '../../supabase/functions/_shared/trackToolDefs.ts'
+import { briefTracksAndGoals, runTrackTool, TRACK_TOOL_NAMES } from './trackTools.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -34,6 +36,11 @@ const editExerciseSchema = {
     load: { type: 'string', description: 'bodyweight | light | moderate | heavy' },
     cue: { type: 'string' },
     target_rpe: { type: ['number', 'null'], minimum: 1, maximum: 10 },
+    track: { type: 'string', description: 'Track id or name to stamp on the exercise.' },
+    track_id: { type: 'string' },
+    superset_group: { type: 'string', description: 'A1 / A2 pairing.' },
+    rest_s: { type: 'integer', minimum: 0, maximum: 600 },
+    contacts: { type: 'integer', minimum: 0, maximum: 200 },
   },
   required: ['name'],
 }
@@ -65,6 +72,11 @@ const editObjectSchema = {
     sessions_per_week: { type: ['integer', 'null'], minimum: 1, maximum: 7 },
     note: { type: ['string', 'null'] },
     exercises: { type: 'array', items: editExerciseSchema, description: 'Required for add_session.' },
+    track: { type: ['string', 'null'] },
+    track_id: { type: ['string', 'null'] },
+    superset_group: { type: ['string', 'null'] },
+    rest_s: { type: ['integer', 'null'], minimum: 0, maximum: 600 },
+    contacts: { type: ['integer', 'null'], minimum: 0, maximum: 200 },
   },
   required: ['type'],
 }
@@ -157,6 +169,7 @@ export const ZEROED_TOOLS: McpTool[] = [
       type: 'object',
       properties: {
         edits: { type: 'array', items: editObjectSchema, minItems: 1 },
+        week_start: { type: 'string', description: 'YYYY-MM-DD Monday. Queued block if it matches; otherwise the live template, labeled with this week.' },
       },
       required: ['edits'],
       additionalProperties: false,
@@ -184,6 +197,7 @@ export const ZEROED_TOOLS: McpTool[] = [
       additionalProperties: false,
     },
   },
+  ...TRACK_TOOLS,
   ...LIFT_MODEL_TOOLS,
 ]
 
@@ -220,6 +234,13 @@ export async function executeZeroedTool(
     })
   }
 
+  if (TRACK_TOOL_NAMES.has(name)) {
+    const live = name === 'get_track_progression' ? await loadLiveProgram(store) : null
+    const out = await runTrackTool(store, name, args, live)
+    if (out == null) throw new McpUserError(`Unknown tool: ${name}`)
+    return out
+  }
+
   switch (name) {
     case 'get_training_brief': {
       const [athlete, insights, live, workouts] = await Promise.all([
@@ -243,6 +264,7 @@ export async function executeZeroedTool(
       const recent = workouts.length
         ? workouts.map((w) => formatLoggedWorkout(w, store.unit)).join('\n\n')
         : 'None logged.'
+      const extras = await briefTracksAndGoals(store, live)
       return [
         `Connected (remote MCP) as ${athlete.name ?? athleteId}`,
         '',
@@ -252,10 +274,11 @@ export async function executeZeroedTool(
         renderInsights(insights),
         '',
         week,
+        extras,
         '',
         '## Recent sessions',
         recent,
-      ].join('\n')
+      ].filter((l) => l !== '').join('\n')
     }
     case 'get_athlete':
       return renderAthlete(await loadAthlete(store))
@@ -317,7 +340,15 @@ export async function executeZeroedTool(
       const obs = row.observations.length
         ? ['', '## Observations', ...row.observations.map((o) => `- [${o.severity}] ${o.category}: ${o.signal}`)]
         : []
-      return [formatLoggedWorkout(row.workout, store.unit), ...obs].join('\n')
+      const notes = await store.sql<{ author: string; body: string }[]>`
+        SELECT author, body FROM workout_note
+        WHERE athlete_id = ${store.athleteId} AND workout_id = ${workoutId}
+        ORDER BY created_at
+      `
+      const noteLines = notes.length
+        ? ['', '## Workout notes', ...notes.map((n) => `- ${n.author}: ${n.body}`)]
+        : []
+      return [formatLoggedWorkout(row.workout, store.unit), ...obs, ...noteLines].join('\n')
     }
     case 'search_lifts': {
       const exercise = asString(args.exercise)
@@ -333,7 +364,7 @@ export async function executeZeroedTool(
       if (!Array.isArray(edits) || !edits.length) throw new McpUserError('edits is required')
       const live = await loadLiveProgram(store)
       if (!live) return 'No active program/phase to edit.'
-      return previewEdits(live, edits as EditInput[]).text
+      return previewEdits(live, edits as EditInput[], asString(args.week_start)).text
     }
     case 'apply_program_edits': {
       if (args.confirm !== true) {
