@@ -79,7 +79,7 @@ import { workoutRpeError } from './rpeScale'
 import {
   canonicalLiftId, modelFromSources, dayOfModifiers, exerciseCall, readModelLog, localDay,
   fmtLoad, addDays as addDaysIso, mondayOf, readTmOverride, convertTmOverride, tmOverrideEntry,
-  type DayOf, type LiftModelSources, type MainLiftId, type ModelWorkout, type Recommendation,
+  type DayOf, type LiftModelSources, type MainLiftId, type ModelWorkout, type ProgressionRuleRef, type Recommendation,
 } from './liftModel'
 export {
   canonicalLiftId, backoffLoad, liftIncrement, type DayOf, type MainLiftId,
@@ -2501,6 +2501,10 @@ export async function gatherLiftSources(athleteId: string, u: UnitContext): Prom
       return o ? [[k, convertTmOverride(o, u.show)]] : []
     }))
     : null
+  const { data: ruleRows } = await supabase
+    .from('progression_rule')
+    .select('exercise_name, engine_type, track_id, active_from, active_to')
+    .in('program_id', ids)
   return {
     workouts,
     observations: (obs ?? []) as Array<{ signal: string; severity: number; logged_at: string }>,
@@ -2510,6 +2514,7 @@ export async function gatherLiftSources(athleteId: string, u: UnitContext): Prom
     // liftModel.ts stays byte-identical to its edge copy, so it can't read the
     // runtime calendar itself; the client hands it over here.
     timeZone: athleteTimeZone(),
+    progressionRules: (ruleRows ?? []) as ProgressionRuleRef[],
   }
 }
 
@@ -2571,6 +2576,7 @@ export async function saveTrainingMaxOverride(
 const CALL_LABEL: Record<Recommendation['call'], string> = {
   push: 'Push', hold: 'Hold', drop: 'Drop', repeat: 'Repeat', miss: 'Missed',
   deload: 'Deload', program_pct: 'Program', establish: 'Re-establish',
+  explicit: 'Program', manual: 'Manual',
 }
 
 /** The chip on a main lift: the call and the number, e.g. "Push · 340lb × 5 @8". */

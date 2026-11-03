@@ -73,6 +73,27 @@ const squat: PerformedExercise = {
 }
 ok(!proposeForExercise(squatRule, squat).apply, 'maintenance squat does not bump load')
 
+const manualDl: ProgressionRule = { engine_type: 'manual', exercise_name: 'Deadlift', params: {} }
+const manualSq: ProgressionRule = { engine_type: 'manual', exercise_name: 'Squat', params: {} }
+const dlDone: PerformedExercise = {
+  name: 'Deadlift',
+  prescribed: { sets: 3, reps: '3', load: '350', target_rpe: 7 },
+  sets: [{ reps: 3, load: 350, rpe: 7 }],
+}
+const sqDone: PerformedExercise = {
+  name: 'Squat',
+  prescribed: { sets: 3, reps: '3', load: '295', target_rpe: 7 },
+  sets: [{ reps: 3, load: 295, rpe: 7 }],
+}
+const manualDlProp = proposeForExercise(manualDl, dlDone)
+ok(!manualDlProp.apply && manualDlProp.to === '350', 'manual deadlift keeps written 350')
+ok(manualDlProp.reason.includes('Manual'), 'manual reason says coach sets the value')
+const manualSqProp = proposeForExercise(manualSq, sqDone)
+ok(!manualSqProp.apply && manualSqProp.to === '295', 'manual squat keeps written 295')
+const manualWeek = proposeNextWeek([manualDl, manualSq], [dlDone, sqDone])
+ok(manualWeek.every((p) => !p.apply), 'manual weekly prescription never writes a TM bump')
+ok(manualWeek.map((p) => p.to).join(',') === '350,295', 'manual weekly prescription stays on written loads')
+
 const mixed = proposeNextWeek(
   [ohpRule, dbRule, bikeRule, squatRule],
   [ohpHit, dbHit, bike, squat],

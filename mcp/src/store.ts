@@ -2,7 +2,7 @@ import { createClient, type SupabaseClient } from '@supabase/supabase-js'
 import { readLoggedExercises, type LoggedWorkoutLike } from '../../src/engine/loggedSets.ts'
 import {
   e1rmFromSet, liftNameMatcher, localDay, mondayOf, addDays, parseLiftId,
-  type LiftModelSources, type MainLiftId, type ModelWorkout, type TmOverride,
+  type LiftModelSources, type MainLiftId, type ModelWorkout, type ProgressionRuleRef, type TmOverride,
 } from '../../src/engine/liftModel.ts'
 import { ATHLETE_TIME_ZONE, isValidTimeZone } from '../../src/engine/weekDates.ts'
 import type { ExerciseTemplate, SetLog } from '../../src/types/database.ts'
@@ -410,7 +410,18 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
     today,
     timeZone,
     unit: store.env.unit === 'kg' ? 'kg' : 'lb',
+    progressionRules: await loadProgressionRules(store, live?.programId ?? null),
   }
+}
+
+async function loadProgressionRules(store: ConnectedStore, programId: string | null): Promise<ProgressionRuleRef[]> {
+  if (!programId) return []
+  const { data, error } = await store.supabase
+    .from('progression_rule')
+    .select('exercise_name, engine_type, track_id, active_from, active_to')
+    .eq('program_id', programId)
+  if (error) return []
+  return (data ?? []) as ProgressionRuleRef[]
 }
 
 /** Write (or clear, with null) one lift's hand-set training max. */

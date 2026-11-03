@@ -936,9 +936,10 @@ export interface LiftPrescription {
   sets: number
   reps: string | number
   targetRpe?: number | null
-  /** The program's own load text — a % here is a % of the training max. */
+  /** The program's own load text — a written bar weight wins over TM math. */
   load?: string | null
   exercise?: string
+  trackId?: string | null
 }
 
 export interface LiftModelInput {
@@ -963,6 +964,8 @@ export interface LiftModelInput {
   /** A standing reason a push may not happen (the app's limiter cap). Holds instead. */
   noPush?: string | null
   rpeHalfSteps?: boolean
+  /** True when the matching progression_rule is `manual` — never compute from TM. */
+  manual?: boolean
 }
 
 export interface Recommendation {
@@ -975,8 +978,8 @@ export interface Recommendation {
   rpeCap: number | null
   load: number
   pctOfTm: number | null
-  call: WeeklyCall | 'deload' | 'program_pct' | 'establish'
-  basis: 'last_top_set' | 'rpe_chart' | 'program_pct' | 'deload'
+  call: WeeklyCall | 'deload' | 'program_pct' | 'establish' | 'explicit' | 'manual'
+  basis: 'last_top_set' | 'rpe_chart' | 'program_pct' | 'deload' | 'explicit' | 'manual'
   /** "245 = 65% of TM 377 (from 365x1 @8, Oct 6)" */
   reason: string
   /** The decision, the base, each modifier, the ceiling — one line each. */
@@ -1037,6 +1040,73 @@ export function percentOf(load: string | null | undefined): number | null {
   const b = m[2] != null ? Number(m[2]) : a
   const p = (a + b) / 2
   return p > 0 && p <= 110 ? p : null
+}
+
+const QUALITATIVE_LOAD = /^(light|moderate|heavy|bodyweight|bw)$/i
+const LB_PER_KG = 2.2046226218
+
+/**
+ * Written bar weight from the session `load` field, in the model's unit.
+ * "295", "350 lb", "~275 lbs" count. Percentages and qualitative labels do not —
+ * those still fall through to TM / chart math (unless a manual rule blocks it).
+ */
+export function explicitBarLoad(
+  load: string | null | undefined,
+  unit: ModelUnit = 'lb',
+): number | null {
+  if (!load) return null
+  const trimmed = load.trim()
+  if (!trimmed || QUALITATIVE_LOAD.test(trimmed)) return null
+  if (percentOf(trimmed) != null) return null
+  const withUnit = trimmed.match(/(?:(?:about|approx(?:imately)?|around)\s+)?~?\s*(\d+(?:\.\d+)?)\s*(lbs?|kg|#)\b/i)
+  if (withUnit) {
+    const n = Number(withUnit[1])
+    if (!Number.isFinite(n) || n <= 0) return null
+    const from: ModelUnit = withUnit[2].toLowerCase() === 'kg' ? 'kg' : 'lb'
+    if (from === unit) return n
+    return from === 'kg' ? n * LB_PER_KG : n / LB_PER_KG
+  }
+  const bare = trimmed.match(/^(?:(?:about|approx(?:imately)?|around)\s+)?~?\s*(\d+(?:\.\d+)?)\s*$/i)
+  if (!bare) return null
+  const n = Number(bare[1])
+  return Number.isFinite(n) && n >= 20 ? n : null
+}
+
+/** A progression_rule row the lift model can read without importing tracks. */
+export interface ProgressionRuleRef {
+  engine_type: string
+  exercise_name?: string | null
+  track_id?: string | null
+  active_from?: string | null
+  active_to?: string | null
+}
+
+export function isRuleActive(rule: ProgressionRuleRef, today: string): boolean {
+  if (rule.active_from && rule.active_from > today) return false
+  if (rule.active_to && rule.active_to < today) return false
+  return true
+}
+
+/** Exercise-named rule first, then a track-level rule (no exercise_name). */
+export function ruleForExercise(
+  rules: ProgressionRuleRef[] | undefined,
+  exerciseName: string | null | undefined,
+  today: string,
+  trackId?: string | null,
+): ProgressionRuleRef | null {
+  if (!rules?.length) return null
+  const active = rules.filter((r) => isRuleActive(r, today))
+  const name = (exerciseName ?? '').trim().toLowerCase()
+  const liftId = exerciseName ? canonicalLiftId(exerciseName) : null
+  const named = active.find((r) => {
+    const rn = (r.exercise_name ?? '').trim().toLowerCase()
+    if (!rn) return false
+    if (rn === name) return true
+    return liftId != null && canonicalLiftId(r.exercise_name) === liftId
+  })
+  if (named) return named
+  if (trackId) return active.find((r) => !(r.exercise_name ?? '').trim() && r.track_id === trackId) ?? null
+  return null
 }
 
 /** The heaviest set of each week the lift was trained, newest first. */
@@ -1209,8 +1279,23 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   let call: Recommendation['call']
   let deltaPct = 0
   const programPct = percentOf(rx?.load)
+  const written = explicitBarLoad(rx?.load, unit)
+  const manual = !!input.manual
+  const lockToProgram = written != null || manual
 
-  if (input.deload && tm != null) {
+  if (written != null) {
+    base = written
+    basis = 'explicit'
+    call = manual ? 'manual' : 'explicit'
+    why.push(manual
+      ? `manual rule: program load ${fmtLoad(written)} — TM not applied`
+      : `program load ${fmtLoad(written)}`)
+  } else if (manual) {
+    base = ref?.top.weight ?? 0
+    basis = 'manual'
+    call = 'manual'
+    why.push('manual rule: no program load written — TM not applied')
+  } else if (input.deload && tm != null) {
     base = tm * DELOAD_TM_PCT / 100
     basis = 'deload'
     call = 'deload'
@@ -1263,10 +1348,6 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   let rpeCap: number | null = input.deload ? DELOAD_RPE_CAP : null
   let skip = false
   const mods: Modifier[] = []
-  if (!input.deload) {
-    const missed = missedWeeksModifier(missedWeeks)
-    if (missed) mods.push(missed)
-  }
   const exerciseName = rx?.exercise ?? LIFT_LABEL[lift]
   // A check-in from earlier this week still says something about the knee; the
   // sleep and readiness rules are today-only.
@@ -1276,7 +1357,15 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   const dayOf: DayOf | null = input.dayOf ?? (todayCheckin
     ? todayCheckin
     : recentCheckin ? { kneePainL: recentCheckin.kneePainL, kneePainR: recentCheckin.kneePainR } : null)
-  mods.push(...dayOfModifiers(exerciseName, dayOf))
+  // Written load and a manual rule are the number on the bar. TM / chart /
+  // missed-week / day-of math does not rewrite them.
+  if (!lockToProgram) {
+    if (!input.deload) {
+      const missed = missedWeeksModifier(missedWeeks)
+      if (missed) mods.push(missed)
+    }
+    mods.push(...dayOfModifiers(exerciseName, dayOf))
+  }
   for (const m of mods) {
     if (m.skip) { skip = true; why.push(m.note); continue }
     load *= m.factor
@@ -1288,14 +1377,14 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   // The ceiling, last, so nothing above can talk its way past it.
   const ceiling = best && !input.testDay ? ceilingLoad(best, repCount, effectiveRpe) : Infinity
   let capped = false
-  if (load > ceiling) {
+  if (!lockToProgram && load > ceiling) {
     load = ceiling
     capped = true
     why.push(`capped: heaviest ever is ${fmtSet(best!.heaviest)} (${shortDay(best!.heaviest.date)}), best e1RM ${fmtLoad(Math.round(best!.e1rm))} — nothing above +${CEILING_PCT}% except on a test day`)
   }
   if (input.testDay) why.push('test day: the all-time-best ceiling is lifted')
   const fit = (x: number) => (x >= ceiling ? floorTo(ceiling, inc) : roundTo(x, inc))
-  const rounded = fit(load)
+  const rounded = lockToProgram ? roundTo(load, inc) : fit(load)
 
   const conditional: string[] = []
   if (!input.dayOf && !todayCheckin) {
@@ -1309,9 +1398,13 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   const pctOfTm = tm != null && tm > 0 ? Math.round((rounded / tm) * 100) : null
   const anchor = wm?.anchor ?? null
   const source = anchor ? `from ${fmtSet(anchor)}${anchor.rpe == null ? ' (no RPE)' : ''}, ${shortDay(anchor.date)}` : null
-  const reason = tm != null
-    ? `${fmtLoad(rounded)} = ${pctOfTm}% of TM ${fmtLoad(Math.round(tm))}${override != null ? ' (set by hand)' : ''}${source ? ` (${source})` : ''}`
-    : `${fmtLoad(rounded)} (no training max yet${ref ? ` — from top set ${fmtSet(ref.top)}, ${shortDay(ref.top.date)}` : ''})`
+  const reason = written != null
+    ? `${fmtLoad(rounded)} = program load${manual ? ' (manual rule — TM not applied)' : ''}`
+    : manual
+      ? `${fmtLoad(rounded)} (manual rule — TM not applied)`
+      : tm != null
+        ? `${fmtLoad(rounded)} = ${pctOfTm}% of TM ${fmtLoad(Math.round(tm))}${override != null ? ' (set by hand)' : ''}${source ? ` (${source})` : ''}`
+        : `${fmtLoad(rounded)} (no training max yet${ref ? ` — from top set ${fmtSet(ref.top)}, ${shortDay(ref.top.date)}` : ''})`
 
   model.recommendation = {
     weekStart,
@@ -1371,6 +1464,7 @@ export function prescriptionFromProgram(
         targetRpe: ex.target_rpe ?? null,
         load: ex.load ?? null,
         exercise: ex.name,
+        trackId: ex.track_id ?? null,
         session: s.name ?? null,
         sessionIntent: s.intent ?? null,
       }
@@ -1446,6 +1540,8 @@ export interface LiftModelSources {
   noPush?: string | null
   /** When set, overrides the process / Vite / Deno env for this call. */
   rpeHalfSteps?: boolean
+  /** Live progression_rule rows. A `manual` rule blocks TM math for that lift. */
+  progressionRules?: ProgressionRuleRef[]
 }
 
 export function modelFromSources(lift: MainLiftId, src: LiftModelSources): LiftModel {
@@ -1457,6 +1553,7 @@ export function modelFromSources(lift: MainLiftId, src: LiftModelSources): LiftM
     .map((o) => ({ date: localDay(o.logged_at, timeZone), exercise: o.signal.split('—')[0].trim(), severity: o.severity }))
   const rx = prescriptionFromProgram(lift, src.sessions ?? [])
   const flags = sessionFlags(rx?.session, rx?.sessionIntent, rx?.load, src.phaseName)
+  const rule = ruleForExercise(src.progressionRules, rx?.exercise, today, rx?.trackId)
   const override = readTmOverride(src.overrides?.[lift])
   // The weekly review's DELOAD is chosen off an average RPE across every lift —
   // exactly the signal this model exists to stop reading — so only an explicit
@@ -1480,6 +1577,7 @@ export function modelFromSources(lift: MainLiftId, src: LiftModelSources): LiftM
     dayOf: src.dayOf ?? null,
     noPush: src.noPush ?? null,
     rpeHalfSteps: src.rpeHalfSteps,
+    manual: rule?.engine_type === 'manual',
   })
 }
 

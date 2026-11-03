@@ -3,7 +3,7 @@ import { readLoggedExercises, type LoggedWorkoutLike } from '../../supabase/func
 import { formatSet, isoDay, shortDate, topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import {
   addDays, e1rmFromSet, liftNameMatcher, localDay, mondayOf, parseLiftId,
-  type LiftModelSources, type MainLiftId, type ModelWorkout, type TmOverride,
+  type LiftModelSources, type MainLiftId, type ModelWorkout, type ProgressionRuleRef, type TmOverride,
 } from '../../supabase/functions/_shared/engine/liftModel.ts'
 import { asJson, type Sql } from './db.ts'
 
@@ -497,6 +497,7 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
     : []
   const live = await loadLiveProgram(store)
   const presc = review ? asJson<{ directive?: string } | null>(review.next_week_prescription, null) : null
+  const progressionRules = await loadProgressionRules(store, live?.programId ?? null)
   return {
     workouts,
     observations,
@@ -507,6 +508,27 @@ export async function loadLiftModelSources(store: ConnectedStore): Promise<LiftM
     today,
     timeZone,
     unit: store.unit === 'kg' ? 'kg' : 'lb',
+    progressionRules,
+  }
+}
+
+async function loadProgressionRules(store: ConnectedStore, programId: string | null): Promise<ProgressionRuleRef[]> {
+  if (!programId) return []
+  try {
+    const rows = await store.sql<{
+      exercise_name: string | null
+      engine_type: string
+      track_id: string | null
+      active_from: string | null
+      active_to: string | null
+    }[]>`
+      SELECT exercise_name, engine_type, track_id, active_from::text, active_to::text
+      FROM progression_rule
+      WHERE program_id = ${programId}
+    `
+    return rows
+  } catch {
+    return []
   }
 }
 
