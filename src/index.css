@@ -2470,20 +2470,118 @@ textarea.input {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* --- Pull to refresh ------------------------------------------------------ */
+/* The app mark — the Convergence reticle — tightening as you pull: scattered
+   points collapse onto the lock ring, the crosshair draws in, and at the
+   threshold the ring goes solid and the zero point lights signal. While the
+   refetch runs the locked cloud orbits; when it lands the cloud collapses into
+   the zero and the page settles. Everything rides --ptr-p (0→1 pull progress)
+   and --ptr-y (pull distance), written by the component without a re-render,
+   and only ever moves transform and opacity. */
 .ptr { position: relative; }
+.ptr__content { position: relative; }
+.ptr--pulling .ptr__content,
+.ptr--refreshing .ptr__content { will-change: transform; }
+/* No transition while the finger drives it; a spring on the way back. */
+.ptr--refreshing .ptr__content,
+.ptr--settling .ptr__content,
+.ptr--landing .ptr__content { transition: transform var(--dur-transition) var(--ease-out); }
+
 .ptr__indicator {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 56px;
   display: flex;
-  align-items: center;
   justify-content: center;
-  overflow: hidden;
-  font-family: var(--font-mono);
-  font-size: var(--fs-xs);
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  color: var(--text-dim);
-  transition: opacity 120ms ease;
+  pointer-events: none;
+  /* Centered in the gap the pull opens, rising out of it as it closes. */
+  transform: translate3d(0, calc(var(--ptr-y) / 2 - 28px), 0);
+  opacity: min(1, calc(var(--ptr-p) * 1.6));
 }
-.ptr__indicator--ready { color: var(--signal); }
+.ptr--idle .ptr__indicator { visibility: hidden; }
+.ptr--refreshing .ptr__indicator,
+.ptr--settling .ptr__indicator,
+.ptr--landing .ptr__indicator {
+  transition: transform var(--dur-transition) var(--ease-out), opacity var(--dur-mid) var(--ease-out);
+}
+.ptr--landing .ptr__indicator { opacity: 0; transition-delay: 0ms, 140ms; }
+.ptr__sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.ptr__mark { overflow: visible; }
+.ptr__mark * { transform-box: fill-box; transform-origin: center; }
+
+.ptr__hair {
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  opacity: 0.35;
+}
+.ptr__hair--v { transform: scaleY(var(--ptr-p)); }
+.ptr__hair--h { transform: scaleX(var(--ptr-p)); }
+
+/* The lock ring shrinks onto the read, dashed until it's locked. */
+.ptr__ring {
+  fill: none;
+  stroke: var(--text-dim);
+  stroke-width: 1;
+  stroke-dasharray: 3 4;
+  opacity: calc(0.25 + var(--ptr-p) * 0.45);
+  transform: scale(calc(1.9 - var(--ptr-p) * 0.9));
+  transition: stroke var(--dur-mid) var(--ease-out);
+}
+.ptr--armed .ptr__ring { stroke: var(--signal); stroke-dasharray: none; }
+
+/* view-box origin is the viewBox (0,0) — the mark's center. */
+.ptr__cloud { transform-box: view-box; transform-origin: 0 0; }
+.ptr__dot {
+  fill: var(--text-dim);
+  opacity: calc(0.3 + var(--ptr-p) * 0.6);
+  transform: translate(calc(var(--dx) * (1 - var(--ptr-p))), calc(var(--dy) * (1 - var(--ptr-p))));
+  transition: fill var(--dur-mid) var(--ease-out);
+}
+.ptr--armed .ptr__dot { fill: var(--signal); }
+
+.ptr__zero {
+  fill: var(--signal);
+  transform: scale(0);
+  transition: transform 320ms var(--ease-snap);
+}
+.ptr--armed .ptr__zero { transform: scale(1); }
+
+/* Refetching: the locked cloud orbits, the zero point breathes. */
+.ptr--refreshing .ptr__cloud { animation: ptr-orbit 1400ms linear infinite; }
+.ptr--refreshing .ptr__zero { animation: ptr-breathe 1400ms var(--ease-out) infinite; }
+.ptr--refreshing .ptr__ring { animation: ptr-ring 1400ms var(--ease-out) infinite; }
+@keyframes ptr-orbit { to { transform: rotate(360deg); } }
+@keyframes ptr-breathe { 50% { transform: scale(0.6); } }
+@keyframes ptr-ring { 50% { opacity: 0.35; } }
+
+/* Landed: the cloud collapses into the zero, which flashes once. */
+.ptr--landing .ptr__cloud {
+  transform: scale(0.15);
+  opacity: 0;
+  transition: transform var(--dur-mid) var(--ease-out), opacity var(--dur-mid) var(--ease-out);
+}
+.ptr--landing .ptr__ring { transform: scale(0.4); transition: transform var(--dur-mid) var(--ease-out); }
+.ptr--landing .ptr__zero { transform: scale(1.5); transition: transform 200ms var(--ease-snap); }
+
+/* Reduced motion: no travel at all. The mark sits already locked and simply
+   fades with the pull; the refetch shows it held still. */
+@media (prefers-reduced-motion: reduce) {
+  .ptr__hair--v, .ptr__hair--h, .ptr__dot, .ptr__ring, .ptr__cloud,
+  .ptr--landing .ptr__cloud, .ptr--landing .ptr__ring, .ptr--landing .ptr__zero { transform: none; }
+  .ptr--refreshing .ptr__cloud,
+  .ptr--refreshing .ptr__zero,
+  .ptr--refreshing .ptr__ring { animation: none; }
+}
 
 /* Back button — a real 44px target, not a 28px sliver. */
 .icon-btn {
