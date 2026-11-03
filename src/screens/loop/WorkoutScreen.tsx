@@ -21,7 +21,7 @@ import {
   type PendingSession, type PendingDebrief, type DebriefExerciseInput, type SessionCheckinInput,
 } from '../../engine'
 import { isUpperBody } from '../../engine/liftModel'
-import { rpeContract } from '../../engine/prescription'
+import { resolveSessionTarget, rpeContract } from '../../engine/prescription'
 import { pickerRpeScale, roundSessionRpe } from '../../engine/rpeScale'
 import { rpeHalfStepsEnabled } from '../../lib/api'
 import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
@@ -48,7 +48,7 @@ import { arcLoadOn } from '../../lib/arcLoad'
 import { tracksOn } from '../../lib/tracksFlag'
 import { fetchAutoregRules, useProgramTracks } from '../../lib/tracksData'
 import { evaluateAutoregRules } from '../../engine/autoreg'
-import { groupByTrack, type TrackRef } from '../../engine/tracks'
+import { sessionTrackLayout, type TrackRef } from '../../engine/tracks'
 import { TrackLabel } from './tracksUi'
 import { IntervalTimer, type IntervalResult } from '../../components/IntervalTimer'
 import { IntervalBlock } from '../../components/IntervalBlock'
@@ -2752,11 +2752,21 @@ export function WorkoutScreen({
         )}
 
         {(tracksOn() && tracks.length
-          ? groupByTrack(exercises, tracks).flatMap((g) =>
-              g.exercises.map((item, i) => ({ ex: item.exercise, exIdx: item.index, header: i === 0 ? g.track : null }))
-            )
-          : exercises.map((ex, exIdx) => ({ ex, exIdx, header: null as TrackRef | null }))
-        ).map(({ ex, exIdx, header }) => {
+          ? (() => {
+              const layout = sessionTrackLayout(exercises, tracks)
+              if (layout.kind === 'flat') {
+                return layout.items.map((item) => ({
+                  ex: item.exercise, exIdx: item.index, header: null as TrackRef | null, label: item.track,
+                }))
+              }
+              return layout.groups.flatMap((g) =>
+                g.exercises.map((item, i) => ({
+                  ex: item.exercise, exIdx: item.index, header: i === 0 ? g.track : null, label: null as TrackRef | null,
+                })),
+              )
+            })()
+          : exercises.map((ex, exIdx) => ({ ex, exIdx, header: null as TrackRef | null, label: null as TrackRef | null }))
+        ).map(({ ex, exIdx, header, label }) => {
           const logs = setLogs[exIdx] ?? []
           const trackingType = effectiveTrackingType(ex)
           // A prescription is only this slot's if it was written for this
@@ -2787,18 +2797,18 @@ export function WorkoutScreen({
           // A block written with its dose in the name is titled by the movement;
           // the block below already says 8 × 15s / 45s.
           const title = intervalPlan ? intervalTitle(ex.name) : ex.name
-          // The number to hit is the engine's target for today — the same one
-          // Train's session preview and the hint chip quote — not the program's
-          // raw load text, which predates every progression since it was written.
-          // A pushed lift aims at its uncapped number. Weight-and-reps only: a
-          // bodyweight lift's "load" is added weight, which the engine doesn't set.
-          // Gated like the hint: a swapped-in lift never inherits the replaced
-          // lift's number while its own prescription is still on the way.
-          const rxTarget = trackingType === 'weight_reps' && presOk
+          // Written bar load wins. TM / lift-model math is only the fallback
+          // when the program did not write a weight. A pushed lift aims at its
+          // uncapped number. Weight-and-reps only: a bodyweight lift's "load"
+          // is added weight, which the engine doesn't set. Gated like the hint:
+          // a swapped-in lift never inherits the replaced lift's number while
+          // its own prescription is still on the way.
+          const computedTarget = trackingType === 'weight_reps' && presOk
             ? (feedback[exIdx]?.pushed && prescription?.pushTargets?.[exIdx] != null
                 ? prescription.pushTargets[exIdx]
                 : prescription?.targets?.[exIdx] ?? null)
             : null
+          const rxTarget = resolveSessionTarget(ex, computedTarget, u)
           const pLoad = rxTarget ?? leadingInt(ex.load ?? undefined)
           // Details sheet: the movement demo, the hardcoded how-to library, the
           // program-specific cue, the insight this lift serves, and the reading
@@ -2830,6 +2840,11 @@ export function WorkoutScreen({
                 <div className="track-group__head" style={{ marginBottom: 12 }}>
                   <span className="track-group__bar" style={{ background: header.color }} />
                   <TrackLabel track={header} />
+                </div>
+              )}
+              {label && !header && (
+                <div style={{ marginBottom: 8 }}>
+                  <TrackLabel track={label} />
                 </div>
               )}
               <div style={{ marginBottom: 14 }}>

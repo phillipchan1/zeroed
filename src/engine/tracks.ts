@@ -114,7 +114,7 @@ export interface TrackGroup<T extends TrackableExercise> {
   exercises: Array<{ exercise: T; index: number }>
 }
 
-/** Group in track order, preserving in-session order inside each track. */
+/** Group by track. Groups follow the first exercise of each track in session order. */
 export function groupByTrack<T extends TrackableExercise>(
   exercises: T[],
   tracks: TrackRef[],
@@ -136,13 +136,47 @@ export function groupByTrack<T extends TrackableExercise>(
     }
     bucket.exercises.push({ exercise: ex, index: i })
   }
-  const ordered = tracks
-    .slice()
-    .sort((a, b) => a.order - b.order)
-    .map((t) => buckets.get(t.id))
-    .filter((g): g is TrackGroup<T> => Boolean(g))
+  const ordered = [...buckets.values()]
   if (leftovers.exercises.length) ordered.push(leftovers)
+  ordered.sort((a, b) => a.exercises[0].index - b.exercises[0].index)
   return ordered
+}
+
+export function groupingPreservesSessionOrder<T extends TrackableExercise>(
+  groups: TrackGroup<T>[],
+): boolean {
+  let prev = -1
+  for (const g of groups) {
+    for (const item of g.exercises) {
+      if (item.index <= prev) return false
+      prev = item.index
+    }
+  }
+  return true
+}
+
+export type SessionTrackLayout<T extends TrackableExercise> =
+  | { kind: 'groups'; groups: TrackGroup<T>[] }
+  | { kind: 'flat'; items: Array<{ exercise: T; index: number; track: TrackRef | null }> }
+
+/**
+ * Track groups in session order, or one list with labels when grouping
+ * would move a later exercise in front of an earlier one.
+ */
+export function sessionTrackLayout<T extends TrackableExercise>(
+  exercises: T[],
+  tracks: TrackRef[],
+): SessionTrackLayout<T> {
+  const groups = groupByTrack(exercises, tracks)
+  if (groupingPreservesSessionOrder(groups)) return { kind: 'groups', groups }
+  return {
+    kind: 'flat',
+    items: exercises.map((exercise, index) => ({
+      exercise,
+      index,
+      track: resolveTrack(exercise, tracks),
+    })),
+  }
 }
 
 export function formatSuperset(group: string | null | undefined): string | null {

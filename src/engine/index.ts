@@ -64,7 +64,7 @@ import {
   SEVERITY_STRONG, SEVERITY_PAIN, strongTopSet,
   rpeContract, PHASE_RPE, tallyWeek, decidePrescription,
   recommendedLoad, autoregulateDelta, maxUpFor,
-  projectExerciseLoad, allowsAutoProgress,
+  projectExerciseLoad, allowsAutoProgress, writtenBarWeight,
   P1_RESOLVE_THRESHOLD, P1_DISCONFIRM_STEP, advanceStatus,
   addressesLimiter, capIsActive, isLiftHeld,
   CLEARANCE_TOP_SETS, CLEARANCE_SESSIONS,
@@ -2687,6 +2687,13 @@ export async function gatherSessionPrescription(
   const loggedSets = liftSrc ? readModelLog(liftSrc.workouts, { convert: liftSrc.convert }).sets : []
 
   exercises.forEach((ex, i) => {
+    const written = writtenBarWeight(ex.load, u)
+    if (written != null) {
+      targets[i] = written
+      held[i] = isLiftHeld(ex, p1, capActive)
+      hints[i] = `Program · ${written}${u.unit}`
+      return
+    }
     // The four main lifts: the lift model decides, from the whole log.
     const lift = canonicalLiftId(ex.name)
     if (lift && liftSrc) {

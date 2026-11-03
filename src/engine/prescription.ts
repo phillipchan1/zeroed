@@ -485,6 +485,30 @@ export function parseExplicitLoad(load: string | null | undefined): number | nul
   return p.load
 }
 
+/** Written bar weight in the display unit, or null when load is qualitative / % / empty. */
+export function writtenBarWeight(
+  load: string | null | undefined,
+  u: UnitContext,
+): number | null {
+  const p = parsePrescription(load)
+  if (p.ambiguous || p.load == null) return null
+  const stored = storedBarWeight(p, u)
+  return stored != null ? u.prescribe(stored) : null
+}
+
+/**
+ * The number the session preview, active session, and logging defaults show.
+ * A written bar load always wins. TM / percent / lift-model math is the
+ * fallback when nothing is written. Flag-on and flag-off share this.
+ */
+export function resolveSessionTarget(
+  exercise: Pick<ExerciseTemplate, 'load'>,
+  computed: number | null | undefined,
+  u: UnitContext,
+): number | null {
+  return writtenBarWeight(exercise.load, u) ?? computed ?? null
+}
+
 export function allowsAutoProgress(opts: {
   exercise: Pick<ExerciseTemplate, 'name' | 'load' | 'target_rpe'>
   sessionIntent?: string | null
