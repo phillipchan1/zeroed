@@ -21,7 +21,7 @@ import {
   readModelLog, dedupeSets, isQualifying, isHeavySingle, rpeEvidenceWeight, workingMaxAsOf, workingMaxSeries, trendOver,
   allTimeBest, ceilingLoad, backoffLoad, weeklyCall, dayOfModifiers, missedWeeksModifier,
   buildLiftModel, buildLiftModels, prescriptionFromProgram, renderLiftModel, sessionFlags,
-  mondayOf, addDays, shortDay, targetReps, percentOf, liftIncrement, recencyFactor,
+  mondayOf, addDays, shortDay, targetReps, percentOf, explicitBarLoad, ruleForExercise, recencyFactor, liftIncrement,
   modelFromSources, previewTrainingMax, BLOCK_TARGET_RPE,
   readTmOverride, convertTmOverride, tmOverrideEntry, withTrainingMax,
   type LiftSet, type TopSetWeek, type ModelWorkout,
@@ -374,6 +374,92 @@ const REASON = /^\d+(\.\d)? = \d+% of TM \d+( \(set by hand\))? \(from \d+(\.\d)
 }
 
 {
+  // Written session load always wins over TM / RPE-chart math.
+  // Tue Lower: TM 410 would chart ~335 squat / ~400 deadlift; the program says 295 / 350.
+  const squatLog = [s('Squat (no belt)', '2026-10-20', 315, 3, 8)]
+  const squatTm = buildLiftModel({
+    lift: 'squat', sets: squatLog, today: TODAY, tmOverride: 410,
+    prescription: { sets: 3, reps: '3', targetRpe: 7, exercise: 'Squat (no belt)' },
+  }).recommendation!
+  ok(squatTm.load !== 295, `TM-only squat is not the written 295 (got ${squatTm.load})`)
+  const squatWritten = buildLiftModel({
+    lift: 'squat', sets: squatLog, today: TODAY, tmOverride: 410,
+    prescription: { sets: 3, reps: '3', targetRpe: 7, load: '295', exercise: 'Squat (no belt)' },
+  }).recommendation!
+  eq(squatWritten.load, 295, 'explicit squat 295 beats TM chart')
+  eq(squatWritten.basis, 'explicit', 'written squat is basis explicit')
+  eq(squatWritten.call, 'explicit', 'written squat call is explicit')
+  ok(!squatWritten.reason.includes('of TM'), 'written squat reason is not a TM percent')
+
+  const deadLog = [s('Deadlift (conventional, no belt)', '2026-10-20', 365, 3, 8)]
+  const deadTm = buildLiftModel({
+    lift: 'deadlift', sets: deadLog, today: TODAY, tmOverride: 410,
+    prescription: { sets: 3, reps: '3', targetRpe: 7, exercise: 'Deadlift (conventional, no belt)' },
+  }).recommendation!
+  ok(deadTm.load !== 350, `TM-only deadlift is not the written 350 (got ${deadTm.load})`)
+  const deadWritten = buildLiftModel({
+    lift: 'deadlift', sets: deadLog, today: TODAY, tmOverride: 410,
+    prescription: { sets: 3, reps: '3', targetRpe: 7, load: '350', exercise: 'Deadlift (conventional, no belt)' },
+  }).recommendation!
+  eq(deadWritten.load, 350, 'explicit deadlift 350 beats TM chart')
+  eq(deadWritten.basis, 'explicit', 'written deadlift is basis explicit')
+
+  const deadManual = buildLiftModel({
+    lift: 'deadlift', sets: deadLog, today: TODAY, tmOverride: 410, manual: true,
+    prescription: { sets: 3, reps: '3', targetRpe: 7, load: '350', exercise: 'Deadlift (conventional, no belt)' },
+  }).recommendation!
+  eq(deadManual.load, 350, 'manual rule uses written deadlift 350, not TM')
+  eq(deadManual.call, 'manual', 'manual + written load is call manual')
+  ok(deadManual.reason.includes('manual rule'), 'manual reason names the rule')
+
+  const squatManualNoLoad = buildLiftModel({
+    lift: 'squat', sets: squatLog, today: TODAY, tmOverride: 410, manual: true,
+    prescription: { sets: 3, reps: '3', targetRpe: 7, exercise: 'Squat (no belt)' },
+  }).recommendation!
+  eq(squatManualNoLoad.call, 'manual', 'manual with no written load still does not TM-chart')
+  eq(squatManualNoLoad.load, 315, 'manual with no written load holds last top set')
+  ok(squatManualNoLoad.load !== squatTm.load, 'manual no-load is not the TM chart number')
+
+  const liftingRule = { engine_type: 'manual', track_id: 't-lift', active_from: '2026-11-02' }
+  ok(ruleForExercise([liftingRule], 'Squat (no belt)', '2026-11-03', 't-lift')?.engine_type === 'manual', 'track-level manual rule matches Squat on Lifting')
+  ok(ruleForExercise([liftingRule], 'Squat (no belt)', '2026-11-01', 't-lift') == null, 'manual rule not active before active_from')
+  ok(ruleForExercise([{ engine_type: 'manual', exercise_name: 'Deadlift' }], 'Deadlift (conventional, no belt)', TODAY)?.engine_type === 'manual', 'exercise-named manual matches by lift identity')
+
+  const wk = (name: string, load: string, at: string): ModelWorkout => ({
+    id: name, performed_at: at,
+    actual_weights: { '0': [{ set: 1, weight: 365, reps: 3, rpe: 8, done: true }] },
+    exercises_snapshot: [{ name, sets: 3, reps: '3', load }],
+  })
+  const tue = {
+    name: 'Tue Lower Strength',
+    exercises: [
+      { name: 'Deadlift (conventional, no belt)', sets: 3, reps: '3', load: '350', target_rpe: 7, track_id: 't-lift' },
+      { name: 'Squat (no belt)', sets: 3, reps: '3', load: '295', target_rpe: 7, track_id: 't-lift' },
+    ],
+  }
+  const srcDead = modelFromSources('deadlift', {
+    workouts: [wk('Deadlift (conventional, no belt)', '350', '2026-10-20T19:00:00Z')],
+    sessions: [tue],
+    today: '2026-11-03',
+    overrides: { deadlift: 410 },
+    progressionRules: [{ engine_type: 'manual', track_id: 't-lift', active_from: '2026-11-02' }],
+  })
+  eq(srcDead.recommendation!.load, 350, 'get_lift_model path: Deadlift This week is written 350')
+  eq(srcDead.recommendation!.call, 'manual', 'get_lift_model path: Lifting manual rule')
+  const srcSquat = modelFromSources('squat', {
+    workouts: [wk('Squat (no belt)', '295', '2026-10-20T19:00:00Z')],
+    sessions: [tue],
+    today: '2026-11-03',
+    overrides: { squat: 410 },
+    progressionRules: [{ engine_type: 'manual', track_id: 't-lift', active_from: '2026-11-02' }],
+  })
+  eq(srcSquat.recommendation!.load, 295, 'get_lift_model path: Squat This week is written 295')
+  const rendered = renderLiftModel(srcDead)
+  ok(rendered.includes('@ 350lb'), 'This week text quotes written 350, not TM 400')
+  ok(!rendered.includes('@ 400lb'), 'This week text does not quote TM 400')
+}
+
+{
   // TM override and a program percentage: every number moves off the hand-set TM.
   const log = [s('Bench press', '2026-10-20', 245, 3, 8)]
   const m = buildLiftModel({
@@ -544,6 +630,12 @@ eq(targetReps('5')?.lo, 5, 'a single number')
 eq(percentOf('65%'), 65, 'a percentage')
 eq(percentOf('65-70% TM'), 67.5, 'a percentage range')
 eq(percentOf('~275 lbs'), null, 'a load is not a percentage')
+eq(explicitBarLoad('295'), 295, 'written 295 is a bar weight')
+eq(explicitBarLoad('350 lb'), 350, 'written 350 lb is a bar weight')
+eq(explicitBarLoad('~275 lbs'), 275, 'approx pounds is a bar weight')
+eq(explicitBarLoad('70%'), null, 'a percent is not a bar weight')
+eq(explicitBarLoad('light'), null, 'qualitative load is not a bar weight')
+eq(explicitBarLoad(null), null, 'missing load is not a bar weight')
 eq(liftIncrement('ohp', 'lb'), 2.5, 'press rounds to 2.5 lb')
 eq(liftIncrement('squat', 'lb'), 5, 'everything else to 5 lb')
 eq(sessionFlags('Week 5 deload').deload, true, 'a deload session is flagged')

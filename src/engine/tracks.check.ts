@@ -1,6 +1,6 @@
 // Run: node --experimental-strip-types src/engine/tracks.check.ts
 import {
-  daysHitByTrack, formatSuperset, groupByTrack, suggestTrackName, wantsGeneralTrack,
+  daysHitByTrack, formatSuperset, groupByTrack, sessionTrackLayout, suggestTrackName, wantsGeneralTrack,
 } from './tracks.ts'
 
 const fails: string[] = []
@@ -45,10 +45,39 @@ const friday = [
 ]
 const groups = groupByTrack(friday, [lifting, cond, hyp])
 ok(groups.length === 3, `Friday groups into 3 tracks, got ${groups.length}`)
-ok(groups[0].track?.name === 'Lifting' && groups[0].exercises.length === 2, 'Lifting first (order 1) with OHP + speed bench')
-ok(groups[1].track?.name === 'Conditioning' && groups[1].exercises.length === 3, 'Conditioning keeps jump/bound/sprint')
+ok(groups[0].track?.name === 'Conditioning' && groups[0].exercises.length === 3, 'Conditioning first — first exercise in session order')
+ok(groups[1].track?.name === 'Lifting' && groups[1].exercises.length === 2, 'Lifting keeps OHP + speed bench after Conditioning')
 ok(groups[2].track?.name === 'Hypertrophy', 'Hypertrophy last')
 ok(formatSuperset('a1') === 'A1' && formatSuperset('nope') === null, 'superset A1/A2')
+
+const general = { id: 't-gen', name: 'General', color: '#9A9A9A', icon: 'circle', order: 0 }
+const tueLower = [
+  { name: 'Deadlift (conventional, no belt)', track_id: 't-lift' },
+  { name: 'Squat (no belt)', track_id: 't-gen' },
+  { name: 'Glute bridge', track_id: 't-gen' },
+  { name: 'Assault Bike', track_id: 't-cond' },
+]
+const tueGroups = groupByTrack(tueLower, [general, lifting, cond])
+ok(tueGroups[0].track?.name === 'Lifting', 'Tue Lower: Lifting group first because Deadlift is planned first')
+ok(tueGroups[0].exercises[0].exercise.name.startsWith('Deadlift'), 'Tue Lower: Deadlift is the first row')
+ok(tueGroups[1].track?.name === 'General' && tueGroups[1].exercises[0].exercise.name.startsWith('Squat'), 'Tue Lower: Squat stays after Deadlift')
+ok(
+  tueGroups.flatMap((g) => g.exercises.map((e) => e.index)).join(',') === '0,1,2,3',
+  'Tue Lower: grouping keeps planned session order',
+)
+
+const interleaved = [
+  { name: 'Deadlift', track_id: 't-lift' },
+  { name: 'Squat', track_id: 't-gen' },
+  { name: 'Row', track_id: 't-lift' },
+]
+const flat = sessionTrackLayout(interleaved, [general, lifting])
+ok(flat.kind === 'flat', 'interleaved tracks fall back to one list in session order')
+ok(
+  flat.kind === 'flat' && flat.items.map((i) => i.exercise.name).join(',') === 'Deadlift,Squat,Row',
+  'flat fallback keeps Deadlift → Squat → Row',
+)
+ok(sessionTrackLayout(tueLower, [general, lifting, cond]).kind === 'groups', 'non-interleaved Tue Lower still groups')
 
 const days = daysHitByTrack(
   [

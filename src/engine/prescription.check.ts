@@ -18,6 +18,7 @@ import {
   tallyWeek, decidePrescription,
   autoregulateDelta, recommendedLoad, roundLoad, maxUpFor,
   parseExplicitLoad, parsePrescription, trainingIntent, allowsAutoProgress, projectExerciseLoad, isComparableWorkingBase,
+  writtenBarWeight, resolveSessionTarget,
   advanceStatus, addressesLimiter, capIsActive, isLiftHeld, strongTopSet,
   clearanceTestOf, pickClearanceLift, describeClearanceTest, newClearanceTest, judgeClearanceSession,
   P1_RESOLVE_THRESHOLD,
@@ -367,6 +368,37 @@ const explicitBeats = projectExerciseLoad({
 })
 eq(explicitBeats.weight, 185, 'an explicit load always beats +5% off last week')
 eq(explicitBeats.source, 'explicit', 'source is explicit')
+
+eq(writtenBarWeight('295', LB), 295, 'written 295 is a bar weight')
+eq(writtenBarWeight('350 lb', LB), 350, 'written 350 lb is a bar weight')
+eq(writtenBarWeight('light', LB), null, 'qualitative load is not a bar weight')
+eq(writtenBarWeight(null, LB), null, 'missing load is not a bar weight')
+eq(writtenBarWeight('70%', LB), null, 'a percent is not a bar weight — TM math may still run')
+
+const squatTm = 335
+const deadTm = 400
+for (const flag of ['off', 'on'] as const) {
+  eq(
+    resolveSessionTarget({ load: '295' }, squatTm, LB),
+    295,
+    `flag-${flag}: Squat written 295 overrides TM ${squatTm}`,
+  )
+  eq(
+    resolveSessionTarget({ load: '350' }, deadTm, LB),
+    350,
+    `flag-${flag}: Deadlift written 350 overrides TM ${deadTm}`,
+  )
+  eq(
+    resolveSessionTarget({ load: 'light' }, squatTm, LB),
+    squatTm,
+    `flag-${flag}: qualitative load falls back to TM`,
+  )
+  eq(
+    resolveSessionTarget({ load: undefined }, squatTm, LB),
+    squatTm,
+    `flag-${flag}: missing load falls back to TM`,
+  )
+}
 
 const plusFiveOff250 = recommendedLoad(set(250, 2, 8), 5, LB)
 const PROJECT_PROBES: Array<{

@@ -15,6 +15,7 @@ import { effectiveTrackingType } from '../../engine/exerciseLibrary'
 import { fmtDose, isIntervalBlock, intervalPlanFor, roundsFromLogs, fmtClock, intervalTitle } from '../../engine/intervals'
 import { primeCueAudio } from '../../lib/intervalCues'
 import { tallySession } from '../../engine/volume'
+import { resolveSessionTarget } from '../../engine/prescription'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag, Play, Plus, MessageSquarePlus } from 'lucide-react'
 import { loadDraftStarts } from '../../lib/workoutDraft'
@@ -458,7 +459,7 @@ function SessionSheet({
                 exercises={exercises}
                 tracks={tracks}
                 render={(ex, i) => {
-                  const target = targets?.[i]
+                  const target = resolveSessionTarget(ex, targets?.[i] ?? null, u)
                   return (
                     <div
                       style={{
@@ -480,10 +481,9 @@ function SessionSheet({
               />
             )
           : exercises.map((ex, i) => {
-            // The concrete recommended weight beats the vague label ("50lb" over
-            // "moderate") — it's the number you prep the bar with. The label is
-            // the fallback for lifts with no logged history yet.
-            const target = targets?.[i]
+            // Written load wins. TM / lift-model math is only the fallback
+            // when the program did not write a bar weight.
+            const target = resolveSessionTarget(ex, targets?.[i] ?? null, u)
             return (
               <div
                 key={i}

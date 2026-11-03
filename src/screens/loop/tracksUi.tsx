@@ -1,5 +1,5 @@
 import type { ReactNode } from 'react'
-import { formatSuperset, groupByTrack, type TrackRef, type TrackableExercise } from '../../engine/tracks'
+import { formatSuperset, sessionTrackLayout, type TrackRef, type TrackableExercise } from '../../engine/tracks'
 
 export function TrackDot({ color, size = 8 }: { color: string; size?: number }) {
   return (
@@ -31,13 +31,29 @@ export function TrackedExerciseList<T extends TrackableExercise>({
   tracks: TrackRef[]
   render: (ex: T, index: number) => ReactNode
 }) {
-  const groups = groupByTrack(exercises, tracks)
-  if (!groups.length) {
+  const layout = sessionTrackLayout(exercises, tracks)
+  if (layout.kind === 'flat') {
+    return (
+      <>
+        {layout.items.map(({ exercise, index, track }) => {
+          const tag = formatSuperset(exercise.superset_group)
+          return (
+            <div key={`${index}-${exercise.name}`} className="track-group__row">
+              {track && <TrackLabel track={track} />}
+              {tag && <span className="superset-tag">{tag}</span>}
+              {render(exercise, index)}
+            </div>
+          )
+        })}
+      </>
+    )
+  }
+  if (!layout.groups.length) {
     return <>{exercises.map((ex, i) => render(ex, i))}</>
   }
   return (
     <>
-      {groups.map((g) => (
+      {layout.groups.map((g) => (
         <div key={g.track?.id ?? 'none'} className="track-group">
           {g.track && (
             <div className="track-group__head">
