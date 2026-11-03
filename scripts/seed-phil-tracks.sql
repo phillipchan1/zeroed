@@ -196,13 +196,6 @@ WHERE lower(u.email) = 'phillipchan1@gmail.com'
     WHERE r.athlete_id = a.id AND r.message = v.message
   );
 
-INSERT INTO public.goal_measurement (athlete_id, goal_id, measured_on, value, source, note, client_key)
-SELECT a.id, g.id, DATE '2026-10-01', 95, 'manual', 'Baseline 95"', 'seed:broad-jump-95'
-FROM public.athlete a
-JOIN auth.users u ON u.id = a.auth_user_id
-JOIN public.athlete_goal g ON g.athlete_id = a.id AND g.name = 'Broad jump'
-WHERE lower(u.email) = 'phillipchan1@gmail.com'
-  AND NOT EXISTS (
-    SELECT 1 FROM public.goal_measurement m
-    WHERE m.athlete_id = a.id AND m.client_key = 'seed:broad-jump-95'
-  );
+-- No invented measurement dates. last_measured is the latest real
+-- goal_measurement.measured_on, or null. Prod may already have a
+-- seed:broad-jump-95 row; reads ignore client_key seed:*.

@@ -21,7 +21,9 @@ ok(sql.includes("lower(u.email) = 'phillipchan1@gmail.com'"), 'seed targets Phil
 ok(!/a@example\.com|b@example\.com/.test(sql), 'seed does not mention isolation emails')
 ok(!/training_max_overrides\s*=/.test(sql), 'seed never writes training_max_overrides')
 ok(/ON CONFLICT \(athlete_id, name\) DO NOTHING/.test(sql), 'goals are ON CONFLICT DO NOTHING')
-ok(/NOT EXISTS/.test(sql), 'tracks / rules / measurements use NOT EXISTS')
+ok(/NOT EXISTS/.test(sql), 'tracks / rules use NOT EXISTS')
+ok(!/2026-10-01/.test(sql), 'seed does not invent a Broad jump measured_on')
+ok(!/INSERT INTO public\.goal_measurement/.test(sql), 'seed does not insert invented measurements')
 ok(/Deadlift held/.test(sql) && /410/.test(sql), 'deadlift held target 410 stays in the seed, not the athlete row')
 ok(/e->>'track_id' IS NULL/.test(sql), 'exercise reassignment is a no-op when track_id is already set')
 

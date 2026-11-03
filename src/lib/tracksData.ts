@@ -2,7 +2,7 @@ import { useCachedLoader } from './cache'
 import { cacheKeys } from './loopCache'
 import { supabase } from './supabaseClient'
 import { tracksOn } from './tracksFlag'
-import { computeGoalStatus, pairKey, type GoalMeasurement } from '../engine/goals'
+import { computeGoalStatus, lastMeasuredOn, pairKey, type GoalMeasurement } from '../engine/goals'
 import type { AutoregRule } from '../engine/autoreg'
 import { GENERAL_TRACK_SEED, wantsGeneralTrack, type TrackRef } from '../engine/tracks'
 import type { AthleteGoalRow, GoalMeasurementRow, TrackRow } from '../types/database'
@@ -46,6 +46,7 @@ export interface GoalView extends AthleteGoalRow {
   computed: ReturnType<typeof computeGoalStatus>
   pair: string
   history: GoalMeasurement[]
+  last_measured: string | null
 }
 
 export async function fetchGoalsView(athleteId: string): Promise<GoalView[]> {
@@ -58,7 +59,14 @@ export async function fetchGoalsView(athleteId: string): Promise<GoalView[]> {
   const byGoal = new Map<string, GoalMeasurement[]>()
   for (const row of (meas ?? []) as GoalMeasurementRow[]) {
     const list = byGoal.get(row.goal_id) ?? []
-    list.push({ date: row.measured_on, value: Number(row.value), side: row.side, source: row.source, note: row.note })
+    list.push({
+      date: row.measured_on,
+      value: Number(row.value),
+      side: row.side,
+      source: row.source,
+      note: row.note,
+      client_key: row.client_key,
+    })
     byGoal.set(row.goal_id, list)
   }
   const today = new Date().toISOString().slice(0, 10)
@@ -69,6 +77,7 @@ export async function fetchGoalsView(athleteId: string): Promise<GoalView[]> {
       computed: computeGoalStatus(g, history, today),
       pair: pairKey(g.name),
       history,
+      last_measured: lastMeasuredOn(history),
     }
   })
 }

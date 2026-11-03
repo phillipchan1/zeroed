@@ -19,6 +19,7 @@ export interface GoalMeasurement {
   side?: string | null
   source: string
   note?: string | null
+  client_key?: string | null
 }
 
 export interface GoalFields {
@@ -44,11 +45,40 @@ export function isGoalDirection(v: unknown): v is GoalDirection {
   return typeof v === 'string' && (GOAL_DIRECTIONS as readonly string[]).includes(v)
 }
 
-function meetsTarget(direction: string, current: number, target: number, hi?: number | null): boolean {
-  if (direction === 'lower') return current <= target
-  if (direction === 'pass') return current >= 1
-  if (hi != null && Number.isFinite(hi)) return current >= target
-  return current >= target
+/** Postgres NUMERIC often arrives as a string. Never compare those lexicographically. */
+export function goalNumber(value: unknown): number | null {
+  if (value == null || value === '') return null
+  const n = typeof value === 'number' ? value : Number(value)
+  return Number.isFinite(n) ? n : null
+}
+
+export function isSeedMeasurement(m: { client_key?: string | null }): boolean {
+  return typeof m.client_key === 'string' && m.client_key.startsWith('seed:')
+}
+
+/** Latest real measured_on. Seed rows (client_key seed:*) do not count. */
+export function lastMeasuredOn(
+  history: Array<Pick<GoalMeasurement, 'date' | 'client_key'> | GoalMeasurement>,
+): string | null {
+  let latest: string | null = null
+  for (const m of history) {
+    const day = String(m.date ?? '').slice(0, 10)
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || isSeedMeasurement(m)) continue
+    if (!latest || day > latest) latest = day
+  }
+  return latest
+}
+
+function meetsTarget(direction: string, current: unknown, target: unknown, hi?: unknown): boolean {
+  const c = goalNumber(current)
+  if (c == null) return false
+  if (direction === 'pass') return c >= 1
+  const t = goalNumber(target)
+  if (t == null) return false
+  if (direction === 'lower') return c <= t
+  const ceiling = goalNumber(hi)
+  if (ceiling != null) return c >= t && c <= ceiling
+  return c >= t
 }
 
 function daysUntil(due: string | null | undefined, today: string): number | null {
@@ -60,7 +90,7 @@ function daysUntil(due: string | null | undefined, today: string): number | null
 }
 
 function slope(history: GoalMeasurement[]): number | null {
-  const pts = history.filter((h) => Number.isFinite(h.value)).slice(-6)
+  const pts = history.filter((h) => Number.isFinite(h.value) && !isSeedMeasurement(h)).slice(-6)
   if (pts.length < 2) return 0
   const first = pts[0].value
   const last = pts[pts.length - 1].value
@@ -77,14 +107,14 @@ export function computeGoalStatus(
   history: GoalMeasurement[],
   today: string,
 ): GoalStatus {
-  const current = goal.current
-  const target = goal.target
-  if (current != null && target != null && meetsTarget(goal.direction, current, target, goal.target_range_hi)) {
+  const current = goalNumber(goal.current)
+  const target = goalNumber(goal.target)
+  if (meetsTarget(goal.direction, current, target, goal.target_range_hi)) {
     return 'hit'
   }
   const dueIn = daysUntil(goal.due_date, today)
   const trend = slope(history)
-  const pending = current == null && (goal.baseline == null)
+  const pending = current == null && goalNumber(goal.baseline) == null
   if (pending) {
     if (dueIn != null && dueIn <= 21) return 'behind'
     return 'on_track'
@@ -102,18 +132,18 @@ export function applyMeasurement(
 ): { current: number; best: number | null; baseline: number | null } {
   const current = measurement.value
   const direction = goal.direction
-  let best = goal.best ?? null
+  let best = goalNumber(goal.best)
   if (best == null) best = current
   else if (direction === 'lower') best = Math.min(best, current)
   else best = Math.max(best, current)
-  const baseline = goal.baseline ?? current
+  const baseline = goalNumber(goal.baseline) ?? current
   return { current, best, baseline }
 }
 
 export function progressRatio(goal: GoalFields): number | null {
-  const current = goal.current
-  const target = goal.target
-  const baseline = goal.baseline
+  const current = goalNumber(goal.current)
+  const target = goalNumber(goal.target)
+  const baseline = goalNumber(goal.baseline)
   if (current == null || target == null) return null
   if (goal.direction === 'pass') return current >= 1 ? 1 : 0
   if (baseline == null || baseline === target) {

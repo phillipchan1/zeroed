@@ -115,9 +115,15 @@ Phil's seeded rules:
 
 `athlete_goal` + `goal_measurement`. Status is computed:
 
-- `hit` — current meets the target (higher / lower / pass)
+- `hit` — current meets the target: higher when `current >= target`
+  (and `<= target_range_hi` when that ceiling is set); lower when
+  `current <= target`; pass only on a pass (`>= 1`). Status is
+  computed on read from numeric values — never from the stored
+  `athlete_goal.status` column, and never by string comparison.
 - `behind` — due date is near or past and trend is flat or away
 - `on_track` — otherwise, including "pending" baselines
+- `last_measured` — latest real `goal_measurement.measured_on`, or
+  null. Seed `client_key` values (`seed:*`) do not count.
 
 L/R sides are two goals that share a name stem (`Hip IR L`,
 `Hip IR R`) so the UI can pair them. History is the measurement
