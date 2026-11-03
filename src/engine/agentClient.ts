@@ -247,6 +247,11 @@ export interface ProgramEditExercise {
   load: string
   cue: string
   target_rpe: number | null
+  track?: string | null
+  track_id?: string | null
+  superset_group?: string | null
+  rest_s?: number | null
+  contacts?: number | null
 }
 
 /**
@@ -274,6 +279,11 @@ export interface ProgramEdit {
   sessions_per_week: number | null
   note: string | null
   exercises: ProgramEditExercise[]
+  track?: string | null
+  track_id?: string | null
+  superset_group?: string | null
+  rest_s?: number | null
+  contacts?: number | null
 }
 
 export interface ProgramEditResult {

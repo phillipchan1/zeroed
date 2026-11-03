@@ -107,9 +107,12 @@ export async function applyLowerEmailUniqueIndex(query) {
 
 export const CHECKSUM_TABLES = [
   'athlete',
+  'athlete_goal',
   'athlete_profile',
+  'autoreg_rule',
   'coach_message',
   'diagnostic',
+  'goal_measurement',
   'insight',
   'insight_draft',
   'mcp_token',
@@ -117,11 +120,14 @@ export const CHECKSUM_TABLES = [
   'probe_throttle',
   'program',
   'program_revision',
+  'progression_rule',
   'routine',
   'session_observation',
+  'track',
   'weekly_review',
   'workout',
   'workout_draft',
+  'workout_note',
 ]
 
 export function checksumQuery() {

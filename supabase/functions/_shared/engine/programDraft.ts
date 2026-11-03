@@ -193,6 +193,32 @@ function buildExercise(
   return ex
 }
 
+function applyTrackFields(
+  ex: ExerciseTemplate,
+  e: {
+    track_id?: string | null
+    track?: string | null
+    superset_group?: string | null
+    rest_s?: number | null
+    contacts?: number | null
+  },
+): boolean {
+  let touched = false
+  const tid = String(e.track_id ?? e.track ?? '').trim()
+  if (tid) { ex.track_id = tid; touched = true }
+  const sg = String(e.superset_group ?? '').trim().toUpperCase()
+  if (/^[A-Z]\d+$/.test(sg)) { ex.superset_group = sg; touched = true }
+  if (e.rest_s != null && Number.isFinite(Number(e.rest_s))) {
+    ex.rest_s = Math.max(0, Math.round(Number(e.rest_s)))
+    touched = true
+  }
+  if (e.contacts != null && Number.isFinite(Number(e.contacts))) {
+    ex.contacts = Math.max(0, Math.round(Number(e.contacts)))
+    touched = true
+  }
+  return touched
+}
+
 /** A human one-liner for an edit — the pending list and the coach note use it. */
 export function summarizeEdit(e: ProgramEdit): string {
   switch (e.type) {
@@ -205,6 +231,10 @@ export function summarizeEdit(e: ProgramEdit): string {
       if (e.load) bits.push(e.load)
       if (e.target_rpe != null) bits.push(`RPE ${e.target_rpe}`)
       if (e.cue) bits.push('new cue')
+      if (e.track || e.track_id) bits.push('track')
+      if (e.superset_group) bits.push(e.superset_group)
+      if (e.rest_s != null) bits.push(`${e.rest_s}s rest`)
+      if (e.contacts != null) bits.push(`${e.contacts} contacts`)
       return `Retune ${e.exercise_name ?? 'a lift'} in ${e.session_name ?? 'a session'}${bits.length ? ` → ${bits.join(' · ')}` : ''}`
     }
     case 'remove_exercise':
@@ -264,6 +294,7 @@ export function applyEditsToDraft(
           skip(`${session.name} is already at ${MAX_EXERCISES_PER_SESSION} exercises`); break
         }
         const ex = buildExercise(name, e.sets, e.reps, e.load, e.cue, e.target_rpe)
+        applyTrackFields(ex, e)
         const anchor = findExercise(session.exercises, e.after_exercise)
         if (anchor >= 0) session.exercises.splice(anchor + 1, 0, ex)
         else session.exercises.push(ex)
@@ -290,6 +321,7 @@ export function applyEditsToDraft(
         if (e.target_rpe != null && Number.isFinite(Number(e.target_rpe))) {
           ex.target_rpe = Math.max(1, Math.min(10, Math.round(Number(e.target_rpe) * 10) / 10)); touched = true
         }
+        if (applyTrackFields(ex, e)) touched = true
         if (!touched) { skip('nothing to change'); break }
         // The metric can move with the prescription ("8" → "30s").
         ex.tracking_type = resolveTrackingType(ex.name, ex.reps, ex.load)
@@ -317,7 +349,11 @@ export function applyEditsToDraft(
         if (findSession(next, name) >= 0) { skip(`"${name}" already exists`); break }
         const exercises = (e.exercises ?? [])
           .slice(0, MAX_EXERCISES_PER_SESSION)
-          .map((x) => buildExercise(cleanText(x.name, 80), x.sets, x.reps, x.load, x.cue, x.target_rpe))
+          .map((x) => {
+            const built = buildExercise(cleanText(x.name, 80), x.sets, x.reps, x.load, x.cue, x.target_rpe)
+            applyTrackFields(built, x)
+            return built
+          })
           .filter((x) => x.name)
         if (!exercises.length) { skip('no exercises in the new session'); break }
         next.sessions.push({

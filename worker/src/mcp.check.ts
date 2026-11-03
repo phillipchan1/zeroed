@@ -11,6 +11,7 @@ import { handleMcp, publicMcpError } from './mcp.ts'
 import { resolveMcpToken, sha256Hex, timingSafeEqualHex } from './mcpToken.ts'
 import { ZEROED_TOOLS } from './tools.ts'
 import { LIFT_MODEL_TOOLS } from '../../supabase/functions/_shared/liftModelTools.ts'
+import { TRACK_TOOLS } from '../../supabase/functions/_shared/trackToolDefs.ts'
 import { McpUserError } from './userError.ts'
 
 const fails: string[] = []
@@ -49,6 +50,7 @@ ok(toolsBlock(edgeSrc) === toolsBlock(workerSrc), 'parity: ZEROED_TOOLS matches 
 // counted when the edge block actually spreads it.
 const edgeNames = [
   ...[...toolsBlock(edgeSrc).matchAll(/name: '([a-z_]+)'/g)].map((m) => m[1]),
+  ...(toolsBlock(edgeSrc).includes('...TRACK_TOOLS') ? TRACK_TOOLS.map((t) => t.name) : []),
   ...(toolsBlock(edgeSrc).includes('...LIFT_MODEL_TOOLS') ? LIFT_MODEL_TOOLS.map((t) => t.name) : []),
 ]
 const workerNames = ZEROED_TOOLS.map((t) => t.name)
@@ -60,6 +62,7 @@ for (const need of [
   'list_workouts', 'get_workout', 'search_lifts', 'get_program_journey',
   'get_coach_notes', 'preview_program_edits', 'apply_program_edits',
   'get_lift_model', 'set_training_max',
+  'list_tracks', 'get_goals', 'add_workout_note', 'update_program_meta',
 ]) {
   const tool = ZEROED_TOOLS.find((t) => t.name === need)
   ok(Boolean(tool), `parity: ${need} exists`)
@@ -263,6 +266,72 @@ ok(nul.status === 400, 'HTTP: NUL in body is 400')
 const nulBody = await nul.json() as { error?: string }
 ok(nulBody.error === 'invalid input', 'HTTP: NUL message is generic')
 ok(!JSON.stringify(nulBody).includes('UTF8') && !JSON.stringify(nulBody).includes('0x00'), 'HTTP: NUL response does not leak PG encoding')
+
+const tracksA = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'list_tracks', arguments: {} })).body)
+ok(tracksA.includes('General'), 'e2e: list_tracks returns the General track for A')
+ok(!tracksA.includes('Athlete B') && !tracksA.includes('Deadlift'), 'isolation: list_tracks does not leak B')
+const tracksB = toolText((await rpc(TOKEN_B, 'tools/call', { name: 'list_tracks', arguments: {} })).body)
+ok(tracksB.includes('General'), 'e2e: B also has a General track')
+
+const previewTrack = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'create_track', arguments: { name: 'Lifting', purpose: 'mains', rationale: 'test' },
+})).body)
+ok(previewTrack.includes('preview_id') && previewTrack.includes('diff'), 'e2e: create_track without confirm previews')
+const [trackCountBefore] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM track WHERE program_id = ${PROG_A}`
+ok(Number(trackCountBefore?.n) === 1, 'e2e: preview create_track writes nothing')
+
+const createdTrack = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'create_track', arguments: { name: 'Lifting', purpose: 'mains', confirm: true, rationale: 'test', athlete_id: B },
+})).body)
+ok(createdTrack.includes('Lifting'), 'e2e: create_track with confirm writes')
+const [aTracks] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM track WHERE program_id = ${PROG_A}`
+ok(Number(aTracks?.n) === 2, 'e2e: A now has General + Lifting')
+const [bTracks] = await sql<{ n: string }[]>`
+  SELECT count(*)::text AS n FROM track t
+  JOIN program p ON p.id = t.program_id
+  WHERE p.athlete_id = ${B}
+`
+ok(Number(bTracks?.n) === 1, 'isolation: athlete_id override cannot create a track on B')
+
+const goalPreview = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'upsert_goal', arguments: { name: 'Hip IR L', metric: 'hip_ir', unit: 'deg', side: 'L', direction: 'higher', target: 35 },
+})).body)
+ok(goalPreview.includes('preview_id') && goalPreview.includes('"utc"') && goalPreview.includes('local_date'), 'e2e: upsert_goal preview stamps utc + local_date')
+
+const goalSaved = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'upsert_goal', arguments: { name: 'Hip IR L', metric: 'hip_ir', unit: 'deg', side: 'L', direction: 'higher', target: 35, confirm: true },
+})).body)
+ok(goalSaved.includes('Hip IR L'), 'e2e: upsert_goal confirm writes')
+
+const measKey = 'iso-hip-ir-l-2026-11-02'
+const meas1 = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'log_goal_measurement',
+  arguments: { goal: 'Hip IR L', date: '2026-11-02', value: 30, side: 'L', client_key: measKey, confirm: true },
+})).body)
+ok(meas1.includes('30'), 'e2e: log_goal_measurement writes')
+const meas2 = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'log_goal_measurement',
+  arguments: { goal: 'Hip IR L', date: '2026-11-02', value: 99, side: 'L', client_key: measKey, confirm: true },
+})).body)
+ok(meas2.includes('reused') || meas2.includes('30'), 'e2e: same client_key does not duplicate')
+const [measCount] = await sql<{ n: string }[]>`
+  SELECT count(*)::text AS n FROM goal_measurement gm
+  JOIN athlete_goal g ON g.id = gm.goal_id
+  WHERE g.athlete_id = ${A} AND gm.client_key = ${measKey}
+`
+ok(Number(measCount?.n) === 1, 'e2e: client_key unique — one measurement row')
+
+const bGoals = toolText((await rpc(TOKEN_B, 'tools/call', { name: 'get_goals', arguments: {} })).body)
+ok(!bGoals.includes('Hip IR L'), 'isolation: B get_goals hides A goals')
+
+const weekPreview = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'preview_program_edits',
+  arguments: {
+    week_start: '2026-11-09',
+    edits: [{ type: 'add_note', note: 'labeled week', rationale: 'test' }],
+  },
+})).body)
+ok(weekPreview.includes('labeled 2026-11-09') || weekPreview.includes('Preview against'), 'e2e: preview week_start labels the header')
 
 await harness.close()
 

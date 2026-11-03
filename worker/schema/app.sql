@@ -176,7 +176,14 @@ CREATE TABLE IF NOT EXISTS public.program (
   start_date  DATE NOT NULL DEFAULT CURRENT_DATE,
   retest_date DATE,
   status      TEXT NOT NULL DEFAULT 'active'
-               CHECK (status IN ('draft','active','completed','paused','external'))
+               CHECK (status IN ('draft','active','completed','paused','external')),
+  -- tracks_v1 block metadata (migration 20261103000001).
+  name               TEXT,
+  block_phase        TEXT,
+  end_date           DATE,
+  deload_week_start  DATE,
+  retest_start       DATE,
+  retest_end         DATE
 );
 
 CREATE INDEX IF NOT EXISTS program_athlete_id_idx ON public.program(athlete_id);
@@ -386,6 +393,156 @@ COMMENT ON TABLE public.program_revision IS
   'what the athlete asked for, and when it took effect.';
 
 -- =============================================================================
+-- TRACK / GOALS / NOTES (tracks_v1, migration 20261103000001)
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS public.track (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  program_id        UUID NOT NULL REFERENCES public.program(id) ON DELETE CASCADE,
+  name              TEXT NOT NULL,
+  color             TEXT,
+  icon              TEXT,
+  sort_order        INTEGER NOT NULL DEFAULT 0,
+  purpose           TEXT,
+  methodology_text  TEXT,
+  sources           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  parent_track_id   UUID REFERENCES public.track(id) ON DELETE SET NULL,
+  deload_policy     JSONB,
+  retest_policy     JSONB,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (program_id, name)
+);
+CREATE INDEX IF NOT EXISTS track_program_id_idx ON public.track(program_id);
+
+CREATE TABLE IF NOT EXISTS public.progression_rule (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  program_id     UUID NOT NULL REFERENCES public.program(id) ON DELETE CASCADE,
+  track_id       UUID NOT NULL REFERENCES public.track(id) ON DELETE CASCADE,
+  exercise_name  TEXT,
+  engine_type    TEXT NOT NULL CHECK (engine_type IN (
+    'tm_wave', 'rpe_autoreg', 'double_progression', 'maintenance',
+    'time_interval', 'contacts', 'measurement', 'manual'
+  )),
+  params         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  active_from    DATE,
+  active_to      DATE,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS progression_rule_track_id_idx ON public.progression_rule(track_id);
+CREATE INDEX IF NOT EXISTS progression_rule_program_id_idx ON public.progression_rule(program_id);
+
+CREATE TABLE IF NOT EXISTS public.autoreg_rule (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id     UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  scope_type     TEXT NOT NULL CHECK (scope_type IN ('program', 'track', 'exercise')),
+  scope_id       UUID,
+  scope_name     TEXT,
+  signal         TEXT NOT NULL,
+  op             TEXT NOT NULL CHECK (op IN ('>', '>=', '<', '<=', '==', '!=')),
+  value          NUMERIC,
+  action         TEXT NOT NULL,
+  action_params  JSONB NOT NULL DEFAULT '{}'::jsonb,
+  message        TEXT NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS autoreg_rule_athlete_idx ON public.autoreg_rule(athlete_id);
+
+CREATE TABLE IF NOT EXISTS public.athlete_goal (
+  id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id      UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  track_id        UUID REFERENCES public.track(id) ON DELETE SET NULL,
+  name            TEXT NOT NULL,
+  metric          TEXT NOT NULL,
+  unit            TEXT,
+  side            TEXT CHECK (side IS NULL OR side IN ('L', 'R', 'both', 'none')),
+  direction       TEXT NOT NULL CHECK (direction IN ('higher', 'lower', 'pass')),
+  target          NUMERIC,
+  target_range_hi NUMERIC,
+  baseline        NUMERIC,
+  current         NUMERIC,
+  best            NUMERIC,
+  due_date        DATE,
+  test_protocol   TEXT,
+  cadence         TEXT,
+  status          TEXT NOT NULL DEFAULT 'on_track'
+                   CHECK (status IN ('on_track', 'behind', 'hit')),
+  source_metric   TEXT,
+  note            TEXT,
+  created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (athlete_id, name)
+);
+CREATE INDEX IF NOT EXISTS athlete_goal_athlete_idx ON public.athlete_goal(athlete_id);
+
+CREATE TABLE IF NOT EXISTS public.goal_measurement (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id   UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  goal_id      UUID NOT NULL REFERENCES public.athlete_goal(id) ON DELETE CASCADE,
+  measured_on  DATE NOT NULL,
+  value        NUMERIC NOT NULL,
+  side         TEXT,
+  source       TEXT NOT NULL DEFAULT 'manual'
+                CHECK (source IN ('workout_log', 'manual', 'agent')),
+  workout_id   UUID REFERENCES public.workout(id) ON DELETE SET NULL,
+  note         TEXT,
+  client_key   TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS goal_measurement_goal_idx ON public.goal_measurement(goal_id, measured_on);
+CREATE UNIQUE INDEX IF NOT EXISTS goal_measurement_client_key_uidx
+  ON public.goal_measurement (athlete_id, client_key)
+  WHERE client_key IS NOT NULL;
+
+CREATE TABLE IF NOT EXISTS public.workout_note (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id   UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  workout_id   UUID REFERENCES public.workout(id) ON DELETE CASCADE,
+  session_id   UUID REFERENCES public.routine(id) ON DELETE SET NULL,
+  author       TEXT NOT NULL DEFAULT 'coach',
+  body         TEXT NOT NULL,
+  client_key   TEXT,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT workout_note_has_target CHECK (workout_id IS NOT NULL OR session_id IS NOT NULL)
+);
+CREATE INDEX IF NOT EXISTS workout_note_athlete_idx ON public.workout_note(athlete_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS workout_note_client_key_uidx
+  ON public.workout_note (athlete_id, client_key)
+  WHERE client_key IS NOT NULL;
+
+CREATE OR REPLACE FUNCTION public.ensure_general_track()
+RETURNS TRIGGER AS $$
+BEGIN
+  IF NEW.status IS DISTINCT FROM 'external' THEN
+    INSERT INTO public.track (program_id, name, color, icon, sort_order, purpose)
+    SELECT NEW.id, 'General', '#9A9A9A', 'circle', 0, 'Default track for unassigned work'
+    WHERE NOT EXISTS (
+      SELECT 1 FROM public.track t WHERE t.program_id = NEW.id AND t.name = 'General'
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS program_ensure_general_track ON public.program;
+CREATE TRIGGER program_ensure_general_track
+  AFTER INSERT ON public.program
+  FOR EACH ROW
+  EXECUTE FUNCTION public.ensure_general_track();
+
+CREATE OR REPLACE FUNCTION public.tm_override_value(overrides jsonb, lift text)
+RETURNS numeric
+LANGUAGE sql
+IMMUTABLE
+AS $$
+  SELECT CASE
+    WHEN jsonb_typeof(overrides -> lift) = 'number' THEN (overrides ->> lift)::numeric
+    WHEN jsonb_typeof(overrides -> lift) = 'object'
+      AND (overrides -> lift ->> 'value') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+      THEN (overrides -> lift ->> 'value')::numeric
+    ELSE NULL
+  END;
+$$;
+
+-- =============================================================================
 -- MCP_TOKEN
 -- =============================================================================
 CREATE TABLE IF NOT EXISTS public.mcp_token (
@@ -441,6 +598,11 @@ BEGIN
    WHERE w.routine_id = r.id
      AND r.program_id = p.id
      AND p.athlete_id = aid;
+
+  DELETE FROM public.workout_note WHERE athlete_id = aid;
+  DELETE FROM public.goal_measurement WHERE athlete_id = aid;
+  DELETE FROM public.athlete_goal WHERE athlete_id = aid;
+  DELETE FROM public.autoreg_rule WHERE athlete_id = aid;
 
   DELETE FROM public.program WHERE athlete_id = aid;
   DELETE FROM public.insight       WHERE athlete_id = aid;

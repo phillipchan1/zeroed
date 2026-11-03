@@ -16,6 +16,10 @@ import {
   PageHeader, SectionHeader, Skeleton, Disclosure, Chip, Row, Button,
 } from '../../components/ui'
 import type { ProgramRow, PhaseRow, RoutineRow, AthleteProfileRow, InsightRow, PhaseName, WeeklyDirective } from '../../types/database'
+import { tracksOn } from '../../lib/tracksFlag'
+import { useProgramTracks } from '../../lib/tracksData'
+import { CoverageGrid, TrackLabel } from './tracksUi'
+import { daysHitByTrack } from '../../engine/tracks'
 
 // Directive → chip tone, matching the recap banner so "the call" reads the same
 // everywhere it appears.
@@ -214,6 +218,10 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
   const program  = data?.program ?? null
   const phase     = data?.phase ?? null
   const routines  = data?.routines ?? []
+  const tracks = useProgramTracks(program?.id)
+  const coverage = tracks.length
+    ? daysHitByTrack(routines.map((r) => ({ intendedDow: r.intended_dow, exercises: r.exercises })), tracks)
+    : {}
   const profile   = data?.profile ?? null
   const loading   = coldLoading
 
@@ -290,7 +298,44 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
               {program.goal && (
                 <p className="text-sm text-dim" style={{ marginTop: 16, lineHeight: 1.55 }}>{program.goal}</p>
               )}
+              {tracksOn() && (program.name || program.block_phase || program.deload_week_start) && (
+                <p className="text-xs text-dim" style={{ marginTop: 12 }}>
+                  {[program.name, program.block_phase, program.deload_week_start ? `deload ${program.deload_week_start}` : null, program.retest_start ? `retest ${program.retest_start}` : null].filter(Boolean).join(' · ')}
+                </p>
+              )}
             </div>
+
+            {tracksOn() && tracks.length > 0 && (
+              <div className="card fade-rise" style={{ marginBottom: 28 }}>
+                <SectionHeader>Coverage</SectionHeader>
+                <div style={{ marginTop: 14 }}>
+                  <CoverageGrid tracks={tracks} days={coverage} />
+                </div>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 18 }}>
+                  {tracks.filter((t) => t.name !== 'General' || tracks.length === 1).map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      className="card--tap"
+                      style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%', background: 'none', color: 'var(--text)', padding: '8px 0', borderBottom: '1px solid var(--line)' }}
+                      onClick={() => navigate(`/app/program/track/${t.id}`)}
+                    >
+                      <TrackLabel track={t} />
+                      <span className="program-edit-cta__chev">›</span>
+                    </button>
+                  ))}
+                </div>
+                <button
+                  type="button"
+                  className="program-edit-cta program-edit-cta--quiet"
+                  style={{ marginTop: 16 }}
+                  onClick={() => navigate('/app/goals')}
+                >
+                  <span className="program-edit-cta__title">Goals</span>
+                  <span className="program-edit-cta__chev">›</span>
+                </button>
+              </div>
+            )}
 
             {blockVolume && <BlockVolumeChart data={blockVolume} u={unitContext()} />}
 

@@ -54,3 +54,15 @@ export function arcLoadV1Enabled(env: FlagEnv, athleteFlags: unknown, search: st
   if (env.VITE_ARC_LOAD_V1 !== '1') return false
   return readAthleteFlags(athleteFlags).arc_load_v1 === true
 }
+
+/**
+ * Multi-track programs, structured goals, workout notes.
+ * Athlete-row only — no build-time ceiling — so Phil sees it the day
+ * the flag is written. DEV builds also take `?flag=tracks_v1`.
+ *
+ *   UPDATE athlete SET flags = flags - 'tracks_v1';
+ */
+export function tracksV1Enabled(env: FlagEnv, athleteFlags: unknown, search: string): boolean {
+  if (devOverride('tracks_v1', env, search)) return true
+  return readAthleteFlags(athleteFlags).tracks_v1 === true
+}

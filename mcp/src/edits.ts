@@ -36,7 +36,17 @@ export interface EditInput {
     load?: string
     cue?: string
     target_rpe?: number | null
+    track?: string | null
+    track_id?: string | null
+    superset_group?: string | null
+    rest_s?: number | null
+    contacts?: number | null
   }>
+  track?: string | null
+  track_id?: string | null
+  superset_group?: string | null
+  rest_s?: number | null
+  contacts?: number | null
 }
 
 export function toProgramEdit(e: EditInput): ProgramEdit {
@@ -64,7 +74,17 @@ export function toProgramEdit(e: EditInput): ProgramEdit {
       load: x.load ?? 'moderate',
       cue: x.cue ?? '',
       target_rpe: x.target_rpe ?? null,
+      track: x.track ?? null,
+      track_id: x.track_id ?? null,
+      superset_group: x.superset_group ?? null,
+      rest_s: x.rest_s ?? null,
+      contacts: x.contacts ?? null,
     })),
+    track: e.track ?? null,
+    track_id: e.track_id ?? null,
+    superset_group: e.superset_group ?? null,
+    rest_s: e.rest_s ?? null,
+    contacts: e.contacts ?? null,
   }
 }
 
@@ -109,21 +129,40 @@ function summarizeRevision(diff: ReturnType<typeof revisionPayload>): string {
   return parts.join(' · ') || 'no net change'
 }
 
-export function previewEdits(live: LiveProgram, inputs: EditInput[]): {
+export function previewEdits(live: LiveProgram, inputs: EditInput[], weekStart?: string): {
   text: string
   applied: number
   skipped: number
   dirty: boolean
 } {
-  const base = liveToDraft(live)
+  const want = weekStart?.slice(0, 10)
+  const queued = want && live.scheduledPhase && live.scheduledPhase.weekStart === want
+  const base = queued
+    ? {
+        sessionsPerWeek: live.sessionsPerWeek,
+        sessions: (live.scheduledSessions ?? []).map((s) => ({
+          routineId: s.routineId,
+          name: s.name,
+          intent: s.intent,
+          sessionType: s.sessionType,
+          intendedDow: s.intendedDow,
+          exercises: s.exercises.map((ex) => ({ ...ex })),
+        })),
+      }
+    : liveToDraft(live)
   const edits = inputs.map(toProgramEdit)
   const { draft, outcomes, notes } = applyEditsToDraft(base, edits)
   const diff = diffDraft(base, draft)
   const outcomeLines = outcomes.map((o) =>
     o.applied ? `- applied: ${o.label}` : `- skipped: ${o.label} (${o.reason})`,
   )
+  const header = queued
+    ? `# Preview against queued ${live.scheduledPhase!.name} (${want})`
+    : want && want !== live.weekStart
+      ? `# Preview against ${live.phaseName} (live template, labeled ${want})`
+      : `# Preview against ${live.phaseName} (${live.weekStart} → ${live.weekEnd})`
   const text = [
-    `# Preview against ${live.phaseName} (${live.weekStart} → ${live.weekEnd})`,
+    header,
     '',
     '## Outcomes',
     outcomeLines.join('\n') || 'No edits sent.',
