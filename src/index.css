@@ -2470,6 +2470,21 @@ textarea.input {
   -webkit-tap-highlight-color: transparent;
 }
 
+.ptr { position: relative; }
+.ptr__indicator {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  transition: opacity 120ms ease;
+}
+.ptr__indicator--ready { color: var(--signal); }
+
 /* Back button — a real 44px target, not a 28px sliver. */
 .icon-btn {
   display: inline-flex;

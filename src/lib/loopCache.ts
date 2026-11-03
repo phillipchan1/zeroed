@@ -37,6 +37,7 @@ export const cacheKeys = {
   // The per-routine session prescription on its own — what the Train screen's
   // session sheet reads to show concrete lb/kg targets without the full bootstrap.
   sessionRx:   (routineId: string) => `rx:${routineId}`,
+  rxVersion:   (athleteId: string) => `rxver:${athleteId}`,
   // One finished session as performed — what the preview of a DONE session reads
   // instead of the prescription.
   sessionActuals: (workoutId: string) => `actuals:${workoutId}`,

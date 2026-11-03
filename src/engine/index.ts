@@ -63,12 +63,10 @@ import {
 import {
   SEVERITY_STRONG, SEVERITY_PAIN, strongTopSet,
   rpeContract, PHASE_RPE, tallyWeek, decidePrescription,
-  recommendedLoad, autoregulateDelta, maxUpFor,
-  projectExerciseLoad, allowsAutoProgress, writtenBarWeight,
+  projectExerciseLoad,
   P1_RESOLVE_THRESHOLD, P1_DISCONFIRM_STEP, advanceStatus,
-  addressesLimiter, capIsActive, isLiftHeld,
-  CLEARANCE_TOP_SETS, CLEARANCE_SESSIONS,
-  clearanceTestOf, pickClearanceLift, describeClearanceTest, newClearanceTest, judgeClearanceSession,
+  addressesLimiter,
+  clearanceTestOf, pickClearanceLift, newClearanceTest, judgeClearanceSession,
   type WeeklyTally, type WeekWorkout, type WeekObservation, type LiftAttempt,
 } from './prescription'
 import { athleteTimeZone, planPagerFutureWeeks, weekWindowInZone } from './weekDates'
@@ -77,13 +75,18 @@ import { workoutRpeError } from './rpeScale'
 // drop, modifiers, the all-time-best ceiling and the reason line — are decided
 // in liftModel.ts. This file only reads the rows it needs.
 import {
-  canonicalLiftId, modelFromSources, dayOfModifiers, exerciseCall, readModelLog, localDay,
-  fmtLoad, addDays as addDaysIso, mondayOf, readTmOverride, convertTmOverride, tmOverrideEntry,
-  type DayOf, type LiftModelSources, type MainLiftId, type ModelWorkout, type ProgressionRuleRef, type Recommendation,
+  localDay,
+  addDays as addDaysIso, mondayOf, readTmOverride, convertTmOverride, tmOverrideEntry,
+  type DayOf, type LiftModelSources, type MainLiftId, type ModelWorkout, type ProgressionRuleRef,
 } from './liftModel'
 export {
   canonicalLiftId, backoffLoad, liftIncrement, type DayOf, type MainLiftId,
 } from './liftModel'
+export type {
+  SessionPrescription, IntelligenceRule, ClearanceView, ExerciseRx,
+} from './sessionRxCompute'
+import type { SessionPrescription } from './sessionRxCompute'
+import { fetchSessionPrescription, fetchSessionPrescriptions } from './sessionRx'
 export {
   ATHLETE_TIME_ZONE, weekWindowInZone, upcomingWeekWindow, isSundayInZone,
   logTimestampForWeek, isoInWeek, isoDateInZone, planPagerFutureWeeks, addDaysISO,
@@ -2365,87 +2368,6 @@ export function computeWeekSchedule(
 // prescribes a delta on the athlete's ACTUAL logged load, not the template.
 // ════════════════════════════════════════════════════════════════════════════
 
-export interface IntelligenceRule {
-  name: string
-  reasoning: string   // shown out loud — the felt difference vs a static program
-}
-
-export interface SessionPrescription {
-  directive: WeeklyDirective | null
-  loadDeltaPct: number
-  rpeTarget: number | null
-  rationale: string | null
-  hints: Record<number, string>   // exercise index → one-line hint ('' = none)
-  held: Record<number, boolean>   // exercise index → load cap held (rule fired)
-  // exercise index → the concrete recommended working load (athlete's unit) —
-  // the number the hint narrates, on its own so previews can show "50lb" instead
-  // of "moderate". Null when the lift has no weighted history to recommend from.
-  // Absent on cached copies written before this field existed — read with `?.`.
-  targets: Record<number, number | null>
-  // What a HELD lift would have been prescribed with no limiter in the way — the
-  // number "Push it" aims at. Null on lifts that aren't held (their target is
-  // already the honest one). Absent on caches written before this field existed.
-  pushTargets?: Record<number, number | null>
-  rule: IntelligenceRule | null   // standing rule in effect this session, or null
-  /**
-   * The active block, so the session can prescribe REST the way it prescribes
-   * load — a Strength main lift needs three minutes, a band pull-apart does not.
-   * Absent on cached copies written before this field existed — read with `?.`.
-   */
-  phaseName?: string | null
-  // The open exit condition on the limiter — what would actually clear the cap,
-  // and how far along it is. Null when no cap is in effect. Absent on cached
-  // copies written before this field existed — read with `?.`.
-  clearance?: ClearanceView | null
-  /**
-   * The exercise each index was prescribed FOR. A swap mid-session changes what
-   * slot 3 is; the hint written for the T-bar row is not a hint for the dumbbell
-   * row that replaced it, and the screen checks this before showing one. Absent
-   * on caches written before this field existed — read with `?.`.
-   */
-  exerciseNames?: string[]
-  /**
-   * The lift model's reason line and its why-lines, per exercise index — the
-   * "245 = 65% of TM 377 (from 365x1 @8, Oct 6)" a main lift's number carries.
-   * Accessories carry their call and any day-of modifier. Absent on caches
-   * written before this field existed — read with `?.`.
-   */
-  reasons?: Record<number, string[]>
-  /** A movement today's check-in says to skip (a jump on a sore knee). */
-  skip?: Record<number, boolean>
-}
-
-/** The clearance test, flattened for display. */
-export interface ClearanceView {
-  lift: string
-  requirement: string       // "2 top sets at RPE 8+ on Bench Press, pain-free, across 2 sessions."
-  sessionsPassed: number
-  sessionsNeeded: number
-  minRpe: number
-  /** Index into this routine's exercises, or -1 when the lift isn't in it today. */
-  exerciseIndex: number
-}
-
-function buildHint(top: SetLog | null, u: UnitContext, directive: WeeklyDirective | null, delta: number, rpe: number | null, target: number | null): string {
-  const rpeStr = rpe != null ? `RPE ${rpe}` : null
-  if (top && top.weight != null) {
-    const last = `${u.fmt(top.weight)}${u.unit} last`
-    if (delta !== 0 && target != null) {
-      // Concrete recommended weight, not just a percentage — the actionable number.
-      const pct = `${delta > 0 ? '+' : ''}${delta}%`
-      return `${last} → ${target}${u.unit} (${pct})${rpeStr ? `, aim ${rpeStr}` : ''}`
-    }
-    if (directive) return `${last} → repeat${rpeStr ? `, ${rpeStr}` : ''}`
-    return last
-  }
-  if (top && top.reps != null) return `${top.reps} reps last${rpeStr ? `, aim ${rpeStr}` : ''}`
-  if (top && top.duration != null) return `${top.duration}s last`
-  // No prior set for this exercise — surface the directive intent only.
-  if (directive === 'DELOAD') return `Ease in${rpeStr ? `, ${rpeStr}` : ''}`
-  if (directive === 'PROGRESS') return `Find a working weight${rpeStr ? `, aim ${rpeStr}` : ''}`
-  return ''
-}
-
 /**
  * Everything the lift model reads for one athlete: the whole log across every
  * program (the all-time best has to see all of it), recent pain chips, and any
@@ -2573,26 +2495,9 @@ export async function saveTrainingMaxOverride(
   if (upErr) throw upErr
 }
 
-const CALL_LABEL: Record<Recommendation['call'], string> = {
-  push: 'Push', hold: 'Hold', drop: 'Drop', repeat: 'Repeat', miss: 'Missed',
-  deload: 'Deload', program_pct: 'Program', establish: 'Re-establish',
-  explicit: 'Program', manual: 'Manual',
-}
-
-/** The chip on a main lift: the call and the number, e.g. "Push · 340lb × 5 @8". */
-function liftHint(rec: Recommendation, unit: string): string {
-  if (rec.skip) return 'Skip today'
-  const capped = rec.capped ? ' · capped' : ''
-  return `${CALL_LABEL[rec.call]} · ${fmtLoad(rec.load)}${unit} × ${rec.reps} @${fmtLoad(rec.targetRpe)}${capped}`
-}
-
 /**
- * Per-exercise prescription for a session: the active week's directive applied
- * to each exercise's last logged top set (index-aligned to THIS routine).
- *
- * Intelligence Rule — "Never load over instability": while the P1 weak link is
- * unresolved, the load cap is HELD on the lifts that address it, and the reason
- * is stated out loud. A static program can't say "not yet, and here's why."
+ * Per-exercise prescription for a session. Computed on the Worker; the client
+ * only fetches and renders. Offline callers keep the last cached copy.
  */
 export async function gatherSessionPrescription(
   athleteId: string,
@@ -2602,232 +2507,9 @@ export async function gatherSessionPrescription(
   // Today's check-in. Sleep, readiness and the knees move today's loads.
   opts: { dayOf?: DayOf | null } = {},
 ): Promise<SessionPrescription> {
-  const { data: prog } = await supabase
-    .from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle()
-
-  // Phase caps how far a single easy lift may jump in one step: a Stability phase
-  // "banks" load (the program's own rule — don't chase RPE up while stabilizing),
-  // later phases let progression run.
-  let phaseName: string | null = null
-  if (prog?.id) {
-    const { data: phaseRow } = await supabase
-      .from('phase').select('name').eq('program_id', prog.id).eq('status', 'active').maybeSingle()
-    phaseName = (phaseRow as { name: string } | null)?.name ?? null
-  }
-  const maxUp = maxUpFor(phaseName)
-
-  let directive: WeeklyDirective | null = null
-  let loadDeltaPct = 0
-  let rpeTarget: number | null = null
-  let rationale: string | null = null
-  if (prog?.id) {
-    const { data: review } = await supabase
-      .from('weekly_review').select('next_week_prescription')
-      .eq('program_id', prog.id).order('week_ending', { ascending: false }).limit(1).maybeSingle()
-    const presc = (review?.next_week_prescription as WeeklyPrescription | null) ?? null
-    if (presc) {
-      directive = presc.directive
-      loadDeltaPct = presc.load_delta_pct
-      rpeTarget = presc.rpe_target
-      rationale = presc.rationale
-    }
-  }
-
-  // The P1 weak link — top-priority active insight. Drives the load-cap rule.
-  //
-  // The cap is gated on CONFIDENCE, not merely on the row still existing. It used
-  // to fire for any insight that wasn't explicitly resolved, which meant a read
-  // the system had already argued itself out of — 12% confident, still technically
-  // "a hypothesis" — capped load exactly as hard as one it was sure about. A
-  // belief that weak has no business holding a barbell down.
-  const { data: insightRows } = await supabase
-    .from('insight').select('*').eq('athlete_id', athleteId).order('priority')
-  const p1 = ((insightRows ?? []) as InsightRow[])
-    .filter((i) => i.status !== 'resolved' && i.status !== 'disproved')[0] ?? null
-  const capActive = capIsActive(p1)
-  const rule: IntelligenceRule | null = capActive
-    ? {
-        name: 'Never load over instability',
-        reasoning:
-          `Your ${p1!.category} is still the P1 limiter (${Math.round(p1!.confidence * 100)}% confident, ${p1!.status}). ` +
-          `Load stays capped on the work that addresses it until the pattern clears — earn the load, don't force it.`,
-      }
-    : null
-
-  const [{ data: lastWorkout }, { data: routineMeta }] = await Promise.all([
-    supabase
-      .from('workout').select('actual_weights, performed_at, exercises_snapshot')
-      .eq('routine_id', routineId).order('performed_at', { ascending: false }).limit(1).maybeSingle(),
-    supabase.from('routine').select('name, intent').eq('id', routineId).maybeSingle(),
-  ])
-  const routineName = (routineMeta as { name?: string } | null)?.name ?? null
-  const routineIntent = (routineMeta as { intent?: string | null } | null)?.intent ?? null
-  const lastWeights = (lastWorkout?.actual_weights as Record<string, SetLog[]> | null) ?? null
-  // What each of those indices actually WAS. Last session's slot 3 is this
-  // session's slot 3 only if the same movement was done in it — a dumbbell row
-  // swapped in for the T-bar is not where the T-bar's next load comes from (and
-  // a T-bar's numbers are no base for today's stand-in either).
-  const lastSnapshot = (lastWorkout?.exercises_snapshot as ExerciseTemplate[] | null) ?? null
-  const sameSlot = (i: number, name: string) =>
-    !lastSnapshot?.length || lastSnapshot[i]?.name === name
-  // Cross-phase fallback base: a just-(re)designed routine has no own history, but
-  // its lifts (same names) do elsewhere in the program — read off that.
-  const byName = prog?.id ? await gatherExerciseBases(prog.id) : new Map<string, SetLog>()
-
-  const hints: Record<number, string> = {}
-  const held: Record<number, boolean> = {}
-  const targets: Record<number, number | null> = {}
-  const pushTargets: Record<number, number | null> = {}
-  const reasons: Record<number, string[]> = {}
-  const skip: Record<number, boolean> = {}
-  // The block's own RPE target is the floor for per-lift autoregulation. Without
-  // it a Strength lift with no stamped target autoregulates against the weekly
-  // number (7) and gets marked down for the RPE 8 the block asked for.
-  const phaseTarget = rpeContract(phaseName).target
-  const dayOf = opts.dayOf ?? null
-
-  // The whole log, read once. Best-effort: without it every lift falls back to
-  // the per-session path below, exactly as before the lift model existed.
-  const liftSrc = await gatherLiftSources(athleteId, u).catch(() => null)
-  const today = localDay(new Date().toISOString(), athleteTimeZone())
-  const loggedSets = liftSrc ? readModelLog(liftSrc.workouts, { convert: liftSrc.convert }).sets : []
-
-  exercises.forEach((ex, i) => {
-    const written = writtenBarWeight(ex.load, u)
-    if (written != null) {
-      targets[i] = written
-      held[i] = isLiftHeld(ex, p1, capActive)
-      hints[i] = `Program · ${written}${u.unit}`
-      return
-    }
-    // The four main lifts: the lift model decides, from the whole log.
-    const lift = canonicalLiftId(ex.name)
-    if (lift && liftSrc) {
-      const isHeld = isLiftHeld(ex, p1, capActive)
-      const src = {
-        ...liftSrc, phaseName, directive, dayOf,
-        sessions: [{ name: routineName ?? undefined, intent: routineIntent, exercises: [ex] }],
-      }
-      const model = modelFromSources(lift, { ...src, noPush: isHeld ? `${p1!.category} cap holds until it clears` : null })
-      const rec = model.recommendation
-      if (rec) {
-        held[i] = isHeld
-        targets[i] = rec.skip ? null : rec.load
-        skip[i] = rec.skip
-        pushTargets[i] = isHeld ? modelFromSources(lift, src).recommendation?.load ?? null : null
-        hints[i] = liftHint(rec, u.unit)
-        const stale = model.trainingMax?.override?.stale ?? []
-        reasons[i] = [
-          rec.reason, ...rec.why, ...rec.conditional,
-          ...(stale.length ? [`Hand-set TM may be out of date (${stale.join('; ')}) — check it in You → Training maxes`] : []),
-        ]
-        return
-      }
-    }
-    const top = (lastWeights && sameSlot(i, ex.name) ? topWorkingSet(lastWeights[String(i)]) : null)
-      ?? byName.get(ex.name) ?? null
-    // Per-LIFT autoregulation against THIS exercise's own target RPE (falling
-    // back to the block's target, then the week's): each lift's last RPE vs its
-    // own target sets its load step — capped by phase — instead of one
-    // program-wide delta.
-    const exTarget = ex.target_rpe ?? phaseTarget ?? rpeTarget
-    const prescribed = projectExerciseLoad({
-      exercise: ex,
-      lastWeight: top?.weight ?? null,
-      lastRpe: top?.rpe,
-      lastReps: top?.reps,
-      weeklyDelta: loadDeltaPct,
-      directive,
-      sessionIntent: routineIntent,
-      sessionName: routineName,
-      u,
-    })
-    const canProgress = allowsAutoProgress({
-      exercise: ex, sessionIntent: routineIntent, sessionName: routineName, directive,
-    })
-    // Per-lift push / hold / drop off this movement's own last two weeks when it
-    // has RPE to read (+2.5% upper, +5% lower). With none there is nothing
-    // per-lift to read, and the old autoregulation stands.
-    const call = top?.rpe != null && directive !== 'DELOAD' && directive !== 'RECOVERY'
-      ? exerciseCall(loggedSets, ex.name, today, exTarget ?? 8)
-      : null
-    const exDelta = prescribed.source === 'explicit' || !canProgress
-      ? 0
-      : call
-        ? call.deltaPct
-        : autoregulateDelta(top?.rpe, exTarget, loadDeltaPct, directive, maxUp)
-    if (call && canProgress && prescribed.source !== 'explicit') reasons[i] = [call.why]
-    let uncapped = prescribed.source === 'explicit'
-      ? prescribed.weight
-      : canProgress
-        ? recommendedLoad(top, exDelta, u)
-        : prescribed.weight
-    // Today's check-in reaches accessories too: a sore knee takes 10% off lunges
-    // and skips the jumps; a short night takes 5% off everything.
-    for (const m of dayOfModifiers(ex.name, dayOf)) {
-      reasons[i] = [...(reasons[i] ?? []), m.note]
-      if (m.skip) { skip[i] = true; uncapped = null; continue }
-      if (uncapped != null) uncapped = u.prescribe(u.store(uncapped) * m.factor)
-    }
-
-    // Held when the cap is live AND this lift genuinely trains the limiter's
-    // chain. `addressesLimiter` returning null means the library has no opinion
-    // about the movement, in which case we trust the stamp the program already
-    // carries rather than inventing an answer in either direction.
-    const isHeld = isLiftHeld(ex, p1, capActive)
-    held[i] = isHeld
-    // What the lift would have been asked to do with no limiter in the way. This
-    // is what "Push it" aims at — an override with a real number beats one that
-    // just shrugs and leaves the athlete to guess.
-    pushTargets[i] = isHeld ? uncapped : null
-
-    if (skip[i]) {
-      targets[i] = null
-      hints[i] = 'Skip today'
-    } else if (isHeld && (exDelta > 0 || directive === 'PROGRESS')) {
-      // Suppress the push: state the hold and why, grounded in the last load.
-      // The recommendation under a held cap is the last load itself.
-      targets[i] = top?.weight != null ? u.show(top.weight) : null
-      hints[i] = top && top.weight != null
-        ? `Hold ${u.fmt(top.weight)}${u.unit} — cap stays until ${p1!.category} clears`
-        : `Hold steady — ${p1!.category} not cleared yet`
-    } else {
-      targets[i] = uncapped
-      hints[i] = buildHint(top, u, directive, exDelta, exTarget, targets[i])
-    }
-  })
-
-  // The way out of the cap. Shown whenever a cap is live, even on a day the
-  // tested lift isn't programmed — knowing the exit condition is the point, and
-  // a wall you can't see the door in is the thing we're fixing.
-  let clearance: ClearanceView | null = null
-  if (capActive && p1) {
-    const open = clearanceTestOf(p1)
-    const lift = open?.lift ?? pickClearanceLift(exercises, p1.category, (n) => byName.has(n))
-    if (lift) {
-      const test = open ?? {
-        kind: 'clearance_test' as const,
-        lift,
-        criterion: { top_sets: CLEARANCE_TOP_SETS, min_rpe: phaseTarget, sessions: CLEARANCE_SESSIONS, pain_free: true as const },
-        opened_at: '', sessions_passed: 0, status: 'open' as const,
-      }
-      clearance = {
-        lift,
-        requirement: describeClearanceTest(test),
-        sessionsPassed: test.sessions_passed,
-        sessionsNeeded: test.criterion.sessions,
-        minRpe: test.criterion.min_rpe,
-        exerciseIndex: exercises.findIndex((ex) => ex.name === lift),
-      }
-    }
-  }
-
-  return {
-    directive, loadDeltaPct, rpeTarget, rationale, hints, held, targets, pushTargets, rule, clearance, phaseName,
-    exerciseNames: exercises.map((ex) => ex.name),
-    reasons, skip,
-  }
+  return fetchSessionPrescription(athleteId, routineId, exercises, u, opts)
 }
+
 
 // ════════════════════════════════════════════════════════════════════════════
 // THE LIVING LOOP — P1 resolution from session evidence (the differentiator)
@@ -5174,9 +4856,15 @@ export async function gatherProgramMap(athleteId: string, u: UnitContext): Promi
   const routines = (routineRows ?? []) as unknown as Array<{ id: string; name: string; exercises: ExerciseTemplate[]; intent: string | null }>
 
   if (routines.length) {
+    const byId = await fetchSessionPrescriptions(
+      athleteId,
+      routines.map((r) => ({ id: r.id, exercises: r.exercises })),
+      u,
+    )
     const sessions: ProjectedSession[] = []
     for (const r of routines) {
-      const rx = await gatherSessionPrescription(athleteId, r.id, r.exercises, u)
+      const rx = byId[r.id]
+      if (!rx) continue
       const lines = r.exercises
         .map((ex, i) => ({ name: ex.name, hint: rx.hints[i] ?? '', held: !!rx.held[i] }))
         .filter((l) => l.hint)

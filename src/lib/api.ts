@@ -77,6 +77,12 @@ export function dataUrl(): string | null {
   return `${base}/data`
 }
 
+export function sessionRxUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/session-rx`
+}
+
 export function authBaseUrl(): string | null {
   const base = apiBaseUrl()
   if (!base || !isCloudflareApi()) return null
