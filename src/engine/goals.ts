@@ -178,19 +178,3 @@ export function projectedAtDue(
   const slopePerMs = (pts[pts.length - 1].value - pts[0].value) / (last - first)
   return pts[pts.length - 1].value + slopePerMs * (dueMs - last)
 }
-
-export const PHIL_GOAL_SEED: Array<GoalFields & { note?: string; test_protocol?: string }> = [
-  { name: 'Bench 1RM', metric: 'e1rm', unit: 'lb', side: 'none', direction: 'higher', target: 295, target_range_hi: 300, current: 285, best: 285, baseline: 285, due_date: '2026-12-11', cadence: 'block', test_protocol: 'Paused or competition bench, Dec 7–11. Long-term 315.' },
-  { name: 'Strict OHP', metric: 'load_x_reps', unit: 'lb', side: 'none', direction: 'higher', target: 155, current: 125, best: 125, due_date: null, cadence: 'open', test_protocol: 'Strict press. Last best 125×5 (Aug 26).' },
-  { name: 'Squat held', metric: 'held_load', unit: 'lb', side: 'none', direction: 'higher', target: 375, due_date: '2026-12-11', cadence: 'block', test_protocol: 'Maintenance. A rep PR at RPE 8 counts as held. No maxing.' },
-  { name: 'Deadlift held', metric: 'held_load', unit: 'lb', side: 'none', direction: 'higher', target: 410, current: 350, due_date: '2026-12-11', cadence: 'block', test_protocol: 'TM 410 (hand-set) / best 445. 3×3 @350. No maxing.', note: 'Deadlift TM is 410 and must stay 410.' },
-  { name: 'Hip IR L', metric: 'hip_ir', unit: 'deg', side: 'L', direction: 'higher', target: 35, due_date: null, cadence: 'monthly', test_protocol: 'Seated or supine IR, each side.' },
-  { name: 'Hip IR R', metric: 'hip_ir', unit: 'deg', side: 'R', direction: 'higher', target: 35, due_date: null, cadence: 'monthly', test_protocol: 'Seated or supine IR, each side.' },
-  { name: 'Knee-to-wall L', metric: 'knee_to_wall', unit: 'in', side: 'L', direction: 'higher', target: 4, due_date: null, cadence: 'monthly' },
-  { name: 'Knee-to-wall R', metric: 'knee_to_wall', unit: 'in', side: 'R', direction: 'higher', target: 4, due_date: null, cadence: 'monthly' },
-  { name: 'Wall test', metric: 'wall_test', unit: 'pass', side: 'none', direction: 'pass', due_date: null, cadence: 'monthly', test_protocol: 'Pass / fail screen.' },
-  { name: 'Broad jump', metric: 'distance', unit: 'in', side: 'none', direction: 'higher', target: 100, current: 95, best: 95, baseline: 95, due_date: '2026-12-11', cadence: 'block' },
-  { name: 'Assault Bike 10-min calories', metric: 'calories', unit: 'cal', side: 'none', direction: 'higher', due_date: '2026-12-11', cadence: 'block', test_protocol: 'Set at first test.' },
-  { name: 'Repeat sprint drop-off', metric: 'dropoff_pct', unit: '%', side: 'none', direction: 'lower', target: 5, due_date: '2026-12-11', cadence: 'block', test_protocol: '6 × 20 m, drop-off %.' },
-  { name: 'Basketball gas tank', metric: 'rating', unit: '/10', side: 'none', direction: 'higher', target: 8, due_date: null, cadence: 'weekly', test_protocol: 'Post-game 1–10.' },
-]

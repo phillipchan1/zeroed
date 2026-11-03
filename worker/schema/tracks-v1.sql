@@ -13,10 +13,9 @@
 -- Does NOT write athlete.training_max_overrides. Deadlift TM stays as stored.
 -- Does NOT delete or reseed existing track / goal / rule rows.
 --
--- Runtime flag: athlete.flags.tracks_v1 = true (Phil only, below).
--- Phil's named tracks / goals / rules live in scripts/seed-phil-tracks.sql
--- (already applied on prod). Isolation seed is a@ / b@ and must not pick
--- up personal rows.
+-- Runtime flag: athlete.flags.tracks_v1 = true. Enable per athlete with
+-- scripts/enable-tracks-flag.mjs (email from ZEROED_TRACKS_FLAG_EMAIL).
+-- Isolation seed is a@ / b@ and must not pick up personal rows.
 
 -- =============================================================================
 -- PROGRAM block metadata
@@ -225,13 +224,6 @@ AS $$
   END;
 $$;
 
--- =============================================================================
--- Flag only. Phil's named tracks / goals / rules live in
--- scripts/seed-phil-tracks.sql (already applied on prod). Isolation seed
--- is a@ / b@ and must not pick up personal rows.
--- =============================================================================
-UPDATE public.athlete a
-SET flags = COALESCE(a.flags, '{}'::jsonb) || '{"tracks_v1": true}'::jsonb
-FROM auth.users u
-WHERE a.auth_user_id = u.id
-  AND lower(u.email) = 'phillipchan1@gmail.com';
+-- Flag is not hardcoded here. Enable per athlete with:
+--   ZEROED_TRACKS_FLAG_EMAIL=you@example.com node scripts/enable-tracks-flag.mjs --confirm
+-- Isolation seed is a@ / b@ and must not pick up personal rows.

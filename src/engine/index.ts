@@ -2190,10 +2190,10 @@ export function summarizeInsightMovement(
 }
 
 // ============================================================================
-// Ambient Work — life-integration movements tied to weak-link categories
-// Lifted from Phil's Health life-integration menu. Every other app says "do
-// these at the gym"; Zeroed meets the athlete in their life. Shown on the
-// Zeroed In screen (Act 5), mapped to the P1/P2 insight categories.
+// Ambient Work — life-integration movements tied to weak-link categories.
+// Every other app says "do these at the gym"; Zeroed meets the athlete in
+// their life. Shown on the Zeroed In screen (Act 5), mapped to the P1/P2
+// insight categories.
 // TODO Prompt 3: the ProgramDesignAgent personalises these per athlete.
 // ============================================================================
 

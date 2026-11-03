@@ -182,7 +182,7 @@ eq(recencyFactor(0), 1, 'today counts in full')
 near(recencyFactor(21), 0.95, 1e-9, 'half the discount is gone at three weeks')
 
 {
-  // Phil's regression: an all-time deadlift around 445 must not jump because
+  // Regression: an all-time deadlift around 445 must not jump because
   // someone logged easy volume — 275×4 @6 and 405×2 @6. Those estimate 350
   // and ~484 off the chart; without the RPE weight (0 below 7) and the
   // all-time cap they would set the working max above the real best.

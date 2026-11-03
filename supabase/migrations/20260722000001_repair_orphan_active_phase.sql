@@ -1,6 +1,6 @@
 -- One-off data repair for the orphaned-duplicate-phase bug.
 --
--- Phil's program accumulated a duplicate "Strength" phase left in status='active'
+-- A live program accumulated a duplicate "Strength" phase left in status='active'
 -- with ZERO routines (created by runPhaseAdvancement inserting a fresh phase
 -- instead of activating the pending one). Because the active phase had no
 -- routines, useAppState.fetchSnapshot fell into its legacy "no phase wiring"

@@ -52,8 +52,8 @@ Power / Sport, one active week-block) is unchanged. The spec's
 "settable phase" is the free-text `block_phase`, not a new value in
 the `phase.name` check.
 
-`athlete.goals` stays. The free-text value is copied into a goal
-note for Phil. `update_athlete_target` still writes the legacy field.
+`athlete.goals` stays. `update_athlete_target` still writes the
+legacy field.
 
 ## Tracks
 
@@ -64,13 +64,11 @@ and a trigger-created General collides with the dumped row. Missing
 `track_id` on an exercise resolves to General at read time. Nothing
 in the unflagged UI changes.
 
-Phil (auth email `phillipchan1@gmail.com`) also gets the five named
-tracks from the spec, with exercises classified by name / session
-name. That seed is `scripts/seed-phil-tracks.sql` (idempotent,
-targets Phil's athlete row, no-ops when the data exists). Schema
-migrations stay schema + the flag. Classification is additive
-(`track_id` only). Loads, sets, reps, and `training_max_overrides`
-are not touched. Deadlift TM stays whatever is already stored (410).
+Named tracks beyond General are operator-seeded, not in the schema
+migration. `scripts/seed-athlete-tracks.mjs` applies a gitignored
+local SQL file for `ZEROED_SEED_ATHLETE_EMAIL`. Schema migrations
+stay schema-only. Classification is additive (`track_id` only).
+Loads, sets, reps, and `training_max_overrides` are not touched.
 
 A session may mix tracks. Friday is the fixture: Lifting +
 Conditioning/Power + Hypertrophy in one routine, grouped in the UI.
@@ -81,7 +79,7 @@ Engines propose. They never write the live week. The coach (human or
 agent) calls `get_track_progression`, then `preview_program_edits` /
 `apply_program_edits` with `confirm=true`.
 
-| Type | Next-week rule (Phil fixtures) |
+| Type | Next-week rule (fixtures) |
 |---|---|
 | `tm_wave` | Bench TM wave; bump TM +5 next cycle if top set ≤ RPE 8 |
 | `rpe_autoreg` | OHP +5 only if every set ≤ target RPE; else hold |
@@ -103,11 +101,11 @@ Fired rules render on the workout screen ("Knee 6/10: no squats
 today"). Evaluation is deterministic and runs from the session
 check-in (already on `workout`) plus in-progress draft values.
 
-Phil's seeded rules:
+Example rules:
 
 - knee > 5/10 → drop squats, lunges, jumps
 - knee > 3/10 → drop jumps / plyos
-- knee 4–5/10 on a squat day → 265 or cut depth
+- knee 4–5/10 on a squat day → cap load or cut depth
 - bad sleep → −10 lb, hold RPE
 - shaky OHP warm-up → 85% of planned load
 
@@ -137,10 +135,11 @@ use `client_key`.
 `arc_load_v1`.
 
 No build-time ceiling. We cannot set `VITE_*` in `.github/workflows`
-(out of scope), and Phil needs to see the UI the day this merges.
-The new screens ship in the build; they render only when the
-athlete row says so. Migration turns the flag on for Phil.
-Rollback: `UPDATE athlete SET flags = flags - 'tracks_v1'`.
+(out of scope). The new screens ship in the build; they render only
+when the athlete row says so. Enable the flag per athlete with
+`scripts/enable-tracks-flag.mjs` (email from
+`ZEROED_TRACKS_FLAG_EMAIL`). Rollback:
+`UPDATE athlete SET flags = flags - 'tracks_v1'`.
 
 DEV builds still accept `?flag=tracks_v1`.
 
@@ -184,17 +183,16 @@ Names fuzzy-match the way `session_name` does today; ids win.
 ## Migration
 
 Additive, idempotent, reversible (drop the new tables / columns /
-JSON keys; `flags - 'tracks_v1'`). Safe against Phil's live row:
+JSON keys; `flags - 'tracks_v1'`). Safe against an existing live row:
 
 - Does not `UPDATE` `training_max_overrides`
 - Does not change sets / reps / load
 - Sets program dates only where the new columns are null
-- Copies `athlete.goals` into a note; does not delete the column
+- Does not delete `athlete.goals`
 - Deadlift TM in any new rule params is a *read* of the current
-  override (410)
+  override, never a write
 
-Do not run this against prod from this agent. The SQL is written so
-Phil (or the usual migrate path) can apply it.
+Do not run this against prod from this agent.
 
 ## UI (flag on)
 
@@ -212,11 +210,11 @@ behavior. General-track rows exist but are not shown.
 
 ## Tests
 
-Fixtures are Phil's week: OHP 4×4 @115 all ≤ RPE 7 → propose 120;
-one set at 7.5 → hold. DB bench 4×8 @100 → 105; 8/8/7/7 → 100.
-Alactic 8 → 10 rounds, lifts untouched. Broad jump 97" updates the
-goal. Hip IR 30/34 both below 35. Knee 6/10 drops squats; 4/10
-shows 265 or cut depth.
+Fixtures: OHP 4×4 @115 all ≤ RPE 7 → propose 120; one set at 7.5 →
+hold. DB bench 4×8 @100 → 105; 8/8/7/7 → 100. Alactic 8 → 10
+rounds, lifts untouched. Broad jump 97 updates the goal. Hip IR
+30/34 both below 35. Knee 6/10 drops squats; 4/10 caps load or
+cuts depth.
 
 ## Decisions made
 
@@ -226,8 +224,8 @@ shows 265 or cut depth.
 4. Owner keys denormalized (`progression_rule.program_id`,
    `goal_measurement.athlete_id`) so isolation-mutation keeps working.
 5. Flag is athlete-row only — no `VITE_TRACKS_V1` ceiling.
-6. Phil's five tracks and goals are a one-off idempotent script
-   (`scripts/seed-phil-tracks.sql`), not the schema migration.
+6. Named tracks and goals are a local, gitignored seed
+   (`scripts/seed-athlete-tracks.mjs`), not the schema migration.
    Assignment is `track_id` only. Prod already has the rows.
 7. Live `target_rpe = 1` rows are never rewritten silently. Unstamped
    ones are proposed on Coach / preview for the athlete to approve.
@@ -236,7 +234,7 @@ shows 265 or cut depth.
    otherwise the live template with a labeled header.
 9. Goals L/R are two rows, paired in the UI by name stem + side.
 10. Local MCP (`mcp/`) and Worker MCP advertise the same tool names.
-11. One PR, not a data/UI split — Phil wants this on master.
+11. One PR, not a data/UI split.
 12. `add_workout_note` is the write path for real workout notes;
     `add_note` on program edits stays a coach-inbox message so we
     do not change the meaning of existing transcripts.
@@ -266,5 +264,4 @@ shows 265 or cut depth.
 20. `worker/schema/tracks-v1.sql` is Neon-shaped like `app.sql`: no
     RLS, no `authenticated` GRANT, no `get_current_athlete_id()`.
     Supabase migrations keep RLS for isolation. The decimal regex in
-    `tm_override_value` and the OHP word-boundary in the Phil seed
-    use a single SQL backslash.
+    `tm_override_value` uses a single SQL backslash.

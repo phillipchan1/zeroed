@@ -2,9 +2,9 @@
  * Data-driven autoregulation. Rules are rows: if <signal> <op> <value>
  * then <action>, scoped to program / track / exercise.
  *
- * Phil fixtures (spec §2 / §8):
+ * Example fixtures (spec §2 / §8):
  *   knee 6/10 → drop squats, lunges, jumps
- *   knee 4/10 on squat day → 265 or cut depth
+ *   knee 4/10 on squat day → cap load or cut depth
  *   knee > 3/10 → drop jumps / plyos
  */
 
@@ -170,7 +170,7 @@ export function droppedExerciseNames(fired: FiredRule[]): Set<string> {
   )
 }
 
-export const PHIL_AUTOREG_SEED: AutoregRule[] = [
+export const EXAMPLE_AUTOREG_RULES: AutoregRule[] = [
   {
     scope_type: 'program',
     signal: 'pain_knee',
