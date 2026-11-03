@@ -77,6 +77,12 @@ VALUES (
   '2026-10-20'
 );
 
+INSERT INTO public.track (program_id, name, color, icon, sort_order, purpose)
+VALUES (
+  '33333333-3333-4333-8333-333333333333',
+  'General', '#9A9A9A', 'circle', 0, 'Default track for unassigned work'
+);
+
 INSERT INTO public.phase (
   id, program_id, name, week_start, week_end, non_negotiables, advancement_criteria, status
 ) VALUES (

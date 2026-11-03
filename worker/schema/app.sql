@@ -508,26 +508,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS workout_note_client_key_uidx
   ON public.workout_note (athlete_id, client_key)
   WHERE client_key IS NOT NULL;
 
-CREATE OR REPLACE FUNCTION public.ensure_general_track()
-RETURNS TRIGGER AS $$
-BEGIN
-  IF NEW.status IS DISTINCT FROM 'external' THEN
-    INSERT INTO public.track (program_id, name, color, icon, sort_order, purpose)
-    SELECT NEW.id, 'General', '#9A9A9A', 'circle', 0, 'Default track for unassigned work'
-    WHERE NOT EXISTS (
-      SELECT 1 FROM public.track t WHERE t.program_id = NEW.id AND t.name = 'General'
-    );
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS program_ensure_general_track ON public.program;
-CREATE TRIGGER program_ensure_general_track
-  AFTER INSERT ON public.program
-  FOR EACH ROW
-  EXECUTE FUNCTION public.ensure_general_track();
-
 CREATE OR REPLACE FUNCTION public.tm_override_value(overrides jsonb, lift text)
 RETURNS numeric
 LANGUAGE sql

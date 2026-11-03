@@ -73,6 +73,25 @@ export async function fetchGoalsView(athleteId: string): Promise<GoalView[]> {
   })
 }
 
+export async function ensureGeneralTrack(programId: string): Promise<void> {
+  const { data } = await supabase
+    .from('track')
+    .select('id')
+    .eq('program_id', programId)
+    .eq('name', 'General')
+    .maybeSingle()
+  if (data) return
+  const { error } = await supabase.from('track').insert({
+    program_id: programId,
+    name: 'General',
+    color: '#9A9A9A',
+    icon: 'circle',
+    sort_order: 0,
+    purpose: 'Default track for unassigned work',
+  })
+  if (error && !/duplicate|unique/i.test(error.message ?? '')) throw error
+}
+
 export function measurementClientKey(goalId: string, date: string, side: string | null): string {
   return `gm:${goalId}:${date}:${side ?? 'none'}`
 }

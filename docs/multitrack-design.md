@@ -57,9 +57,11 @@ note for Phil. `update_athlete_target` still writes the legacy field.
 
 ## Tracks
 
-Every non-`external` program gets a `General` track (trigger on
-insert + backfill). Missing `track_id` on an exercise resolves to
-General at read time. Nothing in the unflagged UI changes.
+Every non-`external` program gets a `General` track via backfill
+plus app/seed inserts. There is no INSERT trigger: data-only restore
+cannot disable triggers on Neon, and a trigger-created General
+collides with the dumped row. Missing `track_id` on an exercise
+resolves to General at read time. Nothing in the unflagged UI changes.
 
 Phil (auth email `phillipchan1@gmail.com`) also gets the five named
 tracks from the spec, with exercises classified by name / session
@@ -241,3 +243,8 @@ shows 265 or cut depth.
 18. `/app/goals` and `/app/program/track/:trackId` redirect to Program
     when the flag is off, so a bookmarked URL cannot leak the new
     screens to an unflagged athlete.
+19. No `AFTER INSERT` trigger that writes `track` rows. Restore is
+    data-only and cannot `--disable-triggers` on Neon; a trigger-created
+    General collided with the dump (`23505`). General is backfilled for
+    existing programs, seeded in fixtures, and created beside new
+    active programs in app code.

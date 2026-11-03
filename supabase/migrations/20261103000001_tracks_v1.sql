@@ -263,28 +263,11 @@ CREATE POLICY workout_note_update ON public.workout_note
 GRANT SELECT, INSERT, UPDATE ON public.workout_note TO authenticated;
 
 -- =============================================================================
--- General track on every non-external program (insert + backfill)
+-- General track backfill. No INSERT trigger: data-only restore cannot
+-- disable triggers on Neon, and a trigger-created General collides with
+-- the dumped row (23505 on track(program_id, name)). New programs get
+-- General from app/seed inserts; missing track_id still resolves at read.
 -- =============================================================================
-CREATE OR REPLACE FUNCTION public.ensure_general_track()
-RETURNS TRIGGER AS $$
-BEGIN
-  IF NEW.status IS DISTINCT FROM 'external' THEN
-    INSERT INTO public.track (program_id, name, color, icon, sort_order, purpose)
-    SELECT NEW.id, 'General', '#9A9A9A', 'circle', 0, 'Default track for unassigned work'
-    WHERE NOT EXISTS (
-      SELECT 1 FROM public.track t WHERE t.program_id = NEW.id AND t.name = 'General'
-    );
-  END IF;
-  RETURN NEW;
-END;
-$$ LANGUAGE plpgsql;
-
-DROP TRIGGER IF EXISTS program_ensure_general_track ON public.program;
-CREATE TRIGGER program_ensure_general_track
-  AFTER INSERT ON public.program
-  FOR EACH ROW
-  EXECUTE FUNCTION public.ensure_general_track();
-
 INSERT INTO public.track (program_id, name, color, icon, sort_order, purpose)
 SELECT p.id, 'General', '#9A9A9A', 'circle', 0, 'Default track for unassigned work'
 FROM public.program p

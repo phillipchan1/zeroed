@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../../lib/supabaseClient'
 import { generateInsightsFromDiagnostic, generateInitialProgram } from '../../engine'
+import { ensureGeneralTrack } from '../../lib/tracksData'
 import { Button, TypeOn, TickingNumber, PresenceDot } from '../../components/ui'
 import type { DiagnosticResults, InsightRow } from '../../types/database'
 import { MOVEMENT_PATTERNS } from '../../types/database'
@@ -137,6 +138,7 @@ export function ComputeScreen({ athleteId, results, onComplete }: ComputeProps) 
         .select()
         .single()
       if (progErr || !prog) throw progErr ?? new Error('program insert failed')
+      await ensureGeneralTrack(prog.id)
 
       const { data: phase, error: phaseErr } = await supabase
         .from('phase')

@@ -31,6 +31,7 @@ import type {
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
+import { ensureGeneralTrack } from '../lib/tracksData'
 import { resolveWorkoutInsert } from '../lib/workoutCommit'
 import { orderByPlannedDay } from '../lib/weekOrder'
 import {
@@ -1893,6 +1894,7 @@ export async function buildProvisionalProgram(
     .insert({ athlete_id: athleteId, goal: plan.goal, start_date: startDateStr, retest_date: plan.retest_date, status: 'active' })
     .select().single()
   if (!prog) return counts
+  await ensureGeneralTrack(prog.id)
 
   const { data: phase } = await supabase
     .from('phase')
