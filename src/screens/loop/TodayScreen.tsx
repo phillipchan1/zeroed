@@ -3,7 +3,7 @@ import { useLocation, useNavigate, useOutletContext } from 'react-router-dom'
 import { SessionZeroed, type FinishedSession } from '../../components/SessionZeroed'
 import { ConvergenceReticle } from '../../components/convergence/ConvergenceReticle'
 import { supabase } from '../../lib/supabaseClient'
-import { loadCache, mutateCache, useCachedLoader } from '../../lib/cache'
+import { invalidateCache, loadCache, mutateCache, saveCache, useCachedLoader } from '../../lib/cache'
 import {
   runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, gatherSessionPrescription,
   gatherSessionActuals, actualsFromPending,
@@ -15,7 +15,7 @@ import { effectiveTrackingType } from '../../engine/exerciseLibrary'
 import { fmtDose, isIntervalBlock, intervalPlanFor, roundsFromLogs, fmtClock, intervalTitle } from '../../engine/intervals'
 import { primeCueAudio } from '../../lib/intervalCues'
 import { tallySession } from '../../engine/volume'
-import { resolveSessionTarget } from '../../engine/prescription'
+import { displayedSessionLoad, fetchProgramRxVersion } from '../../engine/sessionRx'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag, Play, Plus, MessageSquarePlus } from 'lucide-react'
 import { loadDraftStarts } from '../../lib/workoutDraft'
@@ -27,6 +27,7 @@ import {
 } from '../../lib/workoutOutbox'
 import { setIntendedDay, orderByPlannedDay, DAY_LABELS as PLAN_DAYS } from '../../lib/weekPlan'
 import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, LockOn, Row } from '../../components/ui'
+import { PullToRefresh } from '../../components/PullToRefresh'
 import { OutsidePlanSheet } from '../../components/OutsidePlanSheet'
 import { OneOffSheet } from '../../components/OneOffSheet'
 import { arcLoadOn } from '../../lib/arcLoad'
@@ -459,7 +460,7 @@ function SessionSheet({
                 exercises={exercises}
                 tracks={tracks}
                 render={(ex, i) => {
-                  const target = resolveSessionTarget(ex, targets?.[i] ?? null, u)
+                  const target = displayedSessionLoad({ targets: targets ?? {} }, i)
                   return (
                     <div
                       style={{
@@ -481,9 +482,7 @@ function SessionSheet({
               />
             )
           : exercises.map((ex, i) => {
-            // Written load wins. TM / lift-model math is only the fallback
-            // when the program did not write a bar weight.
-            const target = resolveSessionTarget(ex, targets?.[i] ?? null, u)
+            const target = displayedSessionLoad({ targets: targets ?? {} }, i)
             return (
               <div
                 key={i}
@@ -864,9 +863,14 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
     `today:${athleteId}`,
     () => fetchTodayView(athleteId),
   )
-  const { data: pager } = useCachedLoader(
+  const { data: pager, refetch: refetchPager } = useCachedLoader(
     `weekpager:${athleteId}`,
     () => gatherWeekPager(athleteId, unitContext()),
+  )
+  const { data: rxVersion, refetch: refetchRxVersion } = useCachedLoader(
+    cacheKeys.rxVersion(athleteId),
+    () => fetchProgramRxVersion(unitContext()),
+    { freshMs: 0 },
   )
 
   const p1            = view?.p1 ?? null
@@ -1092,14 +1096,36 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
   // bootstrap's copy, so the number the preview promises is the one the session
   // opens with.
   const u = unitContext()
-  const { data: openRx } = useCachedLoader(
+  const { data: openRx, refetch: refetchOpenRx } = useCachedLoader(
     openSession ? cacheKeys.sessionRx(openSession.id) : null,
     async () => {
       const rx = await gatherSessionPrescription(athleteId, openSession!.id, openSession!.exercises, u)
       mutateCache<WorkoutBootstrap>(workoutBootKey(openSession!.id), (b) => ({ ...b, prescription: rx }))
       return rx
     },
+    { freshMs: 0 },
   )
+  useEffect(() => {
+    if (!openSession) return
+    refetchOpenRx()
+  }, [openSession?.id, refetchOpenRx])
+  useEffect(() => {
+    if (!rxVersion) return
+    const seenKey = `rxver-seen:${athleteId}`
+    const prev = loadCache<string>(seenKey)
+    if (prev && prev !== rxVersion) {
+      invalidateCache((k) => k.startsWith('rx:') || k.startsWith('workout:'))
+    }
+    saveCache(seenKey, rxVersion)
+  }, [rxVersion, athleteId])
+
+  function pullRefresh() {
+    invalidateCache((k) => k.startsWith('rx:') || k === cacheKeys.rxVersion(athleteId))
+    refetch()
+    refetchPager()
+    refetchRxVersion()
+    refresh()
+  }
   // Cold rx key (first-ever open, maybe offline): fall back to the bootstrap's
   // copy, planted by a previous visit to the workout screen.
   const openTargets = openSession
@@ -1153,6 +1179,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
 
   return (
     <div className="screen with-nav">
+      <PullToRefresh onRefresh={pullRefresh}>
       {finished && (
         <SessionZeroed
           session={finished}
@@ -1462,6 +1489,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
           onInjury={() => void handleCloseWeek(true)}
         />
       )}
+      </PullToRefresh>
     </div>
   )
 }

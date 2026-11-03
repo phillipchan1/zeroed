@@ -2,7 +2,9 @@ import { Fragment, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { History, Lock, Sparkles } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
-import { useCachedLoader } from '../../lib/cache'
+import { invalidateCache, useCachedLoader } from '../../lib/cache'
+import { PullToRefresh } from '../../components/PullToRefresh'
+import { cacheKeys } from '../../lib/loopCache'
 import {
   gatherProgramMap, gatherTrainingLog,
   gatherBlockVolume, activeBlockRetestDate,
@@ -195,19 +197,19 @@ function BlockVolumeChart({ data, u }: { data: BlockVolume; u: ReturnType<typeof
 
 export function ProgramScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
-  const { data, loading: coldLoading } = useCachedLoader(
+  const { data, loading: coldLoading, refetch: refetchProgram } = useCachedLoader(
     `program:${athleteId}`,
     () => fetchProgramView(athleteId),
   )
-  const { data: map } = useCachedLoader(
+  const { data: map, refetch: refetchMap } = useCachedLoader(
     `programmap:${athleteId}`,
     () => gatherProgramMap(athleteId, unitContext()),
   )
-  const { data: log } = useCachedLoader(
+  const { data: log, refetch: refetchLog } = useCachedLoader(
     `history:${athleteId}`,
     () => gatherTrainingLog(athleteId, pendingSessionsRaw()),
   )
-  const { data: blockVolume } = useCachedLoader(
+  const { data: blockVolume, refetch: refetchVolume } = useCachedLoader(
     `blockvol:${athleteId}`,
     () => gatherBlockVolume(athleteId),
   )
@@ -251,8 +253,23 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
   const advancement    = (phase?.advancement_criteria as string[] | null) ?? []
   const clearance      = data?.clearance ?? null
 
+  function pullRefresh() {
+    invalidateCache((k) => (
+      k === cacheKeys.program(athleteId)
+      || k === cacheKeys.programMap(athleteId)
+      || k === cacheKeys.history(athleteId)
+      || k.startsWith('blockvol:')
+      || k.startsWith('rx:')
+    ))
+    refetchProgram()
+    refetchMap()
+    refetchLog()
+    refetchVolume()
+  }
+
   return (
     <div className="screen with-nav">
+      <PullToRefresh onRefresh={pullRefresh}>
       <div className="page">
        <div className="page__main">
         <PageHeader eyebrow="The plan" title="Program" />
@@ -482,6 +499,7 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
         )}
        </div>
       </div>
+      </PullToRefresh>
     </div>
   )
 }

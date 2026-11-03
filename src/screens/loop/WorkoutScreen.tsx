@@ -21,7 +21,8 @@ import {
   type PendingSession, type PendingDebrief, type DebriefExerciseInput, type SessionCheckinInput,
 } from '../../engine'
 import { isUpperBody } from '../../engine/liftModel'
-import { resolveSessionTarget, rpeContract } from '../../engine/prescription'
+import { rpeContract } from '../../engine/prescription'
+import { displayedSessionLoad } from '../../engine/sessionRxCompute'
 import { pickerRpeScale, roundSessionRpe } from '../../engine/rpeScale'
 import { rpeHalfStepsEnabled } from '../../lib/api'
 import { displayPRs, prLabel, NO_BEST, type LiftBest } from '../../engine/prs'
@@ -534,16 +535,6 @@ function SessionCheckinCard({
       )}
     </div>
   )
-}
-
-/**
- * Offline, the engine still answers — from the program's load text alone, with
- * no log to read. A prescription that lost the lift model's numbers is worse
- * than the one already on screen, so a re-prescribe never trades down to it.
- */
-function keepsLiftModel(prev: SessionPrescription | null, next: SessionPrescription): boolean {
-  const had = prev?.reasons ?? {}
-  return Object.entries(had).every(([i, lines]) => !lines?.length || (next.reasons?.[Number(i)]?.length ?? 0) > 0)
 }
 
 /** A lift's reason line, with the arithmetic behind it a tap away. */
@@ -1785,7 +1776,11 @@ export function WorkoutScreen({
     const key = sessionKey
     prescribingRef.current = key
     gatherSessionPrescription(athleteId, routineId, sessionExercises, u, { dayOf: checkinDayOf(checkinRef.current) })
-      .then((next) => { if (latestKeyRef.current === key) setPrescription(next) })
+      .then((next) => {
+        if (latestKeyRef.current !== key) return
+        setPrescription(next)
+        saveCache(cacheKeys.sessionRx(routineId), next)
+      })
       .catch(() => { /* offline — the stand-in trains without a hint */ })
       .finally(() => { if (prescribingRef.current === key) prescribingRef.current = null })
     // sessionExercises and u are derived from state already in the deps.
@@ -1803,7 +1798,11 @@ export function WorkoutScreen({
     const t = setTimeout(() => {
       prescribedDayOfRef.current = dayOfKey
       gatherSessionPrescription(athleteId, routineId, sessionExercises, u, { dayOf: checkinDayOf(checkinRef.current) })
-        .then((next) => { if (latestKeyRef.current === key) setPrescription((prev) => (keepsLiftModel(prev, next) ? next : prev)) })
+        .then((next) => {
+          if (latestKeyRef.current !== key) return
+          setPrescription(next)
+          saveCache(cacheKeys.sessionRx(routineId), next)
+        })
         .catch(() => { /* offline — the numbers on screen stand */ })
     }, 600)
     return () => clearTimeout(t)
@@ -1946,6 +1945,7 @@ export function WorkoutScreen({
       try {
         nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, u, { dayOf: checkinDayOf(checkinRef.current) })
         setPrescription(nextPresc)
+        saveCache(cacheKeys.sessionRx(routineId), nextPresc)
       } catch { /* non-fatal */ }
     }
 
@@ -2806,9 +2806,9 @@ export function WorkoutScreen({
           const computedTarget = trackingType === 'weight_reps' && presOk
             ? (feedback[exIdx]?.pushed && prescription?.pushTargets?.[exIdx] != null
                 ? prescription.pushTargets[exIdx]
-                : prescription?.targets?.[exIdx] ?? null)
+                : prescription ? displayedSessionLoad(prescription, exIdx) : null)
             : null
-          const rxTarget = resolveSessionTarget(ex, computedTarget, u)
+          const rxTarget = computedTarget
           const pLoad = rxTarget ?? leadingInt(ex.load ?? undefined)
           // Details sheet: the movement demo, the hardcoded how-to library, the
           // program-specific cue, the insight this lift serves, and the reading
