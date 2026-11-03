@@ -516,7 +516,7 @@ AS $$
   SELECT CASE
     WHEN jsonb_typeof(overrides -> lift) = 'number' THEN (overrides ->> lift)::numeric
     WHEN jsonb_typeof(overrides -> lift) = 'object'
-      AND (overrides -> lift ->> 'value') ~ '^-?[0-9]+(\\.[0-9]+)?$'
+      AND (overrides -> lift ->> 'value') ~ '^-?[0-9]+(\.[0-9]+)?$'
       THEN (overrides -> lift ->> 'value')::numeric
     ELSE NULL
   END;

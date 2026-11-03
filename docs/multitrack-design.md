@@ -58,16 +58,19 @@ note for Phil. `update_athlete_target` still writes the legacy field.
 ## Tracks
 
 Every non-`external` program gets a `General` track via backfill
-plus app/seed inserts. There is no INSERT trigger: data-only restore
-cannot disable triggers on Neon, and a trigger-created General
-collides with the dumped row. Missing `track_id` on an exercise
-resolves to General at read time. Nothing in the unflagged UI changes.
+plus app / Worker data-plane / onboarding inserts. There is no
+INSERT trigger: data-only restore cannot disable triggers on Neon,
+and a trigger-created General collides with the dumped row. Missing
+`track_id` on an exercise resolves to General at read time. Nothing
+in the unflagged UI changes.
 
 Phil (auth email `phillipchan1@gmail.com`) also gets the five named
 tracks from the spec, with exercises classified by name / session
-name. Classification is additive (`track_id` only). Loads, sets,
-reps, and `training_max_overrides` are not touched. Deadlift TM
-stays whatever is already stored (410).
+name. That seed is `scripts/seed-phil-tracks.sql` (idempotent,
+targets Phil's athlete row, no-ops when the data exists). Schema
+migrations stay schema + the flag. Classification is additive
+(`track_id` only). Loads, sets, reps, and `training_max_overrides`
+are not touched. Deadlift TM stays whatever is already stored (410).
 
 A session may mix tracks. Friday is the fixture: Lifting +
 Conditioning/Power + Hypertrophy in one routine, grouped in the UI.
@@ -143,9 +146,12 @@ gates the app chrome.
 Unset target RPE stays unset and displays as `—`. New exercises do
 not default to 1. The lift model's phase-target fallback still
 applies to *load suggestions* when a lift has no target of its own
-(otherwise we regress #35 / the existing prescription path). We do
-not rewrite live `target_rpe = 1` rows — we cannot prove they were
-never coach-set.
+(otherwise we regress #35 / the existing prescription path). A stored
+`target_rpe = 1` that was never coach-stamped (`rpe_source !==
+'coach'`) is a placeholder: Coach and `preview_program_edits` surface
+it as a proposed fix the athlete approves. Nothing rewrites those
+rows silently. A coach / MCP write that sets `target_rpe` stamps
+`rpe_source: 'coach'`.
 
 Half-steps remain behind the existing RPE flag.
 
@@ -214,10 +220,12 @@ shows 265 or cut depth.
 4. Owner keys denormalized (`progression_rule.program_id`,
    `goal_measurement.athlete_id`) so isolation-mutation keeps working.
 5. Flag is athlete-row only — no `VITE_TRACKS_V1` ceiling.
-6. Phil's five tracks and goals are seeded in the migration so the
-   app is populated the day the flag is on. Assignment is `track_id`
-   only.
-7. Live `target_rpe = 1` rows are not rewritten.
+6. Phil's five tracks and goals are a one-off idempotent script
+   (`scripts/seed-phil-tracks.sql`), not the schema migration.
+   Assignment is `track_id` only. Prod already has the rows.
+7. Live `target_rpe = 1` rows are never rewritten silently. Unstamped
+   ones are proposed on Coach / preview for the athlete to approve.
+   Coach writes stamp `rpe_source: 'coach'`.
 8. Preview `week_start` uses the queued block when it matches,
    otherwise the live template with a labeled header.
 9. Goals L/R are two rows, paired in the UI by name stem + side.
@@ -246,5 +254,11 @@ shows 265 or cut depth.
 19. No `AFTER INSERT` trigger that writes `track` rows. Restore is
     data-only and cannot `--disable-triggers` on Neon; a trigger-created
     General collided with the dump (`23505`). General is backfilled for
-    existing programs, seeded in fixtures, and created beside new
-    active programs in app code.
+    existing programs, seeded in fixtures, and created beside every
+    non-`external` program insert (app, ComputeScreen, Worker
+    `/api/data`, `create_track`).
+20. `worker/schema/tracks-v1.sql` is Neon-shaped like `app.sql`: no
+    RLS, no `authenticated` GRANT, no `get_current_athlete_id()`.
+    Supabase migrations keep RLS for isolation. The decimal regex in
+    `tm_override_value` and the OHP word-boundary in the Phil seed
+    use a single SQL backslash.

@@ -80,6 +80,19 @@ export function findTrack(tracks: TrackRef[], idOrName: string | null | undefine
     ?? null
 }
 
+export const GENERAL_TRACK_SEED = {
+  name: 'General',
+  color: '#9A9A9A',
+  icon: 'circle',
+  sort_order: 0,
+  purpose: 'Default track for unassigned work',
+} as const
+
+/** External / outside-plan programs do not get a General track. */
+export function wantsGeneralTrack(status: string | null | undefined): boolean {
+  return status != null && status !== 'external'
+}
+
 export function generalTrack(tracks: TrackRef[]): TrackRef | null {
   return findTrack(tracks, 'General') ?? tracks.slice().sort((a, b) => a.order - b.order)[0] ?? null
 }

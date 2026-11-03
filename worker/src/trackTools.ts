@@ -6,7 +6,7 @@ import { applyMeasurement, computeGoalStatus, isGoalDirection, isGoalSide, pairK
 import { mcpStamp, writePreview } from '../../src/engine/mcpStamp.ts'
 import { evaluateAutoregRules, type AutoregRule } from '../../src/engine/autoreg.ts'
 import { proposeNextWeek, type PerformedExercise, type ProgressionRule } from '../../src/engine/progression.ts'
-import { daysHitByTrack, findTrack, isEngineType, resolveTrack, suggestTrackName, type TrackRef } from '../../src/engine/tracks.ts'
+import { daysHitByTrack, findTrack, GENERAL_TRACK_SEED, isEngineType, resolveTrack, suggestTrackName, type TrackRef } from '../../src/engine/tracks.ts'
 import { jsonParam } from './db.ts'
 import type { ConnectedStore, LiveProgram } from './store.ts'
 import { McpUserError } from './userError.ts'
@@ -254,6 +254,19 @@ async function createTrack(store: ConnectedStore, args: Record<string, unknown>)
     if (asString(args.client_key)) return getTrack(store, existing.id)
     throw new McpUserError(`Track "${name}" already exists.`)
   }
+  await store.sql`
+    INSERT INTO track (program_id, name, color, icon, sort_order, purpose)
+    SELECT ${program.id}, ${GENERAL_TRACK_SEED.name}, ${GENERAL_TRACK_SEED.color},
+           ${GENERAL_TRACK_SEED.icon}, ${GENERAL_TRACK_SEED.sort_order}, ${GENERAL_TRACK_SEED.purpose}
+    WHERE EXISTS (
+      SELECT 1 FROM program
+      WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
+        AND status IS DISTINCT FROM 'external'
+    )
+      AND NOT EXISTS (
+        SELECT 1 FROM track WHERE program_id = ${program.id} AND name = ${GENERAL_TRACK_SEED.name}
+      )
+  `
   const [row] = await store.sql<{ id: string }[]>`
     INSERT INTO track (program_id, name, color, icon, sort_order, purpose, methodology_text, sources, deload_policy, retest_policy)
     SELECT ${program.id}, ${name}, ${asString(args.color) ?? '#9A9A9A'}, ${asString(args.icon) ?? 'circle'},

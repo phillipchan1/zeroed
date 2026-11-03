@@ -1024,6 +1024,40 @@ ok((await count('workout', 'client_key = $1', [CLIENT_KEY])) === 2, 'idempotent 
 ok((await scalar<string>('SELECT athlete_id::text FROM workout WHERE id = $1', [firstKeyId ?? ''])) === A, 'idempotent insert: A row is stamped with A')
 ok((await scalar<string>('SELECT athlete_id::text FROM workout WHERE id = $1', [bKeyId ?? ''])) === B, 'idempotent insert: B row is stamped with B')
 
+const NEW_PROG = 'aaaa3333-3333-4333-8333-333333333301'
+const createdProg = await executeDataQuery(sql, ctxA, {
+  table: 'program',
+  op: 'insert',
+  values: { id: NEW_PROG, goal: 'new-block', status: 'active', start_date: '2026-11-03' },
+  returning: 'id,status',
+  single: 'one',
+})
+ok(createdProg.error == null, `data program insert: active program lands (${createdProg.error?.message ?? 'ok'})`)
+ok((await count('track', `program_id = $1 AND name = 'General'`, [NEW_PROG])) === 1, 'data program insert: creates General')
+ok((await count('track', `program_id = $1 AND name = 'General'`, [PROG_A])) === 1, 'data program insert: existing General on A is left alone')
+
+const createdAgain = await executeDataQuery(sql, ctxA, {
+  table: 'program',
+  op: 'upsert',
+  values: { id: NEW_PROG, goal: 'new-block-retitled', status: 'active' },
+  onConflict: 'id',
+  returning: 'id',
+  single: 'maybe',
+})
+ok(createdAgain.error == null, `data program upsert: ${createdAgain.error?.message ?? 'ok'}`)
+ok((await count('track', `program_id = $1 AND name = 'General'`, [NEW_PROG])) === 1, 'data program upsert: General stays one row')
+
+const EXT_PROG = 'aaaa3333-3333-4333-8333-333333333302'
+const extProg = await executeDataQuery(sql, ctxA, {
+  table: 'program',
+  op: 'insert',
+  values: { id: EXT_PROG, goal: 'Outside the plan', status: 'external' },
+  returning: 'id,status',
+  single: 'one',
+})
+ok(extProg.error == null, `data program insert: external program lands (${extProg.error?.message ?? 'ok'})`)
+ok((await count('track', `program_id = $1 AND name = 'General'`, [EXT_PROG])) === 0, 'data program insert: external does not get General')
+
 await harness.close()
 
 console.log(`${checks} checks, ${fails.length} failed (${harness.backend})`)

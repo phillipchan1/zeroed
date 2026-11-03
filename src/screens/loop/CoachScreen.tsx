@@ -12,6 +12,8 @@ import {
   applyCoachActions, describeCoachAction,
 } from '../../engine'
 import type { CoachContext, CoachChatTurn, CoachAction } from '../../engine/agentClient'
+import { mergeCoachActions, proposePlaceholderRpeFixes } from '../../engine/rpePlaceholder'
+import type { ExerciseTemplate } from '../../types/database'
 import { ConvergenceReticle } from '../../components/convergence/ConvergenceReticle'
 import { computeLoopConvergence } from '../../components/convergence/state'
 import type { InsightRow, CoachMessageRow, WeeklyPrescription } from '../../types/database'
@@ -56,11 +58,12 @@ interface CoachView {
   messages: CoachMessageRow[]
   directiveByRef: Record<string, string>
   context: CoachContext | null
+  placeholderRpeActions: CoachAction[]
 }
 
 export async function fetchCoachView(athleteId: string): Promise<CoachView> {
   // The read and the event feed are independent — issue them together.
-  const [insightRes, msgRes] = await Promise.all([
+  const [insightRes, msgRes, progRes] = await Promise.all([
     supabase.from('insight').select('*').eq('athlete_id', athleteId).order('priority'),
     supabase
       .from('coach_message')
@@ -68,6 +71,7 @@ export async function fetchCoachView(athleteId: string): Promise<CoachView> {
       .eq('athlete_id', athleteId)
       .order('created_at', { ascending: false })
       .limit(30),
+    supabase.from('program').select('id').eq('athlete_id', athleteId).eq('status', 'active').maybeSingle(),
   ])
   const insights = (insightRes.data ?? []) as InsightRow[]
   const messages = (msgRes.data ?? []) as CoachMessageRow[]
@@ -88,7 +92,22 @@ export async function fetchCoachView(athleteId: string): Promise<CoachView> {
     if (presc?.directive) directiveByRef[(r as { id: string }).id] = presc.directive
   })
 
-  return { insights, messages, directiveByRef, context }
+  let placeholderRpeActions: CoachAction[] = []
+  if (progRes.data?.id) {
+    const [phaseRes, routineRes] = await Promise.all([
+      supabase.from('phase').select('name').eq('program_id', progRes.data.id).eq('status', 'active').maybeSingle(),
+      supabase.from('routine').select('name, exercises').eq('program_id', progRes.data.id),
+    ])
+    placeholderRpeActions = proposePlaceholderRpeFixes(
+      ((routineRes.data ?? []) as Array<{ name: string; exercises: ExerciseTemplate[] | null }>).map((r) => ({
+        name: r.name,
+        exercises: Array.isArray(r.exercises) ? r.exercises : [],
+      })),
+      phaseRes.data?.name,
+    )
+  }
+
+  return { insights, messages, directiveByRef, context, placeholderRpeActions }
 }
 
 export function CoachScreen({ athleteId }: { athleteId: string }) {
@@ -124,6 +143,13 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
   // forces a re-pull of the read after an apply so the screen reflects the write.
   const [proposed, setProposed]   = useState<CoachAction[]>([])
   const [applying, setApplying]   = useState(false)
+  const dismissedPlaceholderRpe = useRef(false)
+  const placeholderRpeActions = view?.placeholderRpeActions
+
+  useEffect(() => {
+    if (pending || dismissedPlaceholderRpe.current || !placeholderRpeActions?.length) return
+    setProposed((prev) => mergeCoachActions(prev, placeholderRpeActions))
+  }, [placeholderRpeActions, pending])
 
   // Keep the latest turn in view as the thread grows.
   useEffect(() => {
@@ -161,7 +187,8 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
 
     setTurns((prev) => [...prev, { role: 'coach', content: res.reply, fresh: true }])
     setSuggestionsOverride(res.followups.length ? res.followups : [])
-    setProposed(res.actions ?? [])
+    const rpeFixes = dismissedPlaceholderRpe.current ? [] : (placeholderRpeActions ?? [])
+    setProposed(mergeCoachActions(res.actions ?? [], rpeFixes))
     setPending(false)
   }
 
@@ -384,7 +411,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
                   <Button variant="primary" onClick={() => void applyProposed()} disabled={applying} style={{ flex: 2 }}>
                     {applying ? 'Applying…' : 'Apply'}
                   </Button>
-                  <Button variant="ghost" onClick={() => setProposed([])} disabled={applying} style={{ flex: 1 }}>
+                  <Button variant="ghost" onClick={() => { dismissedPlaceholderRpe.current = true; setProposed([]) }} disabled={applying} style={{ flex: 1 }}>
                     Dismiss
                   </Button>
                 </div>

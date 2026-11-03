@@ -976,7 +976,10 @@ export async function applyCoachActions(
         if (a.set_sets != null) ex.sets = a.set_sets
         if (a.set_reps) ex.reps = a.set_reps
         if (a.set_cue) ex.cue = a.set_cue
-        if (a.set_target_rpe != null) ex.target_rpe = Math.max(1, Math.min(10, a.set_target_rpe))
+        if (a.set_target_rpe != null) {
+          ex.target_rpe = Math.max(1, Math.min(10, a.set_target_rpe))
+          ex.rpe_source = 'coach'
+        }
         exs[idx] = ex
         const { error } = await supabase.from('routine').update({ exercises: exs }).eq('id', routine.id)
         results.push({ ok: !error, label, error: error?.message })

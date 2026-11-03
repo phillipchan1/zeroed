@@ -10,6 +10,7 @@ import { beginAuthCors, json } from './cors.ts'
 import { withSql, type Sql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 import { parseRpeHalfStepsFlag, rpeHalfStepsOn, workoutRpeError } from '../../src/engine/rpeScale.ts'
+import { GENERAL_TRACK_SEED } from '../../src/engine/tracks.ts'
 
 export type FilterOp = 'eq' | 'neq' | 'in' | 'gte' | 'gt' | 'lte' | 'lt' | 'ilike' | 'not_in'
 
@@ -388,6 +389,28 @@ export function bindOwner(
   let text = raw.replace(/\$\{athleteId\}/g, `$${start}`)
   if (alias) text = qualifyOwnerText(text, alias)
   return { text, params: [athleteId] }
+}
+
+async function ensureGeneralTracksForAthlete(sql: Sql, athleteId: string): Promise<void> {
+  await runSql(
+    sql,
+    `INSERT INTO track (program_id, name, color, icon, sort_order, purpose)
+     SELECT p.id, $2, $3, $4, $5, $6
+     FROM program p
+     WHERE p.athlete_id = $1
+       AND p.status IS DISTINCT FROM 'external'
+       AND NOT EXISTS (
+         SELECT 1 FROM track t WHERE t.program_id = p.id AND t.name = $2
+       )`,
+    [
+      athleteId,
+      GENERAL_TRACK_SEED.name,
+      GENERAL_TRACK_SEED.color,
+      GENERAL_TRACK_SEED.icon,
+      GENERAL_TRACK_SEED.sort_order,
+      GENERAL_TRACK_SEED.purpose,
+    ],
+  )
 }
 
 export async function runSql<T extends object>(sql: Sql, text: string, params: unknown[]): Promise<T[]> {
@@ -966,6 +989,9 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
           if (!query.returning) return { data: null, error: null, count: 1, status: 201 }
           return shapeResult([existing], query, 1)
         }
+      }
+      if (table === 'program' && ctx.athleteId) {
+        await ensureGeneralTracksForAthlete(sql, ctx.athleteId)
       }
       if (!query.returning) return { data: null, error: null, count: rows.length, status: 201 }
       return shapeResult(rows, query, rows.length)

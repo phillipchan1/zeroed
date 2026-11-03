@@ -4,7 +4,7 @@ import { supabase } from './supabaseClient'
 import { tracksOn } from './tracksFlag'
 import { computeGoalStatus, pairKey, type GoalMeasurement } from '../engine/goals'
 import type { AutoregRule } from '../engine/autoreg'
-import type { TrackRef } from '../engine/tracks'
+import { GENERAL_TRACK_SEED, wantsGeneralTrack, type TrackRef } from '../engine/tracks'
 import type { AthleteGoalRow, GoalMeasurementRow, TrackRow } from '../types/database'
 
 export function useProgramTracks(programId: string | null | undefined) {
@@ -74,6 +74,12 @@ export async function fetchGoalsView(athleteId: string): Promise<GoalView[]> {
 }
 
 export async function ensureGeneralTrack(programId: string): Promise<void> {
+  const { data: prog } = await supabase
+    .from('program')
+    .select('status')
+    .eq('id', programId)
+    .maybeSingle()
+  if (!wantsGeneralTrack(prog?.status)) return
   const { data } = await supabase
     .from('track')
     .select('id')
@@ -83,11 +89,7 @@ export async function ensureGeneralTrack(programId: string): Promise<void> {
   if (data) return
   const { error } = await supabase.from('track').insert({
     program_id: programId,
-    name: 'General',
-    color: '#9A9A9A',
-    icon: 'circle',
-    sort_order: 0,
-    purpose: 'Default track for unassigned work',
+    ...GENERAL_TRACK_SEED,
   })
   if (error && !/duplicate|unique/i.test(error.message ?? '')) throw error
 }

@@ -8,6 +8,7 @@ import {
 import type { ProgramEdit } from '../../supabase/functions/_shared/engine/types.ts'
 import type { DraftSession } from '../../supabase/functions/_shared/engine/programDraft.ts'
 import { formatDiff, formatDraft } from '../../supabase/functions/_shared/zeroedFormat.ts'
+import { placeholderRpePreviewSection } from '../../src/engine/rpePlaceholder.ts'
 import { jsonParam } from './db.ts'
 import { loadLiveProgram, type ConnectedStore, type LiveProgram } from './store.ts'
 
@@ -314,12 +315,14 @@ export function previewEdits(live: LiveProgram, inputs: EditInput[], weekStart?:
   const outcomeLines = outcomes.map((o) =>
     o.applied ? `- applied: ${o.label}` : `- skipped: ${o.label} (${o.reason})`,
   )
+  const suggested = placeholderRpePreviewSection(base.sessions, live.phaseName)
   const text = [
     header,
     '',
     '## Outcomes',
     outcomeLines.join('\n') || 'No edits sent.',
     notes.length ? `\nCoach notes that would be stored:\n${notes.map((n) => `- ${n}`).join('\n')}` : '',
+    suggested ? `\n${suggested}` : '',
     '',
     '## Diff',
     formatDiff(diff),
