@@ -621,6 +621,12 @@ export function notRevertibleReason(tool: string, diff: unknown): string | null 
       return 'Change it again under Profile → Coach access.'
     case 'log_session_rpe':
       return 'Session effort stays in your log; tap it again on the day to change it.'
+    case 'apply_activity_change':
+      return 'Change the activity again instead: ask your coach to preview it, and approve that.'
+    case 'apply_composed_block':
+      return 'A block is replaced, not undone: ask your coach to re-compose, and approve the new block.'
+    case 'set_birth_date':
+      return 'Your birth date is set once at intake.'
     default:
       return 'This kind of change can\'t be undone yet.'
   }

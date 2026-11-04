@@ -49,6 +49,7 @@ import { READINESS_TOOL_NAMES, READINESS_TOOLS, runReadinessTool } from './readi
 import { runSessionRpeTool, SESSION_RPE_TOOL_NAMES, SESSION_RPE_TOOLS } from './sessionRpe.ts'
 import { statusBlockedRegions } from './regionStatus.ts'
 import { isReadTool, logCoachRead, logsReads } from './coachReads.ts'
+import { ACTIVITY_TOOL_NAMES, ACTIVITY_TOOLS, coachSchemaMissing, coachUnavailable, coachV1On, runActivityTool } from './activities.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -293,12 +294,15 @@ function withValidatorArgs(tool: McpTool): McpTool {
 /**
  * The tools this athlete's coach sees. tracks_v1 adds the week-only override,
  * change-log and approval-lookup tools, and the approval arguments on writes;
- * with it off the list is exactly ZEROED_TOOLS.
+ * with it off the list is exactly ZEROED_TOOLS. coach_v1 (only with
+ * tracks_v1) adds the activity and composed-block tools at the end; with it
+ * off the tracks_v1 list is exactly as before.
  */
 export async function zeroedToolsFor(sql: Sql, athleteId: string): Promise<McpTool[]> {
-  return await tracksV1On(storeForAthlete(sql, athleteId))
-    ? [...ZEROED_TOOLS.map(withApprovalArgs).map(withValidatorArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS, ...METHODOLOGY_TOOLS, ...READINESS_TOOLS, ...SESSION_RPE_TOOLS]
-    : ZEROED_TOOLS
+  const store = storeForAthlete(sql, athleteId)
+  if (!(await tracksV1On(store))) return ZEROED_TOOLS
+  const tracks = [...ZEROED_TOOLS.map(withApprovalArgs).map(withValidatorArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS, ...METHODOLOGY_TOOLS, ...READINESS_TOOLS, ...SESSION_RPE_TOOLS]
+  return await coachV1On(store) ? [...tracks, ...ACTIVITY_TOOLS] : tracks
 }
 
 /** What preview_program_edits showed and apply_program_edits must still match: the live week and the diff. */
@@ -425,6 +429,8 @@ export async function executeZeroedTool(
     if (approvalMissing(e)) throw new McpUserError(approvalsUnavailable)
     // …or before worker/schema/methodology.sql (G3).
     if (methodologyMissing(e)) throw new McpUserError(methodologyUnavailable)
+    // …or before worker/schema/coach-v1.sql (G6/G7).
+    if (coachSchemaMissing(e)) throw new McpUserError(coachUnavailable)
     throw e
   }
 }
@@ -458,6 +464,9 @@ async function runZeroedTool(
   if (APPROVAL_TOOL_NAMES.has(name)) return runApprovalTool(store, name, args)
 
   if (METHODOLOGY_TOOL_NAMES.has(name)) return runMethodologyTool(store, name, args, actor)
+
+  // G6 (coach_v1 + tracks_v1): unknown tools otherwise.
+  if (ACTIVITY_TOOL_NAMES.has(name)) return runActivityTool(store, name, args, actor)
 
   // G2: with tracks_v1 on, writes go through the gate (approval, preview, change_log).
   // Off, gate stays undefined and every path below is exactly as before.

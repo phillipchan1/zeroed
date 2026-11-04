@@ -113,6 +113,12 @@ export function readinessUrl(): string | null {
   return `${base}/readiness`
 }
 
+export function coachUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/coach`
+}
+
 export function sessionRpeUrl(): string | null {
   const base = apiBaseUrl()
   if (!base || !isCloudflareApi()) return null

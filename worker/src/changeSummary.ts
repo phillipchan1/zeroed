@@ -147,6 +147,17 @@ export function summarizeChange(row: { tool: string; target_type: string; diff: 
       const mins = after.duration_min != null ? ` · ${String(after.duration_min)} min` : ''
       return clip(`Session effort${str(d.session) ? ` (${str(d.session)})` : ''}: ${before ? `${String(before.rating)} → ` : ''}${String(after.rating ?? '')}/10${mins}`)
     }
+    case 'apply_activity_change': {
+      const a = obj(d.after)
+      const what = d.op === 'add' ? 'Added' : d.op === 'remove' ? 'Removed' : 'Changed'
+      return clip(`${what} activity ${str(a.name) ?? ''}${d.op === 'remove' ? '' : `: ${String(a.sessions_per_week ?? '')}×/wk, ${a.season === 'off' ? 'off' : 'in'}-season`}`)
+    }
+    case 'apply_composed_block': {
+      const p = arr(d.priorities).map((q) => String(q).replace(/_/g, ' '))
+      return clip(`New block ${str(d.start) ?? ''} → ${str(d.end) ?? ''}: ${p.length ? `priority ${p.join(' + ')}` : 'all maintenance'}`)
+    }
+    case 'set_birth_date':
+      return 'Birth date recorded at intake'
     case 'clear_region':
       return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} cleared by a clinician`)
     case 'set_coach_health_access': {

@@ -66,3 +66,17 @@ export function tracksV1Enabled(env: FlagEnv, athleteFlags: unknown, search: str
   if (devOverride('tracks_v1', env, search)) return true
   return readAthleteFlags(athleteFlags).tracks_v1 === true
 }
+
+/**
+ * coach_v1 (G6 + G7): intake, activities and the server-side app coach.
+ * Athlete-row only, like tracks_v1, and only together with it: coach_v1
+ * without tracks_v1 is off. DEV builds also take `?flag=coach_v1` (with
+ * `?flag=tracks_v1`).
+ *
+ *   UPDATE athlete SET flags = flags - 'coach_v1';
+ */
+export function coachV1Enabled(env: FlagEnv, athleteFlags: unknown, search: string): boolean {
+  if (!tracksV1Enabled(env, athleteFlags, search)) return false
+  if (devOverride('coach_v1', env, search)) return true
+  return readAthleteFlags(athleteFlags).coach_v1 === true
+}
