@@ -9,6 +9,17 @@
  *          one change_log row per tap (before → after). One row per session
  *          per day: a second tap the same day updates it. No coach, app_coach
  *          included, writes a rating.
+ *   late   a session dated D can be rated from D 00:00 until D+1 04:00,
+ *          athlete-local (RATE_GRACE_HOURS), so last night's session can still
+ *          be rated after midnight. The app queues a tap it couldn't send
+ *          (src/lib/sessionRpeQueue.ts) and retries it with client_id and
+ *          tapped_at: the window is judged at tapped_at, which is trusted only
+ *          when it is no later than now (+ a few minutes of clock skew) and no
+ *          older than QUEUE_MAX_AGE_MS — never a way to backdate beyond the
+ *          window. A retry of a tap already applied (same client_id) is
+ *          "Already logged"; a queued tap older than the row's latest is
+ *          acknowledged and not applied. Both need session-rpe-queue.sql;
+ *          before it, tapped_at is ignored (the tap counts as sent now).
  *   read   MCP get_session_rpe(since, until?) — a coach read, logged (tools.ts),
  *          and health data (D3): a coach the athlete hasn't shared health data
  *          with gets a refusal. Each row carries the set-RPE mean of the same
@@ -45,10 +56,43 @@ export const CR10_LABELS: Record<number, string> = {
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
+/** A session dated D can be rated until this hour (athlete-local) on D+1. */
+export const RATE_GRACE_HOURS = 4
+/** A queued tap's own clock is trusted back this far, and no further. */
+export const QUEUE_MAX_AGE_MS = 48 * 60 * 60 * 1000
+/** How far ahead of the server a device's clock may run. */
+export const CLOCK_SKEW_MS = 5 * 60 * 1000
+
+/** The local hour (0–23) of an instant in a zone. */
+function localHour(at: Date, zone: string): number {
+  try {
+    return Number(new Intl.DateTimeFormat('en-GB', { timeZone: zone, hour: '2-digit', hourCycle: 'h23' }).format(at))
+  } catch {
+    return at.getUTCHours()
+  }
+}
+
+/** The session dates a tap at `at` may rate: its own local date and, before 04:00, the day before. */
+export function ratableDates(at: Date, zone: string): string[] {
+  const day = mcpStamp(at, zone).local_date
+  return localHour(at, zone) < RATE_GRACE_HOURS ? [day, addDays(day, -1)] : [day]
+}
+
 
 /** True once worker/schema/session-rpe.sql is on this database. Checked, not caught (callers run in transactions). */
 export async function sessionRpeTable(store: ConnectedStore): Promise<boolean> {
   const [row] = await store.sql<{ ok: boolean }[]>`SELECT to_regclass('public.session_rpe') IS NOT NULL AS ok`
+  return row?.ok === true
+}
+
+/** True once worker/schema/session-rpe-queue.sql is on this database (client_id, tapped_at). */
+export async function sessionRpeQueueCols(store: ConnectedStore): Promise<boolean> {
+  const [row] = await store.sql<{ ok: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'session_rpe' AND column_name = 'tapped_at'
+    ) AS ok
+  `
   return row?.ok === true
 }
 
@@ -92,6 +136,8 @@ export async function loadSessionRpe(store: ConnectedStore, from: string, to: st
 export interface SessionRpeResult {
   ok: boolean
   text: string
+  /** A refusal that may pass later unchanged (the table isn't there yet): the app keeps the tap queued. */
+  retry?: boolean
   change_id?: string
   rating?: SessionRpeRow
 }
@@ -104,19 +150,39 @@ function intIn(v: unknown, lo: number, hi: number): number | null | 'bad' {
 }
 
 /**
- * The athlete rates a session they trained today: insert, or update today's
- * row for that session. Standing approval (logging), one change_log row.
+ * The athlete rates a session they trained today (or last night, until 04:00):
+ * insert, or update that day's row for that session. Standing approval
+ * (logging), one change_log row. `now` is the server's clock; checks pin it.
  */
-export async function logSessionRpe(store: ConnectedStore, actor: OverrideActor, body: Record<string, unknown>): Promise<SessionRpeResult> {
+export async function logSessionRpe(store: ConnectedStore, actor: OverrideActor, body: Record<string, unknown>, now: Date = new Date()): Promise<SessionRpeResult> {
   if (actor.type !== 'athlete' || actor.id !== store.athleteId) {
     return { ok: false, text: 'Refused: only the athlete rates their own session.' }
   }
   if (!(await tracksV1On(store))) return { ok: false, text: 'Session RPE is off for this athlete.' }
-  if (!(await sessionRpeTable(store))) return { ok: false, text: sessionRpeUnavailable }
-  const today = await athleteToday(store)
+  if (!(await sessionRpeTable(store))) return { ok: false, text: sessionRpeUnavailable, retry: true }
+  const [tz] = await store.sql<{ time_zone: string | null }[]>`SELECT time_zone FROM athlete WHERE id = ${store.athleteId} LIMIT 1`
+  const zone = calendarZone(tz?.time_zone)
+  const today = mcpStamp(now, zone).local_date
   const date = typeof body.date === 'string' && body.date.trim() ? body.date.trim() : today
   if (!DATE_RE.test(date)) return { ok: false, text: 'Refused: date must be YYYY-MM-DD.' }
-  if (date !== today) return { ok: false, text: 'Refused: a session RPE can only be logged or changed on the day of the session.' }
+  // A queued tap: its id dedupes retries, its own time judges the window — within bounds.
+  const queue = await sessionRpeQueueCols(store)
+  let clientId: string | null = null
+  if (body.client_id != null && body.client_id !== '') {
+    if (typeof body.client_id !== 'string' || !UUID_RE.test(body.client_id)) return { ok: false, text: 'Refused: client_id must be a UUID.' }
+    clientId = queue ? body.client_id.toLowerCase() : null
+  }
+  let tappedAt = now
+  if (body.tapped_at != null && body.tapped_at !== '') {
+    const at = typeof body.tapped_at === 'string' ? new Date(body.tapped_at) : new Date(NaN)
+    if (Number.isNaN(at.getTime())) return { ok: false, text: 'Refused: tapped_at must be an ISO timestamp.' }
+    if (at.getTime() > now.getTime() + CLOCK_SKEW_MS) return { ok: false, text: 'Refused: tapped_at is in the future.' }
+    if (at.getTime() < now.getTime() - QUEUE_MAX_AGE_MS) return { ok: false, text: 'Refused: this rating waited too long to sync (more than 48 hours).' }
+    if (queue) tappedAt = at < now ? at : now
+  }
+  if (!ratableDates(tappedAt, zone).includes(date)) {
+    return { ok: false, text: `Refused: a session RPE can only be logged or changed on the day of the session, or until 0${RATE_GRACE_HOURS}:00 the next morning.` }
+  }
   const rating = intIn(body.rating, 0, 10)
   if (rating === 'bad' || rating == null) return { ok: false, text: 'Refused: rating must be a whole number 0–10 (CR-10).' }
   const duration = intIn(body.duration_min, 1, 600)
@@ -139,13 +205,35 @@ export async function logSessionRpe(store: ConnectedStore, actor: OverrideActor,
   }
 
   return withTx(store.sql, async () => {
-    const [before] = await store.sql<{ id: string; rating: unknown; duration_min: unknown; workout_id: string | null }[]>`
-      SELECT id::text AS id, rating, duration_min, workout_id::text AS workout_id FROM session_rpe
-      WHERE athlete_id = ${store.athleteId} AND date = ${date}::date AND session_id = ${sessionId}
-      FOR UPDATE
-    `
+    if (clientId) {
+      // The same tap again: its first send landed and the answer was lost. Never a second write.
+      const [dup] = await store.sql<{ id: string; date: string }[]>`
+        SELECT id::text AS id, date::text AS date FROM session_rpe
+        WHERE athlete_id = ${store.athleteId} AND client_id = ${clientId}
+      `
+      if (dup) {
+        const [same] = (await loadSessionRpe(store, dup.date, dup.date)).filter((r) => r.id === dup.id)
+        return { ok: true, text: 'Already logged.', ...(same ? { rating: same } : {}) }
+      }
+    }
+    const [before] = queue
+      ? await store.sql<{ id: string; rating: unknown; duration_min: unknown; workout_id: string | null; tapped_at: string | null }[]>`
+          SELECT id::text AS id, rating, duration_min, workout_id::text AS workout_id, to_json(tapped_at) #>> '{}' AS tapped_at FROM session_rpe
+          WHERE athlete_id = ${store.athleteId} AND date = ${date}::date AND session_id = ${sessionId}
+          FOR UPDATE
+        `
+      : await store.sql<{ id: string; rating: unknown; duration_min: unknown; workout_id: string | null; tapped_at: string | null }[]>`
+          SELECT id::text AS id, rating, duration_min, workout_id::text AS workout_id, NULL::text AS tapped_at FROM session_rpe
+          WHERE athlete_id = ${store.athleteId} AND date = ${date}::date AND session_id = ${sessionId}
+          FOR UPDATE
+        `
     // A rating the athlete undid (voided, tracks_v1) counts as none: this tap is the first again.
     const live = before && !(await hiddenIds(store, 'session_rpe')).includes(before.id) ? before : null
+    // A queued tap that lands after a newer one: the newer rating stands.
+    if (live?.tapped_at && tappedAt.getTime() < new Date(live.tapped_at).getTime()) {
+      const [newer] = (await loadSessionRpe(store, date, date)).filter((r) => r.id === live.id)
+      return { ok: true, text: 'A newer rating is already logged.', rating: newer }
+    }
     const prev = live ? { rating: Number(live.rating), duration_min: live.duration_min == null ? null : Number(live.duration_min) } : null
     // A tap without a duration keeps the one already logged.
     const nextDuration = duration ?? prev?.duration_min ?? null
@@ -154,15 +242,26 @@ export async function logSessionRpe(store: ConnectedStore, actor: OverrideActor,
       return { ok: true, text: 'Already logged.', rating: same }
     }
     const changeId = crypto.randomUUID()
-    const [row] = await store.sql<{ id: string }[]>`
-      INSERT INTO session_rpe (athlete_id, date, session_id, workout_id, rating, duration_min, change_id)
-      VALUES (${store.athleteId}, ${date}::date, ${sessionId}, ${workoutId}, ${rating}, ${nextDuration}, ${changeId})
-      ON CONFLICT (athlete_id, date, session_id) DO UPDATE
-        SET rating = EXCLUDED.rating, duration_min = EXCLUDED.duration_min,
-            workout_id = COALESCE(EXCLUDED.workout_id, session_rpe.workout_id),
-            change_id = EXCLUDED.change_id, updated_at = NOW()
-      RETURNING id::text AS id
-    `
+    const [row] = queue
+      ? await store.sql<{ id: string }[]>`
+          INSERT INTO session_rpe (athlete_id, date, session_id, workout_id, rating, duration_min, change_id, client_id, tapped_at)
+          VALUES (${store.athleteId}, ${date}::date, ${sessionId}, ${workoutId}, ${rating}, ${nextDuration}, ${changeId}, ${clientId}, ${tappedAt.toISOString()}::timestamptz)
+          ON CONFLICT (athlete_id, date, session_id) DO UPDATE
+            SET rating = EXCLUDED.rating, duration_min = EXCLUDED.duration_min,
+                workout_id = COALESCE(EXCLUDED.workout_id, session_rpe.workout_id),
+                change_id = EXCLUDED.change_id, client_id = EXCLUDED.client_id,
+                tapped_at = EXCLUDED.tapped_at, updated_at = NOW()
+          RETURNING id::text AS id
+        `
+      : await store.sql<{ id: string }[]>`
+          INSERT INTO session_rpe (athlete_id, date, session_id, workout_id, rating, duration_min, change_id)
+          VALUES (${store.athleteId}, ${date}::date, ${sessionId}, ${workoutId}, ${rating}, ${nextDuration}, ${changeId})
+          ON CONFLICT (athlete_id, date, session_id) DO UPDATE
+            SET rating = EXCLUDED.rating, duration_min = EXCLUDED.duration_min,
+                workout_id = COALESCE(EXCLUDED.workout_id, session_rpe.workout_id),
+                change_id = EXCLUDED.change_id, updated_at = NOW()
+          RETURNING id::text AS id
+        `
     // A rating undone earlier is revived by this tap: its tombstone is lifted, so this tap can be undone in turn.
     if (before && !live) {
       await store.sql`
@@ -288,13 +387,13 @@ export async function runSessionRpeTool(store: ConnectedStore, name: string, arg
 // ---- app route ------------------------------------------------------------------------------
 
 /** The route's body (POST /api/session-rpe), separated so checks can drive it without an auth cookie. */
-export async function athleteSessionRpeAction(store: ConnectedStore, body: Record<string, unknown>): Promise<[unknown, number]> {
+export async function athleteSessionRpeAction(store: ConnectedStore, body: Record<string, unknown>, now: Date = new Date()): Promise<[unknown, number]> {
   if (!(await tracksV1On(store))) return [{ error: 'not found' }, 404]
   switch (body.action) {
     case 'log':
-      return [await logSessionRpe(store, { type: 'athlete', id: store.athleteId }, body), 200]
+      return [await logSessionRpe(store, { type: 'athlete', id: store.athleteId }, body, now), 200]
     case 'list': {
-      const today = await athleteToday(store)
+      const today = await athleteToday(store, now)
       const from = typeof body.from === 'string' && DATE_RE.test(body.from) ? body.from : today
       const to = typeof body.to === 'string' && DATE_RE.test(body.to) ? body.to : today
       return [{ today, available: await sessionRpeTable(store), ratings: await loadSessionRpe(store, from, to) }, 200]

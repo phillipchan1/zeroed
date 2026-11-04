@@ -1031,6 +1031,13 @@ CREATE TABLE IF NOT EXISTS public.session_rpe (
   CONSTRAINT session_rpe_one_per_day UNIQUE (athlete_id, date, session_id)
 );
 CREATE INDEX IF NOT EXISTS session_rpe_athlete_date_idx ON public.session_rpe (athlete_id, date);
+-- Offline queue (migration 20261104000011_session_rpe_queue.sql): the app's id
+-- for the tap the row holds (a retry with it is "already logged") and when that
+-- tap happened (a queued tap older than the row's is acknowledged, not applied).
+ALTER TABLE public.session_rpe ADD COLUMN IF NOT EXISTS client_id UUID;
+ALTER TABLE public.session_rpe ADD COLUMN IF NOT EXISTS tapped_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS session_rpe_athlete_client_uidx
+  ON public.session_rpe (athlete_id, client_id) WHERE client_id IS NOT NULL;
 
 -- =============================================================================
 -- COACH V1 (G6 + G7, coach_v1) — mirrors supabase/migrations/20261104000008_coach_v1.sql
