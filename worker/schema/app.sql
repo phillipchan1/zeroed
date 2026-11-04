@@ -1140,3 +1140,19 @@ ALTER TABLE public.athlete_goal ADD COLUMN IF NOT EXISTS weight TEXT
   CHECK (weight IS NULL OR weight IN ('priority', 'maintenance'));
 ALTER TABLE public.athlete_goal ADD COLUMN IF NOT EXISTS quality TEXT
   CHECK (quality IS NULL OR quality IN ('max_strength', 'power', 'aerobic', 'alactic', 'change_of_direction', 'tissue_capacity', 'mobility'));
+
+-- =============================================================================
+-- COACH ROLES (D3, tracks_v1) — mirrors supabase/migrations/20261104000009_coach_roles.sql
+-- =============================================================================
+-- Each coach token is 'read' (read tools only; every preview / apply / write
+-- hidden and refused, refusals logged) or 'propose' (as before). Default
+-- 'propose', so existing tokens keep today's powers. Only the athlete changes
+-- it (logged). Not writable through /api/data.
+ALTER TABLE public.mcp_token ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'propose';
+DO $c$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mcp_token_role_check') THEN
+    ALTER TABLE public.mcp_token ADD CONSTRAINT mcp_token_role_check CHECK (role IN ('read', 'propose'));
+  END IF;
+END
+$c$;

@@ -160,6 +160,10 @@ export function summarizeChange(row: { tool: string; target_type: string; diff: 
       return 'Birth date recorded at intake'
     case 'clear_region':
       return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} cleared by a clinician`)
+    case 'clear_red_flag':
+      return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} red flag cleared by a clinician`)
+    case 'set_coach_role':
+      return clip(`${str(d.coach) ?? 'A coach'} can ${obj(d.role).after === 'read' ? 'only read now' : 'now propose changes'}`)
     case 'set_coach_health_access': {
       const on = obj(d.share_health).after === true
       return clip(`${on ? 'Shared' : 'Stopped sharing'} check-ins and pain with ${str(d.coach) ?? 'a coach'}`)
