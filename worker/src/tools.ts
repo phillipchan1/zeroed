@@ -40,14 +40,14 @@ import { approvalMissing, approvalsUnavailable, APPROVAL_TOOL_NAMES, APPROVAL_TO
 import { isMcpUserError } from './userError.ts'
 import type { LiveProgram } from './store.ts'
 import {
-  blockedRegions, METHODOLOGY_TOOL_NAMES, METHODOLOGY_TOOLS, methodologyMissing, methodologyUnavailable, resolveMethodology,
+  blockedRegions, e1rmFallbackFor, METHODOLOGY_TOOL_NAMES, METHODOLOGY_TOOLS, methodologyMissing, methodologyUnavailable, resolveMethodology,
   runMethodologyTool,
 } from './methodology.ts'
-import { validateEdit, warningsSection, type ValidateResult } from './methodology/validators.ts'
+import { forViewer, validateEdit, warningsSection, type ValidateResult } from './methodology/validators.ts'
 import { actorRef } from './sessionOverride.ts'
 import { READINESS_TOOL_NAMES, READINESS_TOOLS, runReadinessTool } from './readiness.ts'
 import { runSessionRpeTool, SESSION_RPE_TOOL_NAMES, SESSION_RPE_TOOLS } from './sessionRpe.ts'
-import { statusBlockedRegions } from './regionStatus.ts'
+import { isHealthObservation, redactHealthText, seesHealth, statusBlockedRegions } from './regionStatus.ts'
 import { isReadTool, logCoachRead, logsReads } from './coachReads.ts'
 import { ACTIVITY_TOOL_NAMES, ACTIVITY_TOOLS, coachSchemaMissing, coachUnavailable, coachV1On, runActivityTool } from './activities.ts'
 
@@ -410,6 +410,11 @@ ${previewFooter(await gate.preview('set_training_max', state, null))}`
   }
 }
 
+/** tracks_v1 on and this actor doesn't see health data (D3). Flag off: false, so nothing changes. */
+async function hidesHealth(store: ConnectedStore, actor: OverrideActor): Promise<boolean> {
+  return await tracksV1On(store) && !(await seesHealth(store, actor))
+}
+
 export async function executeZeroedTool(
   sql: Sql,
   athleteId: string,
@@ -478,11 +483,19 @@ async function runZeroedTool(
   }
 
   if (LIFT_MODEL_TOOL_NAMES.has(name)) {
-    return runLiftModelTool(name, args, {
-      load: () => loadLiftModelSources(store),
+    const out = await runLiftModelTool(name, args, {
+      // U4 (tracks_v1): RPE-less sets as the methodology reads them, each estimate's method shown.
+      load: async () => {
+        const [src, noRpe] = await Promise.all([loadLiftModelSources(store), e1rmFallbackFor(store)])
+        return noRpe ? { ...src, params: { ...src.params, e1rmNoRpe: noRpe } } : src
+      },
       saveTrainingMax: (lift, entry) => saveTrainingMax(store, lift, entry),
       rpeHalfSteps: flags?.rpeHalfSteps ?? rpeHalfStepsOn(),
     })
+    // D3 (tracks_v1): the model's knee-pain, sleep and readiness readings are
+    // health data; a coach the athlete hasn't shared it with sees the numbers it
+    // moved, not the inputs.
+    return await hidesHealth(store, actor) ? redactHealthText(out) : out
   }
 
   if (TRACK_TOOL_NAMES.has(name)) {
@@ -588,8 +601,13 @@ async function runZeroedTool(
       if (!workoutId) throw new McpUserError('workout_id is required')
       const row = await loadWorkout(store, workoutId)
       if (!row) return `No workout ${workoutId} on this athlete.`
+      // D3 (tracks_v1): pain observations are health data.
+      const hidden = await hidesHealth(store, actor)
+      const shown = hidden ? row.observations.filter((o) => !isHealthObservation(o.category)) : row.observations
+      const held = row.observations.length - shown.length
       const obs = row.observations.length
-        ? ['', '## Observations', ...row.observations.map((o) => `- [${o.severity}] ${o.category}: ${o.signal}`)]
+        ? ['', '## Observations', ...shown.map((o) => `- [${o.severity}] ${o.category}: ${o.signal}`),
+          ...(held ? [`- ${held} health observation${held === 1 ? '' : 's'} the athlete hasn't shared with you`] : [])]
         : []
       const notes = await store.sql<{ author: string; body: string }[]>`
         SELECT author, body FROM workout_note
@@ -604,7 +622,7 @@ async function runZeroedTool(
     case 'search_lifts': {
       const exercise = asString(args.exercise)
       if (!exercise) throw new McpUserError('exercise is required')
-      return renderLift(await loadLiftHistory(store, exercise), store.unit)
+      return renderLift(await loadLiftHistory(store, exercise, { noRpe: await e1rmFallbackFor(store) }), store.unit)
     }
     case 'get_program_journey':
       return renderJourney(await loadJourney(store))
@@ -617,7 +635,10 @@ async function runZeroedTool(
       if (!live) return 'No active program/phase to edit.'
       const preview = previewEdits(live, edits as EditInput[], asString(args.week_start))
       // G5 (tracks_v1 only): warnings in the preview; U13 and red flags refuse it.
-      const checked = gate ? await validateProgramEdits(store, live, edits as EditInput[], args.rewrite === true) : null
+      // D3: a coach without health access sees a held region only generically.
+      const checked = gate
+        ? forViewer(await validateProgramEdits(store, live, edits as EditInput[], args.rewrite === true), await seesHealth(store, actor))
+        : null
       const warned = checked?.warnings.length ? `${preview.text}\n\n${warningsSection(checked.warnings)}` : preview.text
       if (checked?.blocked) {
         return `Refused (${checked.blocked.rule}): ${checked.blocked.message} Nothing was kept or parked.\n\n${warned}`

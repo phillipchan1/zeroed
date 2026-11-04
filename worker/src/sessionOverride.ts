@@ -41,8 +41,8 @@ import { APPROVAL_REF_SHAPE, checkApproval, createApproval, parseApprovalRef } f
 import { withTx } from './changeLog.ts'
 import { methodologyVersionFor, resolveMethodology, blockedRegions } from './methodology.ts'
 import { CURRENT_METHODOLOGY } from './methodology/v1.ts'
-import { statusBlockedRegions } from './regionStatus.ts'
-import { validateEdit, warningsSection, type PreviewWarning, type WeekSession } from './methodology/validators.ts'
+import { seesHealth, statusBlockedRegions } from './regionStatus.ts'
+import { forViewer, validateEdit, warningsSection, type PreviewWarning, type WeekSession } from './methodology/validators.ts'
 
 export type ActorType = 'athlete' | 'mcp' | 'app_coach' | 'system'
 
@@ -516,7 +516,8 @@ export async function previewCreate(
     const plan = await planCreate(store, request, today, sessions)
     if ('error' in plan) return { ok: false, text: `Refused: ${plan.error}` }
     // G5: the validators, before anything is kept. U13 and red flags refuse.
-    const { warnings, blocked } = await validateOverride(store, sessions, ops, args.rewrite === true)
+    // D3: a coach without health access sees a held region only generically.
+    const { warnings, blocked } = forViewer(await validateOverride(store, sessions, ops, args.rewrite === true), await seesHealth(store, actor))
     if (blocked) return { ok: false, text: `Refused (${blocked.rule}): ${blocked.message}\n\n${warningsSection(warnings)}` }
     const previewId = await storePreview(store, actor, 'create', request, plan.diff, rationale)
     return { ok: true, preview_id: previewId, diff: plan.diff, warnings, text: previewText(previewId, plan.diff, 'create', warnings) }

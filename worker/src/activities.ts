@@ -778,8 +778,11 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
       `
       if (program) {
         const tracksOut: Obj[] = []
+        // D3: a track's purpose is program data every coach reads, so it never
+        // names a red-flagged region; the block of record keeps the full why.
+        const safeWhy = new Map(redactHealth(b).tracks.map((t) => [t.name, t.why]))
         for (const t of b.tracks) {
-          const purpose = `${t.role === 'priority' ? 'Priority' : t.role === 'maintenance' ? 'Maintenance' : 'Minimum dose'} this block. ${t.why}`.slice(0, 500)
+          const purpose = `${t.role === 'priority' ? 'Priority' : t.role === 'maintenance' ? 'Maintenance' : 'Minimum dose'} this block. ${safeWhy.get(t.name) ?? ''}`.trim().slice(0, 500)
           const [existing] = await store.sql<{ id: string; purpose: string | null }[]>`
             SELECT id::text AS id, purpose FROM track WHERE program_id = ${program.id} AND lower(name) = ${t.name.toLowerCase()} LIMIT 1
           `

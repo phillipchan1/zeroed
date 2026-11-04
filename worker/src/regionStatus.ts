@@ -142,3 +142,24 @@ export async function seesHealth(store: ConnectedStore, actor: OverrideActor): P
   `
   return row?.on === true
 }
+
+/** Session observations that are health data: the debrief's pain signal (D3). */
+export function isHealthObservation(category: string): boolean {
+  return /pain/i.test(category)
+}
+
+const HIDDEN_INPUT = 'a health input the athlete hasn\'t shared with you'
+
+/**
+ * Lift-model text with its health readings taken out (D3): knee pain scores,
+ * pain flags, sleep hours and readiness scores, each with its date. The loads
+ * they moved stay; only the inputs go.
+ */
+export function redactHealthText(text: string): string {
+  const day = '(?: on [A-Z][a-z]{2} \\d{1,2})?'
+  return text
+    .replace(new RegExp(`knee pain \\d+(?:\\.\\d+)?/10${day}`, 'g'), HIDDEN_INPUT)
+    .replace(new RegExp(`pain flag${day}`, 'g'), HIDDEN_INPUT)
+    .replace(/\d+(?:\.\d+)?h sleep/g, HIDDEN_INPUT)
+    .replace(/readiness \d+(?:\.\d+)?\/10/g, HIDDEN_INPUT)
+}

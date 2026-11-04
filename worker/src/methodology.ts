@@ -16,6 +16,7 @@
  * version is the global one. With the flag off nothing here is called.
  */
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
+import type { NoRpeE1rm } from '../../src/engine/liftModel.ts'
 import { asJson, jsonParam } from './db.ts'
 import { athleteToday, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { authorizeWrite, commitAuthorized, previewFooter, storeChangePreview, type ChangeActor } from './changeLog.ts'
@@ -25,6 +26,7 @@ import {
   blockedRegions, checkOverride, engineParams, OVERRIDE_PATHS, resolveParams,
   type OverrideRecord, type Resolved,
 } from './methodology/resolve.ts'
+import { seesHealth } from './regionStatus.ts'
 import type { ConnectedStore } from './store.ts'
 import { McpUserError } from './userError.ts'
 
@@ -113,6 +115,16 @@ export async function loadOverrides(store: ConnectedStore): Promise<OverrideRow[
 export async function resolveMethodology(store: ConnectedStore, opts: { trackId?: string | null } = {}): Promise<Resolved> {
   const [overrides, minor] = await Promise.all([loadOverrides(store), athleteMinor(store)])
   return resolveParams(CURRENT_METHODOLOGY, overrides, { trackId: opts.trackId ?? null, minor: minor === true })
+}
+
+/**
+ * U4 (tracks_v1): how this athlete's RPE-less sets are estimated, for the
+ * lift-model reads (get_lift_model, search_lifts). Undefined with the flag
+ * off: the chart at RPE 10 and no method recorded, exactly as before.
+ */
+export async function e1rmFallbackFor(store: ConnectedStore): Promise<NoRpeE1rm | undefined> {
+  if (!(await tracksV1On(store))) return undefined
+  return (await resolveMethodology(store)).params.U4.e1rm_without_rpe === 'epley' ? 'epley' : 'rpe10_floor'
 }
 
 /** The version a write or a prescription ran on, for this athlete. */
@@ -242,7 +254,15 @@ function json(v: unknown): string {
   return JSON.stringify(v, null, 2)
 }
 
-async function getMethodology(store: ConnectedStore, args: Record<string, unknown>): Promise<string> {
+/** Per-region pain rules (U7.regions.<region>.*): which regions are capped or red-flagged is health data (D3). */
+export function isHealthPath(path: string): boolean {
+  return /^U7\.regions\./.test(path.trim())
+}
+
+/** What a coach without health access is told about a per-region pain rule, at preview and at apply. */
+export const HEALTH_PATH_HIDDEN = 'Refused: per-region pain caps and red flags (U7.regions) are health data the athlete hasn\'t shared with you. This edit touches a region the athlete may have held for health reasons; ask the athlete.'
+
+async function getMethodology(store: ConnectedStore, args: Record<string, unknown>, health: boolean): Promise<string> {
   let trackId: string | null = null
   if (typeof args.track === 'string' && args.track.trim()) {
     const t = await ownedTrack(store, args.track)
@@ -250,16 +270,20 @@ async function getMethodology(store: ConnectedStore, args: Record<string, unknow
     trackId = t.id
   }
   const [resolved, overrides, minor] = await Promise.all([resolveMethodology(store, { trackId }), loadOverrides(store), athleteMinor(store)])
+  // D3: without health access, no per-region pain rules and no red-flagged regions.
+  const params = health ? resolved.params : { ...resolved.params, U7: { ...resolved.params.U7, regions: {} } }
+  const shown = health ? overrides : overrides.filter((o) => !isHealthPath(o.path))
   return json({
     methodology_version: resolved.version,
     base_version: resolved.base_version,
     under_18: minor,
     track_id: trackId,
-    params: resolved.params,
+    params,
     minors: resolved.minors,
     preview_ttl_hours: resolved.preview_ttl_hours,
-    blocked_regions: blockedRegions(resolved),
-    overrides: overrides.map((o) => ({
+    blocked_regions: health ? blockedRegions(resolved) : null,
+    ...(health ? {} : { health_hidden: true }),
+    overrides: shown.map((o) => ({
       id: o.id, path: o.path, value: o.value, track_id: o.track_id, track: o.track, set_against: o.methodology_version,
       rationale: o.rationale, rule_refs: o.rule_refs, created_by: o.created_by, created_at: o.created_at, change_id: o.change_id,
     })),
@@ -267,9 +291,12 @@ async function getMethodology(store: ConnectedStore, args: Record<string, unknow
   })
 }
 
-async function previewOverride(store: ConnectedStore, args: Record<string, unknown>, actor: ChangeActor): Promise<string> {
+async function previewOverride(store: ConnectedStore, args: Record<string, unknown>, actor: ChangeActor, health: boolean): Promise<string> {
   const path = typeof args.path === 'string' ? args.path.trim() : ''
   if (!path) throw new McpUserError('path is required')
+  // D3: the refusals and the before value would say whether that region is
+  // capped or red-flagged. Refused the same way whatever its state.
+  if (!health && isHealthPath(path)) return HEALTH_PATH_HIDDEN
   const clear = args.clear === true
   if (!clear && args.value === undefined) throw new McpUserError('value is required (or clear=true)')
   let trackId: string | null = null
@@ -300,7 +327,7 @@ async function previewOverride(store: ConnectedStore, args: Record<string, unkno
   ].join('\n')
 }
 
-async function applyOverride(store: ConnectedStore, args: Record<string, unknown>, actor: ChangeActor): Promise<string> {
+async function applyOverride(store: ConnectedStore, args: Record<string, unknown>, actor: ChangeActor, health: boolean): Promise<string> {
   if (args.confirm !== true) return 'Refused: apply_methodology_override requires confirm=true. Preview first, show the athlete, then apply.'
   const previewId = typeof args.preview_id === 'string' ? args.preview_id.trim() : ''
   if (!previewId) return 'Refused: preview_id is required. Call preview_methodology_override first.'
@@ -312,6 +339,8 @@ async function applyOverride(store: ConnectedStore, args: Record<string, unknown
   if (!p) return `Refused: no ${TOOL} preview with that id on this athlete. Preview again.`
   const stored = asJson<OverrideState | null>(p.diff, null)
   if (!stored?.request) return 'Refused: that preview is unreadable. Preview again.'
+  // The toggle may have gone off since the preview: the same generic refusal, nothing written.
+  if (!health && isHealthPath(stored.request.path)) return HEALTH_PATH_HIDDEN
   // Every guard again, against the athlete as they are now, as the preview's author.
   const plan = await planOverride(store, stored.request, p.actor_type)
   if (!plan.ok) return `${plan.text} Preview again.`
@@ -375,13 +404,14 @@ async function applyOverride(store: ConnectedStore, args: Record<string, unknown
 
 export async function runMethodologyTool(store: ConnectedStore, name: string, args: Record<string, unknown>, actor: OverrideActor): Promise<string> {
   if (!(await tracksV1On(store))) throw new McpUserError(`Unknown tool: ${name}`)
+  const health = await seesHealth(store, actor)
   switch (name) {
     case 'get_methodology':
-      return getMethodology(store, args)
+      return getMethodology(store, args, health)
     case 'preview_methodology_override':
-      return previewOverride(store, args, actor)
+      return previewOverride(store, args, actor, health)
     case 'apply_methodology_override':
-      return applyOverride(store, args, actor)
+      return applyOverride(store, args, actor, health)
     default:
       throw new McpUserError(`Unknown tool: ${name}`)
   }
