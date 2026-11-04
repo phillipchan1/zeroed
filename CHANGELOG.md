@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Validator-warning UI and weekly-review UI (Round 2 item 5, G5 / G8), tracks_v1
+
+Behind `athlete.flags.tracks_v1`; with it off the app renders exactly as before, a parked proposal's diff has no `warnings` key, and `/api/session-override`, `/api/change-log` and `/api/weekly-review` answer 404. No schema change.
+
+- **Warnings where the athlete approves.** A coach's parked proposal (program edit or week-only override) keeps the preview's U8–U10 warnings in its diff (`diff.warnings`); ProposalCard shows each with its rule, the session/exercise it is about and the plain message. A refused override preview (U13, red flag) returns the structured refusal alongside its text, and so does an Undo refused for putting work back on a blocked region; the Changes feed shows it as a refusal rather than prose. The athlete sees the region; coaches see nothing new (a red-flag change is never parked, and a coach without health access still gets the generic refusal).
+- **Weekly review under Program.** A "Weekly review" section (this week / last week) reads `GET /api/weekly-review?week=`: the progress / hold / deload call with its why and rule refs, compliance against the 80% target, each priority lift's e1RM trend with how each estimate was made (RPE chart or Epley), maintenance held, pain against the cap, check-in averages and session load. Loading, empty-week and error states.
+- **Checks.** `worker/src/warningsReview.check.ts`, `src/lib/previewWarnings.check.ts`, `src/lib/weeklyReview.check.ts`. Synthetic data only.
+
+**Rollback:** turn `tracks_v1` off. Warnings stored in a proposal's diff are ignored by every reader (the app reads them only with the flag on; undo ignores the key).
+
 ### Offline session-RPE queue + rating last night's session after midnight (Round 2 item 4, G9 follow-up), tracks_v1
 
 Behind `athlete.flags.tracks_v1`; with it off the app queues nothing, `/api/session-rpe` answers 404, and `/api/session-rx`, the MCP tool list and every tool are exactly as before.

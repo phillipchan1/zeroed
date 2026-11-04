@@ -41,12 +41,15 @@ export interface UndoPreview {
   direction?: 'undo' | 'redo'
   text: string
   conflicts?: RevertConflict[]
+  /** G5: a red-flag refusal, structured (read with warningsView). */
+  warnings?: unknown
 }
 
 export interface UndoResult {
   ok: boolean
   reason?: string
   text: string
+  warnings?: unknown
 }
 
 async function post(body: Record<string, unknown>): Promise<unknown> {
@@ -86,6 +89,7 @@ export async function previewUndo(id: string): Promise<UndoPreview> {
       direction: out?.direction === 'redo' ? 'redo' : 'undo',
       text: String(out?.text ?? ''),
       conflicts: Array.isArray(out?.conflicts) ? out.conflicts : [],
+      ...(Array.isArray(out?.warnings) ? { warnings: out.warnings } : {}),
     }
   } catch {
     return { ok: false, text: 'Couldn’t reach the server. Nothing changed; try again when you’re online.' }
@@ -99,7 +103,7 @@ export async function previewUndo(id: string): Promise<UndoPreview> {
 export async function undoChange(id: string, previewId?: string): Promise<UndoResult> {
   try {
     const out = await post({ action: 'revert', id, ...(previewId ? { preview_id: previewId } : {}) }) as Partial<UndoResult>
-    return { ok: out?.ok === true, reason: out?.reason, text: String(out?.text ?? '') }
+    return { ok: out?.ok === true, reason: out?.reason, text: String(out?.text ?? ''), ...(Array.isArray(out?.warnings) ? { warnings: out.warnings } : {}) }
   } catch {
     return { ok: false, reason: 'error', text: 'Couldn’t reach the server. Nothing changed; try again when you’re online.' }
   }

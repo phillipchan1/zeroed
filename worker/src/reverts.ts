@@ -47,7 +47,7 @@ import { athleteToday, canonicalJson, PREVIEW_TTL_HOURS, tracksV1On } from './se
 import { actorLabel, summarizeChange } from './changeSummary.ts'
 import { ApprovalSpent, consumeApproval, directTapApproval } from './approvals.ts'
 import { athleteMinor, blockedRegions, loadOverrides, resolveMethodology } from './methodology.ts'
-import { validateEdit, type WeekSession } from './methodology/validators.ts'
+import { validateEdit, type PreviewWarning, type WeekSession } from './methodology/validators.ts'
 import { applyOverrideOps, type OverrideOp } from '../../src/engine/sessionOverride.ts'
 import type { ExerciseTemplate } from '../../src/types/database.ts'
 import { CURRENT_METHODOLOGY } from './methodology/v1.ts'
@@ -81,6 +81,8 @@ export type RevertResult =
       reason: 'off' | 'unavailable' | 'not_found' | 'refused' | 'stale' | 'not_revertible'
       text: string
       conflicts?: ConflictView[]
+      /** G5: the red-flag refusal, structured, for the athlete's app (the route is theirs alone). */
+      warnings?: PreviewWarning[]
     }
 
 type Fail = Extract<RevertResult, { ok: false }>
@@ -154,7 +156,7 @@ async function loadsBlockedRegion(store: ConnectedStore, before: WeekSession[], 
   const blocked = [...new Set([...blockedRegions(methodology), ...statusBlocked])].sort()
   if (!blocked.length) return null
   const r = validateEdit({ before, after, params: methodology.params, changed: 0, total: 0, rewrite: true, blockedRegions: blocked })
-  return r.blocked ? notRevertible(`it would put back work on a blocked region. ${r.blocked.message}`) : null
+  return r.blocked ? { ...notRevertible(`it would put back work on a blocked region. ${r.blocked.message}`), warnings: [r.blocked] } : null
 }
 
 const weekOf = (rows: RoutineSnap[]): WeekSession[] =>

@@ -2,6 +2,9 @@ import { useState } from 'react'
 import { Button, Chip } from '../../components/ui'
 import { previewUndo, undoChange, whenLabel, type ChangeItem } from '../../lib/changeLog'
 import { success } from '../../lib/haptics'
+import { warningsView, type WarningsView } from '../../lib/previewWarnings'
+import { tracksOn } from '../../lib/tracksFlag'
+import { PreviewWarnings } from './PreviewWarnings'
 
 type Phase = 'idle' | 'previewing' | 'confirm' | 'working' | 'undone' | 'refused'
 
@@ -16,6 +19,8 @@ function ChangeRow({ change, onUndone }: { change: ChangeItem; onUndone: () => v
   const [phase, setPhase] = useState<Phase>('idle')
   const [message, setMessage] = useState<string | null>(null)
   const [previewId, setPreviewId] = useState<string | undefined>(undefined)
+  // G5: a red-flag refusal, shown with its rule and target rather than as prose.
+  const [refusal, setRefusal] = useState<WarningsView | null>(null)
   const undone = phase === 'undone' || change.reverted_by != null
   const redo = change.revert_action === 'redo'
   const verb = redo ? 'Redo' : 'Undo'
@@ -26,6 +31,7 @@ function ChangeRow({ change, onUndone }: { change: ChangeItem; onUndone: () => v
     if (!res.ok || !res.preview_id) {
       setPhase('refused')
       setMessage(res.text || null)
+      setRefusal(warningsView(res.warnings, tracksOn()))
       return
     }
     setPreviewId(res.preview_id)
@@ -38,6 +44,7 @@ function ChangeRow({ change, onUndone }: { change: ChangeItem; onUndone: () => v
     const res = await undoChange(change.id, previewId)
     setPhase(res.ok ? 'undone' : 'refused')
     setMessage(res.ok ? null : res.text || null)
+    setRefusal(res.ok ? null : warningsView(res.warnings, tracksOn()))
     if (res.ok) {
       success()
       onUndone()
@@ -62,7 +69,9 @@ function ChangeRow({ change, onUndone }: { change: ChangeItem; onUndone: () => v
       {change.revert_suggested && !undone && (
         <p className="change__suggest">Your coach suggests undoing this.</p>
       )}
-      {message && <p className="change__message">{message}</p>}
+      {refusal?.refusal
+        ? <PreviewWarnings view={refusal} />
+        : message && <p className="change__message">{message}</p>}
       {change.revertible && !undone && phase !== 'refused' && (
         phase === 'confirm' || phase === 'working' ? (
           <div className="change__acts">

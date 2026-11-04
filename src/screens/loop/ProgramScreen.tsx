@@ -26,6 +26,7 @@ import { weekWindowInZone } from '../../engine/weekDates'
 import { fetchWeekOverrides, overridesByRoutine, weekdayOf, WEEK_ONLY_LABEL } from '../../lib/sessionOverrides'
 import { fetchChanges } from '../../lib/changeLog'
 import { ChangesFeed } from './ChangesFeed'
+import { WeeklyReviewCard } from './WeeklyReviewCard'
 
 // Directive → chip tone, matching the recap banner so "the call" reads the same
 // everywhere it appears.
@@ -278,6 +279,7 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
       || k.startsWith('rx:')
       || k.startsWith('overrides:')
       || k.startsWith('changes:')
+      || k.startsWith('wreview:')
     ))
     refetchProgram()
     refetchMap()
@@ -416,6 +418,12 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
 
             {/* Everything else folds away. Each row states its own size so you
                 know what's behind it before you open it. */}
+
+            {tracksOn() && (
+              <Disclosure label="Weekly review">
+                <WeeklyReviewCard athleteId={athleteId} thisWeekStart={week.weekStart} />
+              </Disclosure>
+            )}
 
             {tracksOn() && changes && (
               <Disclosure label="Changes" meta={<span className="num">{changes.length}</span>}>
