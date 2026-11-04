@@ -532,6 +532,77 @@ CREATE UNIQUE INDEX IF NOT EXISTS coach_proposal_pending_preview_uidx
   ON public.coach_proposal (athlete_id, preview_id)
   WHERE status = 'pending';
 
+-- =============================================================================
+-- SESSION_OVERRIDE (G1, tracks_v1, migration 20261104000002)
+-- Week-only per-date session changes. The template is never written.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS public.session_override (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id        UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  date              DATE NOT NULL,
+  routine_id        UUID NOT NULL REFERENCES public.routine(id) ON DELETE CASCADE,
+  ops               JSONB NOT NULL DEFAULT '[]'::jsonb,
+  expires_on        DATE NOT NULL,
+  pair_id           UUID,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  actor_type        TEXT NOT NULL CHECK (actor_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  actor_id          TEXT NOT NULL,
+  rationale         TEXT,
+  approval_ref      TEXT NOT NULL,
+  preview_id        TEXT NOT NULL,
+  voided_at         TIMESTAMPTZ,
+  void_approval_ref TEXT,
+  void_preview_id   TEXT,
+  CONSTRAINT session_override_expiry_window
+    CHECK (expires_on >= date AND expires_on <= date + 7)
+);
+CREATE INDEX IF NOT EXISTS session_override_athlete_date_idx
+  ON public.session_override (athlete_id, date, routine_id)
+  WHERE voided_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS public.session_override_preview (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id  UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  preview_id  TEXT NOT NULL UNIQUE,
+  kind        TEXT NOT NULL CHECK (kind IN ('create', 'clear')),
+  request     JSONB NOT NULL,
+  diff        JSONB NOT NULL,
+  actor_type  TEXT NOT NULL CHECK (actor_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  actor_id    TEXT NOT NULL,
+  rationale   TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  used_at     TIMESTAMPTZ,
+  voided_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS session_override_preview_athlete_idx
+  ON public.session_override_preview (athlete_id, created_at DESC);
+
+-- Append-only. Columns are spec section 6's change_log, so G2 can copy rows
+-- across as they are.
+CREATE TABLE IF NOT EXISTS public.session_override_log (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  athlete_id   UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  actor_type   TEXT NOT NULL CHECK (actor_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  actor_id     TEXT NOT NULL,
+  tool         TEXT NOT NULL,
+  target       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  diff         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  rationale    TEXT,
+  rule_refs    JSONB NOT NULL DEFAULT '[]'::jsonb,
+  approval_ref TEXT,
+  preview_id   TEXT,
+  expires_on   DATE,
+  reverted_by  UUID
+);
+CREATE INDEX IF NOT EXISTS session_override_log_athlete_idx
+  ON public.session_override_log (athlete_id, created_at DESC);
+
+-- A coach proposal can now park a session override as well as program edits.
+ALTER TABLE public.coach_proposal
+  ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'program_edits'
+    CHECK (kind IN ('program_edits', 'session_override'));
+
 CREATE OR REPLACE FUNCTION public.tm_override_value(overrides jsonb, lift text)
 RETURNS numeric
 LANGUAGE sql

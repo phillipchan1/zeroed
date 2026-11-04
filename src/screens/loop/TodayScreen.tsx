@@ -8,7 +8,7 @@ import {
   runLoopTriggers, isRetestDue, closeOutCurrentWeek, gatherWeekPager, gatherSessionPrescription,
   gatherSessionActuals, actualsFromPending,
   sessionStateForWeek, weekLoggedDays, activeBlockRetestDate,
-  weekWindowInZone, upcomingWeekWindow, isoInWeek,
+  weekWindowInZone, upcomingWeekWindow, isoInWeek, isoDateInZone,
   type PagerWeekView, type WeekPagerData, type SessionActuals,
 } from '../../engine'
 import { effectiveTrackingType } from '../../engine/exerciseLibrary'
@@ -40,6 +40,10 @@ import { GoalChip } from './goalsUi'
 import { TrackedExerciseList } from './tracksUi'
 import type { TrackRef } from '../../engine/tracks'
 import { isOffPlan } from '../../engine/outsidePlan'
+import {
+  fetchWeekOverrides, overrideDateFor, overridesByRoutine, weekdayOf, WEEK_ONLY_LABEL,
+  type SessionOverrideView, type WeekOverride,
+} from '../../lib/sessionOverrides'
 import type { RoutineRow, InsightRow, OnboardingStep, SetLog, TrackingType, ExerciseTemplate, WeeklyDirective } from '../../types/database'
 
 const PAGER_DIRECTIVE_TONE: Record<WeeklyDirective, 'done' | 'todo' | 'pending'> = {
@@ -369,12 +373,32 @@ function PerformedRow({
  * intent, the exercise list, the day-pinning, the secondary actions — lives
  * here, one tap away, so the week list stays scannable.
  */
+/** tracks_v1: a coach or the athlete changed this for one date; the plan is untouched. */
+function WeekOnlyBadge({ note }: { note?: string | null }) {
+  return (
+    <span className="week-only" title={note ?? undefined}>
+      {WEEK_ONLY_LABEL}{note ? <span className="week-only__note"> · {note}</span> : null}
+    </span>
+  )
+}
+
+function markNote(view: SessionOverrideView, i: number): string | null {
+  const m = view.marks[i]
+  if (!m) return null
+  if (m.kind === 'swapped') return m.from ? `for ${m.from}` : 'swapped'
+  if (m.kind === 'moved_in') return m.from ? `from ${weekdayOf(m.from)}` : 'moved'
+  return m.kind === 'added' ? 'added' : 'adjusted'
+}
+
 function SessionSheet({
   routine, state, targets, actuals, u, plannedDow, onPlanDay, onClose, onStart, onStartIntervals, onEdit, onLogAgain, tracks = [],
+  override = null,
 }: {
   routine: RoutineRow
   state: SessionState
   tracks?: TrackRef[]
+  /** tracks_v1: the dated override for this session; its exercises and targets replace the plan's here. */
+  override?: SessionOverrideView | null
   // Per-exercise recommended working load (athlete's unit), from the same
   // prescription the workout screen shows. Null/missing → no history yet.
   targets: Record<number, number | null> | null
@@ -390,7 +414,7 @@ function SessionSheet({
   onEdit: () => void
   onLogAgain: () => void
 }) {
-  const exercises = routine.exercises
+  const exercises = override ? override.exercises : routine.exercises
   const chip = STATE_CHIP[state.kind]
   // A finished session is read for what happened, not what was asked for.
   const showPerformed = state.kind === 'done' && !!actuals
@@ -424,6 +448,7 @@ function SessionSheet({
     <Sheet title={routine.name} onClose={onClose} actions={actions}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 16, flexWrap: 'wrap' }}>
         <Chip tone={chip.tone}>{chip.label}</Chip>
+        {override && !showPerformed && <WeekOnlyBadge note={weekdayOf(override.date)} />}
         <span className="text-xs text-dim num">
           {showPerformed
             ? [
@@ -441,6 +466,17 @@ function SessionSheet({
           past being sold on. */}
       {routine.intent && !showPerformed && (
         <p className="text-sm text-dim" style={{ marginBottom: 20, lineHeight: 1.55 }}>{routine.intent}</p>
+      )}
+
+      {override && !showPerformed && (override.dropped.length > 0 || override.moved_in_from) && (
+        <p className="text-sm text-dim" style={{ marginBottom: 16, lineHeight: 1.5 }}>
+          {override.moved_out.some((m) => m.name == null)
+            ? `Moved to ${weekdayOf(override.moved_out.find((m) => m.name == null)!.to_date)} this week.`
+            : [
+                override.moved_in_from ? `Moved here from ${weekdayOf(override.moved_in_from)}.` : null,
+                override.dropped.length ? `Off this week: ${override.dropped.join(', ')}.` : null,
+              ].filter(Boolean).join(' ')}
+        </p>
       )}
 
       <SectionHeader>{showPerformed ? 'What you logged' : 'The work'}</SectionHeader>
@@ -474,6 +510,7 @@ function SessionSheet({
                     >
                       <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
                         {isIntervalBlock(ex) ? intervalTitle(ex.name) : ex.name}
+                        {override?.marks[i] && <span style={{ display: 'block', marginTop: 4 }}><WeekOnlyBadge note={markNote(override, i)} /></span>}
                       </span>
                       <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
                         {isIntervalBlock(ex)
@@ -502,6 +539,7 @@ function SessionSheet({
               Swapped in for {ex.swapped_from}
             </span>
           )}
+          {override?.marks[i] && <span style={{ display: 'block', marginTop: 4 }}><WeekOnlyBadge note={markNote(override, i)} /></span>}
         </span>
                 <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
                   {isIntervalBlock(ex)
@@ -548,8 +586,11 @@ function SessionSheet({
  */
 function SessionCard({
   routine, recommended, state, lastDone, plannedDow, goals, onOpen, onStart, onStartIntervals, onOpenGoal,
+  overrides = [],
 }: {
   routine: RoutineRow
+  /** tracks_v1: this session's week-only overrides this week. */
+  overrides?: WeekOverride[]
   recommended: boolean
   state: SessionState
   lastDone: string | null
@@ -589,6 +630,17 @@ function SessionCard({
         <div style={{ flex: 1, minWidth: 0 }}>
           <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700, lineHeight: 1.3 }}>{routine.name}</h3>
           <p className="meta" style={{ marginTop: 4 }}>{meta}</p>
+          {overrides.length > 0 && (
+            <p style={{ marginTop: 6 }}>
+              <WeekOnlyBadge
+                note={(() => {
+                  const out = overrides.find((o) => o.moved_out_to)?.moved_out_to
+                  const into = overrides.find((o) => o.moved_in_from)
+                  return out ? `moved to ${weekdayOf(out)}` : into ? `on ${weekdayOf(into.date)}` : weekdayOf(overrides[0].date)
+                })()}
+              />
+            </p>
+          )}
         </div>
         <Chip tone={chip.tone}>{chip.label}</Chip>
       </div>
@@ -917,6 +969,12 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
   const today = new Date()
   const thisWindow = weekWindowInZone(today)
   const nextWindow = upcomingWeekWindow(today)
+  const todayISO = isoDateInZone(today)
+  // tracks_v1: this week's week-only overrides, for the badges. Off → no fetch.
+  const { data: weekOverrides } = useCachedLoader(
+    tracksOn() ? cacheKeys.overrides(athleteId, thisWindow.weekStart) : null,
+    () => fetchWeekOverrides(thisWindow.weekStart, thisWindow.weekEnd),
+  )
 
   // Plant a bootstrap for every session on the week list, so the FIRST tap on
   // one paints its exercises immediately instead of spinning on the network.
@@ -965,6 +1023,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
     : null
 
   const viewingUpcoming = wOffset === 1
+  const overridesBy = overridesByRoutine(wOffset === 0 ? weekOverrides : null)
   const displayWindow = viewingUpcoming ? (pager?.upcoming
     ? { weekStart: pager.upcoming.weekStart, weekEnd: pager.upcoming.weekEnd }
     : nextWindow) : thisWindow
@@ -1129,6 +1188,17 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
     if (!openSession) return
     refetchOpenRx()
   }, [openSession?.id, refetchOpenRx])
+  // The open session's override, from the same engine read with that date. Its
+  // indexes follow the override's list, so it never feeds the workout bootstrap.
+  const openOverrideDate = openSession && wOffset === 0
+    ? overrideDateFor(overridesBy[openSession.id], todayISO)
+    : null
+  const { data: openOverrideRx } = useCachedLoader(
+    openSession && openOverrideDate ? cacheKeys.sessionRxOn(openSession.id, openOverrideDate) : null,
+    () => gatherSessionPrescription(athleteId, openSession!.id, openSession!.exercises, u, { date: openOverrideDate }),
+    { freshMs: 0 },
+  )
+  const openOverride = openOverrideRx?.override ?? null
   useEffect(() => {
     if (!rxVersion) return
     const seenKey = `rxver-seen:${athleteId}`
@@ -1140,7 +1210,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
   }, [rxVersion, athleteId])
 
   function pullRefresh() {
-    invalidateCache((k) => k.startsWith('rx:') || k === cacheKeys.rxVersion(athleteId))
+    invalidateCache((k) => k.startsWith('rx:') || k.startsWith('overrides:') || k === cacheKeys.rxVersion(athleteId))
     refetch()
     refetchPager()
     refetchRxVersion()
@@ -1380,6 +1450,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
                       lastDone={lastDoneByRoutine[r.id] ?? null}
                       plannedDow={plannedDowFor(r)}
                       goals={goalsFor(r)}
+                      overrides={overridesBy[r.id]}
                       onOpenGoal={(id) => navigate(`/app/goals/${id}`)}
                       onOpen={() => setOpenSessionId(r.id)}
                       onStart={() => navigate(startHref(r.id), { viewTransition: true })}
@@ -1477,7 +1548,8 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
         <SessionSheet
           routine={openSession}
           state={statusFor(openSession.id)}
-          targets={openTargets}
+          targets={openOverride ? openOverrideRx?.targets ?? null : openTargets}
+          override={openOverride}
           actuals={openActuals}
           tracks={tracks}
           u={u}

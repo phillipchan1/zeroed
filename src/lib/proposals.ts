@@ -26,6 +26,8 @@ export interface CoachProposal {
   diff: { sessions?: Array<{ name: string; changes: ProposalChange[] }> } | null
   status: 'pending' | 'applied' | 'declined' | 'stale'
   created_at: string
+  /** tracks_v1: a week-only session override rather than a program edit. */
+  kind?: 'session_override'
 }
 
 export interface ProposalResult {
