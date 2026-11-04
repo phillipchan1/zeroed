@@ -25,6 +25,7 @@ import {
   type ConnectedStore,
 } from './store.ts'
 import type { Sql } from './db.ts'
+import { hiddenIds, idList } from './tombstones.ts'
 import { McpUserError } from './userError.ts'
 import { TRACK_TOOLS } from '../../supabase/functions/_shared/trackToolDefs.ts'
 import { briefTracksAndGoals, runTrackTool, TRACK_TOOL_NAMES } from './trackTools.ts'
@@ -34,7 +35,7 @@ import {
 } from './sessionOverride.ts'
 import {
   CHANGE_LOG_TOOLS, CHANGE_LOG_TOOL_NAMES, changeLogMissing, changeLogUnavailable, makeWriteGate, phaseRoutineSnapshots,
-  previewFooter, routineDelta, runChangeLogTool, trainingMaxEntry, writeApprovalProblem, type WriteGate,
+  previewFooter, queuedSnapshot, routineDelta, runChangeLogTool, trainingMaxEntry, writeApprovalProblem, type WriteGate,
 } from './changeLog.ts'
 import { approvalMissing, approvalsUnavailable, APPROVAL_TOOL_NAMES, APPROVAL_TOOLS, runApprovalTool } from './approvals.ts'
 import { isMcpUserError } from './userError.ts'
@@ -363,6 +364,7 @@ async function applyEditsLogged(store: ConnectedStore, gate: WriteGate, args: Re
             phase_id: live.phaseId,
             revision: state.revision,
             ...routineDelta(before, await phaseRoutineSnapshots(store, live.phaseId)),
+            ...(timing === 'next_week' ? { queued: await queuedSnapshot(store, live.programId, live.phaseId, live.weekEnd) } : {}),
             ...(spw !== live.sessionsPerWeek ? { sessions_per_week: { before: live.sessionsPerWeek, after: spw } } : {}),
           },
           rationale: edits.map((e) => e.rationale).filter((r): r is string => typeof r === 'string' && r.trim() !== '').join(' ') || null,
@@ -619,6 +621,7 @@ async function runZeroedTool(
       const notes = await store.sql<{ author: string; body: string }[]>`
         SELECT author, body FROM workout_note
         WHERE athlete_id = ${store.athleteId} AND workout_id = ${workoutId}
+          AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'workout_note'))}::text[]))
         ORDER BY created_at
       `
       const noteLines = notes.length

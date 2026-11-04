@@ -19,7 +19,8 @@ import type { Env } from './env.ts'
 import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { loadLiveProgram, makeStore, type ConnectedStore, type LiveProgram } from './store.ts'
 import { actorFromRef, APP_COACH, applyPreview, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
-import { phaseRoutineSnapshots, routineDelta, withTx, writeChange } from './changeLog.ts'
+import { hiddenIds, idList } from './tombstones.ts'
+import { phaseRoutineSnapshots, queuedSnapshot, routineDelta, withTx, writeChange } from './changeLog.ts'
 import { ApprovalSpent, checkApproval, consumeApproval, createApproval, proposalApprovalState } from './approvals.ts'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -62,7 +63,8 @@ export async function resolveGoalIds(store: ConnectedStore, refs: unknown): Prom
   const list = Array.isArray(refs) ? refs.filter((r): r is string => typeof r === 'string' && r.trim() !== '') : []
   if (!list.length) return []
   const rows = await store.sql<{ id: string; name: string }[]>`
-    SELECT id, name FROM athlete_goal WHERE athlete_id = ${store.athleteId}
+    SELECT id, name FROM athlete_goal
+    WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
   `
   const out: string[] = []
   for (const ref of list) {
@@ -304,6 +306,7 @@ async function applyProgramProposal(
         phase_id: live.phaseId,
         revision: p.diff,
         ...routineDelta(before, await phaseRoutineSnapshots(store, live.phaseId)),
+        ...(p.timing === 'next_week' ? { queued: await queuedSnapshot(store, live.programId, live.phaseId, live.weekEnd) } : {}),
         ...(spw !== live.sessionsPerWeek ? { sessions_per_week: { before: live.sessionsPerWeek, after: spw } } : {}),
       },
       rationale: p.rationale,

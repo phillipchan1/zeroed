@@ -21,6 +21,7 @@ import {
   type Logged, type WriteGate,
 } from './changeLog.ts'
 import type { ConnectedStore, LiveProgram } from './store.ts'
+import { hiddenIds, idList } from './tombstones.ts'
 import { McpUserError } from './userError.ts'
 
 function asString(v: unknown): string | undefined {
@@ -66,10 +67,12 @@ async function activeProgram(store: ConnectedStore, programId?: string): Promise
 }
 
 async function loadTracks(store: ConnectedStore, programId: string): Promise<TrackRef[]> {
+  // A track a revert retired (tracks_v1) is hidden; never deleted.
+  const retired = await hiddenIds(store, 'track')
   return store.sql<TrackRef[]>`
     SELECT id, name, color, icon, sort_order AS "order", purpose
     FROM track
-    WHERE program_id = ${programId}
+    WHERE program_id = ${programId} AND NOT (id::text = ANY(${idList(retired)}::text[]))
     ORDER BY sort_order, name
   `
 }
@@ -98,6 +101,15 @@ async function loadLiveSessions(store: ConnectedStore, programId: string): Promi
     sessionType: r.session_type,
     exercises: Array.isArray(r.exercises) ? r.exercises as never : [],
   }))
+}
+
+/** A goal's measured state (current, best, baseline, status): what a measurement moves. */
+async function goalStateNow(store: ConnectedStore, goalId: string): Promise<Record<string, unknown> | null> {
+  const [row] = await store.sql<Record<string, unknown>[]>`
+    SELECT current::float8 AS current, best::float8 AS best, baseline::float8 AS baseline, status
+    FROM athlete_goal WHERE id = ${goalId} AND athlete_id = ${store.athleteId}
+  `
+  return row ? { current: row.current ?? null, best: row.best ?? null, baseline: row.baseline ?? null, status: row.status ?? null } : null
 }
 
 function json(value: unknown): string {
@@ -280,7 +292,7 @@ async function getTrack(store: ConnectedStore, idOrName?: string) {
   `
   const autoreg_rules = await store.sql<object[]>`
     SELECT id, scope_type, scope_id, scope_name, signal, op, value, action, action_params, message
-    FROM autoreg_rule WHERE athlete_id = ${store.athleteId}
+    FROM autoreg_rule WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'autoreg_rule'))}::text[]))
   `
   const sessions = await loadLiveSessions(store, program.id)
   const exercises = sessions.flatMap((s) =>
@@ -299,7 +311,7 @@ async function getTrack(store: ConnectedStore, idOrName?: string) {
   const goals = await store.sql<object[]>`
     SELECT id, name, metric, unit, side, target, baseline, current, best, due_date, status
     FROM athlete_goal
-    WHERE athlete_id = ${store.athleteId} AND track_id = ${track.id}
+    WHERE athlete_id = ${store.athleteId} AND track_id = ${track.id} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
     ORDER BY name
   `
   return {
@@ -331,6 +343,9 @@ async function createTrack(store: ConnectedStore, args: Record<string, unknown>,
       SELECT id FROM track WHERE program_id = ${program.id} AND lower(name) = ${name.toLowerCase()} LIMIT 1
     `
     if (existing) {
+      if (gate && (await hiddenIds(store, 'track')).includes(existing.id)) {
+        throw new McpUserError(`Track "${name}" was undone. Pick another name, or the athlete can bring it back from their Changes feed (Program → Changes) where the change that removed it offers Redo.`)
+      }
       if (asString(args.client_key)) return { result: await getTrack(store, existing.id), entry: null }
       throw new McpUserError(`Track "${name}" already exists.`)
     }
@@ -362,7 +377,7 @@ async function createTrack(store: ConnectedStore, args: Record<string, unknown>,
     await recordMove(store, `Added the ${name} track.`, args, row.id)
     return {
       result: await getTrack(store, row.id),
-      entry: { targetType: 'track', targetId: row.id, diff: { after: { name, purpose: asString(args.purpose) ?? null, color: asString(args.color) ?? null } } },
+      entry: { targetType: 'track', targetId: row.id, diff: { track_id: row.id, after: { name, purpose: asString(args.purpose) ?? null, color: asString(args.color) ?? null } } },
     }
   })
 }
@@ -558,7 +573,7 @@ async function listAutoregRules(store: ConnectedStore, args: Record<string, unkn
   const scope = asString(args.scope_type)
   const rows = await store.sql<object[]>`
     SELECT id, scope_type, scope_id, scope_name, signal, op, value, action, action_params, message, created_at
-    FROM autoreg_rule WHERE athlete_id = ${store.athleteId}
+    FROM autoreg_rule WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'autoreg_rule'))}::text[]))
     ORDER BY created_at
   `
   const filtered = scope ? rows.filter((r) => (r as { scope_type: string }).scope_type === scope) : rows
@@ -590,7 +605,7 @@ async function upsertAutoregRule(store: ConnectedStore, args: Record<string, unk
     await recordMove(store, `Added a rule: ${message}`, args, null)
     return {
       result: { ...mcpStamp(new Date(), await athleteZone(store)), rule: { id: row?.id, signal, op, action, message } },
-      entry: { targetType: 'autoreg_rule', targetId: row?.id ?? null, diff: { after: { scope_type, signal, op, value: asNum(args.value), action, message } } },
+      entry: { targetType: 'autoreg_rule', targetId: row?.id ?? null, diff: { rule_id: row?.id ?? null, after: { scope_type, signal, op, value: asNum(args.value), action, message } } },
     }
   })
 }
@@ -610,14 +625,14 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
   }[]>`
     SELECT id, name, metric, unit, side, direction, target, target_range_hi, baseline, current, best, due_date::text, status, track_id,
            cadence, source_metric
-    FROM athlete_goal WHERE athlete_id = ${store.athleteId}
+    FROM athlete_goal WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
     ORDER BY name
   `
   const measurements = await store.sql<{
     goal_id: string; measured_on: string; value: number | string; client_key: string | null
   }[]>`
     SELECT goal_id, measured_on::text, value, client_key
-    FROM goal_measurement WHERE athlete_id = ${store.athleteId}
+    FROM goal_measurement WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'goal_measurement'))}::text[]))
     ORDER BY measured_on
   `
   const historyByGoal = new Map<string, GoalMeasurement[]>()
@@ -665,7 +680,7 @@ async function getGoalBrief(store: ConnectedStore) {
   const exerciseNames = [...new Set(sessions.flatMap((s) => s.exercises.map((e) => e.name)))]
   const lanes = await store.sql<{ id: string; name: string }[]>`
     SELECT t.id, t.name FROM track t JOIN program p ON p.id = t.program_id
-    WHERE p.athlete_id = ${store.athleteId}
+    WHERE p.athlete_id = ${store.athleteId} AND NOT (t.id::text = ANY(${idList(await hiddenIds(store, 'track'))}::text[]))
   `
   const laneName = new Map(lanes.map((t) => [t.id, t.name]))
   const refs = [...new Set(goals.flatMap((g) => [g.id, g.track_id]).filter((id): id is string => !!id))]
@@ -774,6 +789,16 @@ async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>, 
       if (owned) await recordMove(store, `Updated the goal ${name}.`, args, owned.id)
       return { result: { ...mcpStamp(new Date(), await athleteZone(store)), goal: { id: goalId, name } }, entry: await logged(owned?.id) }
     }
+    if (gate) {
+      const retired = await hiddenIds(store, 'athlete_goal')
+      const [taken] = retired.length
+        ? await store.sql<{ id: string }[]>`
+            SELECT id::text AS id FROM athlete_goal
+            WHERE athlete_id = ${store.athleteId} AND name = ${name} AND id::text = ANY(${idList(retired)}::text[])
+          `
+        : []
+      if (taken) throw new McpUserError(`The goal "${name}" was undone. Pick another name, or the athlete can bring it back from their Changes feed (Program → Changes) where the change that removed it offers Redo.`)
+    }
     const [row] = await store.sql<{ id: string }[]>`
       INSERT INTO athlete_goal (
         athlete_id, track_id, name, metric, unit, side, direction,
@@ -819,6 +844,7 @@ async function logGoalMeasurement(store: ConnectedStore, args: Record<string, un
     FROM athlete_goal
     WHERE athlete_id = ${store.athleteId}
       AND (id::text = ${ident} OR lower(name) = ${ident.toLowerCase()} OR name ILIKE ${'%' + ident + '%'})
+      AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
     LIMIT 1
   `
   if (!goal) throw new McpUserError(`No goal "${ident}".`)
@@ -837,6 +863,8 @@ async function logGoalMeasurement(store: ConnectedStore, args: Record<string, un
       }
     }
     const applied = applyMeasurement(goal, { date, value, source: asString(args.source) ?? 'agent' })
+    // What its undo puts back on the goal (tracks_v1 only).
+    const goalBefore = gate ? await goalStateNow(store, goal.id) : null
     const [row] = await store.sql<{ id: string }[]>`
       INSERT INTO goal_measurement (athlete_id, goal_id, measured_on, value, side, source, note, client_key)
       VALUES (
@@ -859,7 +887,14 @@ async function logGoalMeasurement(store: ConnectedStore, args: Record<string, un
         measurement: { id: row?.id, date, value, goal: goal.name },
         goal_after: { ...goal, current: applied.current, best: applied.best, baseline: applied.baseline, status },
       },
-      entry: { targetType: 'goal_measurement', targetId: row?.id ?? null, diff: { goal: goal.name, goal_id: goal.id, date, value, side: asString(args.side) ?? null } },
+      entry: {
+        targetType: 'goal_measurement',
+        targetId: row?.id ?? null,
+        diff: {
+          measurement_id: row?.id ?? null, goal: goal.name, goal_id: goal.id, date, value, side: asString(args.side) ?? null,
+          goal_before: goalBefore, goal_after: gate ? await goalStateNow(store, goal.id) : null,
+        },
+      },
     }
   })
 }
@@ -875,6 +910,7 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
     FROM athlete_goal
     WHERE athlete_id = ${store.athleteId}
       AND (id::text = ${ident} OR lower(name) = ${ident.toLowerCase()} OR name ILIKE ${'%' + ident + '%'})
+      AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
     LIMIT 1
   `
   if (!goal) throw new McpUserError(`No goal "${ident}".`)
@@ -887,6 +923,7 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
     FROM goal_measurement
     WHERE athlete_id = ${store.athleteId} AND goal_id = ${goal.id}
       AND (${since ?? null}::date IS NULL OR measured_on >= ${since ?? null}::date)
+      AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'goal_measurement'))}::text[]))
     ORDER BY measured_on
   `
   const history: GoalMeasurement[] = rows.map((r) => ({
@@ -957,7 +994,7 @@ async function addWorkoutNote(store: ConnectedStore, args: Record<string, unknow
     `
     return {
       result: { ...mcpStamp(new Date(), await athleteZone(store)), note: { id: row?.id, text, workout_id: resolvedWorkout, session_id: sessionId } },
-      entry: { targetType: 'workout_note', targetId: row?.id ?? null, diff: { text, workout_id: resolvedWorkout, session_id: sessionId } },
+      entry: { targetType: 'workout_note', targetId: row?.id ?? null, diff: { note_id: row?.id ?? null, text, workout_id: resolvedWorkout, session_id: sessionId } },
     }
   })
 }
@@ -1041,7 +1078,7 @@ export async function firedRulesForSignals(
 ) {
   const rows = await store.sql<AutoregRule[]>`
     SELECT scope_type, scope_id, scope_name, signal, op, value, action, action_params, message
-    FROM autoreg_rule WHERE athlete_id = ${store.athleteId}
+    FROM autoreg_rule WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'autoreg_rule'))}::text[]))
   `
   return evaluateAutoregRules(rows, signals, exercises)
 }

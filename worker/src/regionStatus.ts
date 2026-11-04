@@ -8,6 +8,7 @@
  */
 import { asJson } from './db.ts'
 import type { ConnectedStore } from './store.ts'
+import { hiddenIds, idList } from './tombstones.ts'
 import type { OverrideActor } from './sessionOverride.ts'
 import { isPainRegion, isRedFlag, type CheckinDay, type PainEntry, type RegionState } from './readiness/rules.ts'
 
@@ -32,11 +33,14 @@ export interface CheckinRow extends CheckinDay {
 /** The latest check-in per date in [from, to], oldest date first. */
 export async function loadCheckins(store: ConnectedStore, from: string, to: string): Promise<CheckinRow[]> {
   if (!(await readinessTables(store))) return []
+  // A check-in the athlete undid (tracks_v1) is voided, not deleted: the one before it stands.
+  const voided = await hiddenIds(store, 'checkin')
   const rows = await store.sql<{ id: string; date: string; sleep_hours: unknown; stress: unknown; soreness: unknown; created_at: string }[]>`
     SELECT DISTINCT ON (c.date) c.id::text AS id, c.date::text AS date, c.sleep_hours, c.stress, c.soreness,
            to_json(c.created_at) #>> '{}' AS created_at
     FROM checkin c
     WHERE c.athlete_id = ${store.athleteId} AND c.date >= ${from}::date AND c.date <= ${to}::date
+      AND NOT (c.id::text = ANY(${idList(voided)}::text[]))
     ORDER BY c.date, c.created_at DESC, c.id DESC
   `
   return rows.map((r) => ({
@@ -57,11 +61,14 @@ export interface PainRow extends PainEntry {
 /** The latest pain report per (date, region) in [from, to], oldest date first. */
 export async function loadPain(store: ConnectedStore, from: string, to: string): Promise<PainRow[]> {
   if (!(await readinessTables(store))) return []
+  // Voided with an undone check-in. A block it set stays in region_status until the clinician clear.
+  const voided = await hiddenIds(store, 'pain_report')
   const rows = await store.sql<{ id: string; date: string; region: string; score: unknown; red_flags: unknown; created_at: string }[]>`
     SELECT DISTINCT ON (p.date, p.region) p.id::text AS id, p.date::text AS date, p.region, p.score,
            to_jsonb(p.red_flags) AS red_flags, to_json(p.created_at) #>> '{}' AS created_at
     FROM pain_report p
     WHERE p.athlete_id = ${store.athleteId} AND p.date >= ${from}::date AND p.date <= ${to}::date
+      AND NOT (p.id::text = ANY(${idList(voided)}::text[]))
     ORDER BY p.date, p.region, p.created_at DESC, p.id DESC
   `
   return rows.flatMap((r) => {

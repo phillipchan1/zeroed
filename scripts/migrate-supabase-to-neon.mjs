@@ -1033,6 +1033,7 @@ export const PUBLIC_RESTORE_ORDER = [
   'activity',
   'coach_intake',
   'composed_block',
+  'change_tombstone',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]

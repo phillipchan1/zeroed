@@ -127,7 +127,7 @@ export function summarizeChange(row: { tool: string; target_type: string; diff: 
     case 'set_training_max':
       return `${String(d.lift ?? 'Lift').replace(/^\w/, (c) => c.toUpperCase())} training max: ${tmText(d.before)} → ${tmText(d.after)}`
     case 'revert_change':
-      return clip(`Undid: ${str(d.undid) ?? 'a change'}`)
+      return clip(`${d.direction === 'redo' ? 'Redid' : 'Undid'}: ${str(d.undid) ?? 'a change'}`)
     case 'apply_methodology_override':
       return clip(`Rule ${String(d.path ?? '')}${str(d.track_id) ? ' (one track)' : ''}: ${JSON.stringify(d.before ?? null)} → ${d.override_id == null ? 'default' : JSON.stringify(d.after ?? null)}`)
     case 'log_checkin': {

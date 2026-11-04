@@ -309,7 +309,13 @@ ok(undoApproval?.preview_kind === 'revert' && undoApproval.consumed_by === undoR
 ok((await harness.query<{ purpose: string }>(`SELECT purpose FROM track WHERE id = $1`, [speed.id]))[0].purpose === 'acceleration', 'undo: track restored to before that change')
 ok((await listChanges(storeA, { limit: 100 }))?.changes.find((c) => c.id === upd2.id)?.revert_suggested === false, 'undo: the suggestion is spent')
 ok(!(await appRevert(storeA, upd2.id)).ok && (await appRevert(storeA, upd2.id)).text.includes('Already undone'), 'undo: double undo refused')
-ok((await appRevert(storeA, undoRow.id)).text.includes('already an undo'), 'undo: an undo is not itself undone')
+// Round 2 item 3: undoing an undo redoes it; undoing that redo undoes again.
+const redo = await appRevert(storeA, undoRow.id)
+ok(redo.ok && redo.text.startsWith('Redone'), `undo: undoing an undo redoes it (${redo.text})`)
+ok((await harness.query<{ purpose: string }>(`SELECT purpose FROM track WHERE id = $1`, [speed.id]))[0].purpose === 'top speed', 'redo: the track has the change again')
+const redoRow = await lastLog()
+ok(redoRow.revert_of === undoRow.id && (await logById(undoRow.id)).reverted_by === redoRow.id, 'redo: linked to the undo it reverts')
+ok((await appRevert(storeA, redoRow.id)).ok, 'redo: undoing the redo undoes again')
 ok((await appRevert(storeA, upd1.id)).ok, 'undo: with the newer change gone, the older one undoes')
 ok((await harness.query<{ purpose: string }>(`SELECT purpose FROM track WHERE id = $1`, [speed.id]))[0].purpose === 'sprints', 'undo: track back to how it was created')
 
@@ -334,7 +340,9 @@ const added = await onePath('apply_program_edits (add_session)', async () => {
   ok(t.startsWith('Applied now'), `apply_program_edits (add_session): applied (${t.slice(0, 120)})`)
 })
 const addUndo = await appRevert(storeA, added.id)
-ok(!addUndo.ok && addUndo.reason === 'not_revertible' && addUndo.text.includes('delete'), 'undo: a change that added a session is not undone (it would delete data)')
+const addedId = String((added.diff.added as Array<{ id: string }>)[0]?.id)
+ok(addUndo.ok, `undo: a change that added a session undoes (${addUndo.text})`)
+ok(await count('routine', 'id::text = $1 AND phase_id IS NULL', [addedId]) === 1, 'undo: the added session comes out of the week, kept (not deleted)')
 
 // Training max: restores the prior value, only that lift.
 await harness.query(`UPDATE athlete SET training_max_overrides = training_max_overrides || '{"bench": 205}'::jsonb WHERE id = $1`, [A])
@@ -356,10 +364,17 @@ ok((await harness.query<{ d: string | null }>(`SELECT deload_week_start::text AS
 ok((await appRevert(storeA, override.id)).ok, 'undo: week-only override')
 ok(await count('session_override', 'id::text = $1 AND voided_at IS NOT NULL', [(override.diff.override_ids as string[])[0]]) === 1, 'undo: the override is voided (kept for audit)')
 ok(await count('session_override_log', 'athlete_id = $1 AND tool = $2', [A, 'revert_session_override']) === 1, 'undo: session_override_log records it too')
-for (const [row, label] of [[goalNew, 'a new goal'], [autoreg, 'an autoreg rule'], [meas, 'a measurement'], [note, 'a note'], [created, 'a new track'], [cleared, 'a clear'], [appRev, 'an app editor change']] as const) {
+// Round 2 item 3: every type has a defined revert (reverts.check.ts covers each in depth).
+for (const [row, label] of [[goalNew, 'a new goal (retired)'], [autoreg, 'an autoreg rule (retired)'], [note, 'a note (voided)'], [cleared, 'a clear (put back)']] as const) {
   const res = await appRevert(storeA, row.id)
-  ok(!res.ok && res.reason === 'not_revertible', `undo: ${label} is not undone, clearly (${res.text.slice(0, 50)})`)
+  ok(res.ok, `undo: ${label} undoes (${res.text.slice(0, 60)})`)
 }
+const measUndo = await appRevert(storeA, meas.id)
+ok(!measUndo.ok && measUndo.reason === 'stale' && (measUndo as { conflicts?: unknown[] }).conflicts?.length === 1, 'undo: a measurement with a newer one on its goal is a conflict')
+const createdUndo = await appRevert(storeA, created.id)
+ok(!createdUndo.ok && createdUndo.reason === 'not_revertible' && createdUndo.text.includes('still use'), 'undo: a track exercises still use is not retired')
+const appRevUndo = await appRevert(storeA, appRev.id)
+ok(!appRevUndo.ok && appRevUndo.reason === 'not_revertible', 'undo: an editor revision that can\'t be matched is refused, clearly')
 const assignUndo = await appRevert(storeA, assigned.id)
 ok(!assignUndo.ok && assignUndo.reason === 'stale', 'undo: an assignment the proposal then built on is stale')
 

@@ -30,6 +30,7 @@ import { addDays } from './readiness/rules.ts'
 import { seesHealth } from './regionStatus.ts'
 import { athleteToday, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { calendarZone, loadWorkouts, makeStore, type ConnectedStore } from './store.ts'
+import { hiddenIds, idList } from './tombstones.ts'
 import { McpUserError } from './userError.ts'
 
 export const sessionRpeUnavailable = 'Session RPE is not set up on this database yet. Nothing was written.'
@@ -76,6 +77,7 @@ export async function loadSessionRpe(store: ConnectedStore, from: string, to: st
     FROM session_rpe s
     LEFT JOIN routine r ON r.id = s.session_id
     WHERE s.athlete_id = ${store.athleteId} AND s.date >= ${from}::date AND s.date <= ${to}::date
+      AND NOT (s.id::text = ANY(${idList(await hiddenIds(store, 'session_rpe'))}::text[]))
     ORDER BY s.date, s.created_at, s.id
   `
   return rows.map((r) => {
@@ -142,7 +144,9 @@ export async function logSessionRpe(store: ConnectedStore, actor: OverrideActor,
       WHERE athlete_id = ${store.athleteId} AND date = ${date}::date AND session_id = ${sessionId}
       FOR UPDATE
     `
-    const prev = before ? { rating: Number(before.rating), duration_min: before.duration_min == null ? null : Number(before.duration_min) } : null
+    // A rating the athlete undid (voided, tracks_v1) counts as none: this tap is the first again.
+    const live = before && !(await hiddenIds(store, 'session_rpe')).includes(before.id) ? before : null
+    const prev = live ? { rating: Number(live.rating), duration_min: live.duration_min == null ? null : Number(live.duration_min) } : null
     // A tap without a duration keeps the one already logged.
     const nextDuration = duration ?? prev?.duration_min ?? null
     if (prev && prev.rating === rating && prev.duration_min === nextDuration && (workoutId == null || workoutId === before!.workout_id)) {
@@ -159,6 +163,13 @@ export async function logSessionRpe(store: ConnectedStore, actor: OverrideActor,
             change_id = EXCLUDED.change_id, updated_at = NOW()
       RETURNING id::text AS id
     `
+    // A rating undone earlier is revived by this tap: its tombstone is lifted, so this tap can be undone in turn.
+    if (before && !live) {
+      await store.sql`
+        UPDATE change_tombstone SET lifted_at = NOW(), lifted_by = ${changeId}
+        WHERE athlete_id = ${store.athleteId} AND row_table = 'session_rpe' AND row_id = ${before.id} AND lifted_at IS NULL
+      `
+    }
     await writeChange(store, {
       id: changeId,
       actor,
