@@ -48,7 +48,7 @@ import { executeZeroedTool, LOGGING_TOOLS, zeroedToolsFor } from './tools.ts'
 import { isMcpUserError, McpUserError } from './userError.ts'
 import {
   athleteApplyPreview, BLOCK_TOOL, blockSummary, coachTables, coachUnavailable, coachV1On, currentBlock, lastIntake,
-  loadActivities, previewBlockState, recomposeDue, type BlockRequest,
+  loadActivities, previewBlockState, programView, recomposeDue, type BlockRequest,
 } from './activities.ts'
 import { parseIntake, type ParsedIntake } from './coach/intake.ts'
 import {
@@ -431,7 +431,7 @@ export async function runIntake(store: ConnectedStore, answers: unknown): Promis
   const existing = await loadActivities(store)
   const { preview_id, state } = await previewBlockState(store, blockRequestFrom(intake, existing, intakeId), APP_COACH, 'Intake (section 5): your goals, activities, schedule and history, composed (section 4).')
   await record('previewed', preview_id)
-  return { ok: true, stopped: false, intake_id: intakeId, preview_id, block: blockSummary(state.block) }
+  return { ok: true, stopped: false, intake_id: intakeId, preview_id, block: blockSummary(state.block, programView(state, true)) }
 }
 
 /** The athlete picks trade-offs on a block preview: a new preview with their picks, same request otherwise. */
@@ -450,7 +450,7 @@ async function repreview(store: ConnectedStore, previewId: unknown, resolutions:
   }
   const me: OverrideActor = { type: 'athlete', id: store.athleteId }
   const next = await previewBlockState(store, { ...prior, resolutions: { ...(prior.resolutions ?? {}), ...picks } }, me, p.rationale)
-  return { ok: true, preview_id: next.preview_id, block: blockSummary(next.state.block) }
+  return { ok: true, preview_id: next.preview_id, block: blockSummary(next.state.block, programView(next.state, true)) }
 }
 
 // ---- the route -------------------------------------------------------------------------------------

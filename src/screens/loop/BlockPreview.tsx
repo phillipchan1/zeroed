@@ -64,6 +64,27 @@ export function BlockPreview({ previewId, block, onApplied }: {
       ))}
       {b.warnings.map((w, i) => <p key={i} className="text-xs text-dim" style={{ marginBottom: 4 }}>{w}</p>)}
 
+      {b.program && b.program.sessions.length > 0 && (
+        <div className="text-xs" style={{ display: 'flex', flexDirection: 'column', gap: 6, marginTop: 10 }}>
+          <p className="eyebrow">Sessions from {b.program.starts}</p>
+          {b.program.replaces && <p className="text-dim">Your current block ({b.program.replaces}).</p>}
+          {b.program.sessions.map((s) => (
+            <div key={s.name}>
+              <strong>{s.name}</strong>
+              {s.exercises.map((e) => (
+                <span key={e.name} style={{ display: 'block', lineHeight: 1.4 }}>
+                  {e.name}: {e.sets} × {e.reps}{e.target_rpe != null ? ` @RPE ${e.target_rpe}` : ''}
+                </span>
+              ))}
+            </div>
+          ))}
+          {(b.program.held ?? []).map((h, i) => (
+            <p key={i} style={{ color: 'var(--warn, var(--signal))' }}>Not loaded: {h.exercise}{h.regions.length ? ` (${h.regions.join(', ')})` : ''}</p>
+          ))}
+        </div>
+      )}
+      {b.program?.note && <p className="text-xs text-dim" style={{ marginTop: 6 }}>{b.program.note}</p>}
+
       {b.trade_offs.map((t) => (
         <div key={t.id} className="card" style={{ marginTop: 10 }}>
           <Markdown className="text-sm" text={t.message} style={{ lineHeight: 1.45 }} />
@@ -86,8 +107,8 @@ export function BlockPreview({ previewId, block, onApplied }: {
       {note && <p className="text-sm" style={{ marginTop: 10 }}>{note}</p>}
       {!done && (
         <div style={{ marginTop: 12 }}>
-          <Button variant="primary" full disabled={busy || b.needs_decision} onClick={() => void approve()}>
-            {b.needs_decision ? 'Pick the trade-offs first' : busy ? 'Applying…' : 'Approve and apply'}
+          <Button variant="primary" full disabled={busy || b.needs_decision || b.program?.appliable === false} onClick={() => void approve()}>
+            {b.needs_decision ? 'Pick the trade-offs first' : b.program?.appliable === false ? 'Not appliable yet' : busy ? 'Applying…' : 'Approve and apply'}
           </Button>
           <p className="text-xs text-dim" style={{ marginTop: 6 }}>Nothing changes until you approve. Every change is in Program → Changes.</p>
         </div>

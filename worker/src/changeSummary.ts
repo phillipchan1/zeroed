@@ -154,7 +154,9 @@ export function summarizeChange(row: { tool: string; target_type: string; diff: 
     }
     case 'apply_composed_block': {
       const p = arr(d.priorities).map((q) => String(q).replace(/_/g, ' '))
-      return clip(`New block ${str(d.start) ?? ''} → ${str(d.end) ?? ''}: ${p.length ? `priority ${p.join(' + ')}` : 'all maintenance'}`)
+      const q = obj(d.program_phase)
+      const queued = typeof q.sessions === 'number' ? `; ${q.sessions} session${q.sessions === 1 ? '' : 's'} a week queued` : ''
+      return clip(`New block ${str(d.start) ?? ''} → ${str(d.end) ?? ''}: ${p.length ? `priority ${p.join(' + ')}` : 'all maintenance'}${queued}`)
     }
     case 'set_birth_date':
       return 'Birth date recorded at intake'

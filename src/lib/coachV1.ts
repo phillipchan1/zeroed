@@ -52,6 +52,21 @@ export interface BlockView {
   needs_decision: boolean
   warnings: string[]
   minor: boolean
+  /** The week's sessions the block writes (a new queued block from its start). Absent on older previews. */
+  program?: BlockProgramView
+}
+
+export interface BlockProgramView {
+  starts?: string
+  replaces?: string
+  sessions: Array<{
+    name: string
+    day: number
+    exercises: Array<{ name: string; sets: number; reps: string; track: string | null; target_rpe?: number; contacts?: number }>
+  }>
+  held?: Array<{ session: string | null; exercise: string; regions: string[] }>
+  note: string | null
+  appliable: boolean
 }
 
 export interface ChatMessage { id: string; role: 'athlete' | 'coach'; body: string; created_at: string }
