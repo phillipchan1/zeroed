@@ -17,6 +17,8 @@ import type { ExerciseTemplate } from '../../types/database'
 import { ConvergenceReticle } from '../../components/convergence/ConvergenceReticle'
 import { computeLoopConvergence } from '../../components/convergence/state'
 import { PendingProposals } from './ProposalCard'
+import { AppCoachPanel } from './AppCoachPanel'
+import { coachOn } from '../../lib/tracksFlag'
 import type { InsightRow, CoachMessageRow, WeeklyPrescription } from '../../types/database'
 
 /**
@@ -340,6 +342,8 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             the read on mobile (with a separator). Read-only: narrate and route. */}
         {/* No section header: it sat directly under the screen's own "Coach"
             title, and the input placeholder already says what this is for. */}
+        {/* coach_v1: the server-side app coach. Off: the chat below, unchanged. */}
+        {coachOn() ? <AppCoachPanel /> : (
         <div className="fade-rise fade-rise-delay-1 page__main coach-convo">
           <div className="coach-chat" style={{ marginTop: 12 }}>
             {conv && turns.length === 0 && (
@@ -439,6 +443,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             Nothing is written until you approve it. Notice something mid-session? Log it next session so it counts.
           </p>
         </div>
+        )}
       </div>
     </div>
   )

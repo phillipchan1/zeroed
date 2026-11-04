@@ -1030,6 +1030,9 @@ export const PUBLIC_RESTORE_ORDER = [
   'region_status',
   'coach_read_log',
   'session_rpe',
+  'activity',
+  'coach_intake',
+  'composed_block',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]
