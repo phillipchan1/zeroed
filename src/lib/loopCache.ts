@@ -39,6 +39,11 @@ export const cacheKeys = {
   // The per-routine session prescription on its own — what the Train screen's
   // session sheet reads to show concrete lb/kg targets without the full bootstrap.
   sessionRx:   (routineId: string) => `rx:${routineId}`,
+  // tracks_v1: the same prescription for one dated session with its week-only
+  // override applied. Kept apart from the bootstrap's copy, whose indexes follow
+  // the template.
+  sessionRxOn: (routineId: string, date: string) => `rx:${routineId}@${date}`,
+  overrides:   (athleteId: string, weekStart: string) => `overrides:${athleteId}:${weekStart}`,
   rxVersion:   (athleteId: string) => `rxver:${athleteId}`,
   // One finished session as performed — what the preview of a DONE session reads
   // instead of the prescription.

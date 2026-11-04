@@ -22,6 +22,8 @@ import { tracksOn } from '../../lib/tracksFlag'
 import { useProgramTracks } from '../../lib/tracksData'
 import { CoverageGrid, TrackLabel } from './tracksUi'
 import { daysHitByTrack } from '../../engine/tracks'
+import { weekWindowInZone } from '../../engine/weekDates'
+import { fetchWeekOverrides, overridesByRoutine, weekdayOf, WEEK_ONLY_LABEL } from '../../lib/sessionOverrides'
 
 // Directive → chip tone, matching the recap banner so "the call" reads the same
 // everywhere it appears.
@@ -213,6 +215,13 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
     `blockvol:${athleteId}`,
     () => gatherBlockVolume(athleteId),
   )
+  // tracks_v1: which sessions carry a week-only override this week.
+  const week = weekWindowInZone(new Date())
+  const { data: weekOverrides } = useCachedLoader(
+    tracksOn() ? cacheKeys.overrides(athleteId, week.weekStart) : null,
+    () => fetchWeekOverrides(week.weekStart, week.weekEnd),
+  )
+  const overridesBy = overridesByRoutine(weekOverrides)
 
   const nextWeek = map?.nextWeek ?? null
   const aheadPhases = (map?.phases ?? []).filter((p) => p.state === 'upcoming')
@@ -260,6 +269,7 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
       || k === cacheKeys.history(athleteId)
       || k.startsWith('blockvol:')
       || k.startsWith('rx:')
+      || k.startsWith('overrides:')
     ))
     refetchProgram()
     refetchMap()
@@ -416,6 +426,16 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
                       </span>
                     </div>
                     {r.intent && <p className="text-sm text-dim" style={{ marginTop: 6, lineHeight: 1.5 }}>{r.intent}</p>}
+                    {(overridesBy[r.id]?.length ?? 0) > 0 && (
+                      <p style={{ marginTop: 8 }}>
+                        <span className="week-only">
+                          {WEEK_ONLY_LABEL}
+                          <span className="week-only__note">
+                            {' · '}{overridesBy[r.id].map((o) => o.moved_out_to ? `moved to ${weekdayOf(o.moved_out_to)}` : weekdayOf(o.date)).join(', ')}
+                          </span>
+                        </span>
+                      </p>
+                    )}
                   </div>
                 )) : (
                   <p className="text-sm text-dim">No sessions in this phase yet.</p>

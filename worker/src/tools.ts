@@ -27,6 +27,10 @@ import type { Sql } from './db.ts'
 import { McpUserError } from './userError.ts'
 import { TRACK_TOOLS } from '../../supabase/functions/_shared/trackToolDefs.ts'
 import { briefTracksAndGoals, runTrackTool, TRACK_TOOL_NAMES } from './trackTools.ts'
+import {
+  APP_COACH, runSessionOverrideTool, SESSION_OVERRIDE_TOOLS, SESSION_OVERRIDE_TOOL_NAMES, tracksV1On,
+  type OverrideActor,
+} from './sessionOverride.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -224,14 +228,31 @@ export function storeForAthlete(sql: Sql, athleteId: string): ConnectedStore {
   return makeStore(sql, athleteId, 'lb')
 }
 
+/**
+ * The tools this athlete's coach sees. tracks_v1 adds the week-only override
+ * tools; with it off the list is exactly ZEROED_TOOLS.
+ */
+export async function zeroedToolsFor(sql: Sql, athleteId: string): Promise<McpTool[]> {
+  return await tracksV1On(storeForAthlete(sql, athleteId))
+    ? [...ZEROED_TOOLS, ...SESSION_OVERRIDE_TOOLS]
+    : ZEROED_TOOLS
+}
+
 export async function executeZeroedTool(
   sql: Sql,
   athleteId: string,
   name: string,
   args: Record<string, unknown>,
   flags?: { rpeHalfSteps?: boolean },
+  // Who is calling. A caller that doesn't say gets app_coach's powers: it can
+  // preview and propose, never approve.
+  actor: OverrideActor = APP_COACH,
 ): Promise<string> {
   const store = storeForAthlete(sql, athleteId)
+
+  if (SESSION_OVERRIDE_TOOL_NAMES.has(name)) {
+    return runSessionOverrideTool(store, name, args, actor, (refs) => resolveGoalIds(store, refs))
+  }
 
   if (LIFT_MODEL_TOOL_NAMES.has(name)) {
     return runLiftModelTool(name, args, {

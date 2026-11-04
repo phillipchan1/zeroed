@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+### Week-only session overrides (G1, tracks_v1)
+
+Behind `athlete.flags.tracks_v1`; with it off, `/api/session-rx`, the MCP tool list and the app are unchanged.
+
+- **One date, not the template.** A `session_override` row changes ONE dated session: add, swap, drop or adjust an exercise, or move an exercise or the whole session to another day (a move is a `move_out` row on the source date and a `move_in` row on the target, sharing `pair_id`). Program, phase and routine rows are never written.
+- **Engine applies it on that date only.** `POST /api/session-rx` with `date: YYYY-MM-DD` reads that date's active overrides into the session's exercise list before the engine prescribes it, and returns `prescription.override` (the day's list, a mark per changed index, drops and moves, labeled "This week only"). No `date`, no flag, or no override → the old response, byte for byte. An override never applies after `expires_on` (default: the Sunday ending the date's ISO week; at most date + 7). Expired and cleared rows stay for audit.
+- **Propose-only writes.** New MCP tools (listed only with the flag): `preview_session_override`, `apply_session_override`, `list_session_overrides`, `preview_clear_session_override`. Preview stores a preview and writes no override. Apply needs `confirm=true`, a preview under 24 h old whose diff (including the resulting session that day) still matches, and `approval_ref`: an MCP coach passes `msg:<id>`, the athlete's own tap is `tap:<id>` minted by the Worker, and standing approval never covers it. `app_coach` can never supply `approval_ref`; it parks a `coach_proposal` (`kind = 'session_override'`) and the athlete's Accept applies it. A coach can't apply a preview parked for the athlete. Previews made by a revoked or expired coach token are void, and the void is logged.
+- **Audit.** Every apply and clear writes `session_override_log`, shaped like the spec's `change_log` (actor, tool, target, diff, rationale, approval_ref, preview_id, expires_on) so G2 can lift it across.
+- **App.** Train shows a "This week only" badge on an overridden session and, in its sheet, the day's list with a badge on each changed exercise; Program's session list shows the same badge. Proposal cards for overrides say "This week only."
+
+**Deploy:** the Worker (`npm run cf:deploy`) and `worker/schema/session-override.sql` hand-applied on Neon (`supabase/migrations/20261104000002_session_override.sql` on Supabase). Until the tables exist, session-rx ignores overrides and the tools report them unavailable. Rollback is in the SQL header: drop the flag per athlete; the tables can be dropped afterwards.
+
 ### Goals at the center (tracks_v1)
 
 Everything here is behind `athlete.flags.tracks_v1`; flag-off athletes see no change.

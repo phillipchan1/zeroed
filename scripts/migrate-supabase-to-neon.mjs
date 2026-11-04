@@ -1018,6 +1018,9 @@ export const PUBLIC_RESTORE_ORDER = [
   'goal_measurement',
   'workout_note',
   'coach_proposal',
+  'session_override',
+  'session_override_preview',
+  'session_override_log',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]

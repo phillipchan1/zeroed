@@ -80,7 +80,11 @@ export function ProposalCard({ proposal, goalNames, onResolved }: {
               })}
             </div>
           ))}
-          <p className="proposal__timing">{proposal.timing === 'next_week' ? 'Starts next Monday; this week stays as it is.' : 'Changes this week’s plan.'}</p>
+          <p className="proposal__timing">
+            {proposal.kind === 'session_override'
+              ? 'This week only. Your plan itself doesn’t change.'
+              : proposal.timing === 'next_week' ? 'Starts next Monday; this week stays as it is.' : 'Changes this week’s plan.'}
+          </p>
         </div>
       )}
 

@@ -6,6 +6,7 @@ import type {
   ExerciseTemplate, InsightRow, SetLog, WeeklyDirective,
 } from '../types/database.ts'
 import type { UnitContext } from '../lib/units.ts'
+import type { SessionOverrideView } from './sessionOverride.ts'
 import {
   allowsAutoProgress, autoregulateDelta, capIsActive, clearanceTestOf,
   CLEARANCE_SESSIONS, CLEARANCE_TOP_SETS, describeClearanceTest, isLiftHeld,
@@ -64,6 +65,11 @@ export interface SessionPrescription {
   skip?: Record<number, boolean>
   exercises?: ExerciseRx[]
   version?: string
+  /**
+   * tracks_v1 only, and only when the request named a date with an active
+   * week-only override. The prescription's indexes follow override.exercises.
+   */
+  override?: SessionOverrideView
 }
 
 export interface SessionRxInput {

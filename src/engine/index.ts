@@ -2507,7 +2507,8 @@ export async function gatherSessionPrescription(
   exercises: ExerciseTemplate[],
   u: UnitContext,
   // Today's check-in. Sleep, readiness and the knees move today's loads.
-  opts: { dayOf?: DayOf | null } = {},
+  // date (tracks_v1): that day's week-only override applies.
+  opts: { dayOf?: DayOf | null; date?: string | null } = {},
 ): Promise<SessionPrescription> {
   return fetchSessionPrescription(athleteId, routineId, exercises, u, opts)
 }

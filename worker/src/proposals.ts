@@ -18,6 +18,7 @@ import { jsonParam, withSql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { loadLiveProgram, makeStore, type ConnectedStore, type LiveProgram } from './store.ts'
+import { applyPreview } from './sessionOverride.ts'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -34,6 +35,15 @@ export interface ProposalRow {
   program_fingerprint: string
   status: 'pending' | 'applied' | 'declined' | 'stale'
   created_at: string
+  /** Present only on a week-only session override (tracks_v1). */
+  kind?: 'session_override'
+}
+
+// kind is read through to_jsonb so these queries work before the column
+// exists, and listed only when it isn't the default: program-edit proposals
+// read back exactly as they did before overrides.
+function withKind(rows: Array<ProposalRow & { kind?: string | null }>): ProposalRow[] {
+  return rows.map(({ kind, ...r }) => kind === 'session_override' ? { ...r, kind } : r)
 }
 
 function missingTable(e: unknown): boolean {
@@ -104,14 +114,14 @@ export async function parkProposal(
 
 export async function listProposals(store: ConnectedStore, status: ProposalRow['status'] = 'pending'): Promise<ProposalRow[] | null> {
   try {
-    return await store.sql<ProposalRow[]>`
+    return withKind(await store.sql<ProposalRow[]>`
       SELECT id, preview_id, title, rationale, goal_ids, edits, timing, request, diff, program_fingerprint, status,
-             to_json(created_at) #>> '{}' AS created_at
-      FROM coach_proposal
+             to_json(created_at) #>> '{}' AS created_at, to_jsonb(cp) ->> 'kind' AS kind
+      FROM coach_proposal cp
       WHERE athlete_id = ${store.athleteId} AND status = ${status}
       ORDER BY created_at DESC
       LIMIT 20
-    `
+    `)
   } catch (e) {
     if (missingTable(e)) return null
     throw e
@@ -129,19 +139,25 @@ export type ResolveResult =
 
 /**
  * Apply a pending proposal exactly as previewed. The athlete's Accept and an
- * MCP apply_program_edits(proposal_id) both land here.
+ * MCP apply_program_edits(proposal_id) both land here. A week-only override
+ * proposal applies only with the athlete's own tap (opts.approvalRef, minted
+ * by /api/proposals); a coach can't accept one on their behalf.
  */
-export async function acceptProposal(store: ConnectedStore, proposalId: string): Promise<ResolveResult> {
+export async function acceptProposal(
+  store: ConnectedStore,
+  proposalId: string,
+  opts: { approvalRef?: string } = {},
+): Promise<ResolveResult> {
   if (!UUID_RE.test(proposalId)) return { ok: false, status: 'not_found', text: 'No such proposal.' }
   let rows: ProposalRow[]
   try {
-    rows = await store.sql<ProposalRow[]>`
+    rows = withKind(await store.sql<ProposalRow[]>`
       SELECT id, preview_id, title, rationale, goal_ids, edits, timing, request, diff, program_fingerprint, status,
-             to_json(created_at) #>> '{}' AS created_at
-      FROM coach_proposal
+             to_json(created_at) #>> '{}' AS created_at, to_jsonb(cp) ->> 'kind' AS kind
+      FROM coach_proposal cp
       WHERE id = ${proposalId} AND athlete_id = ${store.athleteId}
       LIMIT 1
-    `
+    `)
   } catch (e) {
     if (missingTable(e)) return { ok: false, status: 'unavailable', text: 'Proposals are not set up on this database yet.' }
     throw e
@@ -151,6 +167,7 @@ export async function acceptProposal(store: ConnectedStore, proposalId: string):
   if (p.status !== 'pending') {
     return { ok: false, status: p.status === 'stale' ? 'stale' : 'refused', text: `This proposal was already ${p.status}.` }
   }
+  if (p.kind === 'session_override') return acceptOverrideProposal(store, p, opts.approvalRef)
   // Claim it before writing anything, so an app Accept and an MCP apply racing
   // each other can't both apply it. Released back to pending if nothing lands.
   const claimed = await store.sql<{ id: string }[]>`
@@ -197,6 +214,41 @@ export async function acceptProposal(store: ConnectedStore, proposalId: string):
     VALUES (${store.athleteId}, 'coach', 'note', ${body}, ${goalId})
   `
   return { ok: true, status: 'applied', text }
+}
+
+async function acceptOverrideProposal(store: ConnectedStore, p: ProposalRow, approvalRef?: string): Promise<ResolveResult> {
+  if (!approvalRef) {
+    return { ok: false, status: 'refused', text: 'Refused: this is a week-only change; the athlete accepts it in the app.' }
+  }
+  const claimed = await store.sql<{ id: string }[]>`
+    UPDATE coach_proposal SET status = 'applied', resolved_at = NOW()
+    WHERE id = ${p.id} AND athlete_id = ${store.athleteId} AND status = 'pending'
+    RETURNING id
+  `
+  if (!claimed.length) return { ok: false, status: 'refused', text: 'This proposal was already resolved.' }
+  let res: Awaited<ReturnType<typeof applyPreview>>
+  try {
+    res = await applyPreview(store, { type: 'athlete', id: store.athleteId }, {
+      preview_id: p.preview_id,
+      confirm: true,
+      approval_ref: approvalRef,
+    }, { viaProposal: true })
+  } catch (e) {
+    await store.sql`
+      UPDATE coach_proposal SET status = 'pending', resolved_at = NULL
+      WHERE id = ${p.id} AND athlete_id = ${store.athleteId}
+    `
+    throw e
+  }
+  if (res.ok) return { ok: true, status: 'applied', text: res.text }
+  const status = res.reason === 'stale' || res.reason === 'not_found' ? 'stale' : 'pending'
+  await store.sql`
+    UPDATE coach_proposal SET status = ${status}, resolved_at = ${status === 'stale' ? new Date().toISOString() : null}
+    WHERE id = ${p.id} AND athlete_id = ${store.athleteId}
+  `
+  return status === 'stale'
+    ? { ok: false, status: 'stale', text: `${res.text.replace(/^Refused: /, '')} Ask the coach to look again.` }
+    : { ok: false, status: 'refused', text: res.text }
 }
 
 export async function declineProposal(store: ConnectedStore, proposalId: string): Promise<ResolveResult> {
@@ -247,7 +299,8 @@ export async function handleProposals(req: Request, env: Env, _waitUntil?: WaitU
         case 'list':
           return json({ proposals: await listProposals(store) }, 200, cors)
         case 'accept':
-          return json(await acceptProposal(store, id), 200, cors)
+          // The athlete's own tap on Accept is the approval.
+          return json(await acceptProposal(store, id, { approvalRef: `tap:${id}` }), 200, cors)
         case 'decline':
           return json(await declineProposal(store, id), 200, cors)
         default:

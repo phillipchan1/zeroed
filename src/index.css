@@ -2695,6 +2695,24 @@ textarea.input {
 .chip--pending { background: rgba(212,168,72,0.12);  color: var(--pending); }
 .chip--info    { background: rgba(90,143,184,0.12);  color: var(--computing); }
 
+/* tracks_v1: a one-date change from a week-only override. Pending's amber:
+   real, but not the plan. Smaller than a chip so it sits under a name. */
+.week-only {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(212,168,72,0.12);
+  color: var(--pending);
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+.week-only__note { font-weight: 400; text-transform: none; }
+
 /* --- Tappable list row — the sub-screen entry point ----------------------- */
 .row {
   display: flex;

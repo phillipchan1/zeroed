@@ -89,6 +89,12 @@ export function proposalsUrl(): string | null {
   return `${base}/proposals`
 }
 
+export function sessionOverrideUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/session-override`
+}
+
 export function authBaseUrl(): string | null {
   const base = apiBaseUrl()
   if (!base || !isCloudflareApi()) return null
