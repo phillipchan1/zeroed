@@ -7,11 +7,13 @@
  * Writes follow the propose-only contract:
  *   preview  → a stored preview (preview_id + diff). Writes no override.
  *   apply    → confirm=true, a preview under 24 h old whose diff still
- *              matches, and an approval_ref. The athlete's own app session
- *              approves with tap:<id> (minted here, never taken from a
- *              client). An MCP coach passes the chat message where the
- *              athlete said yes (msg:<id>). app_coach can never supply one: it
- *              parks a coach_proposal and the athlete accepts it in the app.
+ *              matches, and an approval_ref that resolves to an approval
+ *              row (G10, approvals.ts) the athlete made for this preview and
+ *              diff: tap:<id> from their own app session (minted server-side,
+ *              never taken from a client) or msg:<id> from their yes in the
+ *              coach chat. The apply consumes it in the same statement.
+ *              app_coach can never supply one: it parks a coach_proposal and
+ *              the athlete accepts it in the app.
  *   clear    → the same preview / apply pair, recorded the same way.
  * Every apply and clear adds a session_override_log row per override row and,
  * in the same statement, one change_log row (G2) for the whole write.
@@ -35,6 +37,8 @@ import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { calendarZone, loadLiveProgram, makeStore, type ConnectedStore } from './store.ts'
 import { McpUserError } from './userError.ts'
 import { ruleRefsFrom } from './changeSummary.ts'
+import { APPROVAL_REF_SHAPE, checkApproval, createApproval, parseApprovalRef } from './approvals.ts'
+import { withTx } from './changeLog.ts'
 
 export type ActorType = 'athlete' | 'mcp' | 'app_coach' | 'system'
 
@@ -49,7 +53,6 @@ export const APP_COACH: OverrideActor = { type: 'app_coach', id: 'app_coach' }
 export const PREVIEW_TTL_HOURS = 24
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const REF_BODY = /^[A-Za-z0-9._:-]{1,128}$/
 
 function missingSchema(e: unknown): boolean {
   const code = (e as { code?: string })?.code
@@ -80,6 +83,7 @@ export async function athleteToday(store: ConnectedStore, now: Date = new Date()
 /**
  * Null when this actor may write with this approval_ref; otherwise why not.
  * Standing approval covers logging only, so it never covers an override.
+ * Shape only: applyPreview then resolves it to a real approval row.
  */
 export function approvalProblem(actor: OverrideActor, ref: unknown): string | null {
   if (actor.type === 'app_coach') {
@@ -87,18 +91,11 @@ export function approvalProblem(actor: OverrideActor, ref: unknown): string | nu
   }
   if (actor.type === 'system') return 'Refused: system writes cannot approve an override.'
   if (typeof ref !== 'string' || !ref.trim()) {
-    return 'Refused: approval_ref is required (the message id where the athlete said yes). Overrides are not covered by standing approval.'
+    return 'Refused: approval_ref is required (the approval the athlete created for this preview; see list_approvals). Overrides are not covered by standing approval.'
   }
   const r = ref.trim()
   if (r.startsWith('standing:')) return 'Refused: standing approval covers logging only, not session overrides.'
-  if (actor.type === 'mcp') {
-    if (r.startsWith('tap:')) return 'Refused: tap approvals come from the athlete\'s app, not from a coach.'
-    if (!r.startsWith('msg:') || !REF_BODY.test(r.slice(4))) {
-      return 'Refused: approval_ref must be msg:<message id> — the chat message where the athlete said yes.'
-    }
-    return null
-  }
-  if (!r.startsWith('tap:') || !REF_BODY.test(r.slice(4))) return 'Refused: the athlete approves with a tap.'
+  if (!parseApprovalRef(r)) return `Refused: ${APPROVAL_REF_SHAPE}`
   return null
 }
 
@@ -446,7 +443,7 @@ function previewText(previewId: string, diff: DiffRow[], kind: 'create' | 'clear
     formatDiff(diff),
     '',
     `preview_id: ${previewId} (valid ${PREVIEW_TTL_HOURS} h, and only while this diff still matches)`,
-    'Apply with apply_session_override(preview_id, confirm=true, approval_ref=msg:<id of the message where the athlete said yes>), or park it for the athlete with propose=true.',
+    'Show the athlete this diff. Once they approve it in the app, list_approvals(preview_id) gives their approval_ref; apply with apply_session_override(preview_id, confirm=true, approval_ref). Or park it for the athlete with propose=true.',
   ].join('\n')
 }
 
@@ -603,6 +600,9 @@ async function voidIfRevoked(store: ConnectedStore, p: PreviewRow): Promise<bool
   return true
 }
 
+/** The override statement wrote nothing, or its approval was spent meanwhile: roll it back. */
+class NothingApplied extends Error {}
+
 /**
  * Write a previewed override (or clear). `actor` is who is applying; the rows
  * and log record the preview's author as created_by and this approval_ref as
@@ -620,7 +620,6 @@ export async function applyPreview(
   }
   const problem = approvalProblem(actor, args.approval_ref)
   if (problem) return { ok: false, reason: 'refused', text: problem }
-  const approvalRef = String(args.approval_ref).trim()
   if (!(await tracksV1On(store))) return { ok: false, reason: 'off', text: flagOff }
   const previewId = typeof args.preview_id === 'string' ? args.preview_id.trim() : ''
   if (!previewId) return { ok: false, reason: 'refused', text: 'Refused: preview_id is required. Call preview_session_override first.' }
@@ -670,88 +669,103 @@ export async function applyPreview(
   if (canonicalJson(diff) !== storedDiff) {
     return { ok: false, reason: 'stale', text: 'Refused: the diff no longer matches the preview (the session or its overrides changed). Preview again.' }
   }
+  const approval = await checkApproval(store, args.approval_ref, { previewId: p.preview_id, currentDiff: diff })
+  if (!approval.ok) return { ok: false, reason: 'refused', text: approval.text }
+  const approvalRef = approval.approvalRef
+  const approvalId = approval.approvalId
+  const changeId = crypto.randomUUID()
 
-  // One statement per write: claiming the preview, the override rows and their
-  // log rows land together or not at all, and a preview applies once.
+  // One statement per write: claiming the preview, the override rows, their
+  // log rows and consuming the approval (G10, named by the change_log row)
+  // land together or not at all, and a preview and its approval apply once.
+  // The transaction only rolls the statement back when the approval was
+  // spent or voided meanwhile.
   const author: OverrideActor = { type: p.actor_type, id: p.actor_id }
-  let ids: string[]
-  if (p.kind === 'create') {
-    const pairId = createRows.some((r) => r.paired) ? crypto.randomUUID() : null
-    const planned = createRows.map((row) => ({
-      date: row.date,
-      routine_id: row.routine_id,
-      session: row.session,
-      ops: row.ops,
-      expires_on: row.expires_on,
-      pair_id: row.paired ? pairId : null,
-      changes: diff.find((x) => x.date === row.date && x.routine_id === row.routine_id)?.changes ?? [],
-    }))
-    const rows = await store.sql<{ id: string }[]>`
-      WITH claim AS (
-        UPDATE session_override_preview SET used_at = NOW()
-        WHERE id = ${p.id} AND athlete_id = ${store.athleteId} AND used_at IS NULL AND voided_at IS NULL
-        RETURNING id
-      ),
-      planned AS (
-        SELECT * FROM jsonb_to_recordset(${jsonParam(store.sql, planned)}) AS x(
-          date date, routine_id uuid, session text, ops jsonb, expires_on date, pair_id uuid, changes jsonb
-        )
-      ),
-      ok AS (
-        SELECT 1 FROM claim
-        WHERE NOT EXISTS (
-          SELECT 1 FROM planned x
-          WHERE NOT EXISTS (
-            SELECT 1 FROM routine r JOIN program pr ON pr.id = r.program_id
-            WHERE r.id = x.routine_id AND pr.athlete_id = ${store.athleteId}
+  const pid = p.id
+  const write = async (): Promise<Array<{ id: string; spent: number }>> => {
+    if (p.kind === 'create') {
+      const pairId = createRows.some((r) => r.paired) ? crypto.randomUUID() : null
+      const planned = createRows.map((row) => ({
+        date: row.date,
+        routine_id: row.routine_id,
+        session: row.session,
+        ops: row.ops,
+        expires_on: row.expires_on,
+        pair_id: row.paired ? pairId : null,
+        changes: diff.find((x) => x.date === row.date && x.routine_id === row.routine_id)?.changes ?? [],
+      }))
+      return store.sql<{ id: string; spent: number }[]>`
+        WITH claim AS (
+          UPDATE session_override_preview SET used_at = NOW()
+          WHERE id = ${pid} AND athlete_id = ${store.athleteId} AND used_at IS NULL AND voided_at IS NULL
+          RETURNING id
+        ),
+        planned AS (
+          SELECT * FROM jsonb_to_recordset(${jsonParam(store.sql, planned)}) AS x(
+            date date, routine_id uuid, session text, ops jsonb, expires_on date, pair_id uuid, changes jsonb
           )
+        ),
+        ok AS (
+          SELECT 1 FROM claim
+          WHERE NOT EXISTS (
+            SELECT 1 FROM planned x
+            WHERE NOT EXISTS (
+              SELECT 1 FROM routine r JOIN program pr ON pr.id = r.program_id
+              WHERE r.id = x.routine_id AND pr.athlete_id = ${store.athleteId}
+            )
+          )
+        ),
+        ins AS (
+          INSERT INTO session_override (
+            athlete_id, date, routine_id, ops, expires_on, pair_id, actor_type, actor_id, rationale, approval_ref, preview_id
+          )
+          SELECT ${store.athleteId}::uuid, x.date, x.routine_id, x.ops, x.expires_on, x.pair_id,
+                 ${author.type}::text, ${author.id}::text, ${p.rationale}::text, ${approvalRef}::text, ${p.preview_id}::text
+          FROM planned x
+          WHERE EXISTS (SELECT 1 FROM ok)
+          RETURNING id, date, routine_id, expires_on, pair_id
+        ),
+        logged AS (
+          INSERT INTO session_override_log (
+            athlete_id, actor_type, actor_id, tool, target, diff, rationale, approval_ref, preview_id, expires_on
+          )
+          SELECT ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'apply_session_override',
+                 jsonb_build_object('override_id', i.id, 'date', i.date, 'routine_id', i.routine_id,
+                                    'session', x.session, 'pair_id', i.pair_id),
+                 jsonb_build_object('changes', x.changes, 'ops', x.ops),
+                 ${p.rationale}::text, ${approvalRef}::text, ${p.preview_id}::text, i.expires_on
+          FROM ins i JOIN planned x ON x.date = i.date AND x.routine_id = i.routine_id
+          RETURNING id
+        ),
+        -- G2: the same write, once, in change_log (a move is one change, two rows).
+        changed AS (
+          INSERT INTO change_log (
+            id, athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
+            approval_ref, approval_id, preview_id, expires_on
+          )
+          SELECT ${changeId}::uuid, ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'apply_session_override',
+                 'session_override', (SELECT min(id::text) FROM ins),
+                 jsonb_build_object('override_ids', (SELECT jsonb_agg(id::text ORDER BY date, id) FROM ins),
+                                    'sessions', ${jsonParam(store.sql, diff)}),
+                 ${p.rationale}::text, ${jsonParam(store.sql, ruleRefsFrom(p.rationale))},
+                 ${approvalRef}::text, ${approvalId}::uuid, ${p.preview_id}::text, (SELECT max(expires_on) FROM ins)
+          WHERE EXISTS (SELECT 1 FROM ins)
+          RETURNING id
+        ),
+        -- G10: the athlete's approval, spent by this change.
+        spent AS (
+          UPDATE approval SET consumed_at = NOW(), consumed_by_change_id = ${changeId}::uuid
+          WHERE id = ${approvalId}::uuid AND athlete_id = ${store.athleteId}
+            AND consumed_at IS NULL AND voided_at IS NULL AND EXISTS (SELECT 1 FROM changed)
+          RETURNING id
         )
-      ),
-      ins AS (
-        INSERT INTO session_override (
-          athlete_id, date, routine_id, ops, expires_on, pair_id, actor_type, actor_id, rationale, approval_ref, preview_id
-        )
-        SELECT ${store.athleteId}::uuid, x.date, x.routine_id, x.ops, x.expires_on, x.pair_id,
-               ${author.type}::text, ${author.id}::text, ${p.rationale}::text, ${approvalRef}::text, ${p.preview_id}::text
-        FROM planned x
-        WHERE EXISTS (SELECT 1 FROM ok)
-        RETURNING id, date, routine_id, expires_on, pair_id
-      ),
-      logged AS (
-        INSERT INTO session_override_log (
-          athlete_id, actor_type, actor_id, tool, target, diff, rationale, approval_ref, preview_id, expires_on
-        )
-        SELECT ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'apply_session_override',
-               jsonb_build_object('override_id', i.id, 'date', i.date, 'routine_id', i.routine_id,
-                                  'session', x.session, 'pair_id', i.pair_id),
-               jsonb_build_object('changes', x.changes, 'ops', x.ops),
-               ${p.rationale}::text, ${approvalRef}::text, ${p.preview_id}::text, i.expires_on
-        FROM ins i JOIN planned x ON x.date = i.date AND x.routine_id = i.routine_id
-        RETURNING id
-      ),
-      -- G2: the same write, once, in change_log (a move is one change, two rows).
-      changed AS (
-        INSERT INTO change_log (
-          athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
-          approval_ref, preview_id, expires_on
-        )
-        SELECT ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'apply_session_override',
-               'session_override', (SELECT min(id::text) FROM ins),
-               jsonb_build_object('override_ids', (SELECT jsonb_agg(id::text ORDER BY date, id) FROM ins),
-                                  'sessions', ${jsonParam(store.sql, diff)}),
-               ${p.rationale}::text, ${jsonParam(store.sql, ruleRefsFrom(p.rationale))},
-               ${approvalRef}::text, ${p.preview_id}::text, (SELECT max(expires_on) FROM ins)
-        WHERE EXISTS (SELECT 1 FROM ins)
-        RETURNING id
-      )
-      SELECT id::text AS id FROM ins ORDER BY date
-    `
-    ids = rows.map((r) => r.id)
-  } else {
-    const rows = await store.sql<{ id: string }[]>`
+        SELECT id::text AS id, (SELECT count(*) FROM spent)::int AS spent FROM ins ORDER BY date
+      `
+    }
+    return store.sql<{ id: string; spent: number }[]>`
       WITH claim AS (
         UPDATE session_override_preview SET used_at = NOW()
-        WHERE id = ${p.id} AND athlete_id = ${store.athleteId} AND used_at IS NULL AND voided_at IS NULL
+        WHERE id = ${pid} AND athlete_id = ${store.athleteId} AND used_at IS NULL AND voided_at IS NULL
         RETURNING id
       ),
       changes AS (
@@ -778,23 +792,38 @@ export async function applyPreview(
       ),
       changed AS (
         INSERT INTO change_log (
-          athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
-          approval_ref, preview_id, expires_on
+          id, athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
+          approval_ref, approval_id, preview_id, expires_on
         )
-        SELECT ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'clear_session_override',
+        SELECT ${changeId}::uuid, ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'clear_session_override',
                'session_override', (SELECT min(id::text) FROM voided),
                jsonb_build_object('override_ids', (SELECT jsonb_agg(id::text ORDER BY date, id) FROM voided),
                                   'sessions', ${jsonParam(store.sql, diff)}),
                ${p.rationale}::text, ${jsonParam(store.sql, ruleRefsFrom(p.rationale))},
-               ${approvalRef}::text, ${p.preview_id}::text, (SELECT max(expires_on) FROM voided)
+               ${approvalRef}::text, ${approvalId}::uuid, ${p.preview_id}::text, (SELECT max(expires_on) FROM voided)
         WHERE EXISTS (SELECT 1 FROM voided)
         RETURNING id
+      ),
+      spent AS (
+        UPDATE approval SET consumed_at = NOW(), consumed_by_change_id = ${changeId}::uuid
+        WHERE id = ${approvalId}::uuid AND athlete_id = ${store.athleteId}
+          AND consumed_at IS NULL AND voided_at IS NULL AND EXISTS (SELECT 1 FROM changed)
+        RETURNING id
       )
-      SELECT id::text AS id FROM voided ORDER BY date
+      SELECT id::text AS id, (SELECT count(*) FROM spent)::int AS spent FROM voided ORDER BY date
     `
-    ids = rows.map((r) => r.id)
   }
-  if (!ids.length) return { ok: false, reason: 'refused', text: 'Refused: this preview was already applied.' }
+  let ids: string[] = []
+  try {
+    await withTx(store.sql, async () => {
+      const rows = await write()
+      if (!rows.length || !rows.every((r) => Number(r.spent) === 1)) throw new NothingApplied()
+      ids = rows.map((r) => r.id)
+    })
+  } catch (e) {
+    if (e instanceof NothingApplied) return { ok: false, reason: 'refused', text: 'Refused: this preview or its approval was already applied (or voided). Preview again.' }
+    throw e
+  }
 
   const summary = diff.map((d) => d.label).join('; ')
   const body = p.kind === 'create'
@@ -974,13 +1003,13 @@ export const SESSION_OVERRIDE_TOOLS: McpTool[] = [
   },
   {
     name: 'apply_session_override',
-    description: 'Write a previewed week-only override (or clear). Requires confirm=true, a preview_id under 24 h old whose diff still matches, and approval_ref = msg:<id> of the message where the athlete said yes. The in-app coach cannot approve; it proposes.',
+    description: 'Write a previewed week-only override (or clear). Requires confirm=true, a preview_id under 24 h old whose diff still matches, and the approval_ref the athlete created for that preview in the app (tap:<id> or msg:<id>; list_approvals(preview_id) shows it). Each approval applies once. Coaches cannot create approvals; the in-app coach cannot approve at all, it proposes.',
     inputSchema: {
       type: 'object',
       properties: {
         preview_id: { type: 'string' },
         confirm: { type: 'boolean', description: 'Must be true.' },
-        approval_ref: { type: 'string', description: 'msg:<message id> where the athlete approved this diff.' },
+        approval_ref: { type: 'string', description: 'The athlete\'s approval of this preview: tap:<approval id> or msg:<approval id> (from list_approvals).' },
       },
       required: ['preview_id', 'confirm', 'approval_ref'],
       additionalProperties: false,
@@ -1148,7 +1177,11 @@ export async function athleteOverrideAction(store: ConnectedStore, body: Record<
         throw e
       }
       if (!own) return [{ ok: false, reason: 'not_found', text: 'No such preview.' }, 200]
-      return [await applyPreview(store, me, { preview_id: previewId, confirm: true, approval_ref: `tap:${own.id}` }), 200]
+      // The tap is the approval (G10): a real approval row, made by this
+      // session for this preview and its diff, spent by the apply.
+      const approval = await createApproval(store, me, { preview_id: previewId })
+      if (!approval.ok) return [{ ok: false, reason: approval.reason === 'not_found' ? 'not_found' : 'refused', text: approval.text }, 200]
+      return [await applyPreview(store, me, { preview_id: previewId, confirm: true, approval_ref: approval.approval_ref }), 200]
     }
     default:
       return [{ error: 'unknown action' }, 400]

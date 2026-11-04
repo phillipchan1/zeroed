@@ -20,6 +20,7 @@ import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { loadLiveProgram, makeStore, type ConnectedStore, type LiveProgram } from './store.ts'
 import { APP_COACH, applyPreview, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { phaseRoutineSnapshots, routineDelta, withTx, writeChange } from './changeLog.ts'
+import { ApprovalSpent, checkApproval, consumeApproval, createApproval, proposalApprovalState } from './approvals.ts'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -144,11 +145,12 @@ export type ResolveResult =
  * proposal applies only with the athlete's own tap (opts.approvalRef, minted
  * by /api/proposals); a coach can't accept one on their behalf.
  *
- * With tracks_v1 on (G2) a program-edit proposal also needs an approval_ref
- * (the athlete's tap, or msg:<id> from a coach passing on their chat yes), must
- * be under 24 h old like any preview, and its write is logged in change_log in
- * the same transaction. opts.actor is the coach applying it over MCP; an app
- * Accept records the proposal's author.
+ * With tracks_v1 on (G2) a program-edit proposal also needs an approval_ref,
+ * must be under 24 h old like any preview, and its write is logged in
+ * change_log in the same transaction. Since G10 the ref must resolve to an
+ * approval row the athlete made for this proposal (their Accept tap, or their
+ * yes in the coach chat), which the write consumes. opts.actor is the coach
+ * applying it over MCP; an app Accept records the proposal's author.
  */
 export async function acceptProposal(
   store: ConnectedStore,
@@ -174,7 +176,13 @@ export async function acceptProposal(
   if (p.status !== 'pending') {
     return { ok: false, status: p.status === 'stale' ? 'stale' : 'refused', text: `This proposal was already ${p.status}.` }
   }
-  if (p.kind === 'session_override') return acceptOverrideProposal(store, p, opts.approvalRef)
+  if (p.kind === 'session_override') {
+    // Parked for the athlete: only their Accept applies it (G1).
+    if (opts.actor && await tracksV1On(store)) {
+      return { ok: false, status: 'refused', text: 'Refused: this week-only change is parked for the athlete; they accept it in the app.' }
+    }
+    return acceptOverrideProposal(store, p, opts.approvalRef)
+  }
   const logged = await tracksV1On(store)
   let author: OverrideActor = opts.actor ?? APP_COACH
   if (logged) {
@@ -195,7 +203,13 @@ export async function acceptProposal(
     if (!opts.actor) author = meta.source === 'app' ? APP_COACH : { type: 'mcp', id: 'coach' }
   }
   const run = () => applyProgramProposal(store, p, logged ? { approvalRef: opts.approvalRef!, author } : null)
-  return logged ? withTx(store.sql, run) : run()
+  if (!logged) return run()
+  try {
+    return await withTx(store.sql, run)
+  } catch (e) {
+    if (e instanceof ApprovalSpent) return { ok: false, status: 'refused', text: e.message }
+    throw e
+  }
 }
 
 async function applyProgramProposal(
@@ -230,6 +244,18 @@ async function applyProgramProposal(
       text: 'The program changed after this was proposed, so it was not applied. Ask the coach to look again.',
     }
   }
+  // G10: the athlete's approval of exactly this proposal, checked before any write.
+  let approvalId: string | null = null
+  let approvalRef = log?.approvalRef ?? null
+  if (log) {
+    const approval = await checkApproval(store, log.approvalRef, { previewId: p.id, currentDiff: proposalApprovalState(p) })
+    if (!approval.ok) {
+      await release('pending')
+      return { ok: false, status: 'refused', text: approval.text }
+    }
+    approvalId = approval.approvalId
+    approvalRef = approval.approvalRef
+  }
   const before = log ? await phaseRoutineSnapshots(store, live.phaseId) : []
   let text: string
   try {
@@ -245,7 +271,7 @@ async function applyProgramProposal(
   if (log) {
     const [athlete] = await store.sql<{ n: number }[]>`SELECT sessions_per_week AS n FROM athlete WHERE id = ${store.athleteId}`
     const spw = Number(athlete?.n ?? live.sessionsPerWeek)
-    await writeChange(store, {
+    const changeId = await writeChange(store, {
       actor: log.author,
       tool: 'accept_proposal',
       targetType: 'program',
@@ -261,9 +287,12 @@ async function applyProgramProposal(
         ...(spw !== live.sessionsPerWeek ? { sessions_per_week: { before: live.sessionsPerWeek, after: spw } } : {}),
       },
       rationale: p.rationale,
-      approvalRef: log.approvalRef,
+      approvalRef,
+      approvalId,
       previewId: p.preview_id,
     })
+    // Single use: spent by this change, or the whole accept rolls back.
+    if (!(await consumeApproval(store, approvalId!, changeId))) throw new ApprovalSpent()
   }
   // The move, pinned to the goal it serves so the goal page shows it.
   const goalId = (Array.isArray(p.goal_ids) ? p.goal_ids : []).find((g) => UUID_RE.test(g)) ?? null
@@ -327,6 +356,31 @@ export async function declineProposal(store: ConnectedStore, proposalId: string)
 }
 
 /**
+ * The athlete's Accept. With tracks_v1 on (G10) it is approve + apply: their
+ * tap creates an approval row for exactly this proposal, and the apply
+ * consumes it. Off, it is the pre-G10 accept, unchanged.
+ */
+export async function approveAndAccept(store: ConnectedStore, proposalId: string): Promise<ResolveResult & { approval_ref?: string }> {
+  if (!(await tracksV1On(store))) return acceptProposal(store, proposalId, { approvalRef: `tap:${proposalId}` })
+  if (!UUID_RE.test(proposalId)) return { ok: false, status: 'not_found', text: 'No such proposal.' }
+  const approval = await createApproval(store, { type: 'athlete', id: store.athleteId }, { preview_id: proposalId })
+  if (!approval.ok) {
+    if (approval.reason === 'stale') {
+      // Too old to approve: it goes stale, as an accept of it always did.
+      await store.sql`
+        UPDATE coach_proposal SET status = 'stale', resolved_at = NOW()
+        WHERE id = ${proposalId} AND athlete_id = ${store.athleteId} AND status = 'pending'
+          AND created_at <= NOW() - make_interval(hours => ${PREVIEW_TTL_HOURS}::int)
+      `
+    }
+    const status = approval.reason === 'stale' ? 'stale' : approval.reason === 'not_found' ? 'not_found' : approval.reason === 'unavailable' ? 'unavailable' : 'refused'
+    return { ok: false, status, text: approval.text.replace(/^Can't approve: /, '') }
+  }
+  const res = await acceptProposal(store, proposalId, { approvalRef: approval.approval_ref })
+  return res.ok ? { ...res, approval_ref: approval.approval_ref } : res
+}
+
+/**
  * POST /api/proposals — the app's side. Session auth, same as /api/session-rx.
  *   { action: 'list' }                 → { proposals } (null when the table is missing)
  *   { action: 'accept', id }           → ResolveResult
@@ -359,7 +413,7 @@ export async function handleProposals(req: Request, env: Env, _waitUntil?: WaitU
           return json({ proposals: await listProposals(store) }, 200, cors)
         case 'accept':
           // The athlete's own tap on Accept is the approval.
-          return json(await acceptProposal(store, id, { approvalRef: `tap:${id}` }), 200, cors)
+          return json(await approveAndAccept(store, id), 200, cors)
         case 'decline':
           return json(await declineProposal(store, id), 200, cors)
         default:

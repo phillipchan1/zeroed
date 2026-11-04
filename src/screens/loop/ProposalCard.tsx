@@ -14,7 +14,9 @@ type Phase = 'pending' | 'working' | 'applied' | 'declined' | 'stale' | 'error'
  * engine's own (what Claude previewed); Accept applies exactly that. On accept
  * only what changed moves: added movements slide in and lock, removed ones
  * fade, and nothing else on the card animates. The card's one yellow is
- * Accept, and it is the screen's only call to act.
+ * Approve, and it is the screen's only call to act. Approve is approve +
+ * apply: the Worker records the athlete's tap as an approval of exactly this
+ * diff, and the apply spends it (G10).
  */
 export function ProposalCard({ proposal, goalNames, onResolved }: {
   proposal: CoachProposal
@@ -92,7 +94,7 @@ export function ProposalCard({ proposal, goalNames, onResolved }: {
 
       {(phase === 'pending' || phase === 'working' || phase === 'error') && (
         <div className="proposal__acts">
-          <Button variant="primary" disabled={phase === 'working'} onClick={() => void act('accept')}>Accept</Button>
+          <Button variant="primary" disabled={phase === 'working'} onClick={() => void act('accept')}>Approve</Button>
           <Button variant="outline" disabled={phase === 'working'} onClick={() => void act('decline')}>Not now</Button>
         </div>
       )}
