@@ -15,6 +15,11 @@
  * Warnings name only what THIS edit introduces (a violation already in the
  * week before the edit is not repeated), and an exercise classify() can't
  * place is never the reason for one. Only U13 and red flags block.
+ *
+ * D3: a U7 warning names the blocked region, which is health data. A coach
+ * the athlete hasn't shared health data with gets forViewer(result, false):
+ * the same refusal with a generic message (HEALTH_HELD_TEXT) and only the
+ * session as its target, never the region or the exercise that loads it.
  */
 import type { ExerciseTemplate } from '../../../src/types/database.ts'
 import { classify, type Classified } from './classify.ts'
@@ -172,6 +177,12 @@ function interferenceBreaks(week: WeekSession[], p: MethodologyParams): Map<stri
 
 // ---- U7 red flags ----------------------------------------------------------------------------
 
+/** What a coach without health access is told about a U7 refusal (D3). */
+export const HEALTH_HELD_TEXT = 'This edit loads a region the athlete has held for health reasons; ask the athlete.'
+
+/** The session a U7 warning is about, for the redacted target. */
+const SESSION_OF = new WeakMap<PreviewWarning, string>()
+
 function redFlagBreaks(before: WeekSession[], after: WeekSession[], blocked: string[]): PreviewWarning | null {
   if (!blocked.length) return null
   const had = new Map(before.map((s) => [s.key, new Set(s.exercises.map((ex) => JSON.stringify(ex)))]))
@@ -181,12 +192,14 @@ function redFlagBreaks(before: WeekSession[], after: WeekSession[], blocked: str
       if (old.has(JSON.stringify(ex))) continue
       const hit = classify(ex).regions.find((r) => blocked.includes(r))
       if (hit) {
-        return {
+        const w: PreviewWarning = {
           rule: 'U7',
           message: `Red flag: ${hit} is blocked until a clinician clears it, and ${ex.name} loads it. Red flags always block; leave it out or pick work that spares the ${hit.replace('_', ' ')}.`,
           target: `${s.name} · ${ex.name}`,
           blocking: true,
         }
+        SESSION_OF.set(w, s.name)
+        return w
       }
     }
   }
@@ -225,6 +238,20 @@ export function validateEdit(input: ValidateInput): ValidateResult {
   }
   const blocked = warnings.find((w) => w.blocking) ?? null
   return { warnings, blocked }
+}
+
+/**
+ * The result as this viewer may see it (D3). With health data shared (the
+ * athlete, app_coach, a coach with the toggle on) it is unchanged; without,
+ * every U7 warning — and so the refusal — says HEALTH_HELD_TEXT instead.
+ */
+export function forViewer(result: ValidateResult, seesHealth: boolean): ValidateResult {
+  if (seesHealth || !result.warnings.some((w) => w.rule === 'U7')) return result
+  const held = (w: PreviewWarning): PreviewWarning => (w.rule === 'U7'
+    ? { rule: 'U7', message: HEALTH_HELD_TEXT, target: SESSION_OF.get(w) ?? 'week', ...(w.blocking ? { blocking: true as const } : {}) }
+    : w)
+  const warnings = result.warnings.map(held)
+  return { warnings, blocked: result.blocked ? warnings[result.warnings.indexOf(result.blocked)] ?? held(result.blocked) : null }
 }
 
 /** For preview text: a section the coach reads, with the structured list. */

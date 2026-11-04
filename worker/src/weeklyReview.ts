@@ -22,7 +22,7 @@
  * comes from the athlete's session-RPE taps, so it is health data too.
  */
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
-import { canonicalLiftId, e1rmFromSet } from '../../src/engine/liftModel.ts'
+import { canonicalLiftId, estimateE1rm, type E1rmMethod } from '../../src/engine/liftModel.ts'
 import { readLoggedExercises } from '../../src/engine/loggedSets.ts'
 import { mcpStamp } from '../../src/engine/mcpStamp.ts'
 import { topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
@@ -40,6 +40,9 @@ export interface LiftTrend {
   /** Best e1RM logged this week, and in the 3 weeks before. */
   e1rm_week: number | null
   e1rm_prior: number | null
+  /** U4: how each of those was estimated — the RPE chart, or Epley for a set with no RPE (v1.1). */
+  e1rm_week_method: E1rmMethod | null
+  e1rm_prior_method: E1rmMethod | null
   change_pct: number | null
   trend: 'up' | 'flat' | 'down' | 'no_data'
   /** Consecutive sessions, up to this week's last, each with a lower e1RM than the one before. */
@@ -183,22 +186,26 @@ export async function computeWeeklyReview(
   const maintenance = [...new Set(weekExercises.filter((e) => isMaintenance(e.name, e.track_id)).map((e) => e.name))].sort()
 
   // Top sets per exercise, oldest first.
-  const tops: Array<{ date: string; name: string; lift: string | null; e1rm: number | null; weight: number | null; rpe: number | null }> = []
+  const tops: Array<{ date: string; name: string; lift: string | null; e1rm: number | null; method: E1rmMethod | null; weight: number | null; rpe: number | null }> = []
+  const noRpe = params.U4.e1rm_without_rpe === 'epley' ? 'epley' : 'rpe10_floor'
   for (const w of [...workouts].reverse()) {
     const date = dayOf(w.performed_at)
     if (date < priorStart || date > sunday) continue
     for (const { name, sets } of readLoggedExercises(w)) {
       const top = topWorkingSet(sets)
       if (!top || top.weight == null || top.reps == null) continue
-      const e1rm = e1rmFromSet(top.weight, top.reps, top.rpe ?? null)
-      tops.push({ date, name, lift: canonicalLiftId(name), e1rm: e1rm != null ? Math.round(e1rm) : null, weight: top.weight, rpe: top.rpe ?? null })
+      const est = estimateE1rm(top.weight, top.reps, top.rpe ?? null, noRpe)
+      tops.push({ date, name, lift: canonicalLiftId(name), e1rm: est ? Math.round(est.e1rm) : null, method: est?.method ?? null, weight: top.weight, rpe: top.rpe ?? null })
     }
   }
   const best = (xs: Array<number | null>) => xs.reduce<number | null>((m, x) => (x != null && (m == null || x > m) ? x : m), null)
+  const bestPoint = <T extends { e1rm: number | null }>(xs: T[]) => xs.reduce<T | null>((m, x) => (x.e1rm != null && (m == null || x.e1rm > m.e1rm!) ? x : m), null)
   const priority_lifts: LiftTrend[] = priority.map((lift) => {
     const pts = tops.filter((t) => t.lift === lift && t.e1rm != null)
-    const week = best(pts.filter((p) => inWeek(p.date)).map((p) => p.e1rm))
-    const prior = best(pts.filter((p) => p.date < monday).map((p) => p.e1rm))
+    const weekTop = bestPoint(pts.filter((p) => inWeek(p.date)))
+    const priorTop = bestPoint(pts.filter((p) => p.date < monday))
+    const week = weekTop?.e1rm ?? null
+    const prior = priorTop?.e1rm ?? null
     const change = week != null && prior != null && prior > 0 ? round1(((week - prior) / prior) * 100) : null
     let down = 0
     const seq = pts.map((p) => p.e1rm!)
@@ -206,7 +213,10 @@ export async function computeWeeklyReview(
       for (let i = seq.length - 1; i > 0 && seq[i] < seq[i - 1]; i--) down++
     }
     const trend = week == null || prior == null ? 'no_data' : change! > 1 ? 'up' : change! < -1 ? 'down' : 'flat'
-    return { lift, e1rm_week: week, e1rm_prior: prior, change_pct: change, trend, down_sessions: down }
+    return {
+      lift, e1rm_week: week, e1rm_prior: prior, e1rm_week_method: weekTop?.method ?? null, e1rm_prior_method: priorTop?.method ?? null,
+      change_pct: change, trend, down_sessions: down,
+    }
   })
   const heldAt = params.U12.maintenance_held_at_rpe
   const maintenanceView: MaintenanceHeld[] = maintenance.map((exercise) => {

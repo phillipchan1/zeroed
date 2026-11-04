@@ -121,7 +121,12 @@ export function resolveParams(
   const trackLevel = trackId ? overrides.filter((o) => o.track_id === trackId) : []
   const applied: OverrideRecord[] = []
   for (const o of [...athleteLevel, ...trackLevel]) {
-    if (!specFor(o.path)) continue
+    const spec = specFor(o.path)
+    if (!spec) continue
+    // Under-18 rules only tighten (D6), against this version too: an override
+    // set under an older, looser default (minors contacts 70 under v1's 80)
+    // never loosens the newer one (v1.1's 60).
+    if (spec.rule === 'minors' && strictness(spec, getPath(root, o.path), o.value) > 0) continue
     setPath(root, o.path.startsWith('minors.') ? o.path : `params.${o.path}`, o.value)
     applied.push(o)
   }
@@ -147,6 +152,8 @@ export function engineParams(r: Resolved): LiftModelParams {
     deloadTmPct: r.params.U11.deload_tm_pct,
     deloadRpeCap: r.params.U11.deload_rpe_cap,
     maxRpe: r.minor ? r.minors.max_rpe : null,
+    // v1.1 (U4): RPE-less sets by Epley, the method recorded. v1 leaves it out: today's math.
+    ...(r.params.U4.e1rm_without_rpe === 'epley' ? { e1rmNoRpe: 'epley' as const } : {}),
   }
 }
 
@@ -214,6 +221,7 @@ const FIXED: Array<[RegExp, string]> = [
   [/^preview_ttl_hours$|^params\.preview_ttl_hours$/, 'previews expire after 24 h for everyone (section 6)'],
   [/^U8\.order$/, 'session order is the rule the validator checks (U8)'],
   [/^U4\.(e1rm_source|written_load_wins)$/, 'a written load always beats TM math (U4, #49)'],
+  [/^U4\.e1rm_without_rpe$/, 'how an RPE-less set is estimated is set by the methodology version (U4, section 11)'],
   [/^minors\.(age_under|parental_consent_required|max_testing|raised_pain_cap)$/, 'under-18 rules can only be tightened, and these are already at their strictest (D6)'],
 ]
 

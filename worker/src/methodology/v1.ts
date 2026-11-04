@@ -19,10 +19,18 @@
  * max is read off the RTS reps × RPE chart (Epley is kept for PR display), so
  * v1 records what the engine does: e1rm_source 'rpe_chart'.
  *
+ * v1.1 (spec section 11, Director of Product, Nov 4 2026) is v1 plus:
+ *   U4.e1rm_without_rpe 'epley'   the RPE chart when a set has an RPE, Epley
+ *                                 when it doesn't (v1 read it at RPE 10); each
+ *                                 estimate records its method (e1rm_method)
+ *   minors.contacts_per_session_max 60   was an 80 placeholder; still tighten-only
+ * v1 stays resolvable (METHODOLOGIES) for prescriptions already stamped with it.
+ *
  * Numbers are coaching defaults, not medical prescriptions.
  */
 
 export const METHODOLOGY_V1_VERSION = 'v1'
+export const METHODOLOGY_V1_1_VERSION = 'v1.1'
 
 /** Pain regions a cap or a red flag can be set on (U7). */
 export const PAIN_REGIONS = [
@@ -47,7 +55,11 @@ export interface MethodologyParams {
   U1: { strength_exposures_per_week: number; strength_exposure_min_pct_tm: number; strength_exposure_min_rpe: number }
   U2: { max_priority_tracks: number; maintenance_volume_fraction: Range; higher_end_from_age: number }
   U3: { load_step_lb: { upper: Range; lower: Range }; load_step_kg: { upper: Range; lower: Range }; push_pct: { upper: number; lower: number } }
-  U4: { tm_fraction: number; e1rm_source: 'rpe_chart'; written_load_wins: true }
+  U4: {
+    tm_fraction: number; e1rm_source: 'rpe_chart'; written_load_wins: true
+    /** v1.1: how a set with no RPE is estimated. Absent (v1): the chart at RPE 10. */
+    e1rm_without_rpe?: 'epley'
+  }
   U5: {
     base_rpe: Range; top_single_rpe: Range; rpe_10: 'test_days_only'
     hold_after_weeks_over: number; deload_or_swap_after_weeks_over: number
@@ -172,8 +184,22 @@ export const METHODOLOGY_V1: Methodology = {
   preview_ttl_hours: 24,
 }
 
+/** v1.1 (section 11): U4 Epley fallback with the method recorded; under-18 contacts ≤ 60 a session. */
+export const METHODOLOGY_V1_1: Methodology = {
+  ...METHODOLOGY_V1,
+  version: METHODOLOGY_V1_1_VERSION,
+  params: {
+    ...METHODOLOGY_V1.params,
+    U4: { ...METHODOLOGY_V1.params.U4, e1rm_without_rpe: 'epley' },
+  },
+  minors: { ...METHODOLOGY_V1.minors, contacts_per_session_max: 60 },
+}
+
 /** Every version the Worker can still resolve, by version string. */
-export const METHODOLOGIES: Record<string, Methodology> = { [METHODOLOGY_V1_VERSION]: METHODOLOGY_V1 }
+export const METHODOLOGIES: Record<string, Methodology> = {
+  [METHODOLOGY_V1_VERSION]: METHODOLOGY_V1,
+  [METHODOLOGY_V1_1_VERSION]: METHODOLOGY_V1_1,
+}
 
 /** The version new prescriptions run on. */
-export const CURRENT_METHODOLOGY = METHODOLOGY_V1
+export const CURRENT_METHODOLOGY = METHODOLOGY_V1_1

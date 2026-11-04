@@ -2,8 +2,8 @@ import type { ExerciseTemplate } from '../../supabase/functions/_shared/engine/t
 import { readLoggedExercises, type LoggedWorkoutLike } from '../../supabase/functions/_shared/engine/loggedSets.ts'
 import { formatSet, isoDay, shortDate, topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import {
-  addDays, e1rmFromSet, liftNameMatcher, localDay, mondayOf, parseLiftId,
-  type LiftModelSources, type MainLiftId, type ModelWorkout, type ProgressionRuleRef, type TmOverride,
+  addDays, estimateE1rm, liftNameMatcher, localDay, mondayOf, parseLiftId,
+  type E1rmMethod, type LiftModelSources, type NoRpeE1rm, type MainLiftId, type ModelWorkout, type ProgressionRuleRef, type TmOverride,
 } from '../../supabase/functions/_shared/engine/liftModel.ts'
 import { asJson, type Sql } from './db.ts'
 
@@ -386,18 +386,20 @@ export async function loadWorkout(store: ConnectedStore, workoutId: string): Pro
   return hydrateOwnedWorkout(store, await selectOwnedWorkout(store, workoutId), workoutId)
 }
 
-export async function loadLiftHistory(store: ConnectedStore, exerciseName: string): Promise<{
+export async function loadLiftHistory(store: ConnectedStore, exerciseName: string, opts: { noRpe?: NoRpeE1rm } = {}): Promise<{
   name: string
   matches: string[]
   canonical: MainLiftId | null
-  points: Array<{ date: string; top: string; e1rm: number | null; rpe: number | null }>
+  points: Array<{ date: string; top: string; e1rm: number | null; rpe: number | null; e1rm_method?: E1rmMethod | null }>
   bestWeight: number | null
   bestE1rm: number | null
+  /** U4 (tracks_v1 only): how an RPE-less set was read. Absent: the chart at RPE 10, as before. */
+  noRpe?: NoRpeE1rm
 }> {
   const rows = await loadWorkouts(store, { limit: 120 })
   const matches = liftNameMatcher(exerciseName)
   const names = new Set<string>()
-  const points: Array<{ date: string; top: string; e1rm: number | null; rpe: number | null; weight: number | null }> = []
+  const points: Array<{ date: string; top: string; e1rm: number | null; rpe: number | null; weight: number | null; e1rm_method?: E1rmMethod | null }> = []
   for (const w of [...rows].reverse()) {
     for (const { name, sets } of readLoggedExercises(w)) {
       if (!matches(name)) continue
@@ -405,8 +407,10 @@ export async function loadLiftHistory(store: ConnectedStore, exerciseName: strin
       const top = topWorkingSet(sets)
       if (!top) continue
       // Off the RPE chart, not Epley: the same 115×5 is a different max at @6
-      // than at @9. A set with no RPE reads at 10 — the floor it proves.
-      const e1rm = top.weight != null && top.reps != null ? e1rmFromSet(top.weight, top.reps, top.rpe ?? null) : null
+      // than at @9. A set with no RPE reads at 10 — the floor it proves —
+      // or, with opts.noRpe 'epley' (methodology v1.1, U4), by Epley.
+      const est = top.weight != null && top.reps != null ? estimateE1rm(top.weight, top.reps, top.rpe ?? null, opts.noRpe) : null
+      const e1rm = est?.e1rm ?? null
       const cell = formatSet(top, store.unit)
       if (!cell) continue
       points.push({
@@ -415,6 +419,7 @@ export async function loadLiftHistory(store: ConnectedStore, exerciseName: strin
         e1rm: e1rm != null ? Math.round(e1rm) : null,
         rpe: top.rpe ?? w.rpe,
         weight: top.weight ?? null,
+        ...(opts.noRpe ? { e1rm_method: est?.method ?? null } : {}),
       })
     }
   }
@@ -422,9 +427,10 @@ export async function loadLiftHistory(store: ConnectedStore, exerciseName: strin
     name: exerciseName,
     matches: [...names],
     canonical: parseLiftId(exerciseName),
-    points: points.map(({ date, top, e1rm, rpe }) => ({ date, top, e1rm, rpe })),
+    points: points.map(({ date, top, e1rm, rpe, e1rm_method }) => ({ date, top, e1rm, rpe, ...(opts.noRpe ? { e1rm_method } : {}) })),
     bestWeight: points.reduce<number | null>((m, p) => (p.weight != null && (m == null || p.weight > m) ? p.weight : m), null),
     bestE1rm: points.reduce<number | null>((m, p) => (p.e1rm != null && (m == null || p.e1rm > m) ? p.e1rm : m), null),
+    ...(opts.noRpe ? { noRpe: opts.noRpe } : {}),
   }
 }
 
@@ -687,10 +693,12 @@ export function renderLift(h: Awaited<ReturnType<typeof loadLiftHistory>>, unit:
   const lines = [
     `# ${h.matches.join(', ') || h.name}`,
     h.bestWeight != null ? `Best load: ${h.bestWeight}${unit}` : null,
-    h.bestE1rm != null ? `Best e1RM (RPE chart; no RPE reads as @10): ${h.bestE1rm}${unit}` : null,
+    h.bestE1rm != null
+      ? `Best e1RM (RPE chart; ${h.noRpe === 'epley' ? 'Epley when no RPE is logged (U4)' : 'no RPE reads as @10'}): ${h.bestE1rm}${unit}`
+      : null,
     h.canonical ? `Matched by lift identity (${h.canonical}) — variations like Cossack, split, close-grip or push press are excluded. get_lift_model has the working max and this week's number.` : null,
     '',
-    ...h.points.map((p) => `- ${p.date}: ${p.top}${p.e1rm != null ? ` (e1RM ${p.e1rm})` : ''}`),
+    ...h.points.map((p) => `- ${p.date}: ${p.top}${p.e1rm != null ? ` (e1RM ${p.e1rm}${p.e1rm_method ? `, ${p.e1rm_method === 'epley' ? 'Epley' : 'RPE chart'}` : ''})` : ''}`),
   ]
   return lines.filter((l) => l !== null).join('\n')
 }

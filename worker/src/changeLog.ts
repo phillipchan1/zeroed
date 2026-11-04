@@ -1188,20 +1188,45 @@ export const CHANGE_LOG_TOOL_NAMES = new Set(CHANGE_LOG_TOOLS.map((t) => t.name)
 /** change_log target types that carry health data (G4, G9, D3). */
 const HEALTH_TARGETS = new Set(['checkin', 'region', 'session_rpe'])
 
+/** A per-region pain rule (U7.regions.<region>.*): which region is capped or red-flagged is health data too. */
+const healthRuleRow = (c: { target_type: string; target_id: string | null }) =>
+  c.target_type === 'methodology' && /^U7\.regions\./.test(c.target_id ?? '')
+
+/** Rules whose reasons are readiness and pain (U6, U7): a rationale citing them can quote check-ins or pain. */
+const HEALTH_RULES = new Set(['U6', 'U7'])
+
 export async function runChangeLogTool(store: ConnectedStore, name: string, args: Obj, actor: ChangeActor): Promise<string> {
   if (!(await tracksV1On(store))) throw new McpUserError(`Unknown tool: ${name}`)
   switch (name) {
     case 'get_change_log': {
       if (!isoOrNull(args.since)) throw new McpUserError('since is required: an ISO date or timestamp')
+      const health = await seesHealth(store, actor)
+      // D3: filtering by one region's pain rule would say, by whether anything
+      // comes back, whether that region was capped or red-flagged. Answered the
+      // same either way.
+      const asked = typeof args.target === 'string' ? args.target.trim() : ''
+      if (!health && /^U7\.regions\./.test(asked)) {
+        return 'Pain rules for a region are health data the athlete hasn\'t shared with you. Ask the athlete.'
+      }
       const page = await listChanges(store, args)
       if (page == null) return changeLogUnavailable.replace(' Nothing was written.', '')
       if (!page.changes.length) return 'No changes in that window.'
-      // D3: check-ins, pain, region clears and session RPE are health data. A coach the
-      // athlete hasn't shared them with sees that a row exists, not what it says.
-      if (!(await seesHealth(store, actor))) {
-        page.changes = page.changes.map((c) => (HEALTH_TARGETS.has(c.target_type)
-          ? { ...c, target_id: null, diff: { hidden: true }, summary: c.target_type === 'session_rpe' ? 'Session effort (not shared with you)' : 'Health check-in (not shared with you)', rationale: null, rule_refs: [] }
-          : c))
+      // D3: check-ins, pain, region clears, per-region pain rules and session RPE are
+      // health data. A coach the athlete hasn't shared them with sees that a row
+      // exists, not what it says; and another actor's rationale citing U6/U7 (which
+      // can quote pain or check-ins) is withheld.
+      if (!health) {
+        const own = (c: { actor_type: string; actor_id: string }) => c.actor_type === actor.type && c.actor_id === actor.id
+        page.changes = page.changes.map((c) => (HEALTH_TARGETS.has(c.target_type) || healthRuleRow(c)
+          ? {
+              ...c, target_id: null, diff: { hidden: true }, rationale: null, rule_refs: [],
+              summary: c.target_type === 'session_rpe' ? 'Session effort (not shared with you)'
+                : healthRuleRow(c) ? 'Pain rule for a region (not shared with you)'
+                  : 'Health check-in (not shared with you)',
+            }
+          : c.rationale && !own(c) && c.rule_refs.some((r) => HEALTH_RULES.has(r))
+            ? { ...c, rationale: 'A health-related reason (not shared with you).' }
+            : c))
       }
       return JSON.stringify({
         changes: page.changes.map((c) => ({
