@@ -1264,11 +1264,99 @@ function blockKeys(d: Obj): string[] {
     if (t.rule_id) keys.add(`rule:${String(t.rule_id)}`)
   }
   if (typeof d.program_id === 'string') keys.add(`program_meta:${d.program_id}`)
+  const q = obj(d.program_phase)
+  for (const k of ['phase_id', 'live_phase_id', 'replaced_queued']) if (typeof q[k] === 'string') keys.add(`phase:${String(q[k])}`)
   return [...keys]
 }
 
+/**
+ * The week a block queued (activities.writeBlockProgram), taken back inside
+ * the revert: its phase is skipped (kept; its routines stay as history), the
+ * live block's end date goes back, and the composed block's phase it replaced
+ * is queued again. Once the block has started, the block before it is the
+ * live one again. Guards: null when it still looks as the apply left it.
+ */
+async function blockPhaseState(store: ConnectedStore, q: Obj): Promise<{ started: boolean } | Fail> {
+  const ids = ['phase_id', 'live_phase_id', 'replaced_queued'].map((k) => q[k]).filter((v): v is string => typeof v === 'string' && UUID_RE.test(v))
+  const rows = await store.sql<{ id: string; status: string; week_end: string }[]>`
+    SELECT ph.id::text AS id, ph.status, ph.week_end::text AS week_end
+    FROM phase ph JOIN program p ON p.id = ph.program_id
+    WHERE p.athlete_id = ${store.athleteId} AND ph.id::text = ANY(${pgArrayLiteral(ids)}::text[])
+  `
+  const at = (id: unknown) => rows.find((r) => r.id === id)
+  const mine = at(q.phase_id)
+  const live = at(q.live_phase_id)
+  if (!mine || !live) return stale('the block\'s sessions')
+  if (live.week_end !== q.live_week_end_after) return stale('your previous block\'s end date')
+  if (typeof q.replaced_queued === 'string' && at(q.replaced_queued)?.status !== 'skipped') return stale('the block it replaced')
+  if (mine.status === 'pending') {
+    if (live.status !== 'active') return stale('your current block')
+    return { started: false }
+  }
+  if (mine.status === 'active' && live.status === 'completed') {
+    // Started: the previous block comes back only if nothing else took over since.
+    const [other] = await store.sql<{ id: string }[]>`
+      SELECT ph.id::text AS id FROM phase ph JOIN program p ON p.id = ph.program_id
+      WHERE p.athlete_id = ${store.athleteId} AND ph.program_id = ${String(q.program_id)} AND ph.id <> ${String(q.phase_id)}
+        AND ph.status IN ('active', 'pending')
+      LIMIT 1
+    `
+    if (other) return stale('the program (another block is live or queued)')
+    return { started: true }
+  }
+  return stale('the block\'s sessions')
+}
+
+async function undoBlockPhase(store: ConnectedStore, q: Obj, started: boolean): Promise<void> {
+  const one = async (rows: Promise<{ id: string }[]>) => {
+    if (!(await rows).length) throw staleRefusal('the block\'s sessions')
+  }
+  await one(store.sql<{ id: string }[]>`
+    UPDATE phase ph SET status = 'skipped'
+    FROM program p
+    WHERE ph.id = ${String(q.phase_id)} AND ph.program_id = p.id AND p.athlete_id = ${store.athleteId}
+      AND ph.status = ${started ? 'active' : 'pending'}
+    RETURNING ph.id::text AS id
+  `)
+  await one(store.sql<{ id: string }[]>`
+    UPDATE phase ph SET week_end = ${String(q.live_week_end_before)}::date, status = 'active'
+    FROM program p
+    WHERE ph.id = ${String(q.live_phase_id)} AND ph.program_id = p.id AND p.athlete_id = ${store.athleteId}
+      AND ph.week_end = ${String(q.live_week_end_after)}::date AND ph.status = ${started ? 'completed' : 'active'}
+    RETURNING ph.id::text AS id
+  `)
+  if (started) {
+    // The app named the block's phase when it went live; the previous one is current again.
+    await store.sql`
+      UPDATE athlete_profile SET current_phase = (
+        SELECT ph.name FROM phase ph JOIN program p ON p.id = ph.program_id
+        WHERE ph.id = ${String(q.live_phase_id)} AND p.athlete_id = ${store.athleteId}
+      )
+      WHERE athlete_id = ${store.athleteId}
+    `
+  }
+  if (typeof q.replaced_queued === 'string') {
+    await one(store.sql<{ id: string }[]>`
+      UPDATE phase ph SET status = 'pending'
+      FROM program p
+      WHERE ph.id = ${q.replaced_queued} AND ph.program_id = p.id AND p.athlete_id = ${store.athleteId} AND ph.status = 'skipped'
+      RETURNING ph.id::text AS id
+    `)
+  }
+}
+
+async function blockPhaseColumn(store: ConnectedStore): Promise<boolean> {
+  const [row] = await store.sql<{ ok: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'composed_block' AND column_name = 'phase_id'
+    ) AS ok
+  `
+  return row?.ok === true
+}
+
 const COMPOSED_BLOCK: Handler = {
-  defined: 'The block comes off: its rules end, tracks and goals it created are retired, added activities go inactive, goal weights, track purposes and block dates go back, and the block before it is the block of record again. Redo is refused: re-compose instead, so the new block runs on the current methodology.',
+  defined: 'The block comes off: its rules end, tracks and goals it created are retired, added activities go inactive, goal weights, track purposes and block dates go back, the week it queued is skipped (kept as history) and the previous block runs on, and the block before it is the block of record again. Redo is refused: re-compose instead, so the new block runs on the current methodology.',
   blocked: (d, dir) => {
     if (dir === 'redo') return 'a block is never re-applied from the log. Ask your coach to re-compose, so the new block runs on the current methodology, and approve that.'
     return arr(d.tracks).length && !d.ended_rule_ends ? LEGACY : null
@@ -1297,6 +1385,10 @@ const COMPOSED_BLOCK: Handler = {
     }
     const retireGoals = [...arr(d.goals_added), ...arr(d.screen_goals_added), ...arr(d.goals_unretired)].map(String).filter((id) => UUID_RE.test(id))
     const retireTracks = tracks.filter((t) => t.created === true).map((t) => String(t.track_id))
+    const phaseDiff = obj(d.program_phase)
+    const phase = typeof phaseDiff.phase_id === 'string' ? await blockPhaseState(store, phaseDiff) : null
+    if (phase && 'ok' in phase) return phase
+    const phaseCol = await blockPhaseColumn(store)
     return {
       targetType: 'composed_block',
       targetId: blockId,
@@ -1305,6 +1397,11 @@ const COMPOSED_BLOCK: Handler = {
         reinstated_from: d.superseded ?? null,
         activities_inactive: arr(d.activities_added), goals_retired: retireGoals, tracks_retired: retireTracks,
         rules_ended: tracks.map((t) => String(t.rule_id)), rules_reopened: Object.keys(ends),
+        ...(phase ? {
+          sessions_skipped: { phase_id: phaseDiff.phase_id, started: phase.started, routine_ids: arr(phaseDiff.routine_ids) },
+          live_restored: { phase_id: phaseDiff.live_phase_id, week_end: phaseDiff.live_week_end_before },
+          ...(typeof phaseDiff.replaced_queued === 'string' ? { requeued: phaseDiff.replaced_queued } : {}),
+        } : {}),
       },
       apply: async (c) => {
         const tomb = (table: TombTable, rowId: string) => writeTombstone(store, { table, rowId, kind: 'retire', changeId: c.changeId, voidsChangeId: ctx.row.id })
@@ -1372,19 +1469,32 @@ const COMPOSED_BLOCK: Handler = {
           RETURNING id::text AS id
         `
         if (!off.length) throw staleRefusal('the block')
+        if (phase) await undoBlockPhase(store, phaseDiff, phase.started)
         // The block before it is the block of record again: a copy, since a superseded row never changes back.
         if (typeof d.superseded === 'string') {
           const copy = crypto.randomUUID()
-          const done = await store.sql<{ id: string }[]>`
-            INSERT INTO composed_block (
-              id, athlete_id, program_id, start_date, end_date, methodology_version, modules_version, compose_key, block, request,
-              intake_id, preview_id, approval_ref, change_id, actor_type, actor_id
-            )
-            SELECT ${copy}, athlete_id, program_id, start_date, end_date, methodology_version, modules_version, compose_key, block, request,
-                   intake_id, ${`revert:${c.changeId}`}, ${c.approvalRef}, ${c.changeId}, 'athlete', ${store.athleteId}
-            FROM composed_block WHERE id = ${d.superseded} AND athlete_id = ${store.athleteId}
-            RETURNING id::text AS id
-          `
+          // With its queued week, so a later re-compose replaces that one too.
+          const done = phaseCol
+            ? await store.sql<{ id: string }[]>`
+                INSERT INTO composed_block (
+                  id, athlete_id, program_id, start_date, end_date, methodology_version, modules_version, compose_key, block, request,
+                  intake_id, preview_id, approval_ref, change_id, actor_type, actor_id, phase_id
+                )
+                SELECT ${copy}, athlete_id, program_id, start_date, end_date, methodology_version, modules_version, compose_key, block, request,
+                       intake_id, ${`revert:${c.changeId}`}, ${c.approvalRef}, ${c.changeId}, 'athlete', ${store.athleteId}, phase_id
+                FROM composed_block WHERE id = ${d.superseded} AND athlete_id = ${store.athleteId}
+                RETURNING id::text AS id
+              `
+            : await store.sql<{ id: string }[]>`
+                INSERT INTO composed_block (
+                  id, athlete_id, program_id, start_date, end_date, methodology_version, modules_version, compose_key, block, request,
+                  intake_id, preview_id, approval_ref, change_id, actor_type, actor_id
+                )
+                SELECT ${copy}, athlete_id, program_id, start_date, end_date, methodology_version, modules_version, compose_key, block, request,
+                       intake_id, ${`revert:${c.changeId}`}, ${c.approvalRef}, ${c.changeId}, 'athlete', ${store.athleteId}
+                FROM composed_block WHERE id = ${d.superseded} AND athlete_id = ${store.athleteId}
+                RETURNING id::text AS id
+              `
           return done.length ? { reinstated_block_id: copy } : undefined
         }
       },

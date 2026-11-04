@@ -21,10 +21,21 @@
  *   apply_composed_block    the same approval rules; refused while a
  *                           trade-off is undecided. Writes the block of
  *                           record, any activities/goals the request added,
- *                           goal weights, tracks + progression rules, and the
- *                           program's deload/retest dates, in one transaction
- *                           with one change_log row. Screen baselines then go
- *                           in under standing approval (log_goal_measurement).
+ *                           goal weights, tracks + progression rules, the
+ *                           program's deload/retest dates, and the week's
+ *                           sessions (coach/blockProgram.ts) as a new queued
+ *                           block (a pending phase from the block's start;
+ *                           the live week runs until then and is never
+ *                           rewritten), in one transaction with one
+ *                           change_log row. Screen baselines then go in under
+ *                           standing approval (log_goal_measurement).
+ *
+ * The week's sessions are part of the preview the athlete approves: the
+ * concrete program diff, with the G5 validators run on it. A composed block
+ * rewrites the week, so it runs as an explicit rewrite=true (U13's small-edit
+ * cap does not apply, and the preview says so); a red flag (U7) still refuses
+ * it. Before worker/schema/composed-block-program.sql the block applies as
+ * before (no sessions) and the preview says why.
  *
  * coach_v1 only counts together with tracks_v1; with it off every tool here
  * is unknown and nothing here is called. app_coach can preview and never
@@ -40,7 +51,7 @@ import { athleteMinor, blockedRegions, resolveMethodology } from './methodology.
 import { seesHealth, statusBlockedRegions } from './regionStatus.ts'
 import { athleteToday, canonicalJson, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { runTrackTool } from './trackTools.ts'
-import type { ConnectedStore } from './store.ts'
+import { loadLiveProgram, type ConnectedStore, type LiveProgram } from './store.ts'
 import { hiddenIds, idList, tombstonesReady } from './tombstones.ts'
 import { McpUserError } from './userError.ts'
 import {
@@ -53,7 +64,11 @@ import {
   type ModuleKey, type Quality, type ScreenKey,
 } from './coach/modules.ts'
 import { ageOn } from './coach/intake.ts'
-import { PAIN_REGIONS, type PainRegion } from './methodology/v1.ts'
+import { BLOCK_PROGRAM_VERSION, blockSessions, sessionLines, type BlockSession, type HeldExercise } from './coach/blockProgram.ts'
+import { PAIN_REGIONS, type MethodologyParams, type PainRegion } from './methodology/v1.ts'
+import { forViewer, validateEdit, warningsSection, type ValidateResult } from './methodology/validators.ts'
+import { insertOwnedRoutine, liveToDraft } from './edits.ts'
+import { previewId as draftFingerprint } from '../../src/engine/mcpStamp.ts'
 
 export const ACTIVITY_TOOL = 'apply_activity_change'
 export const BLOCK_TOOL = 'apply_composed_block'
@@ -470,6 +485,25 @@ function injuriesFrom(answers: Obj): ComposeInjury[] {
   return [...out.values()].sort((a, b) => a.region.localeCompare(b.region))
 }
 
+/**
+ * The week's sessions as the block writes them: a new queued block (a pending
+ * phase in the active program) from the block's start. What it replaces is
+ * named so the apply can tell if the live program moved since the preview.
+ */
+export interface BlockProgramPlan {
+  version: string
+  program_id: string
+  /** The live block as previewed: it keeps running, and ends the day before the new one starts. */
+  live: { phase_id: string; name: string; week_start: string; week_end: string; fingerprint: string }
+  phase: { name: 'Stability' | 'Strength' | 'Power' | 'Sport'; week_start: string; week_end: string }
+  /** The previous composed block's queued phase, not started yet: skipped (kept) by this one. */
+  replaces_queued: string | null
+  sessions: BlockSession[]
+  held: HeldExercise[]
+  /** U13: a composed block rewrites the week, always explicitly. */
+  rewrite: true
+}
+
 /** What a composed-block preview holds and its apply must still match. */
 interface BlockState {
   request: BlockRequest
@@ -477,11 +511,107 @@ interface BlockState {
   modules_version: string
   compose_key: string
   block: ComposedBlock
+  /** The week's sessions, or null with the reason (program_note). */
+  program: BlockProgramPlan | null
+  /** Why there are no sessions; refuse: the apply is refused until it changes. */
+  program_note: { refuse: boolean; text: string } | null
 }
 
-async function planBlock(store: ConnectedStore, req: BlockRequest): Promise<BlockState> {
+/** composed_block.phase_id exists (worker/schema/composed-block-program.sql). Checked, not caught. */
+export async function blockProgramReady(store: ConnectedStore): Promise<boolean> {
+  const [row] = await store.sql<{ ok: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'composed_block' AND column_name = 'phase_id'
+    ) AS ok
+  `
+  return row?.ok === true
+}
+
+function phaseNameFor(b: ComposedBlock): BlockProgramPlan['phase']['name'] {
+  if (b.priorities.includes('max_strength')) return 'Strength'
+  if (b.priorities.includes('power')) return 'Power'
+  if (b.activity_load.sessions_per_week > 0) return 'Sport'
+  return 'Strength'
+}
+
+async function planProgram(store: ConnectedStore, c: Composed, live: LiveProgram | null): Promise<Pick<BlockState, 'program' | 'program_note'>> {
+  const none = (text: string, refuse = false) => ({ program: null, program_note: { refuse, text } })
+  if (!live) return none('No active program, so no sessions are written; the block of record is kept.')
+  if (!(await blockProgramReady(store))) return none('The week\'s sessions are not written on this database yet (composed-block-program.sql); tracks, rules and dates are.')
+  const b = c.block
+  if (live.weekStart >= b.start) {
+    return none(`The current block started ${live.weekStart}; a new block starts after it. Preview again with a later start.`, true)
+  }
+  // A block already queued: the previous composed block's is replaced (kept,
+  // skipped); anything else queued is never overwritten silently.
+  const block = await currentBlock(store)
+  const [mine] = block
+    ? await store.sql<{ phase_id: string | null }[]>`
+        SELECT phase_id::text AS phase_id FROM composed_block WHERE id = ${block.id} AND athlete_id = ${store.athleteId}
+      `
+    : []
+  const queued = await store.sql<{ id: string; week_start: string }[]>`
+    SELECT ph.id::text AS id, ph.week_start::text AS week_start
+    FROM phase ph JOIN program p ON p.id = ph.program_id
+    WHERE p.athlete_id = ${store.athleteId} AND ph.program_id = ${live.programId} AND ph.status = 'pending'
+    ORDER BY ph.week_start, ph.id
+  `
+  const replaces = queued.find((q) => q.id === mine?.phase_id) ?? null
+  const other = queued.find((q) => q.id !== replaces?.id)
+  if (other) {
+    return none(`A block is already queued for ${other.week_start} by another change. Undo it from the Changes feed (or let it start), then preview again.`, true)
+  }
+  const { sessions, held } = blockSessions(b, { blocked: c.input.blocked_regions, minor: c.input.minor, minors: c.input.minors })
+  return {
+    program: {
+      version: BLOCK_PROGRAM_VERSION,
+      program_id: live.programId,
+      live: { phase_id: live.phaseId, name: live.phaseName, week_start: live.weekStart, week_end: live.weekEnd, fingerprint: await draftFingerprint(liveToDraft(live)) },
+      phase: { name: phaseNameFor(b), week_start: b.start, week_end: b.end },
+      replaces_queued: replaces?.id ?? null,
+      sessions,
+      held,
+      rewrite: true,
+    },
+    program_note: null,
+  }
+}
+
+/**
+ * G5 on the block's week: the live week before, the block's week after,
+ * against this athlete's methodology. rewrite=true (U13 doesn't apply to a
+ * composed block); a red flag still refuses it.
+ */
+function validateBlockProgram(live: LiveProgram | null, plan: BlockProgramPlan, params: MethodologyParams, blocked: string[]): ValidateResult {
+  const before = (live?.sessions ?? []).map((s) => ({ key: s.routineId, name: s.name, dow: s.intendedDow, exercises: s.exercises }))
+  const after = plan.sessions.map((s) => ({ key: `block:${s.intended_dow}`, name: s.name, dow: s.intended_dow, exercises: s.exercises }))
+  const count = (xs: typeof before) => xs.reduce((n, s) => n + s.exercises.length, 0)
+  return validateEdit({
+    before, after, params,
+    changed: count(before) + count(after),
+    total: count(before),
+    rewrite: plan.rewrite,
+    blockedRegions: blocked,
+  })
+}
+
+async function planBlock(store: ConnectedStore, req: BlockRequest): Promise<BlockState & { checked: ValidateResult | null }> {
   const c = await composeFor(store, req)
-  return { request: c.effective, methodology_version: c.methodology_version, modules_version: MODULES_V1_VERSION, compose_key: c.key, block: c.block }
+  const live = await loadLiveProgram(store)
+  const program = await planProgram(store, c, live)
+  const checked = program.program ? validateBlockProgram(live, program.program, c.input.params, c.input.blocked_regions) : null
+  return {
+    request: c.effective, methodology_version: c.methodology_version, modules_version: MODULES_V1_VERSION, compose_key: c.key, block: c.block,
+    ...program,
+    checked,
+  }
+}
+
+/** The kept state: everything but the validator result (recomputed, and shown per viewer). */
+function keptState(p: Awaited<ReturnType<typeof planBlock>>): BlockState {
+  const { checked: _c, ...state } = p
+  return state
 }
 
 /** Re-compose: the reason the block on file no longer stands, or null. */
@@ -514,8 +644,32 @@ export function redactHealth(b: ComposedBlock): ComposedBlock {
   }
 }
 
-export function blockSummary(b: ComposedBlock) {
+/** The week's sessions as the preview shows them. D3: without the health toggle, held exercises are a count only. */
+export function programView(state: Pick<BlockState, 'program' | 'program_note'>, health: boolean) {
+  const p = state.program
+  if (!p) return { sessions: [], held: [] as Array<{ session: string | null; exercise: string; regions: string[]; note?: string }>, note: state.program_note?.text ?? null, appliable: state.program_note?.refuse !== true }
   return {
+    starts: p.phase.week_start,
+    ends: p.phase.week_end,
+    replaces: `${p.live.name} (runs until ${addDaysIso(p.phase.week_start, -1)}; kept as history)`,
+    rewrite: true,
+    sessions: p.sessions.map((s) => ({
+      name: s.name, day: s.intended_dow, session_type: s.session_type,
+      exercises: s.exercises.map((e) => ({
+        name: e.name, sets: e.sets, reps: e.reps, track: e.track,
+        ...(typeof e.target_rpe === 'number' ? { target_rpe: e.target_rpe } : {}),
+        ...(typeof e.contacts === 'number' ? { contacts: e.contacts } : {}),
+      })),
+    })),
+    held: health ? p.held : p.held.length ? [{ session: null, exercise: `${p.held.length} exercise${p.held.length === 1 ? '' : 's'}`, regions: [], note: 'Held for a health reason (not shared with you).' }] : [],
+    note: null,
+    appliable: true,
+  }
+}
+
+export function blockSummary(b: ComposedBlock, program?: ReturnType<typeof programView>) {
+  return {
+    ...(program ? { program } : {}),
     start: b.start,
     end: b.end,
     priorities: b.priorities.map((q) => QUALITY_LABEL[q]),
@@ -679,18 +833,35 @@ export async function previewBlockState(
   req: BlockRequest,
   actor: ChangeActor,
   rationale: string | null,
-): Promise<{ preview_id: string; state: BlockState }> {
-  const state = await planBlock(store, req)
+): Promise<{ preview_id: string; state: BlockState; checked: ValidateResult | null }> {
+  const plan = await planBlock(store, req)
+  const state = keptState(plan)
   const previewId = await storeChangePreview(store, actor, BLOCK_TOOL, state, { rationale, targetId: 'block' })
-  return { preview_id: previewId, state }
+  return { preview_id: previewId, state, checked: plan.checked }
 }
 
 async function previewBlock(store: ConnectedStore, args: Obj, actor: ChangeActor): Promise<string> {
   const parsed = parseBlockRequest(args, await athleteToday(store))
   if (!parsed.ok) return `Refused: ${parsed.text}`
   const rationale = str(args.rationale, 500)
-  const { preview_id, state } = await previewBlockState(store, parsed.request, actor, rationale)
-  const b = await seesHealth(store, actor) ? state.block : redactHealth(state.block)
+  const { preview_id, state, checked: raw } = await previewBlockState(store, parsed.request, actor, rationale)
+  const health = await seesHealth(store, actor)
+  const b = health ? state.block : redactHealth(state.block)
+  const checked = raw ? forViewer(raw, health) : null
+  const program = programView(state, health)
+  const p = state.program
+  const programLines = p
+    ? [
+        '',
+        `## Program from ${p.phase.week_start}: a new queued block (${p.phase.name}, ${p.sessions.length} session${p.sessions.length === 1 ? '' : 's'} a week)`,
+        `Your current block (${p.live.name}) keeps running until ${addDaysIso(p.phase.week_start, -1)} and is kept as history; nothing in it is rewritten.`,
+        'U13: a composed block rewrites the week, so this runs as rewrite=true (the 30% small-edit cap does not apply). Loads come from the engine at each session (tracks + progression rules), never from the coach.',
+        ...p.sessions.flatMap(sessionLines),
+        ...(program.held.length ? ['', `Held (U7): ${program.held.map((h) => health ? `${h.exercise} (${h.regions.join(', ')})` : `${h.exercise}, held for a health reason`).join('; ')}.`] : []),
+        ...(checked?.warnings.length ? ['', warningsSection(checked.warnings)] : []),
+        ...(checked?.blocked ? ['', `Not appliable (${checked.blocked.rule}): ${checked.blocked.message}`] : []),
+      ]
+    : state.program_note ? ['', `${state.program_note.refuse ? 'Not appliable: ' : ''}${state.program_note.text}`] : []
   return [
     `# Preview: composed block ${b.start} → ${b.end}`,
     `Priorities: ${b.priorities.map((q) => QUALITY_LABEL[q]).join(', ') || 'none (everything at maintenance)'}`,
@@ -699,10 +870,11 @@ async function previewBlock(store: ConnectedStore, args: Obj, actor: ChangeActor
     ...(b.trade_offs.length
       ? ['', '## Trade-offs for the athlete to pick', ...b.trade_offs.map((t) => `- ${t.id}: ${t.message} Options: ${t.options.map((o) => `${o.id} (${o.label})`).join('; ')}.${t.chosen ? ` Picked: ${t.chosen}.` : ''}`)]
       : []),
+    ...programLines,
     ...(b.needs_decision ? ['', 'Not appliable yet: the athlete picks each trade-off first. Preview again with resolutions = { <trade-off id>: <option id> }.'] : []),
     'Nothing was written.',
     '',
-    json({ preview_id, block: blockSummary(b), methodology_version: state.methodology_version, modules_version: state.modules_version }),
+    json({ preview_id, block: blockSummary(b, program), methodology_version: state.methodology_version, modules_version: state.modules_version }),
     '',
     previewFooter(preview_id),
   ].join('\n')
@@ -711,6 +883,74 @@ async function previewBlock(store: ConnectedStore, args: Obj, actor: ChangeActor
 const TRACK_COLOR: Record<string, string> = {
   max_strength: '#E5484D', other_lifts: '#9A9A9A', power: '#F5A524', aerobic: '#30A46C', alactic: '#0090FF',
   change_of_direction: '#8E4EC6', tissue_capacity: '#12A594', mobility: '#6E56CF',
+}
+
+/**
+ * The week's sessions as a new queued block, inside the apply's transaction:
+ * the previous composed block's queued phase (not started) is skipped, the
+ * live block ends the day before this one starts, and one pending phase with
+ * one routine per training day is added. Nothing is deleted or rewritten;
+ * athlete.training_max_overrides is never read or written. Every guard that
+ * misses throws, so the whole apply rolls back. Returns what the revert needs.
+ */
+async function writeBlockProgram(store: ConnectedStore, p: BlockProgramPlan, trackIds: Map<string, string>): Promise<Obj> {
+  const stale = (what: string) => new McpUserError(`Refused: ${what} changed since the preview. Preview again.`)
+  if (p.replaces_queued) {
+    const skipped = await store.sql<{ id: string }[]>`
+      UPDATE phase ph SET status = 'skipped'
+      FROM program pr
+      WHERE ph.id = ${p.replaces_queued} AND ph.program_id = pr.id AND pr.athlete_id = ${store.athleteId} AND ph.status = 'pending'
+      RETURNING ph.id::text AS id
+    `
+    if (!skipped.length) throw stale('the queued block')
+  }
+  const liveEndAfter = p.live.week_end >= p.phase.week_start ? addDaysIso(p.phase.week_start, -1) : p.live.week_end
+  const ended = await store.sql<{ id: string }[]>`
+    UPDATE phase ph SET week_end = ${liveEndAfter}::date
+    FROM program pr
+    WHERE ph.id = ${p.live.phase_id} AND ph.program_id = pr.id AND pr.athlete_id = ${store.athleteId}
+      AND ph.status = 'active' AND ph.week_end = ${p.live.week_end}::date
+    RETURNING ph.id::text AS id
+  `
+  if (!ended.length) throw stale('your current block')
+  const [phase] = await store.sql<{ id: string }[]>`
+    INSERT INTO phase (program_id, name, week_start, week_end, non_negotiables, advancement_criteria, status)
+    SELECT ${p.program_id}, ${p.phase.name}, ${p.phase.week_start}::date, ${p.phase.week_end}::date,
+           ${jsonParam(store.sql, [])}, ${jsonParam(store.sql, [])}, 'pending'
+    WHERE EXISTS (SELECT 1 FROM program WHERE id = ${p.program_id} AND athlete_id = ${store.athleteId} AND status = 'active')
+    RETURNING id::text AS id
+  `
+  if (!phase) throw stale('the active program')
+  const routines: string[] = []
+  for (const s of p.sessions) {
+    // The track by id now that the block's tracks exist; loads stay the engine's.
+    const exercises = s.exercises.map(({ track, ...e }) => {
+      const id = track ? trackIds.get(track) : undefined
+      return id ? { ...e, track_id: id } : e
+    })
+    const id = await insertOwnedRoutine(store, {
+      programId: p.program_id, phaseId: phase.id, name: s.name, sessionType: s.session_type,
+      exercises, intent: s.intent, intendedDow: s.intended_dow,
+    })
+    if (!id) throw stale('the active program')
+    routines.push(String(id))
+  }
+  return {
+    version: p.version,
+    program_id: p.program_id,
+    phase_id: phase.id,
+    name: p.phase.name,
+    week_start: p.phase.week_start,
+    week_end: p.phase.week_end,
+    routine_ids: routines,
+    sessions: p.sessions.length,
+    live_phase_id: p.live.phase_id,
+    live_week_end_before: p.live.week_end,
+    live_week_end_after: liveEndAfter,
+    replaced_queued: p.replaces_queued,
+    rewrite: true,
+    held: p.held.length,
+  }
 }
 
 async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor): Promise<string> {
@@ -722,16 +962,22 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
   // Every rule again, against the athlete as they are now: the approval and
   // the diff first, then the athlete's picks.
   const plan = await planBlock(store, stored.state.request)
-  const auth = await authorizeWrite(store, actor, BLOCK_TOOL, args, plan)
+  const auth = await authorizeWrite(store, actor, BLOCK_TOOL, args, keptState(plan))
   if (!auth.ok) return auth.text
   if (plan.block.needs_decision) {
     const open = plan.block.trade_offs.filter((t) => t.chosen == null).map((t) => t.id)
     return `Refused: the athlete has not picked ${open.join(', ')} yet. The engine never decides a trade-off for them (section 4); preview again with resolutions.`
   }
+  if (plan.program_note?.refuse) return `Refused: ${plan.program_note.text}`
+  if (plan.checked?.blocked) {
+    const shown = forViewer(plan.checked, await seesHealth(store, actor)).blocked ?? plan.checked.blocked
+    return `Refused (${shown.rule}): ${shown.message} Nothing was written.`
+  }
   const req = plan.request
   const b = plan.block
   const changeId = crypto.randomUUID()
   const blockId = crypto.randomUUID()
+  let phaseId: string | null = null
   try {
     const text = await commitAuthorized(store, actor, BLOCK_TOOL, auth, stored.rationale, b.rule_refs, async () => {
       const diff: Obj = { block_id: blockId, start: b.start, end: b.end, priorities: b.priorities, methodology_version: plan.methodology_version, modules_version: plan.modules_version }
@@ -891,6 +1137,11 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
         diff.ended_rule_ends = endedRuleEnds
         if (goalsTracked.length) diff.goals_tracked = goalsTracked
         diff.program_meta = { before: metaBefore, after: await programMetaSnapshot(store, program.id) }
+        if (plan.program) {
+          if (plan.program.program_id !== program.id) throw new McpUserError('Refused: the active program changed since the preview. Preview again.')
+          diff.program_phase = await writeBlockProgram(store, plan.program, new Map(tracksOut.map((t) => [String(t.name), String(t.track_id)])))
+          phaseId = String((diff.program_phase as Obj).phase_id)
+        }
       } else {
         diff.program_id = null
       }
@@ -899,17 +1150,32 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
       // re-compose check compares like with like.
       const prior = await currentBlock(store)
       const key = (await composeFor(store, {})).key
-      await store.sql`
-        INSERT INTO composed_block (
-          id, athlete_id, program_id, start_date, end_date, methodology_version, modules_version, compose_key, block, request,
-          intake_id, preview_id, approval_ref, change_id, actor_type, actor_id
-        ) VALUES (
-          ${blockId}, ${store.athleteId}, ${program?.id ?? null}, ${b.start}::date, ${b.end}::date, ${plan.methodology_version},
-          ${plan.modules_version}, ${key}, ${jsonParam(store.sql, b)}, ${jsonParam(store.sql, req)},
-          ${req.intake_id && UUID_RE.test(req.intake_id) ? req.intake_id : null}, ${auth.previewId}, ${auth.approvalRef}, ${changeId},
-          ${actor.type}, ${actor.id}
-        )
-      `
+      const intakeId = req.intake_id && UUID_RE.test(req.intake_id) ? req.intake_id : null
+      if (phaseId) {
+        // composed_block is append-only: the queued phase goes in with the row.
+        await store.sql`
+          INSERT INTO composed_block (
+            id, athlete_id, program_id, start_date, end_date, methodology_version, modules_version, compose_key, block, request,
+            intake_id, preview_id, approval_ref, change_id, actor_type, actor_id, phase_id
+          ) VALUES (
+            ${blockId}, ${store.athleteId}, ${program?.id ?? null}, ${b.start}::date, ${b.end}::date, ${plan.methodology_version},
+            ${plan.modules_version}, ${key}, ${jsonParam(store.sql, b)}, ${jsonParam(store.sql, req)},
+            ${intakeId}, ${auth.previewId}, ${auth.approvalRef}, ${changeId}, ${actor.type}, ${actor.id}, ${phaseId}
+          )
+        `
+      } else {
+        // No sessions written (no active program, or before composed-block-program.sql): as before.
+        await store.sql`
+          INSERT INTO composed_block (
+            id, athlete_id, program_id, start_date, end_date, methodology_version, modules_version, compose_key, block, request,
+            intake_id, preview_id, approval_ref, change_id, actor_type, actor_id
+          ) VALUES (
+            ${blockId}, ${store.athleteId}, ${program?.id ?? null}, ${b.start}::date, ${b.end}::date, ${plan.methodology_version},
+            ${plan.modules_version}, ${key}, ${jsonParam(store.sql, b)}, ${jsonParam(store.sql, req)},
+            ${intakeId}, ${auth.previewId}, ${auth.approvalRef}, ${changeId}, ${actor.type}, ${actor.id}
+          )
+        `
+      }
       if (prior) {
         await store.sql`
           UPDATE composed_block SET superseded_at = NOW(), superseded_by = ${blockId}
@@ -921,6 +1187,9 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
         result: [
           `Applied the composed block ${b.start} → ${b.end} (methodology ${plan.methodology_version}, ${plan.modules_version}).`,
           `Priorities: ${b.priorities.map((q) => QUALITY_LABEL[q]).join(', ') || 'none'}.`,
+          ...(plan.program && phaseId
+            ? [`Queued ${plan.program.sessions.length} session${plan.program.sessions.length === 1 ? '' : 's'} a week from ${plan.program.phase.week_start}; your current block runs until then.`]
+            : []),
           ...(program ? [] : ['No active program, so no tracks or dates were written; the block of record is kept.']),
           `change_id: ${changeId}`,
         ].join('\n'),
@@ -1002,7 +1271,7 @@ export const ACTIVITY_TOOLS: McpTool[] = [
   },
   {
     name: 'preview_composed_block',
-    description: 'Compose the next block from the athlete\'s activities and goals (section 4): merged demands, max 2 priority qualities (U2), the activities counted as load (U9, U14), deduped prehab and screens, the week layout (U8, U9), deload and retest weeks (U11, U12). Conflicts come back as trade-offs the athlete picks; nothing is dropped silently. Optionally re-weight goals, add goals or activities, set the schedule, or pass the athlete\'s picks as resolutions. Writes nothing; returns preview_id + the block.',
+    description: 'Compose the next block from the athlete\'s activities and goals (section 4): merged demands, max 2 priority qualities (U2), the activities counted as load (U9, U14), deduped prehab and screens, the week layout (U8, U9), deload and retest weeks (U11, U12). The preview includes the week\'s concrete sessions (exercises, sets, reps, RPE targets from the engine; loads are computed at each session, never stated) as a new queued block from the start date, with the G5 validators run as rewrite=true (U13) and red-flagged regions left out (U7). Conflicts come back as trade-offs the athlete picks; nothing is dropped silently. Optionally re-weight goals, add goals or activities, set the schedule, or pass the athlete\'s picks as resolutions. Writes nothing; returns preview_id + the block.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1033,7 +1302,7 @@ export const ACTIVITY_TOOLS: McpTool[] = [
   },
   {
     name: 'apply_composed_block',
-    description: 'Write a previewed composed block: the block of record, any goals/activities it added, goal weights, tracks + progression rules from the block start, and the program\'s deload/retest dates. Refused while a trade-off is undecided. Requires confirm=true, the preview_id (under 24 h old, and the block recomputed now must equal it) and approval_ref = the athlete\'s approval of that preview (list_approvals(preview_id)). Applies once, recorded in the change log. The in-app coach cannot apply.',
+    description: 'Write a previewed composed block: the block of record, any goals/activities it added, goal weights, tracks + progression rules from the block start, the program\'s deload/retest dates, and the week\'s sessions as a new queued block (the current block keeps running until the start date; nothing in it is rewritten). Refused while a trade-off is undecided or another block is queued. Requires confirm=true, the preview_id (under 24 h old, and the block recomputed now must equal it) and approval_ref = the athlete\'s approval of that preview (list_approvals(preview_id)). Applies once, recorded in the change log. The in-app coach cannot apply.',
     inputSchema: { type: 'object', properties: approvalProps, required: ['preview_id', 'confirm', 'approval_ref'], additionalProperties: false },
   },
 ]

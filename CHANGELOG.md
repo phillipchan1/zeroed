@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Composed blocks write the week's exercises (Round 2 item 6, G6 follow-up), coach_v1
+
+Behind `athlete.flags.coach_v1` (which only counts with `tracks_v1`), still off for everyone. With it off the MCP tool list, every tool, `/api/session-rx`, the app and every route are exactly as before.
+
+- **The block's week becomes sessions.** `worker/src/coach/blockProgram.ts` (pure, deterministic) turns the composer's week layout into one routine per training day: lifts (the priority goal's lift on the priority track, the rest on Other lifts at maintenance; ~1/3 volume at maintenance, U2), power (jumps sized to the block's contact budget, then acceleration starts, U8/U14), aerobic (bike unless the block runs), repeat sprints as a bike interval block (HIIT, U9), and the block's prehab items (already capped per session). Sets, reps and RPE targets come from the engine; no load is written, so `/api/session-rx` computes it from the block's tracks and rules (#49).
+- **One preview, one approval.** `preview_composed_block` shows the concrete program diff and runs the G5 validators on it as an explicit `rewrite=true` (U13 doesn't apply to a composed block, and the preview says so); a red flag (U7) still refuses it. The athlete's single approval covers the whole block; `apply_composed_block` writes everything in one transaction with one change_log row (methodology + module versions, `diff.program_phase` with the generator version). A preview whose live program moved since is refused.
+- **Never overwrites the live program.** The sessions go into a new queued block (a `pending` phase from the block's start, promoted by the app as any queued block is); the live block keeps running and ends the day before. A re-compose before the start skips (keeps) the previous block's queued phase; anything else queued refuses the apply. `athlete.training_max_overrides` is never touched.
+- **Red flags, minors, prehab.** No written exercise loads a blocked region (it is listed as held; a coach without the health toggle sees a count, not the region). Under 18: no target RPE above the minors' cap, contacts within the minors' ceiling (tightened caps tighten the sessions). Prehab only from the capped list.
+- **Revert.** Undoing the block (Changes feed) skips its queued phase (kept, routines stay as history), puts the live block's end date back and re-queues the phase it replaced; once the block has started, the previous block is live again.
+- **App.** The block preview the athlete approves lists the sessions and any held work.
+- **Schema (additive).** `composed_block.phase_id` (nullable, no FK). Before it exists blocks apply exactly as before (no sessions) and the preview says why.
+- **Checks.** `worker/src/composedBlockProgram.check.ts`. Synthetic data only.
+
+**Deploy:** hand-apply `worker/schema/composed-block-program.sql` on Neon (`supabase/migrations/20261104000012_composed_block_program.sql` on Supabase) after `coach-v1.sql` and `change-tombstone.sql`. Rollback is in the SQL header.
+
 ### Validator-warning UI and weekly-review UI (Round 2 item 5, G5 / G8), tracks_v1
 
 Behind `athlete.flags.tracks_v1`; with it off the app renders exactly as before, a parked proposal's diff has no `warnings` key, and `/api/session-override`, `/api/change-log` and `/api/weekly-review` answer 404. No schema change.

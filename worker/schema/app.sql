@@ -1110,6 +1110,11 @@ CREATE TABLE IF NOT EXISTS public.composed_block (
   superseded_by        UUID
 );
 CREATE INDEX IF NOT EXISTS composed_block_athlete_idx ON public.composed_block (athlete_id, created_at DESC);
+-- The pending phase the block queued (its week's sessions, from its start).
+-- Mirrors supabase/migrations/20261104000012_composed_block_program.sql. No
+-- foreign key: composed_block is append-only, so it never gains an ON DELETE
+-- action.
+ALTER TABLE public.composed_block ADD COLUMN IF NOT EXISTS phase_id UUID;
 
 -- Append-only, like readiness_append_only: coach_intake never changes;
 -- composed_block only gains superseded_at / superseded_by, once. Deletes go
