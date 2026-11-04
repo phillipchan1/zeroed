@@ -6,6 +6,7 @@ import { useArcLoad } from './lib/arcLoad'
 import { coachOn, tracksOn, useTracksV1 } from './lib/tracksFlag'
 import { useDisableShakeToUndo } from './hooks/useDisableShakeToUndo'
 import { useOutboxSync, pendingSessionsRaw } from './lib/workoutOutbox'
+import { useSessionRpeSync } from './lib/sessionRpe'
 import { cacheKeys, useWarmLoopCaches } from './lib/loopCache'
 import { unitContext } from './lib/units'
 import { gatherProgramMap, gatherTrainingLog, gatherWeekPager } from './engine'
@@ -108,6 +109,9 @@ function AppRoutes() {
 
   // Flush any sessions completed offline once we're back (and on every launch).
   useOutboxSync()
+  // Session-RPE taps that couldn't be sent at the finish (tracks_v1). Nothing is
+  // queued with the flag off, so this sends nothing then.
+  useSessionRpeSync()
 
   // Onboarding owns the athlete until they finish the first session. That's
   // every state before auth, the brief no-athlete beat after sign-in, and every

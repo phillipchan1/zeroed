@@ -91,7 +91,9 @@ const flag = async (athleteId: string, on: boolean) => {
 }
 const count = async (table: string, where = 'TRUE', params: unknown[] = []) =>
   Number((await harness.query<{ n: string }>(`SELECT count(*)::text AS n FROM ${table} WHERE ${where}`, params))[0].n)
-const tap = (body: Record<string, unknown>, store = storeA, actor = athleteA) => logSessionRpe(store, actor, body)
+const tap = (body: Record<string, unknown>, store = storeA, actor = athleteA, now?: Date) => logSessionRpe(store, actor, body, now)
+// Midday on T in A's zone (Los Angeles, UTC-7/-8): clear of the 04:00 grace for last night's session.
+const NOON_T = new Date(`${T}T12:00:00-08:00`)
 const workoutRow = async () => (await harness.query<{ rpe: string | null; session_rpe: string | null }>(`SELECT rpe::text AS rpe, session_rpe::text AS session_rpe FROM workout WHERE id = $1`, [A_WORKOUT]))[0]
 
 // ---- pure ----------------------------------------------------------------------------------
@@ -159,7 +161,7 @@ ok((await tap({ session_id: A_DAY, rating: 10 })).ok, 'range: 10 (maximal) is al
 for (const bad of [0, 601, 12.5, 'long']) {
   ok(!(await tap({ session_id: A_DAY, rating: 5, duration_min: bad })).ok, `range: duration_min ${String(bad)} is refused`)
 }
-ok(!(await tap({ session_id: A_DAY, rating: 5, date: addDays(T, -1) })).ok, 'same day: yesterday\'s rating can\'t be logged or changed')
+ok(!(await tap({ session_id: A_DAY, rating: 5, date: addDays(T, -1) }, storeA, athleteA, NOON_T)).ok, 'same day: yesterday\'s rating can\'t be logged or changed after 04:00')
 ok(!(await tap({ session_id: A_DAY, rating: 5, date: addDays(T, 1) })).ok, 'same day: nor a future day')
 ok(!(await tap({ session_id: A_DAY, rating: 5, date: 'tomorrow' })).ok, 'date must be a date')
 ok(!(await tap({ session_id: 'not-a-session', rating: 5 })).ok, 'session_id must be a session')

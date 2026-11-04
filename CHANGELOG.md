@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Offline session-RPE queue + rating last night's session after midnight (Round 2 item 4, G9 follow-up), tracks_v1
+
+Behind `athlete.flags.tracks_v1`; with it off the app queues nothing, `/api/session-rpe` answers 404, and `/api/session-rx`, the MCP tool list and every tool are exactly as before.
+
+- **Queue.** The finish's CR-10 tap is written to the device first (`src/lib/sessionRpeQueue.ts`, localStorage like the workout outbox) and then sent; one that can't be sent waits and is retried on launch, reconnect and resume. Accepted (incl. "Already logged") and definitive refusals (refused, 400, 404) leave the queue; no answer, 5xx, 401 and "not set up yet" keep it. A newer tap for the same session and date replaces one still waiting. Today shows "Session effort saved on this device, will sync" while one waits.
+- **Idempotent.** Each tap carries a `client_id` and `tapped_at`. A retry of a tap already applied is "Already logged" (no second write or change_log row); a queued tap older than the row's latest is acknowledged, not applied. One row per session per day and update semantics are unchanged.
+- **After midnight.** A session dated D can be rated until 04:00 athlete-local on D+1. A queued tap is judged at its own `tapped_at`, trusted only between now − 48 h and now + 5 min, so it can't backdate a rating beyond its date's window.
+- **Schema (additive).** `session_rpe.client_id`, `session_rpe.tapped_at` (nullable) and a partial unique index. Before they exist the 04:00 grace works on the server's clock and tap times are ignored.
+
+**Deploy:** hand-apply `worker/schema/session-rpe-queue.sql` on Neon (`supabase/migrations/20261104000011_session_rpe_queue.sql` on Supabase) after `session-rpe.sql` and before deploying this Worker for anyone with `tracks_v1` on. Rollback is in the SQL header.
+
 ### Every change type revertible (Round 2 item 3, spec section 6), tracks_v1
 
 Behind `athlete.flags.tracks_v1`; with it off the MCP tool list, every tool, `/api/session-rx` and every read are exactly as before, and `/api/change-log` answers 404.

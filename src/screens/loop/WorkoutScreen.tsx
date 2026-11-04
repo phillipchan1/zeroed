@@ -50,6 +50,7 @@ import { tracksOn } from '../../lib/tracksFlag'
 import { sessionWithOverride, workoutRxDate, WEEK_ONLY_LABEL, type SessionOverrideView } from '../../engine/sessionOverride'
 import { isoDateInZone } from '../../engine/weekDates'
 import { fetchSessionRpe, logSessionRpe } from '../../lib/sessionRpe'
+import { queuedTapFor } from '../../lib/sessionRpeQueue'
 import { fetchAutoregRules, fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
 import { deriveGoalMeasurements, goalsTrainedBy } from '../../engine/goalSources'
 import { WorkoutGoalChip } from './WorkoutGoalChip'
@@ -1482,9 +1483,15 @@ export function WorkoutScreen({
   // indexes follow the override's list, not the plan's that Today reads.
   const rxCacheKey = (id: string) => (weekOnlyRef.current ? cacheKeys.sessionRxOn(id, weekOnlyRef.current.date) : cacheKeys.sessionRx(id))
   // tracks_v1 (G9): an edit shows the session RPE already logged that day, so
-  // a re-tap changes it (the Worker takes changes on the day only).
+  // a re-tap changes it (the Worker takes changes on the day, or until 04:00
+  // the next morning). A tap still waiting to sync is the latest one.
   useEffect(() => {
     if (!isEdit || !tracksOn() || !routineId || sessionRpe != null) return
+    const queued = queuedTapFor(routineId, performedAt.slice(0, 10))
+    if (queued) {
+      setSessionRpe(queued.rating)
+      return
+    }
     let live = true
     void fetchSessionRpe(routineId, performedAt.slice(0, 10)).then((r) => {
       if (live && r) setSessionRpe((v) => v ?? r.rating)
@@ -2540,7 +2547,8 @@ export function WorkoutScreen({
     if (!isEdit) clearDraft(athleteId, routineId!) // the outbox is its home now
 
     // tracks_v1 (G9): the session-RPE tap goes to its own table, never into the
-    // set RPEs. Best-effort; the Worker only takes it on the session's own day.
+    // set RPEs. Queued on the device first, so a tap offline syncs later; the
+    // Worker takes it for the session's own day (until 04:00 the next morning).
     if (tracksOn() && sessionRpe != null) {
       void logSessionRpe({
         session_id: routineId!,

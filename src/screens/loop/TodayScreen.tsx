@@ -32,6 +32,7 @@ import { OutsidePlanSheet } from '../../components/OutsidePlanSheet'
 import { OneOffSheet } from '../../components/OneOffSheet'
 import { arcLoadOn } from '../../lib/arcLoad'
 import { tracksOn } from '../../lib/tracksFlag'
+import { useQueuedSessionRpe } from '../../lib/sessionRpe'
 import { fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
 import { goalsTrainedBy } from '../../engine/goalSources'
 import { GOAL_DISPLAY_LABEL, progressRatio } from '../../engine/goals'
@@ -937,6 +938,8 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
   // Sessions finished offline. Subscribed to the outbox, so the note appears and
   // clears as the queue actually moves rather than on a guessed delay.
   const outbox = useOutboxStatus()
+  // tracks_v1: session-RPE taps that couldn't be sent yet. Always 0 with the flag off.
+  const rpeQueued = useQueuedSessionRpe()
 
   const { data: view, loading, refetch } = useCachedLoader(
     `today:${athleteId}`,
@@ -1427,6 +1430,11 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
                   <p className="ring-card__note">
                     <CloudUpload size={13} strokeWidth={1.75} />
                     <span>{outbox.pending} saved on this device, syncing</span>
+                  </p>
+                ) : tracksOn() && rpeQueued > 0 ? (
+                  <p className="ring-card__note">
+                    <CloudUpload size={13} strokeWidth={1.75} />
+                    <span>Session effort saved on this device, will sync</span>
                   </p>
                 ) : null}
               </div>

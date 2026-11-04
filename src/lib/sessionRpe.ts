@@ -2,12 +2,17 @@
  *
  * One CR-10 tap (0–10) for the whole session at the finish. The Worker stores
  * it in session_rpe, apart from the set RPEs (workout.rpe is their mean, and
- * stays that), logs it, and lets the athlete change it the same day. This only
- * sends and reads. With the flag off the route answers 404 and nothing here is
- * called.
+ * stays that), logs it, and lets the athlete change it the same day (or last
+ * night's until 04:00). This only sends and reads. A tap goes through the
+ * queue (sessionRpeQueue.ts) so one that can't be sent waits on the device and
+ * syncs later. With the flag off the route answers 404, no tap is queued and
+ * nothing here is called.
  */
+import { useEffect, useState } from 'react'
 import { sessionRpeUrl } from './api'
 import { getAccessToken } from './authClient'
+import { enqueueTap, flushTapQueue, queuedTaps, subscribeTapQueue, tapOutcome, type QueuedTap, type TapOutcome } from './sessionRpeQueue'
+import { isKnownOffline, subscribeOnline } from './useOnline'
 
 export interface SessionRpeRating {
   date: string
@@ -16,7 +21,7 @@ export interface SessionRpeRating {
   duration_min: number | null
 }
 
-async function post(body: Record<string, unknown>): Promise<unknown> {
+async function send(body: Record<string, unknown>): Promise<{ status: number; body: unknown }> {
   const url = sessionRpeUrl()
   if (!url) throw new Error('session rpe unavailable')
   const headers: Record<string, string> = { 'content-type': 'application/json' }
@@ -27,20 +32,75 @@ async function post(body: Record<string, unknown>): Promise<unknown> {
     /* cookies still carry the session */
   }
   const res = await fetch(url, { method: 'POST', credentials: 'include', headers, body: JSON.stringify(body) })
-  const parsed: unknown = await res.json().catch(() => null)
-  if (!res.ok) throw new Error(`session rpe ${res.status}`)
-  return parsed
+  return { status: res.status, body: await res.json().catch(() => null) }
 }
 
-/** Log (or, the same day, change) the session's rating. False on any failure. */
-export async function logSessionRpe(input: { session_id: string; rating: number; duration_min: number | null; date: string }): Promise<boolean> {
-  if (!sessionRpeUrl()) return false
+async function post(body: Record<string, unknown>): Promise<unknown> {
+  const res = await send(body)
+  if (res.status < 200 || res.status >= 300) throw new Error(`session rpe ${res.status}`)
+  return res.body
+}
+
+/** Send one queued tap. A fetch that never got an answer is "later". */
+async function sendTap(tap: QueuedTap): Promise<TapOutcome> {
+  if (!sessionRpeUrl()) return { kind: 'later' }
   try {
-    const out = await post({ action: 'log', ...input }) as { ok?: boolean } | null
-    return out?.ok === true
+    const res = await send({
+      action: 'log',
+      client_id: tap.client_id,
+      tapped_at: tap.tapped_at,
+      session_id: tap.session_id,
+      date: tap.date,
+      rating: tap.rating,
+      duration_min: tap.duration_min,
+      ...(tap.workout_id ? { workout_id: tap.workout_id } : {}),
+    })
+    return tapOutcome(res.status, res.body)
   } catch {
-    return false
+    return tapOutcome(null, null)
   }
+}
+
+/** Send whatever taps are waiting. Safe to call any time; a no-op on an empty queue. */
+export function syncSessionRpe(): Promise<void> {
+  if (!queuedTaps().length) return Promise.resolve()
+  return flushTapQueue(sendTap)
+}
+
+/**
+ * Log (or change) the session's rating: queued on the device first, then sent.
+ * One that can't be sent now waits and syncs on reconnect or resume.
+ */
+export function logSessionRpe(input: { session_id: string; rating: number; duration_min: number | null; date: string; workout_id?: string | null }): Promise<void> {
+  enqueueTap(input)
+  return syncSessionRpe()
+}
+
+/** Sync queued taps on mount, on reconnect and on resume. Mount once near the app root. */
+export function useSessionRpeSync(): void {
+  useEffect(() => {
+    const flush = () => { void syncSessionRpe() }
+    flush()
+    const onVisible = () => { if (document.visibilityState === 'visible') flush() }
+    window.addEventListener('online', flush)
+    document.addEventListener('visibilitychange', onVisible)
+    const unsubscribe = subscribeOnline(() => { if (!isKnownOffline()) flush() })
+    return () => {
+      window.removeEventListener('online', flush)
+      document.removeEventListener('visibilitychange', onVisible)
+      unsubscribe()
+    }
+  }, [])
+}
+
+/** How many taps are waiting to sync, live. */
+export function useQueuedSessionRpe(): number {
+  const [n, setN] = useState(() => queuedTaps().length)
+  useEffect(() => {
+    setN(queuedTaps().length)
+    return subscribeTapQueue(() => setN(queuedTaps().length))
+  }, [])
+  return n
 }
 
 /** The rating already logged for this session on this date, if any. Null on any failure. */
