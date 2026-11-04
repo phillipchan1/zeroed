@@ -666,7 +666,7 @@ async function runZeroedTool(
         goalIds: await resolveGoalIds(store, args.goal_ids),
         timing: args.timing === 'next_week' ? 'next_week' : 'now',
         request: null,
-        ...(gate ? { createdBy: actorRef(actor) } : {}),
+        ...(gate ? { createdBy: actorRef(actor), warnings: checked?.warnings ?? [] } : {}),
       })
       if (!parked.ok) {
         return `${warned}\n\n${parked.reason === 'unavailable'

@@ -442,9 +442,9 @@ function formatDiff(diff: DiffRow[]): string {
   ].join('\n')).join('\n\n')
 }
 
-/** The shape ProposalCard already renders. */
-function proposalDiff(diff: DiffRow[]): Record<string, unknown> {
-  return { sessions: diff.map((d) => ({ name: d.label, changes: d.changes })) }
+/** The shape ProposalCard already renders, with the preview's G5 warnings when it had any. */
+function proposalDiff(diff: DiffRow[], warnings: PreviewWarning[] = []): Record<string, unknown> {
+  return { sessions: diff.map((d) => ({ name: d.label, changes: d.changes })), ...(warnings.length ? { warnings } : {}) }
 }
 
 export interface PreviewOk {
@@ -455,7 +455,8 @@ export interface PreviewOk {
   /** G5: what this change breaks (U8–U10), none of it blocking. */
   warnings: PreviewWarning[]
 }
-export type PreviewResult = PreviewOk | { ok: false; text: string }
+/** warnings: on a validator refusal (U13, red flag), the structured list the athlete's app renders. */
+export type PreviewResult = PreviewOk | { ok: false; text: string; warnings?: PreviewWarning[] }
 
 async function storePreview(
   store: ConnectedStore,
@@ -518,7 +519,7 @@ export async function previewCreate(
     // G5: the validators, before anything is kept. U13 and red flags refuse.
     // D3: a coach without health access sees a held region only generically.
     const { warnings, blocked } = forViewer(await validateOverride(store, sessions, ops, args.rewrite === true), await seesHealth(store, actor))
-    if (blocked) return { ok: false, text: `Refused (${blocked.rule}): ${blocked.message}\n\n${warningsSection(warnings)}` }
+    if (blocked) return { ok: false, text: `Refused (${blocked.rule}): ${blocked.message}\n\n${warningsSection(warnings)}`, warnings }
     const previewId = await storePreview(store, actor, 'create', request, plan.diff, rationale)
     return { ok: true, preview_id: previewId, diff: plan.diff, warnings, text: previewText(previewId, plan.diff, 'create', warnings) }
   } catch (e) {
@@ -1028,7 +1029,7 @@ export async function parkOverrideProposal(
       ) VALUES (
         ${store.athleteId}, ${preview.preview_id}, ${opts.title}, ${opts.rationale}, ${jsonParam(store.sql, opts.goalIds)},
         ${jsonParam(store.sql, { preview_id: preview.preview_id })}, 'now', ${null},
-        ${jsonParam(store.sql, proposalDiff(preview.diff))}, ${preview.preview_id}, ${opts.source}, 'session_override',
+        ${jsonParam(store.sql, proposalDiff(preview.diff, preview.warnings))}, ${preview.preview_id}, ${opts.source}, 'session_override',
         ${actorRef(opts.actor)}
       )
       RETURNING id
@@ -1252,7 +1253,9 @@ export async function athleteOverrideAction(store: ConnectedStore, body: Record<
       }, 200]
     case 'preview': {
       const p = await previewCreate(store, me, { date: body.date, session: body.session, ops: body.ops, expires_on: body.expires_on, rationale: body.rationale, rewrite: body.rewrite })
-      return [p.ok ? { ok: true, preview_id: p.preview_id, diff: p.diff, warnings: p.warnings } : { ok: false, text: p.text }, 200]
+      return [p.ok
+        ? { ok: true, preview_id: p.preview_id, diff: p.diff, warnings: p.warnings }
+        : { ok: false, text: p.text, ...(p.warnings ? { warnings: p.warnings } : {}) }, 200]
     }
     case 'preview_clear': {
       const p = await previewClear(store, me, { override_id: body.override_id, rationale: body.rationale })

@@ -6,6 +6,8 @@ import { fetchProposals, resolveProposal, type CoachProposal } from '../../lib/p
 import { fetchGoalsView, type GoalView } from '../../lib/tracksData'
 import { tracksOn } from '../../lib/tracksFlag'
 import { success } from '../../lib/haptics'
+import { proposalWarnings } from '../../lib/previewWarnings'
+import { PreviewWarnings } from './PreviewWarnings'
 
 type Phase = 'pending' | 'working' | 'applied' | 'declined' | 'stale' | 'error'
 
@@ -26,6 +28,8 @@ export function ProposalCard({ proposal, goalNames, onResolved }: {
   const [phase, setPhase] = useState<Phase>('pending')
   const [message, setMessage] = useState<string | null>(null)
   const sessions = (proposal.diff?.sessions ?? []).filter((s) => s.changes.some((c) => c.kind !== 'kept'))
+  // tracks_v1 (G5): the validators' warnings on what the coach previewed.
+  const warnings = proposalWarnings(proposal.diff, tracksOn())
 
   async function act(action: 'accept' | 'decline') {
     setPhase('working')
@@ -89,6 +93,8 @@ export function ProposalCard({ proposal, goalNames, onResolved }: {
           </p>
         </div>
       )}
+
+      {phase === 'pending' && <PreviewWarnings view={warnings} />}
 
       {message && <p className="proposal__message">{message}</p>}
 

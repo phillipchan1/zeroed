@@ -5437,6 +5437,42 @@ textarea.input {
 .change__message { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.45; }
 .change__undo { margin-top: 6px; min-height: var(--tap); padding: 0; background: none; border: none; color: var(--text); font-family: var(--font-sans); font-size: var(--fs-sm); font-weight: 600; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
 .change__acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+
+/* Preview warnings (tracks_v1, G5): what the engine's validators said about a
+   change. A refusal (U13, red flag) sits in the veto colour; the rest are
+   notes in the hypothesis colour. Each names its rule and what it is about. */
+.pwarn { margin-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.pwarn__refusal { padding: 10px 12px; border: 1px solid var(--veto); border-radius: var(--radius-btn); background: rgba(232, 112, 112, 0.08); }
+.pwarn__title { font-family: var(--font-mono); font-size: var(--fs-micro); font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--veto); }
+.pwarn__title--note { color: var(--pending); }
+.pwarn__list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.pwarn__row { padding-left: 10px; border-left: 2px solid var(--pending); }
+.pwarn__row--block { border-left-color: var(--veto); }
+.pwarn__k { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; font-size: var(--fs-xs); color: var(--text-dim); }
+.pwarn__rule { padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; font-size: var(--fs-micro); }
+.pwarn__target { color: var(--text); font-weight: 600; }
+.pwarn__msg { margin-top: 2px; font-size: var(--fs-sm); line-height: 1.45; color: #CFCFCF; }
+
+/* Weekly review (tracks_v1, G8 / U15) under Program. */
+.wreview__call { padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-btn); background: var(--ground); }
+.wreview__call--hold { border-color: var(--pending); }
+.wreview__call--deload { border-color: var(--computing); }
+.wreview__k { display: flex; align-items: center; gap: 8px; }
+.wreview__range { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+.wreview__why { margin-top: 8px; font-size: var(--fs-sm); line-height: 1.5; }
+.wreview__empty { margin-top: 12px; font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.5; }
+.wreview__sec { margin-top: 14px; }
+.wreview__h { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
+.wreview__line { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; padding: 3px 0; font-size: var(--fs-sm); line-height: 1.45; }
+.wreview__line--over { color: var(--veto); }
+.wreview__mark { font-family: var(--font-mono); width: 12px; flex-shrink: 0; color: var(--text-dim); }
+.wreview__trend--up .wreview__mark { color: var(--confirmed); }
+.wreview__trend--down .wreview__mark { color: var(--veto); }
+.wreview__name { font-weight: 600; text-transform: capitalize; }
+.wreview__detail { font-size: var(--fs-xs); color: var(--text-dim); }
+.wreview__aside { margin-left: auto; font-size: var(--fs-xs); color: var(--text-dim); }
+.wreview__aside--under { color: var(--pending); }
+.wreview__foot { margin-top: 14px; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.45; }
 @keyframes proposal-arrive { from { transform: translateX(24px); opacity: 0; } }
 
 .sidebar__goals-read { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }

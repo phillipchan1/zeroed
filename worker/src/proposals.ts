@@ -21,6 +21,7 @@ import { loadLiveProgram, makeStore, type ConnectedStore, type LiveProgram } fro
 import { actorFromRef, APP_COACH, applyPreview, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { hiddenIds, idList } from './tombstones.ts'
 import { phaseRoutineSnapshots, queuedSnapshot, routineDelta, withTx, writeChange } from './changeLog.ts'
+import type { PreviewWarning } from './methodology/validators.ts'
 import { ApprovalSpent, checkApproval, consumeApproval, createApproval, proposalApprovalState } from './approvals.ts'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -88,6 +89,8 @@ export async function parkProposal(
     title: string; rationale: string | null; goalIds: string[]; timing: 'now' | 'next_week'; request: string | null
     /** tracks_v1 (G3): who parked it, as actorRef. Absent with the flag off: the insert is the pre-G3 one. */
     createdBy?: string | null
+    /** tracks_v1 (G5): the preview's validator warnings, kept with the diff so the athlete sees them on the card. */
+    warnings?: PreviewWarning[]
   },
 ): Promise<ParkResult> {
   const base = liveToDraft(live)
@@ -110,7 +113,7 @@ export async function parkProposal(
         ) VALUES (
           ${store.athleteId}, ${id}, ${opts.title}, ${opts.rationale}, ${jsonParam(store.sql, opts.goalIds)},
           ${jsonParam(store.sql, inputs)}, ${opts.timing}, ${opts.request},
-          ${jsonParam(store.sql, revisionPayload(base.sessions, diff))}, ${fingerprint},
+          ${jsonParam(store.sql, { ...revisionPayload(base.sessions, diff), ...(opts.warnings?.length ? { warnings: opts.warnings } : {}) })}, ${fingerprint},
           ${opts.createdBy === 'app_coach' ? 'app' : 'mcp'}, ${opts.createdBy}
         )
         RETURNING id
