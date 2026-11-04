@@ -5,6 +5,7 @@ import { handleData } from './data.ts'
 import { handleSessionRx } from './sessionRx.ts'
 import { handleProposals } from './proposals.ts'
 import { handleSessionOverride } from './sessionOverride.ts'
+import { handleChangeLog } from './changeLogRoute.ts'
 import { authFailureMessage, handleAuthRequest } from './auth.ts'
 import type { Env } from './env.ts'
 import { handleMcp } from './mcp.ts'
@@ -81,6 +82,8 @@ app.all('/api/data', (c) => handleData(c.req.raw, c.env, waitUntilOf(c)))
 app.all('/api/session-rx', (c) => handleSessionRx(c.req.raw, c.env, waitUntilOf(c)))
 app.all('/api/proposals', (c) => handleProposals(c.req.raw, c.env, waitUntilOf(c)))
 app.all('/api/session-override', (c) => handleSessionOverride(c.req.raw, c.env, waitUntilOf(c)))
+app.all('/api/change-log', (c) => handleChangeLog(c.req.raw, c.env, waitUntilOf(c)))
+app.all('/api/change-log/:id/revert', (c) => handleChangeLog(c.req.raw, c.env, waitUntilOf(c)))
 
 // Compatibility aliases so VITE_API_BASE_URL can point at either
 // `https://<worker>/api` or the old `/functions/v1` prefix.

@@ -448,10 +448,12 @@ const PSQL_ALIGNED = `     t     | n
  session_override | 0
  session_override_preview | 0
  session_override_log | 0
-(26 rows)
+ change_log | 0
+ change_preview | 0
+(28 rows)
 `
 
-eq(REQUIRED_COUNT_TABLES.length, 26, 'counts cover all 26 public app tables')
+eq(REQUIRED_COUNT_TABLES.length, 28, 'counts cover all 28 public app tables')
 for (const table of EXTRA_COUNT_TABLES) {
   ok(REQUIRED_COUNT_TABLES.includes(table), `counts include ${table}`)
 }
@@ -650,11 +652,11 @@ eq(aligned.coach_message, 0, 'parseCounts reads padded psql aligned coach_messag
 requireCounts(aligned, 'aligned-fixture')
 ok(true, 'requireCounts accepts a complete aligned parse')
 
-const atCsv = parseCounts('athlete,3\nathlete_goal,0\nathlete_profile,0\nautoreg_rule,0\ncoach_message,0\ndiagnostic,0\ngoal_measurement,0\ninsight,0\ninsight_draft,0\nmcp_token,1\nphase,1\nprobe_throttle,0\nprogram,1\nprogram_revision,0\nprogression_rule,0\nroutine,1\nsession_observation,0\ntrack,0\nweekly_review,0\nworkout,1\nworkout_draft,0\nworkout_note,0\ncoach_proposal,0\nsession_override,0\nsession_override_preview,0\nsession_override_log,0\n')
+const atCsv = parseCounts('athlete,3\nathlete_goal,0\nathlete_profile,0\nautoreg_rule,0\ncoach_message,0\ndiagnostic,0\ngoal_measurement,0\ninsight,0\ninsight_draft,0\nmcp_token,1\nphase,1\nprobe_throttle,0\nprogram,1\nprogram_revision,0\nprogression_rule,0\nroutine,1\nsession_observation,0\ntrack,0\nweekly_review,0\nworkout,1\nworkout_draft,0\nworkout_note,0\ncoach_proposal,0\nsession_override,0\nsession_override_preview,0\nsession_override_log,0\nchange_log,0\nchange_preview,0\n')
 eq(atCsv.athlete, 3, 'parseCounts reads psql -At CSV')
 requireCounts(atCsv, 'at-csv')
 
-const csvHeaderOut = parseCounts('t,n\nathlete,3\nathlete_goal,0\nathlete_profile,0\nautoreg_rule,0\ncoach_message,0\ndiagnostic,0\ngoal_measurement,0\ninsight,0\ninsight_draft,0\nmcp_token,1\nphase,1\nprobe_throttle,0\nprogram,1\nprogram_revision,0\nprogression_rule,0\nroutine,1\nsession_observation,0\ntrack,0\nweekly_review,0\nworkout,1\nworkout_draft,0\nworkout_note,0\ncoach_proposal,0\nsession_override,0\nsession_override_preview,0\nsession_override_log,0\n')
+const csvHeaderOut = parseCounts('t,n\nathlete,3\nathlete_goal,0\nathlete_profile,0\nautoreg_rule,0\ncoach_message,0\ndiagnostic,0\ngoal_measurement,0\ninsight,0\ninsight_draft,0\nmcp_token,1\nphase,1\nprobe_throttle,0\nprogram,1\nprogram_revision,0\nprogression_rule,0\nroutine,1\nsession_observation,0\ntrack,0\nweekly_review,0\nworkout,1\nworkout_draft,0\nworkout_note,0\ncoach_proposal,0\nsession_override,0\nsession_override_preview,0\nsession_override_log,0\nchange_log,0\nchange_preview,0\n')
 eq(csvHeaderOut.workout, 1, 'parseCounts skips psql --csv header')
 eq(csvHeaderOut.session_observation, 0, 'parseCounts reads session_observation from csv header output')
 
@@ -667,7 +669,7 @@ try {
 ok(emptyFailed, 'requireCounts fails hard when aligned output has no table rows')
 
 const full = Object.fromEntries(REQUIRED_COUNT_TABLES.map((t) => [t, aligned[t] ?? 0]))
-eq(Object.keys(full).length, 26, 'complete count fixture has 26 tables')
+eq(Object.keys(full).length, 28, 'complete count fixture has 28 tables')
 ok(!formatCountComparison(full, full).mismatch, 'matching required tables are ok')
 ok(formatCountComparison(full, { ...full, athlete: 2 }).mismatch, 'mismatch is flagged')
 ok(formatCountComparison(full, null).mismatch, 'missing dest counts are a mismatch')
@@ -1296,7 +1298,7 @@ const tables = await db.query(`
   WHERE schemaname = 'public'
     AND tablename IN (${REQUIRED_COUNT_TABLES.map((t) => `'${t}'`).join(',')})
 `)
-eq(tables.rows.length, 26, 'PGlite app.sql creates the counted public tables')
+eq(tables.rows.length, 28, 'PGlite app.sql creates the counted public tables')
 const uncovered = await db.query(uncoveredPublicTablesQuery())
 eq(uncovered.rows.length, 0, 'PGlite public tables are covered or Better Auth excluded')
 const badPk = await db.query(unexpectedPrimaryKeyQuery())

@@ -11,6 +11,8 @@ import { withSql, type Sql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 import { parseRpeHalfStepsFlag, rpeHalfStepsOn, workoutRpeError } from '../../src/engine/rpeScale.ts'
 import { GENERAL_TRACK_SEED } from '../../src/engine/tracks.ts'
+import { changeLogOnFor, liveCoachTokenIds, voidRevokedCoachPreviews, withTx, writeChange } from './changeLog.ts'
+import { makeStore } from './store.ts'
 
 export type FilterOp = 'eq' | 'neq' | 'in' | 'gte' | 'gt' | 'lte' | 'lt' | 'ilike' | 'not_in'
 
@@ -948,6 +950,13 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
         }
         prepared.push(row)
       }
+      // G2: with tracks_v1 on, the in-app editor's program_revision also lands
+      // in change_log, in the same transaction. Ids are minted here so the log
+      // can name each revision.
+      const logRevisions = table === 'program_revision' && query.op === 'insert' && ctx.athleteId
+        ? await changeLogOnFor(sql, ctx.athleteId)
+        : false
+      if (logRevisions) for (const row of prepared) if (typeof row.id !== 'string') row.id = crypto.randomUUID()
       const cols = [...new Set(prepared.flatMap((r) => Object.keys(r).filter((k) => r[k] !== undefined)))]
       if (cols.length === 0) return fail('insert requires columns', 400)
       cols.forEach((c) => colOk(table, c))
@@ -979,7 +988,13 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       text += ` ${returningSql(table, query.returning)}`
       let rows: object[]
       try {
-        rows = await runSql<object>(sql, text, params)
+        rows = logRevisions
+          ? await withTx(sql, async () => {
+              const out = await runSql<object>(sql, text, params)
+              await logAppRevisions(sql, ctx.athleteId!, prepared)
+              return out
+            })
+          : await runSql<object>(sql, text, params)
       } catch (err) {
         if (query.op === 'insert' && uniqueViolation(err) && ctx.athleteId) {
           const key = firstClientKey(prepared)
@@ -1041,7 +1056,18 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       for (const filter of query.filters ?? []) walkFilterPath(table, filter.column, joins)
       const where = whereClause(table, ctx.athleteId, ctx.userId, query.filters ?? [], joins, params.length + 1)
       const text = `UPDATE ${table} SET ${sets.join(', ')} ${where.text} ${returningSql(table, query.returning)}`
-      const rows = await runSql<object>(sql, text, [...params, ...where.params])
+      // G2: revoking a coach voids its open previews now, not at their next
+      // apply, and logs it — in the same transaction as the revoke.
+      const revoking = table === 'mcp_token' && row.revoked_at != null && await changeLogOnFor(sql, ctx.athleteId)
+      const rows = revoking
+        ? await withTx(sql, async () => {
+            const store = makeStore(sql, ctx.athleteId!)
+            const wasLive = await liveCoachTokenIds(store)
+            const out = await runSql<object>(sql, text, [...params, ...where.params])
+            await voidRevokedCoachPreviews(store, wasLive)
+            return out
+          })
+        : await runSql<object>(sql, text, [...params, ...where.params])
       if (!query.returning) return { data: null, error: null, count: rows.length, status: 200 }
       return shapeResult(rows, query, rows.length)
     }
@@ -1062,6 +1088,30 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
     return fail('unknown op', 400)
   } catch (err) {
     return fail(safeClientMessage(err), 400)
+  }
+}
+
+/** One change_log row per in-app program_revision: the athlete's own edit, their own tap. */
+async function logAppRevisions(sql: Sql, athleteId: string, rows: Record<string, unknown>[]): Promise<void> {
+  const store = makeStore(sql, athleteId)
+  for (const row of rows) {
+    const id = String(row.id)
+    await writeChange(store, {
+      actor: { type: 'athlete', id: athleteId },
+      tool: 'app_editor',
+      targetType: 'program',
+      targetId: typeof row.program_id === 'string' ? row.program_id : null,
+      diff: {
+        revision_id: id,
+        trigger: row.trigger ?? 'editor',
+        effective_on: row.effective_on ?? null,
+        summary: row.summary ?? null,
+        revision: row.diff ?? {},
+      },
+      rationale: Array.isArray(row.requests) ? row.requests.filter((r) => typeof r === 'string').join(' ') || null : null,
+      ruleRefs: [],
+      approvalRef: `tap:${id}`,
+    })
   }
 }
 

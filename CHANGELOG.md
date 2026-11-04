@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### change_log, get_change_log, Changes feed and one-tap undo (G2, tracks_v1)
+
+Behind `athlete.flags.tracks_v1`; with it off no `change_log` row is written, the MCP tool list and schemas are exactly as before, writes need no approval, `/api/change-log` answers 404 and Program has no Changes feed.
+
+- **One accountable record.** New append-only `change_log` (spec section 6: actor, tool, target, before → after diff, rationale, `rule_refs`, `approval_ref`, `preview_id`, `expires_on`, `reverted_by`, `revert_of`). A trigger refuses every UPDATE except setting `reverted_by` once, and every DELETE except the athlete's own account deletion. `program_revision` and `session_override_log` are still written exactly as before; nothing historic is copied.
+- **Every covered write logs one row, in the same transaction or statement:** `apply_program_edits`, proposal Accept (app or MCP), every track / rule / goal / target / block write, `set_training_max` over MCP, week-only override apply and clear (a move is one change), the in-app editor's `program_revision`, voided previews, and coach revocation. `rule_refs` come from `U1`–`U15` named in the rationale or passed as `rule_refs`.
+- **Approval everywhere, not just overrides.** Logging (`log_goal_measurement`, `add_workout_note`) is `standing:logging`. Every other confirmed MCP write needs `approval_ref = msg:<id>` and the `preview_id` its preview returned (kept in `change_preview`, under 24 h old, diff — including the target's current state — unchanged); a proposal stands in for the preview and must be under 24 h old. `app_coach` can never approve. Flag-on write tools advertise `approval_ref`, `preview_id` and `rule_refs`.
+- **Revocation.** Revoking a coach in the app voids its open previews (both kinds) at once and logs it, in the revoke's transaction.
+- **MCP.** `get_change_log(since, target?, actor?, limit?, before?)`: athlete-scoped, newest first, paginated. `preview_revert_change(change_id)`: what an undo would restore, or why it can't; it writes nothing and marks the change as suggested in the athlete's feed. There is no coach-side apply.
+- **Undo (athlete only).** `POST /api/change-log { action: 'revert', id }` or `POST /api/change-log/:id/revert`. Restores the target only if it still looks exactly as the change left it (otherwise "changed since"), writes a new row with `revert_of`, sets `reverted_by` on the original, and refuses a second undo. Supported: program edits and proposals applied this week (not ones that queued next week's block or added a session), track updates, progression rules (ended, not deleted), goal definition updates, the athlete target, block details, week-only overrides (voided, kept), and training maxes (only that lift, back to its prior value). Creating a track, goal or autoreg rule, logging, and clears are refused with the reason; nothing is ever deleted.
+- **App.** Program → Changes: who (You / Claude or the coach's name / Coach / System), what, why with rule refs, when, an Undo with a confirm, and Undone state. Pull to refresh reloads it.
+
+**Deploy:** hand-apply `worker/schema/change-log.sql` on Neon (`supabase/migrations/20261104000003_change_log.sql` on Supabase) BEFORE turning `tracks_v1` on for anyone, then deploy the Worker. Rollback is in the SQL header: drop the flag per athlete (instant; writes go back to today's path); the tables can be dropped afterwards.
+
 ### Week-only session overrides (G1, tracks_v1)
 
 Behind `athlete.flags.tracks_v1`; with it off, `/api/session-rx`, the MCP tool list and the app are unchanged.

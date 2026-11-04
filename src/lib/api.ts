@@ -95,6 +95,12 @@ export function sessionOverrideUrl(): string | null {
   return `${base}/session-override`
 }
 
+export function changeLogUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/change-log`
+}
+
 export function authBaseUrl(): string | null {
   const base = apiBaseUrl()
   if (!base || !isCloudflareApi()) return null

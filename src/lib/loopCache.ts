@@ -44,6 +44,8 @@ export const cacheKeys = {
   // the template.
   sessionRxOn: (routineId: string, date: string) => `rx:${routineId}@${date}`,
   overrides:   (athleteId: string, weekStart: string) => `overrides:${athleteId}:${weekStart}`,
+  // tracks_v1: the Changes feed under Program — every recorded write, newest first.
+  changes:     (athleteId: string) => `changes:${athleteId}`,
   rxVersion:   (athleteId: string) => `rxver:${athleteId}`,
   // One finished session as performed — what the preview of a DONE session reads
   // instead of the prescription.
