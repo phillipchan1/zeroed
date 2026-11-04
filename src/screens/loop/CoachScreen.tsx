@@ -16,6 +16,7 @@ import { mergeCoachActions, proposePlaceholderRpeFixes } from '../../engine/rpeP
 import type { ExerciseTemplate } from '../../types/database'
 import { ConvergenceReticle } from '../../components/convergence/ConvergenceReticle'
 import { computeLoopConvergence } from '../../components/convergence/state'
+import { PendingProposals } from './ProposalCard'
 import type { InsightRow, CoachMessageRow, WeeklyPrescription } from '../../types/database'
 
 /**
@@ -219,6 +220,9 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
           is the point of the screen. The same statuses live inside the read. */}
       <div className="page page--split">
        <div className="page__main coach-read-pane">
+        {/* Changes the coach parked for you (tracks_v1). Above the read: a
+            proposal is the one thing on this screen waiting on you. */}
+        <PendingProposals athleteId={athleteId} />
         {/* On mobile the read folds behind this header so the conversation owns
             the screen; tap to expand the instrument. On desktop it's the left
             column and always shown (the toggle is hidden). */}

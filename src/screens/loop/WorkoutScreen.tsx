@@ -47,7 +47,9 @@ import { MovementDemo } from '../../components/MovementDemo'
 import { SessionEffort } from '../../components/SessionEffort'
 import { arcLoadOn } from '../../lib/arcLoad'
 import { tracksOn } from '../../lib/tracksFlag'
-import { fetchAutoregRules, useProgramTracks } from '../../lib/tracksData'
+import { fetchAutoregRules, fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
+import { deriveGoalMeasurements, goalsTrainedBy } from '../../engine/goalSources'
+import { WorkoutGoalChip } from './WorkoutGoalChip'
 import { evaluateAutoregRules } from '../../engine/autoreg'
 import { sessionTrackLayout, type TrackRef } from '../../engine/tracks'
 import { TrackLabel } from './tracksUi'
@@ -1752,6 +1754,16 @@ export function WorkoutScreen({
     ...programmedExercises.map((ex, i) => feedback[i]?.swap ?? ex),
     ...addedExercises(feedback, programmedExercises.length),
   ]
+  // The goals today's exercises feed, judged live from the logged sets.
+  const { data: goalList } = useCachedLoader<GoalView[]>(
+    athleteId && tracksOn() ? cacheKeys.goals(athleteId) : null,
+    () => fetchGoalsView(athleteId!),
+  )
+  const goalByExercise = new Map<string, GoalView>()
+  for (const t of goalsTrainedBy(goalList ?? [], sessionExercises.map((e) => e.name))) {
+    if (!goalByExercise.has(t.exercise)) goalByExercise.set(t.exercise, t.goal)
+  }
+  const goalUnits = { weight: u.storage, distance: u.distance }
   const fired = tracksOn() && (autoregRules?.length ?? 0)
     ? evaluateAutoregRules(autoregRules ?? [], {
         pain_knee_L: checkin.kneePainL,
@@ -2426,6 +2438,16 @@ export function WorkoutScreen({
       }))
       .map((ex) => ex.name)
     const tally = tallySession(setLogs)
+    // The goals this session moves, by the same function the commit writes
+    // with, so the finish screen shows what the goal will actually get.
+    const goals = deriveGoalMeasurements(
+      sessionExercises.map((ex, i) => ({ name: ex.name, sets: setLogs[i] ?? [] })),
+      goalList ?? [],
+      goalUnits,
+    ).map((m) => {
+      const g = (goalList ?? []).find((x) => x.id === m.goal_id)
+      return { id: m.goal_id, name: m.name, unit: g?.unit ?? null, from: m.previous, to: m.value, target: g?.target ?? null, hit: m.hit }
+    })
     return {
       pendingId,
       name: routine!.name,
@@ -2434,6 +2456,7 @@ export function WorkoutScreen({
       unit: u.unit,
       minutes: Math.ceil(finalElapsedRef.current / 60),
       prLifts,
+      goals,
     }
   }
 
@@ -2838,7 +2861,7 @@ export function WorkoutScreen({
             >
               {header && (
                 <div className="track-group__head" style={{ marginBottom: 12 }}>
-                  <span className="track-group__bar" style={{ background: header.color }} />
+                  <span className="track-group__bar" />
                   <TrackLabel track={header} />
                 </div>
               )}
@@ -2870,6 +2893,14 @@ export function WorkoutScreen({
                       </p>
                     )}
                     {ex.added && <p className="ex-added-tag">{intervalPlan ? 'Finisher · added today' : 'Added today'}</p>}
+                    {goalByExercise.has(ex.name) && (
+                      <WorkoutGoalChip
+                        goal={goalByExercise.get(ex.name)!}
+                        exercise={ex.name}
+                        sets={setLogs[exIdx] ?? []}
+                        units={goalUnits}
+                      />
+                    )}
                   </div>
                   {/* An added movement can be taken back out; a programmed one
                       is swapped — or simply not logged. */}

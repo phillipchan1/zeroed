@@ -162,12 +162,17 @@ export const ZEROED_TOOLS: McpTool[] = [
   },
   {
     name: 'preview_program_edits',
-    description: 'Apply surgical edits in memory against the live week and return the deterministic diff. Writes nothing. Always preview before apply_program_edits.',
+    description: 'Apply surgical edits in memory against the live week and return the deterministic diff. Writes nothing to the program. Always preview before apply_program_edits. With propose=true the preview is parked as a proposal the athlete sees on the goal it serves and in Coach, and accepts on their phone; that Accept applies exactly these edits, and refuses if the program changes first. Propose when the athlete is not in this conversation to approve; apply directly when they already said yes here.',
     inputSchema: {
       type: 'object',
       properties: {
         edits: { type: 'array', items: editObjectSchema, minItems: 1 },
         week_start: { type: 'string', description: 'YYYY-MM-DD Monday. Queued block if it matches; otherwise the live template, labeled with this week.' },
+        propose: { type: 'boolean', description: 'Park this preview for the athlete to accept in the app.' },
+        title: { type: 'string', description: 'With propose: one sentence the athlete reads, e.g. "Add a Friday push press. Cap set 4 at RPE 7."' },
+        rationale: { type: 'string', description: 'With propose: why, in the athlete\'s terms, tied to the goal.' },
+        goal_ids: { type: 'array', items: { type: 'string' }, description: 'With propose: the goals this serves, by id or name (see get_goal_brief).' },
+        timing: { type: 'string', enum: ['now', 'next_week'], description: 'With propose: when the accepted change takes effect.' },
       },
       required: ['edits'],
       additionalProperties: false,
@@ -175,11 +180,12 @@ export const ZEROED_TOOLS: McpTool[] = [
   },
   {
     name: 'apply_program_edits',
-    description: 'Write previewed surgical edits to the live program. Requires confirm=true. Uses the same in-place / next-Monday path as the in-app editor.',
+    description: 'Write previewed surgical edits to the live program. Requires confirm=true. Uses the same in-place / next-Monday path as the in-app editor. Pass proposal_id instead of edits to apply a parked proposal exactly as previewed; it refuses if the program changed since.',
     inputSchema: {
       type: 'object',
       properties: {
         edits: { type: 'array', items: editObjectSchema, minItems: 1 },
+        proposal_id: { type: 'string', description: 'Apply this parked proposal instead of edits.' },
         confirm: { type: 'boolean', description: 'Must be true. Refuses otherwise.' },
         timing: {
           type: 'string',
@@ -191,7 +197,7 @@ export const ZEROED_TOOLS: McpTool[] = [
           description: "The athlete's own words — stored as a standing preference so the next block does not drop it.",
         },
       },
-      required: ['edits', 'confirm'],
+      required: ['confirm'],
       additionalProperties: false,
     },
   },
@@ -343,14 +349,18 @@ export async function executeZeroedTool(
       if (!Array.isArray(edits) || !edits.length) throw new Error('edits is required')
       const live = await loadLiveProgram(store)
       if (!live) return 'No active program/phase to edit.'
-      return previewEdits(live, edits as EditInput[]).text
+      const text = previewEdits(live, edits as EditInput[]).text
+      return args.propose === true
+        ? `${text}\n\nNot parked: proposals live on the hosted Worker MCP. Ask the athlete here and apply with confirm=true.`
+        : text
     }
     case 'apply_program_edits': {
       if (args.confirm !== true) {
         return 'Refused: apply_program_edits requires confirm=true. Call preview_program_edits first, then apply with confirm=true.'
       }
+      if (asString(args.proposal_id)) return 'Proposals are applied through the hosted Worker MCP; send the edits here instead.'
       const edits = args.edits
-      if (!Array.isArray(edits) || !edits.length) throw new Error('edits is required')
+      if (!Array.isArray(edits) || !edits.length) throw new Error('edits or proposal_id is required')
       const timing = args.timing === 'next_week' ? 'next_week' : 'now'
       return applyEdits(store, edits as EditInput[], {
         confirm: true,

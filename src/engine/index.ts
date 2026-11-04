@@ -31,7 +31,8 @@ import type {
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
-import { ensureGeneralTrack } from '../lib/tracksData'
+import { carryLanesForward, ensureGeneralTrack, recordSessionGoals } from '../lib/tracksData'
+import { getDistanceUnit, getStorageWeightUnit } from '../lib/units'
 import { resolveWorkoutInsert } from '../lib/workoutCommit'
 import { orderByPlannedDay } from '../lib/weekOrder'
 import {
@@ -1901,6 +1902,7 @@ export async function buildProvisionalProgram(
     .select().single()
   if (!prog) return counts
   await ensureGeneralTrack(prog.id)
+  await carryLanesForward(athleteId, prog.id)
 
   const { data: phase } = await supabase
     .from('phase')
@@ -3771,6 +3773,9 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
   //    rewrites the numbers (and clears the old observations) so re-running the
   //    coach reads the corrected session, not a duplicate of the original.
   let workoutId: string
+  // The day the session happened, as stored: an edit or a backdated session
+  // measures its goals on that day, not today.
+  let performedAtRow: string | null = null
   if (p.editWorkoutId) {
     const patch: Record<string, unknown> = {
       actual_weights: p.actualWeights,
@@ -3790,6 +3795,7 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     )
     if (updErr || !updated) throw updErr ?? new Error('workout update failed')
     workoutId = (updated as { id: string }).id
+    performedAtRow = (updated as { performed_at?: string | null }).performed_at ?? null
     // Clear prior observations so the re-run doesn't stack duplicates.
     await supabase.from('session_observation').delete().eq('workout_id', workoutId)
   } else {
@@ -3832,6 +3838,7 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
       throw error ?? new Error(resolved.error.message ?? 'workout insert failed')
     }
     workoutId = resolved.workoutId
+    performedAtRow = (workout as { performed_at?: string | null } | null)?.performed_at ?? null
   }
 
   // The workout row now exists. Everything below is best-effort and must NOT
@@ -3847,6 +3854,19 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     // 2. Onboarding state transition, if any.
     if (p.onboardingTransition) {
       await supabase.from('athlete').update({ onboarding_step: p.onboardingTransition }).eq('id', p.athleteId)
+    }
+
+    // The goals this session trained move now, debrief or not. Indices key
+    // actualWeights against the snapshot, the session as it was trained.
+    if (p.exercisesSnapshot?.length) {
+      await recordSessionGoals({
+        athleteId: p.athleteId,
+        workoutId,
+        performedOn: localDay(performedAtRow ?? p.performedAt ?? new Date().toISOString(), Intl.DateTimeFormat().resolvedOptions().timeZone),
+        exercises: p.exercisesSnapshot.map((ex, i) => ({ name: ex.name, sets: p.actualWeights[String(i)] ?? [] })),
+        units: { weight: getStorageWeightUnit(), distance: getDistanceUnit() },
+        isEdit: p.editWorkoutId != null,
+      })
     }
 
     // Skipped debrief → the workout is the whole record.

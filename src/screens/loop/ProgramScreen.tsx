@@ -272,7 +272,11 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
       <PullToRefresh onRefresh={pullRefresh}>
       <div className="page">
        <div className="page__main">
-        <PageHeader eyebrow="The plan" title="Program" />
+        <PageHeader
+          eyebrow="The plan"
+          title="Program"
+          onBack={tracksOn() ? () => navigate('/app/goals') : undefined}
+        />
 
         {loading ? (
           <div className="card" style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>

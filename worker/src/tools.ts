@@ -2,6 +2,7 @@ import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import { LIFT_MODEL_TOOLS, LIFT_MODEL_TOOL_NAMES, runLiftModelTool } from '../../supabase/functions/_shared/liftModelTools.ts'
 import { rpeHalfStepsOn } from '../../src/engine/liftModel.ts'
 import { applyEdits, liveToDraft, previewEdits, type EditInput } from './edits.ts'
+import { acceptProposal, parkProposal, resolveGoalIds } from './proposals.ts'
 import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import {
   loadAthlete,
@@ -164,12 +165,17 @@ export const ZEROED_TOOLS: McpTool[] = [
   },
   {
     name: 'preview_program_edits',
-    description: 'Apply surgical edits in memory against the live week and return the deterministic diff. Writes nothing. Always preview before apply_program_edits.',
+    description: 'Apply surgical edits in memory against the live week and return the deterministic diff. Writes nothing to the program. Always preview before apply_program_edits. With propose=true the preview is parked as a proposal the athlete sees on the goal it serves and in Coach, and accepts on their phone; that Accept applies exactly these edits, and refuses if the program changes first. Propose when the athlete is not in this conversation to approve; apply directly when they already said yes here.',
     inputSchema: {
       type: 'object',
       properties: {
         edits: { type: 'array', items: editObjectSchema, minItems: 1 },
         week_start: { type: 'string', description: 'YYYY-MM-DD Monday. Queued block if it matches; otherwise the live template, labeled with this week.' },
+        propose: { type: 'boolean', description: 'Park this preview for the athlete to accept in the app.' },
+        title: { type: 'string', description: 'With propose: one sentence the athlete reads, e.g. "Add a Friday push press. Cap set 4 at RPE 7."' },
+        rationale: { type: 'string', description: 'With propose: why, in the athlete\'s terms, tied to the goal.' },
+        goal_ids: { type: 'array', items: { type: 'string' }, description: 'With propose: the goals this serves, by id or name (see get_goal_brief).' },
+        timing: { type: 'string', enum: ['now', 'next_week'], description: 'With propose: when the accepted change takes effect.' },
       },
       required: ['edits'],
       additionalProperties: false,
@@ -177,11 +183,12 @@ export const ZEROED_TOOLS: McpTool[] = [
   },
   {
     name: 'apply_program_edits',
-    description: 'Write previewed surgical edits to the live program. Requires confirm=true. Uses the same in-place / next-Monday path as the in-app editor.',
+    description: 'Write previewed surgical edits to the live program. Requires confirm=true. Uses the same in-place / next-Monday path as the in-app editor. Pass proposal_id instead of edits to apply a parked proposal exactly as previewed; it refuses if the program changed since.',
     inputSchema: {
       type: 'object',
       properties: {
         edits: { type: 'array', items: editObjectSchema, minItems: 1 },
+        proposal_id: { type: 'string', description: 'Apply this parked proposal instead of edits.' },
         confirm: { type: 'boolean', description: 'Must be true. Refuses otherwise.' },
         timing: {
           type: 'string',
@@ -193,7 +200,7 @@ export const ZEROED_TOOLS: McpTool[] = [
           description: "The athlete's own words — stored as a standing preference so the next block does not drop it.",
         },
       },
-      required: ['edits', 'confirm'],
+      required: ['confirm'],
       additionalProperties: false,
     },
   },
@@ -364,14 +371,32 @@ export async function executeZeroedTool(
       if (!Array.isArray(edits) || !edits.length) throw new McpUserError('edits is required')
       const live = await loadLiveProgram(store)
       if (!live) return 'No active program/phase to edit.'
-      return previewEdits(live, edits as EditInput[], asString(args.week_start)).text
+      const preview = previewEdits(live, edits as EditInput[], asString(args.week_start))
+      if (args.propose !== true) return preview.text
+      const title = asString(args.title)
+      if (!title) throw new McpUserError('title is required with propose=true: one sentence the athlete reads')
+      const parked = await parkProposal(store, live, edits as EditInput[], {
+        title,
+        rationale: asString(args.rationale) ?? null,
+        goalIds: await resolveGoalIds(store, args.goal_ids),
+        timing: args.timing === 'next_week' ? 'next_week' : 'now',
+        request: null,
+      })
+      if (!parked.ok) {
+        return `${preview.text}\n\n${parked.reason === 'unavailable'
+          ? 'Not parked: proposals are not set up on this database yet. Ask the athlete here and apply with confirm=true.'
+          : 'Not parked: these edits change nothing in the live week.'}`
+      }
+      return `${preview.text}\n\n## Proposed\n${parked.reused ? 'Already parked' : 'Parked'} for the athlete as proposal ${parked.id} (preview ${parked.previewId}). They see it in the app and accept it there; apply_program_edits with proposal_id does the same once they say yes here.`
     }
     case 'apply_program_edits': {
       if (args.confirm !== true) {
         return 'Refused: apply_program_edits requires confirm=true. Call preview_program_edits first, then apply with confirm=true.'
       }
+      const proposalId = asString(args.proposal_id)
+      if (proposalId) return (await acceptProposal(store, proposalId)).text
       const edits = args.edits
-      if (!Array.isArray(edits) || !edits.length) throw new McpUserError('edits is required')
+      if (!Array.isArray(edits) || !edits.length) throw new McpUserError('edits or proposal_id is required')
       const timing = args.timing === 'next_week' ? 'next_week' : 'now'
       return applyEdits(store, edits as EditInput[], {
         confirm: true,

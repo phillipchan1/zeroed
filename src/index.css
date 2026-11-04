@@ -4925,6 +4925,7 @@ textarea.input {
   height: 14px;
   border-radius: 2px;
   flex-shrink: 0;
+  background: var(--line);
 }
 .track-group__row { position: relative; }
 .superset-tag {
@@ -4939,7 +4940,7 @@ textarea.input {
 .coverage { display: flex; flex-direction: column; gap: 8px; }
 .coverage__head, .coverage__row {
   display: grid;
-  grid-template-columns: minmax(88px, 1.4fr) repeat(7, 1fr);
+  grid-template-columns: minmax(112px, 1.6fr) repeat(7, 1fr);
   gap: 6px;
   align-items: center;
 }
@@ -4949,13 +4950,14 @@ textarea.input {
   color: var(--text-dim);
   letter-spacing: 0.04em;
 }
-.coverage__name { display: flex; align-items: center; gap: 7px; color: var(--text); }
+.coverage__name { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text); }
+.coverage__name > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .coverage__cell {
   height: 10px;
   border-radius: 3px;
   background: var(--line);
 }
-.coverage__cell--on { opacity: 0.85; }
+.coverage__cell--on { background: var(--text-dim); }
 .goal-pair {
   display: grid;
   grid-template-columns: 1fr;
@@ -4973,26 +4975,402 @@ textarea.input {
   color: var(--text);
   cursor: pointer;
   padding: 0;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform var(--dur-fast) var(--ease-out);
 }
-.goal-bar {
+.goal-card:active { transform: scale(0.985); }
+
+/* Goal status. Color is status: on course is plain text, off course is the
+   signal (the thing to act on), needs a test is pending (unproven), zeroed is
+   confirmed. The mark's shape carries the same four states without color. */
+.goal-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.goal-status__mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.goal-status--on_course  { color: var(--text); }
+.goal-status--off_course { color: var(--signal); }
+.goal-status--off_course .goal-status__mark { border-radius: 1px; transform: rotate(45deg); }
+.goal-status--needs_test { color: var(--pending); }
+.goal-status--needs_test .goal-status__mark { background: none; border: 1.5px dashed currentColor; width: 8px; height: 8px; }
+.goal-status--zeroed     { color: var(--confirmed); }
+.goal-status--zeroed .goal-status__mark { background: none; border: 1.5px solid currentColor; border-radius: 1px; }
+
+/* The track clips the fill; the labels sit under it (they used to sit inside
+   the track's overflow:hidden and never showed). The tick at the end is the
+   target. The fill takes the status color, so a bar alone reads its state. */
+.goal-bar { margin-top: 12px; }
+.goal-bar__track {
   position: relative;
   height: 6px;
-  margin-top: 12px;
   border-radius: 99px;
   background: var(--line);
-  overflow: hidden;
 }
 .goal-bar__fill {
-  height: 100%;
-  background: var(--computing);
+  position: absolute;
+  inset: 0 auto 0 0;
   border-radius: 99px;
+  background: var(--text);
+  transform-origin: left center;
+  animation: meter-grow 600ms var(--ease-out) 80ms backwards;
 }
-.goal-bar__label {
-  display: inline-block;
+.goal-bar--off_course .goal-bar__fill { background: var(--signal); }
+.goal-bar--zeroed .goal-bar__fill { background: var(--confirmed); }
+.goal-bar--needs_test .goal-bar__fill { background: transparent; border: 1.5px dashed var(--pending); }
+.goal-bar__target {
+  position: absolute;
+  right: 0;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--text-dim);
+}
+.goal-bar--off_course .goal-bar__target { background: var(--signal); }
+.goal-bar--zeroed .goal-bar__target { background: var(--confirmed); }
+.goal-bar__labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
   margin-top: 6px;
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
   color: var(--text-dim);
 }
-.goal-bar__label--end { float: right; }
 .goal-spark { display: block; }
+.goal-spark--wide { width: 100%; height: auto; }
+
+/* Goal page */
+.goal-read {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+.goal-read__value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-4xl);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.goal-read__unit {
+  margin-left: 6px;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-dim);
+}
+.goal-read__side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  text-align: right;
+  min-width: 0;
+}
+.goal-log-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.goal-log-row:last-child { border-bottom: 0; }
+.goal-log-row--move > :first-child { min-width: 0; flex: 1; }
+.goal-log-row--move > :last-child { flex-shrink: 0; white-space: nowrap; }
+
+/* Goal chips: a session's goals on Train, an exercise's goal in the workout. */
+.goal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--text);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.goal-chip:active { transform: scale(0.97); }
+.goal-chip__val { font-size: var(--fs-micro); }
+.goal-chip--off_course { border-color: rgba(232, 204, 10, 0.45); }
+.goal-chip--off_course .goal-chip__val { color: var(--signal); }
+.goal-chip--zeroed .goal-chip__val { color: var(--confirmed); }
+.goal-chip--needs_test { border-style: dashed; border-color: rgba(212, 168, 72, 0.5); }
+.session-goals {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.session-goals__k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-right: 4px;
+}
+
+.workout-goal__lock { display: flex; margin-top: 10px; }
+.workout-goal__lock .workout-goal { margin-top: 0; }
+.workout-goal {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  transition: border-color var(--dur-mid) var(--ease-out), background var(--dur-mid) var(--ease-out);
+}
+.workout-goal__k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.workout-goal__name { font-size: var(--fs-sm); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workout-goal__val { margin-left: auto; font-size: var(--fs-sm); white-space: nowrap; }
+.workout-goal--moved { border-color: rgba(232, 204, 10, 0.5); }
+.workout-goal--moved .workout-goal__k, .workout-goal--moved .workout-goal__val { color: var(--signal); }
+.workout-goal--hit { border-color: rgba(95, 184, 122, 0.55); background: rgba(95, 184, 122, 0.08); }
+.workout-goal--hit .workout-goal__k, .workout-goal--hit .workout-goal__val { color: var(--confirmed); }
+
+/* Finish: Goals moved, the second beat after the session stats. */
+.zeroed-goals { width: min(100%, 360px); margin-top: 22px; display: flex; flex-direction: column; gap: 8px; }
+.zeroed-goals__k { text-align: center; margin-bottom: 2px; }
+.zeroed-goal__lock { display: flex; }
+.zeroed-goal__lock .lockon__c { animation-delay: 1.2s; }
+.zeroed-goal {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  animation: fadeRise var(--dur-mid) var(--ease-out) backwards;
+}
+.zeroed-goal__name { font-size: var(--fs-sm); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zeroed-goal__val { margin-left: auto; font-size: var(--fs-sm); white-space: nowrap; }
+.zeroed-goal__tag { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); flex-shrink: 0; }
+.zeroed-goal--hit { border-color: rgba(95, 184, 122, 0.55); }
+.zeroed-goal--hit .zeroed-goal__tag, .zeroed-goal--hit .zeroed-goal__val { color: var(--confirmed); }
+
+/* Forecast chart (goal page) */
+.forecast-chart { display: block; width: 100%; height: auto; overflow: visible; margin-top: 18px; }
+.forecast-chart__band { fill: rgba(245, 245, 245, 0.035); }
+.forecast-chart__target { stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 2 3; }
+.forecast-chart__due { stroke: var(--line); stroke-width: 1; stroke-dasharray: 2 3; }
+.forecast-chart__label { font-family: var(--font-mono); font-size: 10px; fill: var(--text-dim); }
+.forecast-chart__label--strong { fill: var(--text); }
+.forecast-chart__line {
+  fill: none; stroke: var(--text); stroke-width: 1.75; stroke-linejoin: round; stroke-linecap: round;
+  stroke-dasharray: 1; animation: forecast-draw 700ms var(--ease-out) backwards;
+}
+.forecast-chart__dot { fill: var(--ground); stroke: var(--text); stroke-width: 1.75; transform-box: fill-box; transform-origin: center; animation: forecast-pop 350ms var(--ease-snap) backwards; }
+.forecast-chart__dot--last { fill: var(--text); }
+.forecast-chart__cone { transform-box: fill-box; transform-origin: left center; animation: forecast-cone 600ms var(--ease-out) 550ms backwards; stroke-width: 1; }
+.forecast-chart__cone--on_course { fill: rgba(245, 245, 245, 0.07); stroke: var(--text-dim); }
+.forecast-chart__cone--off_course { fill: rgba(232, 204, 10, 0.12); stroke: var(--signal); }
+.forecast-chart__cone--needs_test { fill: rgba(212, 168, 72, 0.08); stroke: var(--pending); stroke-dasharray: 3 3; }
+.forecast-chart__fc--off_course { fill: var(--signal); font-weight: 600; }
+.forecast-chart__fc--on_course { fill: var(--text); font-weight: 600; }
+.forecast-chart__fc--needs_test { fill: var(--pending); }
+@keyframes forecast-draw { from { stroke-dashoffset: 1; } }
+@keyframes forecast-pop { from { transform: scale(0); } }
+@keyframes forecast-cone { from { transform: scaleX(0); opacity: 0; } }
+
+/* Goal reticle (Goals tab, Train, sidebar) */
+.goal-reticle { display: block; overflow: visible; }
+.goal-reticle__x { stroke: var(--line); stroke-width: 1; }
+.goal-reticle__tick { stroke: #333; stroke-width: 1; }
+.goal-reticle__ring { fill: none; stroke: var(--text-dim); stroke-width: 1; stroke-dasharray: 3 4; opacity: 0.45; transition: r 900ms var(--ease-out); }
+.goal-reticle__ring--locked { stroke: var(--confirmed); stroke-dasharray: none; opacity: 0.8; }
+.goal-reticle__p { transition: transform 900ms var(--ease-out), fill 600ms var(--ease-out); }
+.goal-reticle__p--on_course { fill: var(--text); opacity: 0.78; }
+.goal-reticle__p--off_course { fill: var(--signal); }
+.goal-reticle__p--needs_test { fill: var(--pending); opacity: 0.7; }
+.goal-reticle__p--zeroed { fill: var(--confirmed); }
+.goal-reticle__core { fill: var(--signal); }
+.goal-reticle__label { font-family: var(--font-mono); font-size: 9.5px; font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; fill: var(--text-dim); pointer-events: none; }
+.goal-reticle__label--off_course { fill: var(--signal); }
+.goal-reticle__label--needs_test { fill: var(--pending); }
+.goal-reticle__label--zeroed { fill: var(--confirmed); }
+.goal-reticle__hit { fill: transparent; cursor: pointer; outline: none; }
+.goal-reticle__hit:focus-visible { fill: rgba(232, 204, 10, 0.06); }
+
+/* Goals tab */
+.northstar {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  width: 100%;
+  margin-top: 4px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: #CFCFCF;
+  font-size: var(--fs-base);
+  line-height: 1.45;
+  text-align: left;
+  cursor: pointer;
+}
+.northstar__mark { width: 7px; height: 7px; margin-top: 8px; flex-shrink: 0; background: var(--signal); transform: rotate(45deg); border-radius: 1px; }
+.goals-aim { display: flex; flex-direction: column; align-items: center; gap: 4px; margin: 18px 0 6px; }
+.goals-aim__read { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 14px; font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+.goals-aim__count b { color: var(--text); font-weight: 600; }
+.goals-aim__count--off_course b { color: var(--signal); }
+.goals-aim__count--needs_test b { color: var(--pending); }
+.goals-aim__count--zeroed b { color: var(--confirmed); }
+.goals-act {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+  margin: 18px 0 20px;
+  padding: 16px;
+  border-radius: var(--radius-card);
+  text-align: left;
+  color: var(--text);
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.goals-act:active { transform: scale(0.985); }
+.goals-act--off_course { border: 1px solid rgba(232, 204, 10, 0.45); background: linear-gradient(180deg, rgba(232, 204, 10, 0.08), rgba(232, 204, 10, 0.02)); }
+.goals-act--needs_test { border: 1px dashed rgba(212, 168, 72, 0.55); background: rgba(212, 168, 72, 0.04); }
+.goals-act__k { font-family: var(--font-mono); font-size: var(--fs-micro); font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; }
+.goals-act--off_course .goals-act__k, .goals-act--off_course .goals-act__cta { color: var(--signal); }
+.goals-act--needs_test .goals-act__k, .goals-act--needs_test .goals-act__cta { color: var(--pending); }
+.goals-act__t { font-size: var(--fs-lg); font-weight: 650; line-height: 1.3; }
+.goals-act__s { font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.45; }
+.goals-act__cta { margin-top: 4px; font-size: var(--fs-sm); font-weight: 600; }
+.goals-lane { margin-bottom: 16px; padding-top: 14px; padding-bottom: 6px; }
+.goals-lane__h {
+  display: flex; align-items: center; gap: 8px;
+  padding-bottom: 10px; border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono); font-size: var(--fs-micro); font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase;
+  color: var(--text);
+}
+.goals-target { padding: 14px 0; border-bottom: 1px solid var(--line); }
+.goals-target:last-child { border-bottom: 0; }
+.goals-target__top { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+.goals-target__meta { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 8px; }
+
+/* The block road */
+.road { margin-top: 14px; }
+.road__grid { display: grid; position: relative; align-items: center; }
+.road__h { font-family: var(--font-mono); font-size: 10px; line-height: 1.3; color: var(--text-dim); text-align: center; padding-bottom: 8px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.road__h b { display: block; color: var(--text); font-weight: 600; }
+.road__h--now b { color: var(--signal); }
+.road__name { display: flex; align-items: center; gap: 6px; min-width: 0; height: 32px; border-top: 1px solid var(--line); font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); }
+.road__name > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.road__cell { display: flex; align-items: center; justify-content: center; gap: 3px; height: 32px; min-width: 0; overflow: hidden; border-top: 1px solid var(--line); }
+.road__tick { display: block; width: 3px; height: 12px; border-radius: 1px; background: var(--text-dim); opacity: 0.6; }
+.road__cell--now .road__tick { background: var(--text); opacity: 1; }
+.road__cell--next .road__tick { background: transparent; box-shadow: inset 0 0 0 1px #4a4a4a; opacity: 1; }
+.road__cell--deload .road__tick { height: 6px; }
+.road__flag { display: block; width: 8px; height: 8px; border: 1.5px solid var(--text); transform: rotate(45deg); border-radius: 1px; flex-shrink: 0; }
+.road__flag--off_course { border-color: var(--signal); }
+.road__flag--needs_test { border-color: var(--pending); border-style: dashed; }
+.road__flag--zeroed { border-color: var(--confirmed); background: var(--confirmed); }
+.road__now { position: absolute; top: 0; bottom: 0; border: 1px solid rgba(232, 204, 10, 0.3); border-radius: 6px; pointer-events: none; }
+.road__legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; font-family: var(--font-mono); font-size: 10.5px; color: var(--text-dim); }
+.road__legend > span { display: inline-flex; align-items: center; gap: 6px; }
+.sidebar__goals { display: flex; flex-direction: column; align-items: center; gap: 8px; width: 100%; padding: 12px 0; border: 0; background: none; cursor: pointer; }
+.goal-line {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  width: 100%;
+  margin-bottom: 16px;
+  padding: 12px 14px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-card);
+  background: none;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.goal-line:active { transform: scale(0.985); }
+.goal-line__body { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+.goal-line__k { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); }
+.goal-line__s { font-size: var(--fs-sm); }
+/* Train's one yellow is Start; an off-course count here reads by weight. */
+.goal-line__n--off_course { color: var(--text); font-weight: 600; }
+.goal-line__n--needs_test { color: var(--pending); }
+.goal-line__n--zeroed { color: var(--confirmed); }
+.goal-line__chev { color: var(--text-dim); flex-shrink: 0; }
+/* Coach proposals */
+.proposal {
+  padding: 16px;
+  margin-bottom: 14px;
+  border-radius: var(--radius-card);
+  border: 1px solid rgba(232, 204, 10, 0.45);
+  background: linear-gradient(180deg, rgba(232, 204, 10, 0.07), rgba(232, 204, 10, 0.015));
+  transition: border-color var(--dur-mid) var(--ease-out), background var(--dur-mid) var(--ease-out);
+}
+.proposal--applied, .proposal--declined, .proposal--stale { border-color: var(--line); background: var(--surface); }
+.proposal__k { font-family: var(--font-mono); font-size: var(--fs-micro); font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--signal); }
+.proposal--applied .proposal__k { color: var(--confirmed); }
+.proposal--declined .proposal__k { color: var(--text-dim); }
+.proposal--stale .proposal__k { color: var(--pending); }
+.proposal__for { color: var(--text-dim); font-weight: 500; letter-spacing: 0.04em; text-transform: none; }
+.proposal__title { margin-top: 8px; font-size: var(--fs-lg); font-weight: 650; line-height: 1.3; }
+.proposal__why { margin-top: 8px; font-size: var(--fs-sm); color: #CFCFCF; line-height: 1.5; }
+.proposal__diff { margin-top: 14px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-btn); background: var(--ground); display: flex; flex-direction: column; gap: 10px; }
+.proposal__session-name { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
+.proposal__lock { display: flex; }
+.proposal__change { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 3px 0; font-size: var(--fs-sm); }
+.proposal__sign { font-family: var(--font-mono); width: 12px; flex-shrink: 0; color: var(--text-dim); }
+.proposal__change--added .proposal__sign { color: var(--signal); }
+.proposal--applied .proposal__change--added { animation: proposal-arrive 420ms var(--ease-snap) backwards; }
+.proposal--applied .proposal__change--added .proposal__sign { color: var(--confirmed); }
+.proposal--applied .proposal__change--removed { opacity: 0.4; transition: opacity 400ms var(--ease-out); }
+.proposal__change--removed .proposal__change-name { text-decoration: line-through; color: var(--text-dim); }
+.proposal__change-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proposal__change-rx { margin-left: auto; font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
+.proposal__change-rx s { color: var(--text-dim); opacity: 0.7; }
+/* A retuned movement's before → after is long; it reads under the name. */
+.proposal__change--changed { flex-wrap: wrap; }
+.proposal__change--changed .proposal__change-name { flex: 1; }
+.proposal__change--changed .proposal__change-rx { flex-basis: 100%; margin-left: 20px; white-space: normal; }
+.proposal__timing { font-size: var(--fs-xs); color: var(--text-dim); }
+.proposal__message { margin-top: 10px; font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.45; }
+.proposal__acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+@keyframes proposal-arrive { from { transform: translateX(24px); opacity: 0; } }
+
+.sidebar__goals-read { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }

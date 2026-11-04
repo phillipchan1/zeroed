@@ -169,7 +169,7 @@ export const TRACK_TOOLS: McpTool[] = [
   },
   {
     name: 'get_goals',
-    description: 'Structured athlete goals with computed status (on_track / behind / hit).',
+    description: 'Structured athlete goals with computed status (on_track / behind / hit), the display the athlete sees (zeroed / on_course / off_course / needs_test), and a forecast: where the last three real measurements land on the due date and the rate per week needed.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -178,6 +178,11 @@ export const TRACK_TOOLS: McpTool[] = [
       },
       additionalProperties: false,
     },
+  },
+  {
+    name: 'get_goal_brief',
+    description: 'Start here when planning. Every goal as the athlete sees it (zeroed / on_course / off_course / needs_test), its forecast (where the last three real measurements land on the due date, the rate needed, the rate trending), its lane, the source binding that lets logged sets move it, the sessions this week that train it, the last coach moves pinned to it, and proposals waiting on the athlete. Off course first.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   {
     name: 'upsert_goal',
@@ -198,7 +203,10 @@ export const TRACK_TOOLS: McpTool[] = [
         due_date: { type: 'string', description: 'YYYY-MM-DD' },
         test_protocol: { type: 'string' },
         cadence: { type: 'string' },
-        source_metric: { type: 'string' },
+        source_metric: {
+          type: 'string',
+          description: 'What logged work moves this goal, as kind:Exercise. Kinds: e1rm (best estimated 1RM), top_set (heaviest completed set), reps, distance (best rep), time (longest hold, or fastest when direction is lower), rounds, test (manual only). Example: top_set:Strict Press. Name the exercise as the program spells it; a session that holds or beats the current value writes a workout_log measurement on its own.',
+        },
         confirm,
         rationale,
       },

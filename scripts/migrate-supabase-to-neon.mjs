@@ -1017,6 +1017,7 @@ export const PUBLIC_RESTORE_ORDER = [
   'athlete_goal',
   'goal_measurement',
   'workout_note',
+  'coach_proposal',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]

@@ -2,7 +2,9 @@
  * tracks_v1 MCP tools. Writes preview unless confirm=true.
  * SQL is scoped to store.athleteId on every query.
  */
-import { applyMeasurement, computeGoalStatus, goalNumber, isGoalDirection, isGoalSide, lastMeasuredOn, pairKey, projectedAtDue, type GoalMeasurement } from '../../src/engine/goals.ts'
+import { applyMeasurement, computeGoalStatus, forecastAtDue, goalDisplayStatus, goalNumber, isGoalDirection, isGoalSide, lastMeasuredOn, pairKey, type GoalMeasurement } from '../../src/engine/goals.ts'
+import { formatGoalSource, goalSource, parseGoalSource, sourceMatches, sourceUnitSupported, SOURCE_KINDS } from '../../src/engine/goalSources.ts'
+import { listProposals } from './proposals.ts'
 import { mcpStamp, writePreview } from '../../src/engine/mcpStamp.ts'
 import { evaluateAutoregRules, type AutoregRule } from '../../src/engine/autoreg.ts'
 import { proposeNextWeek, type PerformedExercise, type ProgressionRule } from '../../src/engine/progression.ts'
@@ -92,6 +94,38 @@ function json(value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
 
+/**
+ * A confirmed coach write leaves a move the athlete can read: what changed and
+ * why, pinned by ref_id to the goal, track or program it touched. The tools
+ * take a rationale, and it used to live only on the preview. kind 'note' keeps
+ * coach_message's kind check as it is; the Coach log already lists notes, and
+ * the goal page reads the ones pinned to the goal or its lane. Only athletes
+ * with tracks_v1 get them.
+ */
+async function recordMove(
+  store: ConnectedStore,
+  what: string,
+  args: Record<string, unknown>,
+  refId: string | null,
+): Promise<void> {
+  // Moves are app chrome (the Coach log, the goal page), so they follow the
+  // flag the app does; the tools themselves stay available to every athlete.
+  const [row] = await store.sql<{ on: boolean | null }[]>`
+    SELECT (flags->'tracks_v1') = 'true'::jsonb AS on FROM athlete WHERE id = ${store.athleteId}
+  `
+  if (row?.on !== true) return
+  const why = asString(args.rationale)
+  const body = why ? `${what} Why: ${why}` : what
+  await store.sql`
+    INSERT INTO coach_message (athlete_id, role, kind, body, ref_id)
+    VALUES (${store.athleteId}, 'coach', 'note', ${body}, ${refId})
+  `
+}
+
+function engineLabel(engine: string): string {
+  return engine.replace(/_/g, ' ')
+}
+
 export async function runTrackTool(
   store: ConnectedStore,
   name: string,
@@ -119,6 +153,8 @@ export async function runTrackTool(
       return json(await upsertAutoregRule(store, args))
     case 'get_goals':
       return json(await getGoals(store, args))
+    case 'get_goal_brief':
+      return json(await getGoalBrief(store))
     case 'upsert_goal':
       return json(await upsertGoal(store, args))
     case 'log_goal_measurement':
@@ -140,7 +176,7 @@ export const TRACK_TOOL_NAMES = new Set([
   'list_tracks', 'get_track', 'create_track', 'update_track',
   'assign_exercise_to_track', 'get_track_progression', 'set_track_progression_rule',
   'list_autoreg_rules', 'upsert_autoreg_rule',
-  'get_goals', 'upsert_goal', 'log_goal_measurement', 'get_goal_history',
+  'get_goals', 'get_goal_brief', 'upsert_goal', 'log_goal_measurement', 'get_goal_history',
   'add_workout_note', 'update_athlete_target', 'update_program_meta',
 ])
 
@@ -279,6 +315,7 @@ async function createTrack(store: ConnectedStore, args: Record<string, unknown>)
     RETURNING id
   `
   if (!row) throw new McpUserError('Could not create track.')
+  await recordMove(store, `Added the ${name} track.`, args, row.id)
   return getTrack(store, row.id)
 }
 
@@ -320,6 +357,7 @@ async function updateTrack(store: ConnectedStore, args: Record<string, unknown>)
     await store.sql`UPDATE track SET retest_policy = ${jsonParam(store.sql, args.set_retest_policy)}
       WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})`
   }
+  await recordMove(store, `Updated the ${track.name} track.`, args, track.id)
   return getTrack(store, track.id)
 }
 
@@ -345,6 +383,7 @@ async function assignExercises(store: ConnectedStore, args: Record<string, unkno
   }
   const sessions = await loadLiveSessions(store, program.id)
   const updated: string[] = []
+  const movedTo = new Set<string>()
   for (const a of planned) {
     if (!a.ok || !a.track_id) continue
     const sess = sessions.find((s) => s.name.toLowerCase().includes(a.session!.toLowerCase()) || a.session!.toLowerCase().includes(s.name.toLowerCase()))
@@ -359,6 +398,10 @@ async function assignExercises(store: ConnectedStore, args: Record<string, unkno
         AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})
     `
     updated.push(`${a.exercise} → ${a.track}`)
+    movedTo.add(a.track_id)
+  }
+  if (updated.length) {
+    await recordMove(store, `Moved ${updated.join(', ')}.`, args, movedTo.size === 1 ? [...movedTo][0] : null)
   }
   return { ...mcpStamp(new Date(), await athleteZone(store)), updated }
 }
@@ -423,6 +466,12 @@ async function setProgressionRule(store: ConnectedStore, args: Record<string, un
     RETURNING id
   `
   if (!row) throw new McpUserError('Could not save rule.')
+  await recordMove(
+    store,
+    `Set ${track.name} to progress by ${engineLabel(engine)}${exercise ? ` for ${exercise}` : ''}.`,
+    args,
+    track.id,
+  )
   return { ...mcpStamp(new Date(), await athleteZone(store)), rule: { id: row.id, track: track.name, exercise, engine_type: engine, params } }
 }
 
@@ -455,6 +504,7 @@ async function upsertAutoregRule(store: ConnectedStore, args: Record<string, unk
     )
     RETURNING id
   `
+  await recordMove(store, `Added a rule: ${message}`, args, null)
   return { ...mcpStamp(new Date(), await athleteZone(store)), rule: { id: row?.id, signal, op, action, message } }
 }
 
@@ -469,8 +519,10 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
     target: number | null; target_range_hi: number | null
     baseline: number | null; current: number | null; best: number | null
     due_date: string | null; status: string; track_id: string | null
+    cadence: string | null; source_metric: string | null
   }[]>`
-    SELECT id, name, metric, unit, side, direction, target, target_range_hi, baseline, current, best, due_date::text, status, track_id
+    SELECT id, name, metric, unit, side, direction, target, target_range_hi, baseline, current, best, due_date::text, status, track_id,
+           cadence, source_metric
     FROM athlete_goal WHERE athlete_id = ${store.athleteId}
     ORDER BY name
   `
@@ -495,16 +547,85 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
   const today = todayISO(await athleteZone(store))
   let list = rows.map((g) => {
     const history = historyByGoal.get(g.id) ?? []
+    const computed = computeGoalStatus(g, history, today)
+    const last_measured = lastMeasuredOn(history)
     return {
       ...g,
-      status: computeGoalStatus(g, history, today),
-      last_measured: lastMeasuredOn(history),
+      status: computed,
+      // What the app shows: zeroed / on_course / off_course / needs_test.
+      display: goalDisplayStatus(computed, last_measured, { cadence: g.cadence, today }),
+      forecast: forecastAtDue(g, history),
+      last_measured,
       pair: pairKey(g.name),
     }
   })
   if (track) list = list.filter((g) => g.track_id === track.id)
   if (status) list = list.filter((g) => g.status === status)
   return { ...mcpStamp(new Date(), await athleteZone(store)), goals: list }
+}
+
+const DISPLAY_ORDER: Record<string, number> = { off_course: 0, needs_test: 1, on_course: 2, zeroed: 3 }
+
+/**
+ * The goal-first read Claude plans from: every goal as the athlete sees it,
+ * where its trend lands, what trains it this week, what the coach last did
+ * for it, and what is waiting on the athlete. Off course first.
+ */
+async function getGoalBrief(store: ConnectedStore) {
+  const { goals } = await getGoals(store, {})
+  const program = await activeProgram(store)
+  const sessions = program ? await loadLiveSessions(store, program.id) : []
+  const exerciseNames = [...new Set(sessions.flatMap((s) => s.exercises.map((e) => e.name)))]
+  const lanes = await store.sql<{ id: string; name: string }[]>`
+    SELECT t.id, t.name FROM track t JOIN program p ON p.id = t.program_id
+    WHERE p.athlete_id = ${store.athleteId}
+  `
+  const laneName = new Map(lanes.map((t) => [t.id, t.name]))
+  const refs = [...new Set(goals.flatMap((g) => [g.id, g.track_id]).filter((id): id is string => !!id))]
+  const moves = refs.length
+    ? await store.sql<{ ref_id: string; body: string; created_at: string }[]>`
+        SELECT ref_id::text, body, to_json(created_at) #>> '{}' AS created_at
+        FROM coach_message
+        WHERE athlete_id = ${store.athleteId} AND kind = 'note' AND ref_id = ANY(${refs}::uuid[])
+        ORDER BY created_at DESC
+        LIMIT 60
+      `
+    : []
+  const proposals = await listProposals(store)
+  const brief = goals.map((g) => {
+    const src = goalSource(g, exerciseNames)
+    const trainedBy = src && src.kind !== 'test'
+      ? sessions.filter((s) => s.exercises.some((e) => sourceMatches(src, e.name))).map((s) => s.name)
+      : []
+    return {
+      id: g.id,
+      name: g.name,
+      lane: g.track_id ? laneName.get(g.track_id) ?? null : null,
+      display: g.display,
+      status: g.status,
+      current: g.current,
+      target: g.target,
+      unit: g.unit,
+      direction: g.direction,
+      due_date: g.due_date,
+      last_measured: g.last_measured,
+      cadence: g.cadence,
+      forecast: g.forecast,
+      source: src ? { binding: formatGoalSource(src), inferred: src.inferred } : null,
+      sessions_this_week: trainedBy,
+      recent_moves: moves.filter((m) => m.ref_id === g.id || m.ref_id === g.track_id).slice(0, 3)
+        .map((m) => ({ at: m.created_at, body: m.body })),
+      pending_proposals: (proposals ?? []).filter((p) => (p.goal_ids ?? []).includes(g.id)).map((p) => p.id),
+    }
+  }).sort((a, b) => (DISPLAY_ORDER[a.display] ?? 9) - (DISPLAY_ORDER[b.display] ?? 9) || a.name.localeCompare(b.name))
+  return {
+    ...mcpStamp(new Date(), await athleteZone(store)),
+    goals: brief,
+    pending_proposals: proposals == null
+      ? 'unavailable on this database'
+      : proposals.map((p) => ({ id: p.id, title: p.title, goal_ids: p.goal_ids, created_at: p.created_at })),
+    next: 'For an off_course goal: preview a change to the lane or sessions that train it, then preview_program_edits with propose=true and goal_ids so the athlete accepts it in the app. A needs_test goal wants a test, not a program change. Give a goal with no source a source_metric (upsert_goal) so logged sets move it.',
+  }
 }
 
 async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) {
@@ -517,7 +638,16 @@ async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) 
   const program = await activeProgram(store)
   const tracks = program ? await loadTracks(store, program.id) : []
   const track = findTrack(tracks, asString(args.track))
-  const diff = [{ op: 'upsert_goal', name, target: asNum(args.target), track: track?.name ?? null }]
+  const rawSource = asString(args.source_metric)
+  const source = rawSource ? parseGoalSource(rawSource) : null
+  if (rawSource && !source) {
+    throw new McpUserError(`source_metric must be kind:Exercise with kind one of ${SOURCE_KINDS.join(', ')} (test may omit the exercise), e.g. top_set:Strict Press`)
+  }
+  if (source && asString(args.unit) && !sourceUnitSupported(source.kind, asString(args.unit))) {
+    throw new McpUserError(`A ${source.kind} source can't be stated in "${asString(args.unit)}". Use a unit it converts to, or a test: binding.`)
+  }
+  if (source) args = { ...args, source_metric: formatGoalSource(source) }
+  const diff = [{ op: 'upsert_goal', name, target: asNum(args.target), track: track?.name ?? null, source: source ? formatGoalSource(source) : null }]
   if (!asBool(args.confirm)) return writePreview(diff, [], { rationale: asString(args.rationale) ?? null })
   const goalId = asString(args.goal_id)
   if (goalId) {
@@ -539,6 +669,10 @@ async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) 
         updated_at = NOW()
       WHERE id = ${goalId} AND athlete_id = ${store.athleteId}
     `
+    const [owned] = await store.sql<{ id: string }[]>`
+      SELECT id FROM athlete_goal WHERE id = ${goalId} AND athlete_id = ${store.athleteId} LIMIT 1
+    `
+    if (owned) await recordMove(store, `Updated the goal ${name}.`, args, owned.id)
     return { ...mcpStamp(new Date(), await athleteZone(store)), goal: { id: goalId, name } }
   }
   const [row] = await store.sql<{ id: string }[]>`
@@ -557,6 +691,17 @@ async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) 
       updated_at = NOW()
     RETURNING id
   `
+  if (row) {
+    const target = asNum(args.target)
+    const unit = asString(args.unit)
+    const due = asString(args.due_date)
+    await recordMove(
+      store,
+      `Set the goal ${name}${target != null ? `: ${target}${unit ? ` ${unit}` : ''}` : ''}${due ? ` by ${due}` : ''}.`,
+      args,
+      row.id,
+    )
+  }
   return { ...mcpStamp(new Date(), await athleteZone(store)), goal: { id: row?.id, name } }
 }
 
@@ -653,7 +798,9 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
     goal: { ...goal, status: computeGoalStatus(goal, history, today), last_measured: lastMeasuredOn(history) },
     measurements: history,
     trend: history.length >= 2 ? history[history.length - 1].value - history[0].value : 0,
-    projected_at_due: projectedAtDue(history, goal.due_date),
+    // The same forecast the app's status reads: the last three real points.
+    projected_at_due: forecastAtDue(goal, history)?.value ?? null,
+    forecast: forecastAtDue(goal, history),
   }
 }
 
@@ -711,11 +858,17 @@ async function updateAthleteTarget(store: ConnectedStore, args: Record<string, u
   const diff = [{ op: 'update_athlete_target', text }]
   if (!asBool(args.confirm)) return writePreview(diff)
   await store.sql`UPDATE athlete SET goals = ${text} WHERE id = ${store.athleteId}`
+  await recordMove(store, `Changed your target to: ${text}`, args, null)
   const [row] = await store.sql<{ id: string; name: string | null; goals: string | null }[]>`
     SELECT id, name, goals FROM athlete WHERE id = ${store.athleteId}
   `
   return { ...mcpStamp(new Date(), await athleteZone(store)), athlete: row }
 }
+
+const PROGRAM_META_LABEL = {
+  name: 'name', block_phase: 'phase', start_date: 'start', end_date: 'end',
+  deload_week_start: 'deload', retest_start: 'retest', retest_end: 'retest ends',
+} as const
 
 async function updateProgramMeta(store: ConnectedStore, args: Record<string, unknown>) {
   const program = await activeProgram(store)
@@ -742,6 +895,10 @@ async function updateProgramMeta(store: ConnectedStore, args: Record<string, unk
       retest_end = COALESCE(${patch.retest_end}::date, retest_end)
     WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
   `
+  const changed = (Object.entries(patch) as Array<[keyof typeof patch, string | null]>)
+    .filter(([, v]) => v != null)
+    .map(([k, v]) => `${PROGRAM_META_LABEL[k]} ${v}`)
+  if (changed.length) await recordMove(store, `Updated the block: ${changed.join(', ')}.`, args, program.id)
   const [row] = await store.sql<object[]>`
     SELECT id, name, block_phase, start_date::text, end_date::text, deload_week_start::text,
            retest_start::text, retest_end::text, goal, status

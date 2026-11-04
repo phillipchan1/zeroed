@@ -251,7 +251,7 @@ export function liveToDraft(live: LiveProgram): ProgramDraft {
   }
 }
 
-function revisionPayload(_before: DraftSession[], diff: ReturnType<typeof diffDraft>) {
+export function revisionPayload(_before: DraftSession[], diff: ReturnType<typeof diffDraft>) {
   return {
     added: diff.added,
     removed: diff.removed,

@@ -18,9 +18,26 @@ export interface FinishedSession {
   minutes: number
   /** Lifts that set a record this session, in the order they were done. */
   prLifts: string[]
+  /** The goals this session moved or held (tracks_v1). Absent on older entries. */
+  goals?: FinishedGoal[]
+}
+
+export interface FinishedGoal {
+  id: string
+  name: string
+  unit: string | null
+  /** The goal's current before this session; null if it had none. */
+  from: number | null
+  to: number
+  target: number | null
+  hit: boolean
 }
 
 const HOLD_MS = 4000
+// Goals moved is a second beat after the stats, so the moment holds a little
+// longer for each goal it names (capped; a tap still skips).
+const GOAL_BEAT_MS = 600
+const holdFor = (goals: number) => HOLD_MS + Math.min(goals, 3) * GOAL_BEAT_MS
 const fmt = (n: number) => n.toLocaleString()
 // The count-up runs in JS, so the CSS reduced-motion rule can't reach it.
 const reducedMotion = () =>
@@ -50,7 +67,7 @@ export function SessionZeroed({ session, week, onDone }: {
   useEffect(() => {
     // Start the count-up just after the check lands, and leave on our own.
     const start = setTimeout(() => { setCounting(true); success(); playZeroed() }, 450)
-    const leave = setTimeout(() => setLeaving(true), HOLD_MS)
+    const leave = setTimeout(() => setLeaving(true), holdFor(session.goals?.length ?? 0))
     return () => { clearTimeout(start); clearTimeout(leave) }
   }, [])
 
@@ -68,6 +85,7 @@ export function SessionZeroed({ session, week, onDone }: {
     ...(session.minutes > 0 ? [{ value: session.minutes, label: 'min' }] : []),
   ]
   const prs = session.prLifts
+  const goals = (session.goals ?? []).slice(0, 3)
 
   return (
     <div
@@ -77,7 +95,7 @@ export function SessionZeroed({ session, week, onDone }: {
       aria-label={`Session logged: ${session.name}`}
       onClick={() => setLeaving(true)}
       onAnimationEnd={(e) => { if (e.animationName === 'zeroed-out') doneRef.current() }}
-      style={{ '--zeroed-hold': `${HOLD_MS}ms` } as React.CSSProperties}
+      style={{ '--zeroed-hold': `${holdFor(session.goals?.length ?? 0)}ms` } as React.CSSProperties}
     >
       <span className="zeroed-moment__timer" aria-hidden />
 
@@ -113,6 +131,36 @@ export function SessionZeroed({ session, week, onDone }: {
             {prs.slice(0, 2).join(' · ')}{prs.length > 2 ? ` +${prs.length - 2}` : ''}
           </span>
         </p>
+      )}
+
+      {goals.length > 0 && (
+        <div className="zeroed-goals">
+          <p className="eyebrow zeroed-goals__k">Goals moved</p>
+          {goals.map((g, i) => {
+            const moved = g.from == null || g.to !== g.from
+            const row = (
+              <div className={`zeroed-goal${g.hit ? ' zeroed-goal--hit' : ''}`} style={{ animationDelay: `${900 + i * 160}ms` }}>
+                <span className="zeroed-goal__name">{g.name}</span>
+                <span className="zeroed-goal__val num">
+                  {moved
+                    ? <TickingNumber value={counting ? g.to : (g.from ?? g.to)} duration={reducedMotion() ? 1 : 700} />
+                    : g.to}
+                  {g.target != null && <span className="text-dim"> / {g.target}{g.unit ? ` ${g.unit}` : ''}</span>}
+                </span>
+                <span className="zeroed-goal__tag">{g.hit ? 'Zeroed' : moved ? 'Moved' : 'Held'}</span>
+              </div>
+            )
+            return g.hit ? (
+              <LockOn
+                key={g.id}
+                className="zeroed-goal__lock"
+                style={{ '--lock-gap': '-6px', '--lock-from': '14px', '--lock-size': '9px', '--lock-color': 'var(--confirmed)' } as React.CSSProperties}
+              >
+                {row}
+              </LockOn>
+            ) : <div key={g.id}>{row}</div>
+          })}
+        </div>
       )}
 
       {week && (

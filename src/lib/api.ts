@@ -83,6 +83,12 @@ export function sessionRxUrl(): string | null {
   return `${base}/session-rx`
 }
 
+export function proposalsUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/proposals`
+}
+
 export function authBaseUrl(): string | null {
   const base = apiBaseUrl()
   if (!base || !isCloudflareApi()) return null

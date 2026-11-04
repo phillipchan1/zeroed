@@ -1,6 +1,6 @@
 // Run: node --experimental-strip-types src/engine/goals.check.ts
 import {
-  applyMeasurement, computeGoalStatus, lastMeasuredOn, pairKey, progressRatio, projectedAtDue,
+  applyMeasurement, cadenceDays, computeGoalStatus, forecastAtDue, goalDisplayStatus, lastMeasuredOn, pairKey, progressRatio, projectedAtDue,
 } from './goals.ts'
 
 const fails: string[] = []
@@ -148,6 +148,49 @@ const projected = projectedAtDue(
   '2026-12-01',
 )
 ok(projected != null && projected > 100 && projected < 103, `linear projection continues the slope, got ${projected}`)
+
+const pressGoal = { name: 'Strict press', metric: 'top_set', direction: 'higher' as const, target: 130, baseline: 112, current: 120, due_date: '2026-11-27' }
+const pressHist = [
+  { date: '2026-09-30', value: 112, source: 'workout_log' }, { date: '2026-10-07', value: 115, source: 'workout_log' },
+  { date: '2026-10-14', value: 120, source: 'workout_log' }, { date: '2026-10-21', value: 120, source: 'workout_log' },
+  { date: '2026-10-28', value: 120, source: 'workout_log' },
+]
+const pressFc = forecastAtDue(pressGoal, pressHist)
+ok(pressFc?.value === 120 && pressFc.perWeek === 0, `a press flat for three weeks forecasts 120, got ${pressFc?.value}`)
+ok(pressFc?.neededPerWeek != null && pressFc.neededPerWeek > 2 && pressFc.neededPerWeek < 2.5, `needs about 2.3 lb a week, got ${pressFc?.neededPerWeek}`)
+ok(computeGoalStatus(pressGoal, pressHist, '2026-11-04') === 'behind', 'a stalled press 23 days out is behind, not on track')
+const benchGoal = { name: 'Bench', metric: 'e1rm', direction: 'higher' as const, target: 285, baseline: 262, current: 275, due_date: '2026-11-27' }
+const benchHist = [
+  { date: '2026-10-19', value: 266, source: 'workout_log' }, { date: '2026-10-26', value: 271, source: 'workout_log' },
+  { date: '2026-11-02', value: 275, source: 'workout_log' },
+]
+ok(computeGoalStatus(benchGoal, benchHist, '2026-11-04') === 'on_track', 'bench climbing 4.5 a week reaches 285 by the 27th')
+const fresh = { name: 'Squat', metric: 'top_set', direction: 'higher' as const, target: 315, baseline: 225, current: 225, due_date: '2027-03-01' }
+ok(forecastAtDue(fresh, [{ date: '2026-11-02', value: 225, source: 'manual' }, { date: '2026-11-02', value: 225, source: 'workout_log' }]) === null, 'two points on one day are not a trend')
+ok(computeGoalStatus(fresh, [{ date: '2026-11-02', value: 225, source: 'manual' }, { date: '2026-11-04', value: 225, source: 'workout_log' }], '2026-11-04') === 'on_track', 'a brand-new goal is not off course on two points days apart')
+ok(forecastAtDue({ ...benchGoal, due_date: null }, benchHist) === null, 'no due date, no forecast')
+ok(forecastAtDue(benchGoal, [benchHist[0]]) === null, 'one point is not a trend')
+ok(forecastAtDue(benchGoal, [{ date: '2026-11-01', value: 270, source: 'manual', client_key: 'seed:a' }, ...benchHist.slice(2)]) === null, 'seed rows do not make a trend')
+const rangeGoal = { ...benchGoal, target: 280, target_range_hi: 284, current: 279 }
+ok(computeGoalStatus(rangeGoal, benchHist, '2026-11-04') === 'on_track', 'overshooting a range ceiling is not behind')
+const sprintGoal = { name: '10 m sprint', metric: 'time', direction: 'lower' as const, target: 1.75, baseline: 1.9, current: 1.82, due_date: '2026-12-15' }
+const sprintHist = [{ date: '2026-10-10', value: 1.9, source: 'manual' }, { date: '2026-10-24', value: 1.85, source: 'manual' }, { date: '2026-11-01', value: 1.82, source: 'manual' }]
+ok(computeGoalStatus(sprintGoal, sprintHist, '2026-11-04') === 'on_track', 'a lower goal trending down is on track')
+const noDue = { name: 'Pull-ups', metric: 'reps', direction: 'higher' as const, target: 15, baseline: 8, current: 10 }
+ok(computeGoalStatus(noDue, [{ date: '2026-10-01', value: 10, source: 'manual' }, { date: '2026-10-15', value: 10, source: 'manual' }, { date: '2026-11-01', value: 10, source: 'manual' }], '2026-11-04') === 'behind', 'no due date and three flat points is behind')
+
+ok(cadenceDays('weekly') === 7 && cadenceDays('Biweekly') === 14 && cadenceDays('every 2 weeks') === 14, 'cadence words read as days')
+ok(cadenceDays('every 10 days') === 10 && cadenceDays('monthly') === 30 && cadenceDays('when it feels right') === null, 'cadence numbers read; prose does not')
+ok(goalDisplayStatus('on_track', '2026-10-06', { cadence: 'every 2 weeks', today: '2026-11-04' }) === 'needs_test', 'a lapsed cadence needs a test')
+ok(goalDisplayStatus('on_track', '2026-10-28', { cadence: 'every 2 weeks', today: '2026-11-04' }) === 'on_course', 'inside the cadence stays on course')
+ok(goalDisplayStatus('on_track', '2026-01-01', { cadence: null, today: '2026-11-04' }) === 'on_course', 'no cadence never goes stale')
+
+ok(goalDisplayStatus('hit', '2026-11-03') === 'zeroed', 'hit with a real measurement is zeroed')
+ok(goalDisplayStatus('behind', '2026-11-03') === 'off_course', 'behind is off course')
+ok(goalDisplayStatus('on_track', '2026-11-03') === 'on_course', 'on_track is on course')
+ok(goalDisplayStatus('on_track', null) === 'needs_test', 'no real measurement needs a test')
+ok(goalDisplayStatus('hit', null) === 'needs_test', 'a seeded hit with no real measurement still needs a test')
+ok(goalDisplayStatus('behind', null) === 'needs_test', 'a pending baseline near its due date needs a test, not the signal')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {
