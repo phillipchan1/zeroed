@@ -141,6 +141,12 @@ export function summarizeChange(row: { tool: string; target_type: string; diff: 
       const blocked = arr(d.regions).map(obj).filter((m) => m.to === 'blocked').map((m) => String(m.region ?? '').replace(/_/g, ' '))
       return clip(`Check-in${str(d.date) ? ` ${str(d.date)}` : ''}: ${bits.join(', ') || 'logged'}${blocked.length ? ` — ${blocked.join(', ')} blocked` : ''}`)
     }
+    case 'log_session_rpe': {
+      const after = obj(d.after)
+      const before = d.before == null ? null : obj(d.before)
+      const mins = after.duration_min != null ? ` · ${String(after.duration_min)} min` : ''
+      return clip(`Session effort${str(d.session) ? ` (${str(d.session)})` : ''}: ${before ? `${String(before.rating)} → ` : ''}${String(after.rating ?? '')}/10${mins}`)
+    }
     case 'clear_region':
       return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} cleared by a clinician`)
     case 'set_coach_health_access': {

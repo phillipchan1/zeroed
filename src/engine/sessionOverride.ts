@@ -507,3 +507,26 @@ export function diffOverride(before: AppliedOverride, after: AppliedOverride): O
   })
   return changes
 }
+
+// ---- starting today's session (tracks_v1) ---------------------------------------
+
+/**
+ * The date the Workout screen sends /api/session-rx when it starts a session:
+ * today, so today's week-only override applies. Null — and the request is
+ * exactly the pre-override one — with the flag off, on an edit of a logged
+ * session, or when logging into a week that isn't this one.
+ */
+export function workoutRxDate(o: { tracksOn: boolean; isEdit: boolean; week: { start: string; end: string } | null; today: string }): string | null {
+  if (!o.tracksOn || o.isEdit) return null
+  if (o.week && (o.today < o.week.start || o.today > o.week.end)) return null
+  return o.today
+}
+
+/**
+ * The session to train: the override's list replaces the template's when the
+ * prescription carries one (its indexes follow that list). Otherwise the same
+ * object back.
+ */
+export function sessionWithOverride<R extends { exercises: ExerciseTemplate[] }>(routine: R, override: SessionOverrideView | null | undefined): R {
+  return override ? { ...routine, exercises: override.exercises } : routine
+}
