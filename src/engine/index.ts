@@ -31,7 +31,7 @@ import type {
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
-import { ensureGeneralTrack, recordSessionGoals } from '../lib/tracksData'
+import { carryLanesForward, ensureGeneralTrack, recordSessionGoals } from '../lib/tracksData'
 import { getDistanceUnit, getStorageWeightUnit } from '../lib/units'
 import { resolveWorkoutInsert } from '../lib/workoutCommit'
 import { orderByPlannedDay } from '../lib/weekOrder'
@@ -1902,6 +1902,7 @@ export async function buildProvisionalProgram(
     .select().single()
   if (!prog) return counts
   await ensureGeneralTrack(prog.id)
+  await carryLanesForward(athleteId, prog.id)
 
   const { data: phase } = await supabase
     .from('phase')

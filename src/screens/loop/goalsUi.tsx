@@ -115,3 +115,83 @@ export function GoalChip({ goal, onOpen }: {
     </button>
   )
 }
+
+/**
+ * Will this goal get there: real measurements as a line, the target as a dashed
+ * rule, the due date as a dashed post, and a cone from the latest point to
+ * where the trend lands on the due date. The cone's color is the status, so an
+ * off-course goal's cone visibly misses the target. Clocks don't ease here:
+ * the line draws once on arrival, then holds.
+ */
+export function ForecastChart({ history, target, due, forecast, display, unit, direction }: {
+  history: Array<{ date: string; value: number }>
+  target: number | null
+  due: string | null
+  forecast: { value: number } | null
+  display: GoalDisplay
+  unit: string | null
+  direction: string
+}) {
+  const W = 320
+  const H = 150
+  const pad = { l: 34, r: 40, t: 12, b: 22 }
+  const day = (d: string) => Math.round(Date.parse(`${d.slice(0, 10)}T12:00:00Z`) / 86_400_000)
+  const pts = history.filter((h) => Number.isFinite(h.value)).map((h) => ({ x: day(h.date), y: h.value, date: h.date }))
+  if (pts.length < 2 && !(pts.length === 1 && due)) {
+    return <p className="text-xs text-dim">Two measurements draw a trend.</p>
+  }
+  const dueX = due ? day(due) : null
+  const x0 = pts[0].x - 2
+  const x1 = Math.max(pts[pts.length - 1].x, dueX ?? pts[pts.length - 1].x) + 2
+  const ys = pts.map((p) => p.y).concat(target != null ? [target] : []).concat(forecast ? [forecast.value] : [])
+  let lo = Math.min(...ys)
+  let hi = Math.max(...ys)
+  const span = hi - lo || Math.max(1, Math.abs(hi) * 0.1)
+  lo -= span * 0.18
+  hi += span * 0.18
+  const X = (x: number) => pad.l + ((x - x0) / (x1 - x0 || 1)) * (W - pad.l - pad.r)
+  const Y = (y: number) => pad.t + (1 - (y - lo) / (hi - lo)) * (H - pad.t - pad.b)
+  const last = pts[pts.length - 1]
+  const width = (hi - lo) * 0.06
+  const line = pts.map((p, i) => `${i ? 'L' : 'M'}${X(p.x).toFixed(1)} ${Y(p.y).toFixed(1)}`).join(' ')
+  const fmtDay = (d: string) => shortDate(d)
+  const towardBand = target != null
+    ? direction === 'lower' ? { y: Y(target), h: H - pad.b - Y(target) } : { y: pad.t, h: Y(target) - pad.t }
+    : null
+  return (
+    <svg className="forecast-chart" viewBox={`0 0 ${W} ${H}`} role="img" aria-label={`History${forecast ? `, forecast ${goalValue(forecast.value, unit)}` : ''}${target != null ? `, target ${goalValue(target, unit)}` : ''}`}>
+      {towardBand && towardBand.h > 0 && <rect className="forecast-chart__band" x={pad.l} y={towardBand.y} width={W - pad.l - pad.r} height={towardBand.h} />}
+      {target != null && (
+        <>
+          <line className="forecast-chart__target" x1={pad.l} x2={W - pad.r} y1={Y(target)} y2={Y(target)} />
+          <text className="forecast-chart__label forecast-chart__label--strong" x={pad.l - 6} y={Y(target) + 3} textAnchor="end">{target}</text>
+        </>
+      )}
+      {dueX != null && (
+        <>
+          <line className="forecast-chart__due" x1={X(dueX)} x2={X(dueX)} y1={pad.t} y2={H - pad.b} />
+          <text className="forecast-chart__label" x={X(dueX)} y={H - 6} textAnchor="middle">{fmtDay(due!)}</text>
+        </>
+      )}
+      <text className="forecast-chart__label" x={X(pts[0].x)} y={H - 6} textAnchor="start">{fmtDay(pts[0].date)}</text>
+      {forecast && dueX != null && display !== 'zeroed' && (
+        <>
+          <polygon
+            className={`forecast-chart__cone forecast-chart__cone--${display}`}
+            points={`${X(last.x)},${Y(last.y)} ${X(dueX)},${Y(forecast.value + width)} ${X(dueX)},${Y(forecast.value - width)}`}
+          />
+          <text className={`forecast-chart__label forecast-chart__fc--${display}`} x={X(dueX) + 6} y={Y(forecast.value) + 3}>{forecast.value}</text>
+        </>
+      )}
+      {pts.length > 1 && <path className="forecast-chart__line" pathLength={1} d={line} />}
+      {pts.map((p, i) => (
+        <circle
+          key={`${p.date}-${i}`}
+          className={`forecast-chart__dot${i === pts.length - 1 ? ' forecast-chart__dot--last' : ''}`}
+          cx={X(p.x)} cy={Y(p.y)} r={i === pts.length - 1 ? 3.6 : 2.8}
+          style={{ animationDelay: `${i * 70}ms` }}
+        />
+      ))}
+    </svg>
+  )
+}

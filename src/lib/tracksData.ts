@@ -50,6 +50,8 @@ export interface GoalView extends AthleteGoalRow {
   computed: ReturnType<typeof computeGoalStatus>
   display: GoalDisplay
   forecast: GoalForecast | null
+  /** The lane this goal sits on, by its track id even when that track is last block's. */
+  lane: Pick<TrackRow, 'id' | 'name' | 'icon' | 'sort_order'> | null
   pair: string
   history: GoalMeasurement[]
   last_measured: string | null
@@ -62,6 +64,11 @@ export async function fetchGoalsView(athleteId: string): Promise<GoalView[]> {
   ])
   if (gErr) throw gErr
   if (mErr) throw mErr
+  const trackIds = [...new Set(((goals ?? []) as AthleteGoalRow[]).map((g) => g.track_id).filter((id): id is string => !!id))]
+  const { data: laneRows } = trackIds.length
+    ? await supabase.from('track').select('id, name, icon, sort_order').in('id', trackIds)
+    : { data: [] }
+  const laneById = new Map(((laneRows ?? []) as Array<GoalView['lane'] & object>).map((t) => [t.id, t]))
   const byGoal = new Map<string, GoalMeasurement[]>()
   for (const row of (meas ?? []) as GoalMeasurementRow[]) {
     const list = byGoal.get(row.goal_id) ?? []
@@ -85,6 +92,7 @@ export async function fetchGoalsView(athleteId: string): Promise<GoalView[]> {
       computed,
       display: goalDisplayStatus(computed, last_measured, { cadence: g.cadence, today }),
       forecast: forecastAtDue(g, history),
+      lane: (g.track_id && laneById.get(g.track_id)) || null,
       pair: pairKey(g.name),
       history,
       last_measured,
@@ -127,6 +135,58 @@ export async function fetchGoalExtras(goal: Pick<AthleteGoalRow, 'id' | 'athlete
     track: (trackRes.data as GoalExtras['track']) ?? null,
     moves: (movesRes.data ?? []) as GoalMove[],
   }
+}
+
+/**
+ * A new block keeps its lanes. Tracks belong to a program, so a fresh program
+ * starts with only General while every goal still points at last block's
+ * tracks. This copies the named tracks from the athlete's previous program
+ * (by name, skipping any the new one already has) and moves each goal onto the
+ * same-named lane. Progression rules stay with their program: they name that
+ * block's exercises. Best-effort; never throws.
+ */
+export async function carryLanesForward(athleteId: string, programId: string): Promise<void> {
+  if (!tracksOn()) return
+  try {
+    const { data: programs } = await supabase
+      .from('program').select('id, status, start_date')
+      .eq('athlete_id', athleteId).neq('id', programId)
+      .order('start_date', { ascending: false }).limit(6)
+    const prior = ((programs ?? []) as Array<{ id: string; status: string | null }>).find((p) => wantsGeneralTrack(p.status))
+    if (!prior) return
+    const [{ data: oldRows }, { data: newRows }] = await Promise.all([
+      supabase.from('track')
+        .select('id, name, color, icon, sort_order, purpose, methodology_text, sources, deload_policy, retest_policy')
+        .eq('program_id', prior.id),
+      supabase.from('track').select('id, name').eq('program_id', programId),
+    ])
+    const oldTracks = (oldRows ?? []) as TrackRow[]
+    const here = new Map(((newRows ?? []) as Array<{ id: string; name: string }>).map((t) => [t.name.toLowerCase(), t.id]))
+    for (const t of oldTracks) {
+      const key = t.name.toLowerCase()
+      if (here.has(key)) continue
+      const { data: row } = await supabase.from('track').insert({
+        program_id: programId,
+        name: t.name,
+        color: t.color,
+        icon: t.icon,
+        sort_order: t.sort_order,
+        purpose: t.purpose,
+        methodology_text: t.methodology_text,
+        sources: t.sources ?? [],
+        deload_policy: t.deload_policy ?? null,
+        retest_policy: t.retest_policy ?? null,
+      }).select('id').single()
+      if (row) here.set(key, (row as { id: string }).id)
+    }
+    const oldName = new Map(oldTracks.map((t) => [t.id, t.name.toLowerCase()]))
+    const { data: goalRows } = await supabase.from('athlete_goal').select('id, track_id').eq('athlete_id', athleteId)
+    for (const g of (goalRows ?? []) as Array<{ id: string; track_id: string | null }>) {
+      const name = g.track_id ? oldName.get(g.track_id) : undefined
+      const next = name ? here.get(name) : undefined
+      if (next && next !== g.track_id) await supabase.from('athlete_goal').update({ track_id: next }).eq('id', g.id)
+    }
+  } catch { /* the goals keep their old lane; the next block can carry it */ }
 }
 
 export async function ensureGeneralTrack(programId: string): Promise<void> {

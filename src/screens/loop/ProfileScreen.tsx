@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell, Volume2, Flag } from 'lucide-react'
-import { tracksOn } from '../../lib/tracksFlag'
+import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell, Volume2 } from 'lucide-react'
 import { supabase, supabaseAnonKey, supabaseUrl } from '../../lib/supabaseClient'
 import { signOutLocal } from '../../lib/authClient'
 import { mcpUrl } from '../../lib/api'
@@ -282,15 +281,6 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
         <div className="section">
           <SectionHeader>Training</SectionHeader>
           <div style={{ marginTop: 4 }}>
-            {tracksOn() && (
-              <Row
-                leading={<Flag size={20} strokeWidth={1.75} style={{ color: 'var(--signal)' }} />}
-                title="Goals"
-                sub="Bars, history, L/R sides"
-                value="Open"
-                onClick={() => navigate('/app/goals')}
-              />
-            )}
             <Row
               leading={<CalendarDays size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
               title="Sessions per week"

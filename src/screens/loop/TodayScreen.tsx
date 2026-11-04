@@ -34,6 +34,8 @@ import { arcLoadOn } from '../../lib/arcLoad'
 import { tracksOn } from '../../lib/tracksFlag'
 import { fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
 import { goalsTrainedBy } from '../../engine/goalSources'
+import { GOAL_DISPLAY_LABEL, progressRatio } from '../../engine/goals'
+import { GoalReticle } from '../../components/convergence/GoalReticle'
 import { GoalChip } from './goalsUi'
 import { TrackedExerciseList } from './tracksUi'
 import type { TrackRef } from '../../engine/tracks'
@@ -1248,6 +1250,33 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
             )}
 
             {banner}
+
+            {/* What the week is for: one line that ties today to the goals,
+                with the goal reticle in miniature. */}
+            {tracksOn() && wOffset === 0 && (goalList?.length ?? 0) > 0 && (
+              <button type="button" className="goal-line fade-rise" onClick={() => navigate('/app/goals')}>
+                <GoalReticle
+                  goals={(goalList ?? []).map((g) => ({ id: g.id, label: g.name, progress: progressRatio(g), display: g.display }))}
+                  size={44}
+                  labels={false}
+                  perGoal={5}
+                />
+                <span className="goal-line__body">
+                  <span className="goal-line__k">Goals</span>
+                  <span className="goal-line__s">
+                    {(['off_course', 'needs_test', 'on_course', 'zeroed'] as const)
+                      .map((d) => ({ d, n: (goalList ?? []).filter((g) => g.display === d).length }))
+                      .filter((x) => x.n > 0)
+                      .map((x, i) => (
+                        <span key={x.d} className={`goal-line__n goal-line__n--${x.d}`}>
+                          {i > 0 && ' · '}{x.n} {GOAL_DISPLAY_LABEL[x.d].toLowerCase()}
+                        </span>
+                      ))}
+                  </span>
+                </span>
+                <ChevronRight size={18} strokeWidth={2} className="goal-line__chev" />
+              </button>
+            )}
 
             {/* THE WEEK, AT A GLANCE — a ring and seven dots instead of a
                 sentence. Replaces the old "2/4 done" text plus a separate

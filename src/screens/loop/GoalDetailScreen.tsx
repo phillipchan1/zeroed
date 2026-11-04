@@ -5,7 +5,7 @@ import { useCachedLoader, mutateCache } from '../../lib/cache'
 import { cacheKeys } from '../../lib/loopCache'
 import { fetchGoalExtras, fetchGoalsView, logMeasurement, type GoalExtras, type GoalView } from '../../lib/tracksData'
 import { isSeedMeasurement } from '../../engine/goals'
-import { GoalBar, GoalStatus, goalValue, shortDate, Sparkline } from './goalsUi'
+import { ForecastChart, GoalBar, GoalStatus, goalValue, shortDate } from './goalsUi'
 import { TrackGlyph } from './tracksUi'
 
 const SOURCE_LABEL: Record<string, string> = {
@@ -17,6 +17,10 @@ const SOURCE_LABEL: Record<string, string> = {
 /** Today on the phone's own calendar, not UTC: an evening test is still today. */
 function deviceToday(): string {
   return new Date().toLocaleDateString('en-CA')
+}
+
+function signed(n: number, unit: string | null): string {
+  return `${n > 0 ? '+' : ''}${goalValue(n, unit)}`
 }
 
 function sideLabel(side: string | null | undefined): string {
@@ -92,9 +96,29 @@ export function GoalDetailScreen({ athleteId }: { athleteId: string }) {
                   </div>
                 </div>
                 <GoalBar goal={goal} display={goal.display} />
-                <div style={{ marginTop: 20 }}>
-                  <Sparkline values={real.map((h) => h.value)} width={320} height={64} wide />
-                </div>
+                <ForecastChart
+                  history={real.map((h) => ({ date: h.date, value: h.value }))}
+                  target={goal.target != null ? Number(goal.target) : null}
+                  due={goal.due_date}
+                  forecast={goal.forecast}
+                  display={goal.display}
+                  unit={goal.unit}
+                  direction={goal.direction}
+                />
+                {goal.forecast && goal.display !== 'zeroed' && (
+                  <p className="text-sm" style={{ marginTop: 10, lineHeight: 1.5, color: '#CFCFCF' }}>
+                    Forecast <b className="num">{goalValue(goal.forecast.value, goal.unit)}</b>
+                    {goal.due_date ? ` on ${shortDate(goal.due_date)}` : ''}, target {goalValue(goal.target, goal.unit)}.
+                    {goal.forecast.neededPerWeek != null && (
+                      <>
+                        {' '}Needs <b className="num">{signed(goal.forecast.neededPerWeek, goal.unit)}</b> a week;
+                        {goal.forecast.perWeek === 0
+                          ? ` the last ${goal.forecast.points} measurements are flat.`
+                          : ` the last ${goal.forecast.points} measurements trend ${signed(goal.forecast.perWeek, goal.unit)} a week.`}
+                      </>
+                    )}
+                  </p>
+                )}
                 <p className="text-xs text-dim" style={{ marginTop: 8 }}>
                   {goal.last_measured ? `Last measured ${shortDate(goal.last_measured)}` : 'Not measured yet'}
                   {goal.cadence ? ` · ${goal.cadence}` : ''}
