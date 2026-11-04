@@ -8,7 +8,7 @@ import { supabase } from '../../lib/supabaseClient'
 
 interface TrackPage {
   name: string
-  color: string
+  icon: string
   purpose: string | null
   methodology: string | null
   engine: string | null
@@ -25,17 +25,17 @@ async function fetchTrackPage(athleteId: string, trackId: string): Promise<Track
     .maybeSingle()
   if (!program) return null
   const [{ data: track }, { data: rules }] = await Promise.all([
-    supabase.from('track').select('id, name, color, purpose, methodology_text, deload_policy, retest_policy')
+    supabase.from('track').select('id, name, icon, purpose, methodology_text, deload_policy, retest_policy')
       .eq('id', trackId).eq('program_id', program.id).maybeSingle(),
     supabase.from('progression_rule').select('engine_type').eq('track_id', trackId).limit(1),
   ])
   if (!track) return null
-  const t = track as { name: string; color: string | null; purpose: string | null; methodology_text: string | null }
+  const t = track as { name: string; icon: string | null; purpose: string | null; methodology_text: string | null }
   const engine = (rules?.[0] as { engine_type?: string } | undefined)?.engine_type ?? null
   const p = program as { deload_week_start?: string | null; retest_start?: string | null; retest_end?: string | null }
   return {
     name: t.name,
-    color: t.color || '#9A9A9A',
+    icon: t.icon || 'circle',
     purpose: t.purpose,
     methodology: t.methodology_text,
     engine,
@@ -66,7 +66,7 @@ export function TrackProgressScreen({ athleteId }: { athleteId: string }) {
           ) : (
             <>
               <div className="card fade-rise" style={{ marginBottom: 20 }}>
-                <TrackLabel track={{ id: trackId ?? '', name: data.name, color: data.color, icon: 'circle', order: 0, purpose: data.purpose }} />
+                <TrackLabel track={{ name: data.name, icon: data.icon }} />
                 {data.engine && <p className="num text-xs text-dim" style={{ marginTop: 10 }}>{data.engine}</p>}
                 {data.purpose && <p className="text-sm" style={{ marginTop: 12, lineHeight: 1.55 }}>{data.purpose}</p>}
                 {data.methodology && <p className="text-sm text-dim" style={{ marginTop: 10, lineHeight: 1.55 }}>{data.methodology}</p>}
@@ -84,7 +84,7 @@ export function TrackProgressScreen({ athleteId }: { athleteId: string }) {
                       type="button"
                       className="card--tap"
                       style={{ width: '100%', textAlign: 'left', padding: '10px 0', borderBottom: '1px solid var(--line)', background: 'none', color: 'var(--text)' }}
-                      onClick={() => navigate('/app/goals')}
+                      onClick={() => navigate(`/app/goals/${g.id}`)}
                     >
                       <span className="text-base" style={{ fontWeight: 600 }}>{g.name}</span>
                       <span className="num text-sm text-dim" style={{ display: 'block', marginTop: 4 }}>

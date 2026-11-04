@@ -126,6 +126,30 @@ export function computeGoalStatus(
   return 'on_track'
 }
 
+/**
+ * What the athlete sees. Color is status, so each state owns one of the
+ * five-color tokens: zeroed is confirmed, off course is the signal (the thing
+ * to act on), needs a test is pending (the number is unproven), on course is
+ * plain text. A goal with no real measurement needs a test whatever its seeded
+ * numbers say, so that check runs first.
+ */
+export const GOAL_DISPLAYS = ['zeroed', 'on_course', 'off_course', 'needs_test'] as const
+export type GoalDisplay = (typeof GOAL_DISPLAYS)[number]
+
+export const GOAL_DISPLAY_LABEL: Record<GoalDisplay, string> = {
+  zeroed: 'Zeroed',
+  on_course: 'On course',
+  off_course: 'Off course',
+  needs_test: 'Needs a test',
+}
+
+export function goalDisplayStatus(status: GoalStatus | string, lastMeasured: string | null): GoalDisplay {
+  if (!lastMeasured) return 'needs_test'
+  if (status === 'hit') return 'zeroed'
+  if (status === 'behind') return 'off_course'
+  return 'on_course'
+}
+
 export function applyMeasurement(
   goal: GoalFields,
   measurement: GoalMeasurement,

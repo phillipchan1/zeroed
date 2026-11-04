@@ -292,6 +292,14 @@ const [bTracks] = await sql<{ n: string }[]>`
   WHERE p.athlete_id = ${B}
 `
 ok(Number(bTracks?.n) === 1, 'isolation: athlete_id override cannot create a track on B')
+const [liftingTrack] = await sql<{ id: string }[]>`SELECT id FROM track WHERE program_id = ${PROG_A} AND name = 'Lifting'`
+const trackMoves = await sql<{ athlete_id: string; kind: string; body: string }[]>`
+  SELECT athlete_id, kind, body FROM coach_message WHERE ref_id = ${liftingTrack?.id ?? null}
+`
+ok(trackMoves.length === 1 && trackMoves[0].athlete_id === A && trackMoves[0].kind === 'note', 'move: confirmed create_track records one coach note on A, pinned to the track')
+ok(trackMoves[0]?.body.includes('Lifting') && trackMoves[0]?.body.includes('Why: test'), 'move: the note says what changed and keeps the rationale')
+const [previewMoves] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM coach_message WHERE body LIKE 'Added the Lifting track.%'`
+ok(Number(previewMoves?.n) === 1, 'move: the preview call recorded nothing')
 
 const goalPreview = toolText((await rpc(TOKEN_A, 'tools/call', {
   name: 'upsert_goal', arguments: { name: 'Hip IR L', metric: 'hip_ir', unit: 'deg', side: 'L', direction: 'higher', target: 35 },
@@ -302,6 +310,13 @@ const goalSaved = toolText((await rpc(TOKEN_A, 'tools/call', {
   name: 'upsert_goal', arguments: { name: 'Hip IR L', metric: 'hip_ir', unit: 'deg', side: 'L', direction: 'higher', target: 35, confirm: true },
 })).body)
 ok(goalSaved.includes('Hip IR L'), 'e2e: upsert_goal confirm writes')
+const goalMoves = await sql<{ athlete_id: string; body: string }[]>`
+  SELECT m.athlete_id, m.body FROM coach_message m
+  JOIN athlete_goal g ON g.id = m.ref_id
+  WHERE g.athlete_id = ${A} AND g.name = 'Hip IR L'
+`
+ok(goalMoves.length === 1 && goalMoves[0].athlete_id === A, 'move: confirmed upsert_goal records a coach note pinned to the goal')
+ok(goalMoves[0]?.body.includes('35 deg'), 'move: the goal note names the target and unit')
 
 const measKey = 'iso-hip-ir-l-2026-11-02'
 const meas1 = toolText((await rpc(TOKEN_A, 'tools/call', {

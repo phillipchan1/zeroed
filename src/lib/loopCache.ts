@@ -30,6 +30,7 @@ export const cacheKeys = {
   coach:       (athleteId: string) => `coach:${athleteId}`,
   profile:     (athleteId: string) => `profile:${athleteId}`,
   goals:       (athleteId: string) => `goals:${athleteId}`,
+  goalExtras:  (goalId: string)    => `goal-extras:${goalId}`,
   tracks:      (programId: string) => `tracks:${programId}`,
   convergence: (athleteId: string) => `convergence:${athleteId}`,
   recap:       (athleteId: string, reviewId?: string) => `recap:${athleteId}:${reviewId ?? 'latest'}`,

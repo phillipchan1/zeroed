@@ -4925,6 +4925,7 @@ textarea.input {
   height: 14px;
   border-radius: 2px;
   flex-shrink: 0;
+  background: var(--line);
 }
 .track-group__row { position: relative; }
 .superset-tag {
@@ -4939,7 +4940,7 @@ textarea.input {
 .coverage { display: flex; flex-direction: column; gap: 8px; }
 .coverage__head, .coverage__row {
   display: grid;
-  grid-template-columns: minmax(88px, 1.4fr) repeat(7, 1fr);
+  grid-template-columns: minmax(112px, 1.6fr) repeat(7, 1fr);
   gap: 6px;
   align-items: center;
 }
@@ -4949,13 +4950,14 @@ textarea.input {
   color: var(--text-dim);
   letter-spacing: 0.04em;
 }
-.coverage__name { display: flex; align-items: center; gap: 7px; color: var(--text); }
+.coverage__name { display: flex; align-items: center; gap: 7px; min-width: 0; color: var(--text); }
+.coverage__name > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .coverage__cell {
   height: 10px;
   border-radius: 3px;
   background: var(--line);
 }
-.coverage__cell--on { opacity: 0.85; }
+.coverage__cell--on { background: var(--text-dim); }
 .goal-pair {
   display: grid;
   grid-template-columns: 1fr;
@@ -4973,26 +4975,124 @@ textarea.input {
   color: var(--text);
   cursor: pointer;
   padding: 0;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform var(--dur-fast) var(--ease-out);
 }
-.goal-bar {
+.goal-card:active { transform: scale(0.985); }
+
+/* Goal status. Color is status: on course is plain text, off course is the
+   signal (the thing to act on), needs a test is pending (unproven), zeroed is
+   confirmed. The mark's shape carries the same four states without color. */
+.goal-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.goal-status__mark {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: currentColor;
+  flex-shrink: 0;
+}
+.goal-status--on_course  { color: var(--text); }
+.goal-status--off_course { color: var(--signal); }
+.goal-status--off_course .goal-status__mark { border-radius: 1px; transform: rotate(45deg); }
+.goal-status--needs_test { color: var(--pending); }
+.goal-status--needs_test .goal-status__mark { background: none; border: 1.5px dashed currentColor; width: 8px; height: 8px; }
+.goal-status--zeroed     { color: var(--confirmed); }
+.goal-status--zeroed .goal-status__mark { background: none; border: 1.5px solid currentColor; border-radius: 1px; }
+
+/* The track clips the fill; the labels sit under it (they used to sit inside
+   the track's overflow:hidden and never showed). The tick at the end is the
+   target. The fill takes the status color, so a bar alone reads its state. */
+.goal-bar { margin-top: 12px; }
+.goal-bar__track {
   position: relative;
   height: 6px;
-  margin-top: 12px;
   border-radius: 99px;
   background: var(--line);
-  overflow: hidden;
 }
 .goal-bar__fill {
-  height: 100%;
-  background: var(--computing);
+  position: absolute;
+  inset: 0 auto 0 0;
   border-radius: 99px;
+  background: var(--text);
+  transform-origin: left center;
+  animation: meter-grow 600ms var(--ease-out) 80ms backwards;
 }
-.goal-bar__label {
-  display: inline-block;
+.goal-bar--off_course .goal-bar__fill { background: var(--signal); }
+.goal-bar--zeroed .goal-bar__fill { background: var(--confirmed); }
+.goal-bar--needs_test .goal-bar__fill { background: transparent; border: 1.5px dashed var(--pending); }
+.goal-bar__target {
+  position: absolute;
+  right: 0;
+  top: -4px;
+  bottom: -4px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--text-dim);
+}
+.goal-bar--off_course .goal-bar__target { background: var(--signal); }
+.goal-bar--zeroed .goal-bar__target { background: var(--confirmed); }
+.goal-bar__labels {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
   margin-top: 6px;
   font-family: var(--font-mono);
   font-size: var(--fs-micro);
+  font-variant-numeric: tabular-nums;
   color: var(--text-dim);
 }
-.goal-bar__label--end { float: right; }
 .goal-spark { display: block; }
+.goal-spark--wide { width: 100%; height: auto; }
+
+/* Goal page */
+.goal-read {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 16px;
+}
+.goal-read__value {
+  font-family: var(--font-mono);
+  font-size: var(--fs-4xl);
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.03em;
+  line-height: 1;
+}
+.goal-read__unit {
+  margin-left: 6px;
+  font-size: var(--fs-base);
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--text-dim);
+}
+.goal-read__side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  text-align: right;
+  min-width: 0;
+}
+.goal-log-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 12px;
+  padding: 12px 0;
+  border-bottom: 1px solid var(--line);
+}
+.goal-log-row:last-child { border-bottom: 0; }
+.goal-log-row--move > :first-child { min-width: 0; flex: 1; }
+.goal-log-row--move > :last-child { flex-shrink: 0; white-space: nowrap; }

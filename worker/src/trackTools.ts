@@ -92,6 +92,31 @@ function json(value: unknown): string {
   return JSON.stringify(value, null, 2)
 }
 
+/**
+ * A confirmed coach write leaves a move the athlete can read: what changed and
+ * why, pinned by ref_id to the goal, track or program it touched. The tools
+ * take a rationale, and it used to live only on the preview. kind 'note' keeps
+ * coach_message's kind check as it is; the Coach log already lists notes, and
+ * the goal page reads the ones pinned to the goal or its lane.
+ */
+async function recordMove(
+  store: ConnectedStore,
+  what: string,
+  args: Record<string, unknown>,
+  refId: string | null,
+): Promise<void> {
+  const why = asString(args.rationale)
+  const body = why ? `${what} Why: ${why}` : what
+  await store.sql`
+    INSERT INTO coach_message (athlete_id, role, kind, body, ref_id)
+    VALUES (${store.athleteId}, 'coach', 'note', ${body}, ${refId})
+  `
+}
+
+function engineLabel(engine: string): string {
+  return engine.replace(/_/g, ' ')
+}
+
 export async function runTrackTool(
   store: ConnectedStore,
   name: string,
@@ -279,6 +304,7 @@ async function createTrack(store: ConnectedStore, args: Record<string, unknown>)
     RETURNING id
   `
   if (!row) throw new McpUserError('Could not create track.')
+  await recordMove(store, `Added the ${name} track.`, args, row.id)
   return getTrack(store, row.id)
 }
 
@@ -320,6 +346,7 @@ async function updateTrack(store: ConnectedStore, args: Record<string, unknown>)
     await store.sql`UPDATE track SET retest_policy = ${jsonParam(store.sql, args.set_retest_policy)}
       WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})`
   }
+  await recordMove(store, `Updated the ${track.name} track.`, args, track.id)
   return getTrack(store, track.id)
 }
 
@@ -345,6 +372,7 @@ async function assignExercises(store: ConnectedStore, args: Record<string, unkno
   }
   const sessions = await loadLiveSessions(store, program.id)
   const updated: string[] = []
+  const movedTo = new Set<string>()
   for (const a of planned) {
     if (!a.ok || !a.track_id) continue
     const sess = sessions.find((s) => s.name.toLowerCase().includes(a.session!.toLowerCase()) || a.session!.toLowerCase().includes(s.name.toLowerCase()))
@@ -359,6 +387,10 @@ async function assignExercises(store: ConnectedStore, args: Record<string, unkno
         AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})
     `
     updated.push(`${a.exercise} → ${a.track}`)
+    movedTo.add(a.track_id)
+  }
+  if (updated.length) {
+    await recordMove(store, `Moved ${updated.join(', ')}.`, args, movedTo.size === 1 ? [...movedTo][0] : null)
   }
   return { ...mcpStamp(new Date(), await athleteZone(store)), updated }
 }
@@ -423,6 +455,12 @@ async function setProgressionRule(store: ConnectedStore, args: Record<string, un
     RETURNING id
   `
   if (!row) throw new McpUserError('Could not save rule.')
+  await recordMove(
+    store,
+    `Set ${track.name} to progress by ${engineLabel(engine)}${exercise ? ` for ${exercise}` : ''}.`,
+    args,
+    track.id,
+  )
   return { ...mcpStamp(new Date(), await athleteZone(store)), rule: { id: row.id, track: track.name, exercise, engine_type: engine, params } }
 }
 
@@ -455,6 +493,7 @@ async function upsertAutoregRule(store: ConnectedStore, args: Record<string, unk
     )
     RETURNING id
   `
+  await recordMove(store, `Added a rule: ${message}`, args, null)
   return { ...mcpStamp(new Date(), await athleteZone(store)), rule: { id: row?.id, signal, op, action, message } }
 }
 
@@ -539,6 +578,10 @@ async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) 
         updated_at = NOW()
       WHERE id = ${goalId} AND athlete_id = ${store.athleteId}
     `
+    const [owned] = await store.sql<{ id: string }[]>`
+      SELECT id FROM athlete_goal WHERE id = ${goalId} AND athlete_id = ${store.athleteId} LIMIT 1
+    `
+    if (owned) await recordMove(store, `Updated the goal ${name}.`, args, owned.id)
     return { ...mcpStamp(new Date(), await athleteZone(store)), goal: { id: goalId, name } }
   }
   const [row] = await store.sql<{ id: string }[]>`
@@ -557,6 +600,17 @@ async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) 
       updated_at = NOW()
     RETURNING id
   `
+  if (row) {
+    const target = asNum(args.target)
+    const unit = asString(args.unit)
+    const due = asString(args.due_date)
+    await recordMove(
+      store,
+      `Set the goal ${name}${target != null ? `: ${target}${unit ? ` ${unit}` : ''}` : ''}${due ? ` by ${due}` : ''}.`,
+      args,
+      row.id,
+    )
+  }
   return { ...mcpStamp(new Date(), await athleteZone(store)), goal: { id: row?.id, name } }
 }
 
@@ -711,11 +765,17 @@ async function updateAthleteTarget(store: ConnectedStore, args: Record<string, u
   const diff = [{ op: 'update_athlete_target', text }]
   if (!asBool(args.confirm)) return writePreview(diff)
   await store.sql`UPDATE athlete SET goals = ${text} WHERE id = ${store.athleteId}`
+  await recordMove(store, `Changed your target to: ${text}`, args, null)
   const [row] = await store.sql<{ id: string; name: string | null; goals: string | null }[]>`
     SELECT id, name, goals FROM athlete WHERE id = ${store.athleteId}
   `
   return { ...mcpStamp(new Date(), await athleteZone(store)), athlete: row }
 }
+
+const PROGRAM_META_LABEL = {
+  name: 'name', block_phase: 'phase', start_date: 'start', end_date: 'end',
+  deload_week_start: 'deload', retest_start: 'retest', retest_end: 'retest ends',
+} as const
 
 async function updateProgramMeta(store: ConnectedStore, args: Record<string, unknown>) {
   const program = await activeProgram(store)
@@ -742,6 +802,10 @@ async function updateProgramMeta(store: ConnectedStore, args: Record<string, unk
       retest_end = COALESCE(${patch.retest_end}::date, retest_end)
     WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
   `
+  const changed = (Object.entries(patch) as Array<[keyof typeof patch, string | null]>)
+    .filter(([, v]) => v != null)
+    .map(([k, v]) => `${PROGRAM_META_LABEL[k]} ${v}`)
+  if (changed.length) await recordMove(store, `Updated the block: ${changed.join(', ')}.`, args, program.id)
   const [row] = await store.sql<object[]>`
     SELECT id, name, block_phase, start_date::text, end_date::text, deload_week_start::text,
            retest_start::text, retest_end::text, goal, status

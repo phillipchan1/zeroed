@@ -1,56 +1,15 @@
-import { useMemo, useState } from 'react'
+import { useMemo } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { PageHeader, SectionHeader, Skeleton, Button, Input, Sheet, Chip } from '../../components/ui'
-import { useCachedLoader, mutateCache } from '../../lib/cache'
+import { PageHeader, Skeleton } from '../../components/ui'
+import { useCachedLoader } from '../../lib/cache'
 import { cacheKeys } from '../../lib/loopCache'
-import { fetchGoalsView, logMeasurement, type GoalView } from '../../lib/tracksData'
-import { progressRatio } from '../../engine/goals'
-
-function statusTone(status: string): 'done' | 'pending' | 'todo' {
-  if (status === 'hit') return 'done'
-  if (status === 'behind') return 'todo'
-  return 'pending'
-}
-
-function Sparkline({ values }: { values: number[] }) {
-  if (values.length < 2) return <span className="text-xs text-dim">No history yet</span>
-  const min = Math.min(...values)
-  const max = Math.max(...values)
-  const span = max - min || 1
-  const w = 88
-  const h = 28
-  const pts = values.map((v, i) => {
-    const x = (i / (values.length - 1)) * w
-    const y = h - ((v - min) / span) * (h - 4) - 2
-    return `${x.toFixed(1)},${y.toFixed(1)}`
-  }).join(' ')
-  return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} aria-hidden className="goal-spark">
-      <polyline fill="none" strokeWidth="1.75" points={pts} style={{ stroke: 'var(--computing)' }} />
-    </svg>
-  )
-}
-
-function GoalBar({ goal }: { goal: GoalView }) {
-  const ratio = progressRatio(goal)
-  const pct = ratio == null ? 0 : Math.round(ratio * 100)
-  return (
-    <div className="goal-bar" aria-label={`${pct}% of target`}>
-      <div className="goal-bar__fill" style={{ width: `${pct}%` }} />
-      <span className="goal-bar__mark goal-bar__mark--base" title="Baseline" />
-      <span className="goal-bar__label">{goal.baseline ?? '—'}</span>
-      <span className="goal-bar__label goal-bar__label--end">{goal.target ?? '—'}</span>
-    </div>
-  )
-}
+import { fetchGoalsView, type GoalView } from '../../lib/tracksData'
+import { isSeedMeasurement } from '../../engine/goals'
+import { GoalBar, GoalStatus, goalValue, shortDate, Sparkline } from './goalsUi'
 
 export function GoalsScreen({ athleteId }: { athleteId: string }) {
   const navigate = useNavigate()
-  const key = cacheKeys.goals(athleteId)
-  const { data, loading } = useCachedLoader<GoalView[]>(key, () => fetchGoalsView(athleteId))
-  const [sheet, setSheet] = useState<GoalView | null>(null)
-  const [value, setValue] = useState('')
-  const [saving, setSaving] = useState(false)
+  const { data, loading } = useCachedLoader<GoalView[]>(cacheKeys.goals(athleteId), () => fetchGoalsView(athleteId))
 
   const pairs = useMemo(() => {
     const groups = new Map<string, GoalView[]>()
@@ -61,29 +20,6 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
     }
     return [...groups.values()]
   }, [data])
-
-  function openLog(g: GoalView) {
-    setSheet(g)
-    setValue(g.current != null ? String(g.current) : '')
-  }
-
-  function save() {
-    if (!sheet) return
-    const n = Number(value)
-    if (!Number.isFinite(n)) return
-    const date = new Date().toISOString().slice(0, 10)
-    setSaving(true)
-    void logMeasurement({
-      athleteId, goalId: sheet.id, value: n, date, side: sheet.side,
-    }).then(() => {
-      mutateCache<GoalView[]>(key, (list) => list)
-      return fetchGoalsView(athleteId)
-    }).then((next) => {
-      mutateCache<GoalView[]>(key, () => next)
-      setSheet(null)
-      setSaving(false)
-    }, () => setSaving(false))
-  }
 
   return (
     <div className="screen with-nav">
@@ -107,22 +43,22 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
                       key={g.id}
                       type="button"
                       className="goal-card"
-                      onClick={() => openLog(g)}
+                      onClick={() => navigate(`/app/goals/${g.id}`)}
                     >
                       <div style={{ display: 'flex', justifyContent: 'space-between', gap: 10, alignItems: 'baseline' }}>
                         <span className="text-base" style={{ fontWeight: 600 }}>{g.name}</span>
-                        <Chip tone={statusTone(g.computed)}>{g.computed.replace('_', ' ')}</Chip>
+                        <GoalStatus display={g.display} />
                       </div>
                       <p className="num text-sm" style={{ marginTop: 8 }}>
-                        {g.current != null ? `${g.current}${g.unit ?? ''}` : 'pending'}
-                        <span className="text-dim"> → {g.target != null ? `${g.target}${g.unit ?? ''}` : '—'}</span>
+                        {g.current != null ? goalValue(g.current, g.unit) : 'pending'}
+                        <span className="text-dim"> → {goalValue(g.target, g.unit)}</span>
                       </p>
-                      <GoalBar goal={g} />
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10 }}>
-                        <Sparkline values={g.history.filter((h) => !h.client_key?.startsWith('seed:')).map((h) => h.value)} />
-                        <span className="num text-xs text-dim">
-                          {g.last_measured ? `last ${g.last_measured}` : 'no measurement'}
-                          {g.due_date ? ` · due ${g.due_date.slice(5)}` : ''}
+                      <GoalBar goal={g} display={g.display} />
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 10, gap: 10 }}>
+                        <Sparkline values={g.history.filter((h) => !isSeedMeasurement(h)).map((h) => h.value)} />
+                        <span className="text-xs text-dim" style={{ textAlign: 'right' }}>
+                          {g.last_measured ? `Last ${shortDate(g.last_measured)}` : 'Not measured yet'}
+                          {g.due_date ? ` · due ${shortDate(g.due_date)}` : ''}
                         </span>
                       </div>
                     </button>
@@ -137,22 +73,6 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
           </button>
         </div>
       </div>
-      {sheet && (
-        <Sheet title={`Log ${sheet.name}`} onClose={() => setSheet(null)} actions={
-          <Button variant="primary" full disabled={saving} onClick={save}>Save measurement</Button>
-        }>
-          <SectionHeader>Today</SectionHeader>
-          <Input
-            value={value}
-            onChange={(e) => setValue(e.target.value)}
-            inputMode="decimal"
-            placeholder={sheet.unit ? `Value in ${sheet.unit}` : 'Value'}
-          />
-          {sheet.test_protocol && (
-            <p className="text-sm text-dim" style={{ marginTop: 14, lineHeight: 1.5 }}>{sheet.test_protocol}</p>
-          )}
-        </Sheet>
-      )}
     </div>
   )
 }

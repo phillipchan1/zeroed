@@ -28,6 +28,7 @@ import { ProgramEditScreen } from './screens/loop/ProgramEditScreen'
 import { ProgramJourneyScreen } from './screens/loop/ProgramJourneyScreen'
 import { CoachScreen, fetchCoachView }   from './screens/loop/CoachScreen'
 import { GoalsScreen } from './screens/loop/GoalsScreen'
+import { GoalDetailScreen } from './screens/loop/GoalDetailScreen'
 import { TrackProgressScreen } from './screens/loop/TrackProgressScreen'
 import { HistoryScreen } from './screens/loop/HistoryScreen'
 import { RecapScreen }   from './screens/loop/RecapScreen'
@@ -160,6 +161,7 @@ function AppRoutes() {
         <Route path="program/journey" element={<ProgramJourneyScreen athleteId={athleteId} />} />
         <Route path="program/track/:trackId" element={tracksOn() ? <TrackProgressScreen athleteId={athleteId} /> : <Navigate to="program" replace />} />
         <Route path="goals" element={tracksOn() ? <GoalsScreen athleteId={athleteId} /> : <Navigate to="program" replace />} />
+        <Route path="goals/:goalId" element={tracksOn() ? <GoalDetailScreen athleteId={athleteId} /> : <Navigate to="/app/program" replace />} />
         <Route path="coach"   element={<CoachScreen athleteId={athleteId} />} />
         <Route path="history" element={<HistoryScreen athleteId={athleteId} />} />
         <Route path="recap"             element={<RecapScreen athleteId={athleteId} />} />

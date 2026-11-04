@@ -2838,7 +2838,7 @@ export function WorkoutScreen({
             >
               {header && (
                 <div className="track-group__head" style={{ marginBottom: 12 }}>
-                  <span className="track-group__bar" style={{ background: header.color }} />
+                  <span className="track-group__bar" />
                   <TrackLabel track={header} />
                 </div>
               )}

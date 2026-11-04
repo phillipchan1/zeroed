@@ -2,7 +2,7 @@ import { useCachedLoader } from './cache'
 import { cacheKeys } from './loopCache'
 import { supabase } from './supabaseClient'
 import { tracksOn } from './tracksFlag'
-import { computeGoalStatus, lastMeasuredOn, pairKey, type GoalMeasurement } from '../engine/goals'
+import { computeGoalStatus, goalDisplayStatus, lastMeasuredOn, pairKey, type GoalDisplay, type GoalMeasurement } from '../engine/goals'
 import type { AutoregRule } from '../engine/autoreg'
 import { GENERAL_TRACK_SEED, wantsGeneralTrack, type TrackRef } from '../engine/tracks'
 import type { AthleteGoalRow, GoalMeasurementRow, TrackRow } from '../types/database'
@@ -44,6 +44,7 @@ export async function fetchAutoregRules(athleteId: string): Promise<AutoregRule[
 
 export interface GoalView extends AthleteGoalRow {
   computed: ReturnType<typeof computeGoalStatus>
+  display: GoalDisplay
   pair: string
   history: GoalMeasurement[]
   last_measured: string | null
@@ -72,14 +73,54 @@ export async function fetchGoalsView(athleteId: string): Promise<GoalView[]> {
   const today = new Date().toISOString().slice(0, 10)
   return ((goals ?? []) as AthleteGoalRow[]).map((g) => {
     const history = byGoal.get(g.id) ?? []
+    const computed = computeGoalStatus(g, history, today)
+    const last_measured = lastMeasuredOn(history)
     return {
       ...g,
-      computed: computeGoalStatus(g, history, today),
+      computed,
+      display: goalDisplayStatus(computed, last_measured),
       pair: pairKey(g.name),
       history,
-      last_measured: lastMeasuredOn(history),
+      last_measured,
     }
   })
+}
+
+export interface GoalMove {
+  id: string
+  body: string
+  created_at: string
+}
+
+export interface GoalExtras {
+  track: Pick<TrackRow, 'id' | 'name' | 'icon'> | null
+  moves: GoalMove[]
+}
+
+/**
+ * The goal's lane and the coach's trail on it. A confirmed MCP write records a
+ * coach_message note whose ref_id is the goal or track it touched, so the
+ * moves for a goal are the notes pinned to it or to its lane.
+ */
+export async function fetchGoalExtras(goal: Pick<AthleteGoalRow, 'id' | 'athlete_id' | 'track_id'>): Promise<GoalExtras> {
+  const refs = goal.track_id ? [goal.id, goal.track_id] : [goal.id]
+  const [trackRes, movesRes] = await Promise.all([
+    goal.track_id
+      ? supabase.from('track').select('id, name, icon').eq('id', goal.track_id).maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+    supabase
+      .from('coach_message')
+      .select('id, body, created_at')
+      .eq('athlete_id', goal.athlete_id)
+      .in('ref_id', refs)
+      .order('created_at', { ascending: false })
+      .limit(20),
+  ])
+  if (movesRes.error) throw movesRes.error
+  return {
+    track: (trackRes.data as GoalExtras['track']) ?? null,
+    moves: (movesRes.data ?? []) as GoalMove[],
+  }
 }
 
 export async function ensureGeneralTrack(programId: string): Promise<void> {
@@ -114,6 +155,7 @@ export async function logMeasurement(input: {
   date: string
   side?: string | null
   note?: string | null
+  direction?: string | null
 }): Promise<void> {
   const client_key = measurementClientKey(input.goalId, input.date, input.side ?? null)
   const { error } = await supabase.from('goal_measurement').insert({
@@ -135,6 +177,8 @@ export async function logMeasurement(input: {
     .limit(20)
   const values = ((rows ?? []) as Array<{ value: number }>).map((r) => Number(r.value))
   const current = values[0] ?? input.value
-  const best = values.length ? Math.max(...values) : input.value
+  // A lower-is-better goal (a sprint time, a pain score) is best at its minimum.
+  const best = !values.length ? input.value
+    : input.direction === 'lower' ? Math.min(...values) : Math.max(...values)
   await supabase.from('athlete_goal').update({ current, best, updated_at: new Date().toISOString() }).eq('id', input.goalId)
 }

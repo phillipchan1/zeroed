@@ -1,6 +1,6 @@
 // Run: node --experimental-strip-types src/engine/goals.check.ts
 import {
-  applyMeasurement, computeGoalStatus, lastMeasuredOn, pairKey, progressRatio, projectedAtDue,
+  applyMeasurement, computeGoalStatus, goalDisplayStatus, lastMeasuredOn, pairKey, progressRatio, projectedAtDue,
 } from './goals.ts'
 
 const fails: string[] = []
@@ -148,6 +148,13 @@ const projected = projectedAtDue(
   '2026-12-01',
 )
 ok(projected != null && projected > 100 && projected < 103, `linear projection continues the slope, got ${projected}`)
+
+ok(goalDisplayStatus('hit', '2026-11-03') === 'zeroed', 'hit with a real measurement is zeroed')
+ok(goalDisplayStatus('behind', '2026-11-03') === 'off_course', 'behind is off course')
+ok(goalDisplayStatus('on_track', '2026-11-03') === 'on_course', 'on_track is on course')
+ok(goalDisplayStatus('on_track', null) === 'needs_test', 'no real measurement needs a test')
+ok(goalDisplayStatus('hit', null) === 'needs_test', 'a seeded hit with no real measurement still needs a test')
+ok(goalDisplayStatus('behind', null) === 'needs_test', 'a pending baseline near its due date needs a test, not the signal')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {
