@@ -1029,6 +1029,7 @@ export const PUBLIC_RESTORE_ORDER = [
   'pain_report',
   'region_status',
   'coach_read_log',
+  'session_rpe',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]

@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+### Session RPE (G9), Workout screen starts today's override (G1 follow-up), tracks_v1
+
+Behind `athlete.flags.tracks_v1`; with it off the Workout screen, `/api/session-rx`, the MCP tool list, every tool and the weekly review are exactly as before, and `/api/session-rpe` answers 404.
+
+- **One CR-10 tap after the session.** The finish sheet shows the existing 0–10 effort tap (standard CR-10 labels). The rating goes to a new `session_rpe` table (athlete, date, session, optional workout, rating, duration_min), never into set RPE: `workout.rpe` stays the set-RPE mean and arc_load_v1's `workout.session_rpe` is not touched. One row per session per day; a second tap the same day updates it. Athlete only, on the day only; whole numbers 0–10, minutes 1–600. Each tap is one `log_session_rpe` change_log row under `standing:logging` with before → after. An edit of today's session shows the logged rating.
+- **MCP `get_session_rpe(since, until?)`.** Rating, label, minutes, load (rating × minutes) and, beside it for comparison, the set-RPE mean of the same workout. A logged coach read; refused for a coach without the health-data toggle, whose `get_change_log` also redacts these rows.
+- **Weekly review.** `session_load`: sessions rated, load this week (AU), the mean weekly load of the 4 weeks before and the ratio. Additive: the progress / hold / deload call doesn't use it. Null for a coach without health data.
+- **Workout screen starts today's override.** Starting a session asks `/api/session-rx` with today's local date; when a week-only override applies, its list is the session trained and the header shows "This week only". Re-prescribes after that send the list without a date, so the ops never apply twice. Not on edits or when logging into another week.
+
+**Deploy:** hand-apply `worker/schema/session-rpe.sql` on Neon (`supabase/migrations/20261104000007_session_rpe.sql` on Supabase) after `readiness.sql` and before deploying this Worker for anyone with `tracks_v1` on. Rollback is in the SQL header.
+
 ### Readiness + pain check-in (G4), weekly review (G8), coach-read logging, tracks_v1
 
 Behind `athlete.flags.tracks_v1`; with it off `/api/session-rx`, the MCP tool list and every tool are byte-for-byte as before, no check-in card shows, no read is logged, and `/api/readiness` + `/api/weekly-review` answer 404.

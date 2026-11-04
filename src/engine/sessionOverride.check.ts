@@ -1,7 +1,7 @@
 // Run: node --experimental-strip-types src/engine/sessionOverride.check.ts
 import {
   addDays, applyOverrideOps, defaultExpiresOn, diffOverride, findExercise, isIsoDate,
-  normalizeInputOps, overrideActive, overrideView, resolveExpiresOn, shortDateLabel,
+  normalizeInputOps, overrideActive, overrideView, resolveExpiresOn, sessionWithOverride, shortDateLabel, workoutRxDate,
 } from './sessionOverride.ts'
 import type { ExerciseTemplate } from '../types/database.ts'
 
@@ -90,6 +90,20 @@ ok(normalizeInputOps([{ op: 'move', to_date: '2026-11-06' }, { op: 'drop', exerc
 ok(normalizeInputOps(Array.from({ length: 13 }, () => ({ op: 'drop', exercise_name: 'x' }))).errors.length === 1, 'input: at most 12 ops')
 const good = normalizeInputOps([{ op: 'swap', exercise_name: 'Bench Press', with: { name: 'DB Bench Press', sets: 3 } }])
 ok(good.errors.length === 0 && good.ops.length === 1, 'input: a valid swap passes')
+
+// Starting today's session (tracks_v1): the date sent, and the list trained.
+const T = '2026-11-05'
+ok(workoutRxDate({ tracksOn: false, isEdit: false, week: null, today: T }) === null, 'workout start: flag off → no date, the request is unchanged')
+ok(workoutRxDate({ tracksOn: true, isEdit: false, week: null, today: T }) === T, 'workout start: flag on → today\'s date')
+ok(workoutRxDate({ tracksOn: true, isEdit: true, week: null, today: T }) === null, 'workout start: never on an edit of a logged session')
+ok(workoutRxDate({ tracksOn: true, isEdit: false, week: { start: '2026-11-02', end: '2026-11-08' }, today: T }) === T, 'workout start: logging into this week still uses today')
+ok(workoutRxDate({ tracksOn: true, isEdit: false, week: { start: '2026-10-26', end: '2026-11-01' }, today: T }) === null, 'workout start: logging into another week → template')
+const routineRow = { id: 'r1', name: 'Push', exercises: base }
+const todays = overrideView(base, [{ id: 'o1', date: T, expires_on: '2026-11-08', ops: [{ op: 'drop', exercise_name: 'Cable Row' }] }], T, T)
+ok(sessionWithOverride(routineRow, null) === routineRow, 'workout start: no override → the template, same object')
+const trained = sessionWithOverride(routineRow, todays)
+ok(trained.exercises.map((e) => e.name).join() === 'Bench Press,Incline DB Press' && trained.name === 'Push', 'workout start: an override for today replaces the list')
+ok(routineRow.exercises.length === 3, 'workout start: the template itself is untouched')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {

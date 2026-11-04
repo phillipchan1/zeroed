@@ -16,6 +16,10 @@
  * not 'maintenance'. Maintenance lifts: exercises under a 'maintenance' rule.
  * Pain and check-in sections are health data (D3): a coach the athlete hasn't
  * shared it with gets them as null, and a why line that doesn't name them.
+ *
+ * Session load (G9): Σ session RPE × minutes this week against the mean of the
+ * 4 weeks before (Foster). Additive: it informs, it doesn't move the call. It
+ * comes from the athlete's session-RPE taps, so it is health data too.
  */
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import { canonicalLiftId, e1rmFromSet } from '../../src/engine/liftModel.ts'
@@ -26,6 +30,7 @@ import { resolveMethodology, blockedRegions } from './methodology.ts'
 import { addDays, u6Flags, type CheckinDay } from './readiness/rules.ts'
 import { blockedDuring, loadCheckins, loadPain } from './regionStatus.ts'
 import { athleteToday } from './sessionOverride.ts'
+import { sessionLoadForWeek, type SessionLoadView } from './sessionRpe.ts'
 import { calendarZone, loadLiveProgram, loadWorkouts, type ConnectedStore } from './store.ts'
 
 export type WeeklyCall = 'progress' | 'hold' | 'deload'
@@ -66,6 +71,8 @@ export interface WeeklyReviewView {
   /** null when this coach can't see health data. */
   pain: { regions: PainTrend[]; blocked: string[]; cap: number } | null
   checkins: { days: number; sleep_avg: number | null; stress_avg: number | null; soreness_avg: number | null; flag_days: number } | null
+  /** G9: session RPE × minutes. null when this coach can't see health data. */
+  session_load: SessionLoadView | null
   health_hidden?: true
   call: WeeklyCall
   rule_refs: string[]
@@ -219,10 +226,11 @@ export async function computeWeeklyReview(
   })
 
   // ---- health ----
-  const [checkins, pain, statusBlocked] = await Promise.all([
+  const [checkins, pain, statusBlocked, sessionLoad] = await Promise.all([
     loadCheckins(store, addDays(monday, -2), sunday),
     loadPain(store, addDays(monday, -7), sunday),
     blockedDuring(store, monday, sunday),
+    opts.showHealth ? sessionLoadForWeek(store, monday) : null,
   ])
   const days: CheckinDay[] = checkins
   const weekCheckins = checkins.filter((c) => inWeek(c.date))
@@ -265,6 +273,7 @@ export async function computeWeeklyReview(
     checkins: opts.showHealth
       ? { days: weekCheckins.length, sleep_avg: avg(nums('sleep_hours')), stress_avg: avg(nums('stress')), soreness_avg: avg(nums('soreness')), flag_days: flagDays }
       : null,
+    session_load: sessionLoad,
     ...(opts.showHealth ? {} : { health_hidden: true as const }),
     call,
     rule_refs: refs.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))),
@@ -274,7 +283,7 @@ export async function computeWeeklyReview(
 
 export const WEEKLY_REVIEW_TOOL: McpTool = {
   name: 'get_weekly_review',
-  description: 'The engine\'s weekly review (U15) for one week: compliance (planned vs logged sessions, target ≥ 80%), each priority lift\'s e1RM trend, whether maintenance lifts held (U12), the pain trend and check-in averages (when the athlete shares health data with you), and the call — progress, hold or deload — with rule_refs and one line of why. Read-only. Propose any change it suggests through the usual preview → approval → apply.',
+  description: 'The engine\'s weekly review (U15) for one week: compliance (planned vs logged sessions, target ≥ 80%), each priority lift\'s e1RM trend, whether maintenance lifts held (U12), the pain trend, check-in averages and session load (session RPE × minutes against the 4 weeks before; when the athlete shares health data with you), and the call — progress, hold or deload — with rule_refs and one line of why. Read-only. Propose any change it suggests through the usual preview → approval → apply.',
   inputSchema: {
     type: 'object',
     properties: {

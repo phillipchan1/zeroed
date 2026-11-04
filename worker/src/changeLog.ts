@@ -619,6 +619,8 @@ export function notRevertibleReason(tool: string, diff: unknown): string | null 
       return 'A cleared region stays cleared. If it hurts again, log it in today\'s check-in.'
     case 'set_coach_health_access':
       return 'Change it again under Profile → Coach access.'
+    case 'log_session_rpe':
+      return 'Session effort stays in your log; tap it again on the day to change it.'
     default:
       return 'This kind of change can\'t be undone yet.'
   }
@@ -1177,8 +1179,8 @@ export const CHANGE_LOG_TOOLS: McpTool[] = [
 
 export const CHANGE_LOG_TOOL_NAMES = new Set(CHANGE_LOG_TOOLS.map((t) => t.name))
 
-/** change_log target types that carry health data (G4, D3). */
-const HEALTH_TARGETS = new Set(['checkin', 'region'])
+/** change_log target types that carry health data (G4, G9, D3). */
+const HEALTH_TARGETS = new Set(['checkin', 'region', 'session_rpe'])
 
 export async function runChangeLogTool(store: ConnectedStore, name: string, args: Obj, actor: ChangeActor): Promise<string> {
   if (!(await tracksV1On(store))) throw new McpUserError(`Unknown tool: ${name}`)
@@ -1188,11 +1190,11 @@ export async function runChangeLogTool(store: ConnectedStore, name: string, args
       const page = await listChanges(store, args)
       if (page == null) return changeLogUnavailable.replace(' Nothing was written.', '')
       if (!page.changes.length) return 'No changes in that window.'
-      // D3: check-ins, pain and region clears are health data. A coach the
+      // D3: check-ins, pain, region clears and session RPE are health data. A coach the
       // athlete hasn't shared them with sees that a row exists, not what it says.
       if (!(await seesHealth(store, actor))) {
         page.changes = page.changes.map((c) => (HEALTH_TARGETS.has(c.target_type)
-          ? { ...c, target_id: null, diff: { hidden: true }, summary: 'Health check-in (not shared with you)', rationale: null, rule_refs: [] }
+          ? { ...c, target_id: null, diff: { hidden: true }, summary: c.target_type === 'session_rpe' ? 'Session effort (not shared with you)' : 'Health check-in (not shared with you)', rationale: null, rule_refs: [] }
           : c))
       }
       return JSON.stringify({

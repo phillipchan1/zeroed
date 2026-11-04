@@ -46,6 +46,7 @@ import {
 import { validateEdit, warningsSection, type ValidateResult } from './methodology/validators.ts'
 import { actorRef } from './sessionOverride.ts'
 import { READINESS_TOOL_NAMES, READINESS_TOOLS, runReadinessTool } from './readiness.ts'
+import { runSessionRpeTool, SESSION_RPE_TOOL_NAMES, SESSION_RPE_TOOLS } from './sessionRpe.ts'
 import { statusBlockedRegions } from './regionStatus.ts'
 import { isReadTool, logCoachRead, logsReads } from './coachReads.ts'
 
@@ -296,7 +297,7 @@ function withValidatorArgs(tool: McpTool): McpTool {
  */
 export async function zeroedToolsFor(sql: Sql, athleteId: string): Promise<McpTool[]> {
   return await tracksV1On(storeForAthlete(sql, athleteId))
-    ? [...ZEROED_TOOLS.map(withApprovalArgs).map(withValidatorArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS, ...METHODOLOGY_TOOLS, ...READINESS_TOOLS]
+    ? [...ZEROED_TOOLS.map(withApprovalArgs).map(withValidatorArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS, ...METHODOLOGY_TOOLS, ...READINESS_TOOLS, ...SESSION_RPE_TOOLS]
     : ZEROED_TOOLS
 }
 
@@ -445,6 +446,8 @@ async function runZeroedTool(
   }
 
   if (READINESS_TOOL_NAMES.has(name)) return runReadinessTool(store, name, args, actor)
+
+  if (SESSION_RPE_TOOL_NAMES.has(name)) return runSessionRpeTool(store, name, args, actor)
 
   if (SESSION_OVERRIDE_TOOL_NAMES.has(name)) {
     return runSessionOverrideTool(store, name, args, actor, (refs) => resolveGoalIds(store, refs))

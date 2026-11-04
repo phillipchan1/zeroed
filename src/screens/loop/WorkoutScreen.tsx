@@ -47,6 +47,9 @@ import { MovementDemo } from '../../components/MovementDemo'
 import { SessionEffort } from '../../components/SessionEffort'
 import { arcLoadOn } from '../../lib/arcLoad'
 import { tracksOn } from '../../lib/tracksFlag'
+import { sessionWithOverride, workoutRxDate, WEEK_ONLY_LABEL, type SessionOverrideView } from '../../engine/sessionOverride'
+import { isoDateInZone } from '../../engine/weekDates'
+import { fetchSessionRpe, logSessionRpe } from '../../lib/sessionRpe'
 import { fetchAutoregRules, fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
 import { deriveGoalMeasurements, goalsTrainedBy } from '../../engine/goalSources'
 import { WorkoutGoalChip } from './WorkoutGoalChip'
@@ -1470,6 +1473,26 @@ export function WorkoutScreen({
   // arc_load_v1 is on. Unknown on an edit of a synced session, and null leaves
   // the row's value alone, so an edit never blanks it.
   const [sessionRpe, setSessionRpe] = useState<number | null>(() => seedPending?.sessionRpe ?? null)
+  // tracks_v1: today's week-only override, once /api/session-rx (asked with
+  // today's date) says there is one. The routine below then carries its list.
+  // Always null with the flag off.
+  const [weekOnly, setWeekOnly] = useState<SessionOverrideView | null>(null)
+  const weekOnlyRef = useRef<SessionOverrideView | null>(null)
+  // The prescription cache: today's override has its own key, since its
+  // indexes follow the override's list, not the plan's that Today reads.
+  const rxCacheKey = (id: string) => (weekOnlyRef.current ? cacheKeys.sessionRxOn(id, weekOnlyRef.current.date) : cacheKeys.sessionRx(id))
+  // tracks_v1 (G9): an edit shows the session RPE already logged that day, so
+  // a re-tap changes it (the Worker takes changes on the day only).
+  useEffect(() => {
+    if (!isEdit || !tracksOn() || !routineId || sessionRpe != null) return
+    let live = true
+    void fetchSessionRpe(routineId, performedAt.slice(0, 10)).then((r) => {
+      if (live && r) setSessionRpe((v) => v ?? r.rating)
+    })
+    return () => { live = false }
+    // Once per open; the date and rating at open are the ones that count.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routineId])
   // Elapsed frozen at the moment "Complete" was tapped — the debrief sheet can
   // sit open for a while, so the committed duration is this, not the live clock.
   const finalElapsedRef = useRef(0)
@@ -1632,6 +1655,8 @@ export function WorkoutScreen({
   // is typing into.
   useEffect(() => {
     if (!routineId || isEdit) return
+    // tracks_v1: today's override is in force; the plan's list isn't today's session.
+    if (weekOnlyRef.current) return
     const snapshot = routines.find((r) => r.id === routineId)
     if (!snapshot) return
     const existing = loadCache<WorkoutBootstrap>(bootKey(snapshot.id))
@@ -1791,7 +1816,7 @@ export function WorkoutScreen({
       .then((next) => {
         if (latestKeyRef.current !== key) return
         setPrescription(next)
-        saveCache(cacheKeys.sessionRx(routineId), next)
+        saveCache(rxCacheKey(routineId), next)
       })
       .catch(() => { /* offline — the stand-in trains without a hint */ })
       .finally(() => { if (prescribingRef.current === key) prescribingRef.current = null })
@@ -1813,7 +1838,7 @@ export function WorkoutScreen({
         .then((next) => {
           if (latestKeyRef.current !== key) return
           setPrescription(next)
-          saveCache(cacheKeys.sessionRx(routineId), next)
+          saveCache(rxCacheKey(routineId), next)
         })
         .catch(() => { /* offline — the numbers on screen stand */ })
     }, 600)
@@ -1862,7 +1887,21 @@ export function WorkoutScreen({
       return
     }
 
-    const r = data as RoutineRow
+    let r = data as RoutineRow
+    // tracks_v1: ask for today's prescription BY DATE, so a week-only override
+    // for today applies, and train its list. Flag off: no date, no request
+    // here, exactly as before. Offline: the template trains.
+    const rxDate = workoutRxDate({ tracksOn: tracksOn(), isEdit, week: targetWeek, today: isoDateInZone(new Date()) })
+    let datedRx: SessionPrescription | null = null
+    if (rxDate && routineId) {
+      try {
+        datedRx = await gatherSessionPrescription((data as unknown as { program: { athlete_id: string } | null }).program?.athlete_id ?? '', routineId, r.exercises as ExerciseTemplate[], u, { dayOf: checkinDayOf(checkinRef.current), date: rxDate })
+      } catch { /* non-fatal */ }
+      const todays = datedRx?.override ?? null
+      weekOnlyRef.current = todays
+      setWeekOnly(todays)
+      r = sessionWithOverride(r, todays)
+    }
     const exs = r.exercises as ExerciseTemplate[]
     const initial = buildTemplate(r)
     const logged = startedLoggingRef.current
@@ -1953,7 +1992,12 @@ export function WorkoutScreen({
     // Prescription hints — best-effort; the session loads regardless. Keep the
     // seeded value if the recompute fails (offline mid-revalidation).
     let nextPresc: SessionPrescription | null = seedRef.current!.boot?.prescription ?? null
-    if (programData && routineId) {
+    if (datedRx && routineId) {
+      // Already prescribed above, for today, on the list being trained.
+      nextPresc = datedRx
+      setPrescription(nextPresc)
+      saveCache(rxCacheKey(routineId), nextPresc)
+    } else if (programData && routineId) {
       try {
         nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, u, { dayOf: checkinDayOf(checkinRef.current) })
         setPrescription(nextPresc)
@@ -2495,6 +2539,17 @@ export function WorkoutScreen({
     enqueueSession(pending)                       // durable before any network
     if (!isEdit) clearDraft(athleteId, routineId!) // the outbox is its home now
 
+    // tracks_v1 (G9): the session-RPE tap goes to its own table, never into the
+    // set RPEs. Best-effort; the Worker only takes it on the session's own day.
+    if (tracksOn() && sessionRpe != null) {
+      void logSessionRpe({
+        session_id: routineId!,
+        rating: sessionRpe,
+        duration_min: pending.durationMins > 0 ? pending.durationMins : null,
+        date: isoDateInZone(pending.performedAt ? new Date(pending.performedAt) : new Date()),
+      })
+    }
+
     // A finished session moves nearly every view: the week strip, the schedule,
     // the training log, the program map, the read the coach works from, the
     // convergence reticle. Mark them all due — nothing is dropped, so every
@@ -2688,6 +2743,7 @@ export function WorkoutScreen({
             <p style={{ fontSize: 'var(--fs-base)', fontWeight: 700, lineHeight: 1.25, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {routine.name}
             </p>
+            {weekOnly && <span className="week-only" style={{ marginTop: 2 }}>{WEEK_ONLY_LABEL}</span>}
             <p className="num text-xs text-dim" style={{ marginTop: 2 }}>
               {formatElapsed(elapsed)} · {setsDone}/{setsTotal} sets
               {avgRpeLive !== null ? ` · RPE ${avgRpeLive}` : ''}
@@ -3247,7 +3303,7 @@ export function WorkoutScreen({
           }}
           u={u}
           initial={priorDebrief ? { reflection: priorDebrief.reflection, readingAnswer: priorDebrief.readingAnswer } : null}
-          effort={arcLoadOn() ? { value: sessionRpe, onChange: setSessionRpe } : undefined}
+          effort={arcLoadOn() || tracksOn() ? { value: sessionRpe, onChange: setSessionRpe } : undefined}
           onSave={handleDebrief}
           onSkip={handleDebriefSkip}
         />
