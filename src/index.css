@@ -5096,3 +5096,95 @@ textarea.input {
 .goal-log-row:last-child { border-bottom: 0; }
 .goal-log-row--move > :first-child { min-width: 0; flex: 1; }
 .goal-log-row--move > :last-child { flex-shrink: 0; white-space: nowrap; }
+
+/* Goal chips: a session's goals on Train, an exercise's goal in the workout. */
+.goal-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 32px;
+  padding: 5px 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-pill);
+  background: none;
+  color: var(--text);
+  font-size: var(--fs-xs);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+  transition: transform var(--dur-fast) var(--ease-out);
+}
+.goal-chip:active { transform: scale(0.97); }
+.goal-chip__val { font-size: var(--fs-micro); }
+.goal-chip--off_course { border-color: rgba(232, 204, 10, 0.45); }
+.goal-chip--off_course .goal-chip__val { color: var(--signal); }
+.goal-chip--zeroed .goal-chip__val { color: var(--confirmed); }
+.goal-chip--needs_test { border-style: dashed; border-color: rgba(212, 168, 72, 0.5); }
+.session-goals {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--line);
+}
+.session-goals__k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-right: 4px;
+}
+
+.workout-goal__lock { display: flex; margin-top: 10px; }
+.workout-goal__lock .workout-goal { margin-top: 0; }
+.workout-goal {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  margin-top: 10px;
+  padding: 9px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+  transition: border-color var(--dur-mid) var(--ease-out), background var(--dur-mid) var(--ease-out);
+}
+.workout-goal__k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  flex-shrink: 0;
+}
+.workout-goal__name { font-size: var(--fs-sm); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workout-goal__val { margin-left: auto; font-size: var(--fs-sm); white-space: nowrap; }
+.workout-goal--moved { border-color: rgba(232, 204, 10, 0.5); }
+.workout-goal--moved .workout-goal__k, .workout-goal--moved .workout-goal__val { color: var(--signal); }
+.workout-goal--hit { border-color: rgba(95, 184, 122, 0.55); background: rgba(95, 184, 122, 0.08); }
+.workout-goal--hit .workout-goal__k, .workout-goal--hit .workout-goal__val { color: var(--confirmed); }
+
+/* Finish: Goals moved, the second beat after the session stats. */
+.zeroed-goals { width: min(100%, 360px); margin-top: 22px; display: flex; flex-direction: column; gap: 8px; }
+.zeroed-goals__k { text-align: center; margin-bottom: 2px; }
+.zeroed-goal__lock { display: flex; }
+.zeroed-goal__lock .lockon__c { animation-delay: 1.2s; }
+.zeroed-goal {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-btn);
+  animation: fadeRise var(--dur-mid) var(--ease-out) backwards;
+}
+.zeroed-goal__name { font-size: var(--fs-sm); font-weight: 600; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.zeroed-goal__val { margin-left: auto; font-size: var(--fs-sm); white-space: nowrap; }
+.zeroed-goal__tag { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.1em; text-transform: uppercase; color: var(--text-dim); flex-shrink: 0; }
+.zeroed-goal--hit { border-color: rgba(95, 184, 122, 0.55); }
+.zeroed-goal--hit .zeroed-goal__tag, .zeroed-goal--hit .zeroed-goal__val { color: var(--confirmed); }

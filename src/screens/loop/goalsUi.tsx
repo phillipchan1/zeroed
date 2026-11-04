@@ -94,3 +94,24 @@ export function Sparkline({ values, width = 88, height = 28, wide = false }: {
     </svg>
   )
 }
+
+/** A goal a session trains, as a chip that opens it. Train's session cards carry these. */
+export function GoalChip({ goal, onOpen }: {
+  goal: { id: string; name: string; current: unknown; target: unknown; unit: string | null; display: GoalDisplay }
+  onOpen: (id: string) => void
+}) {
+  const current = goalNumber(goal.current)
+  const target = goalNumber(goal.target)
+  return (
+    <button
+      type="button"
+      className={`goal-chip goal-chip--${goal.display}`}
+      onClick={(e) => { e.stopPropagation(); onOpen(goal.id) }}
+    >
+      <span className="goal-chip__name">{goal.name}</span>
+      <span className="goal-chip__val num">
+        {current ?? '—'}<span className="text-dim">/{target ?? '—'}</span>
+      </span>
+    </button>
+  )
+}

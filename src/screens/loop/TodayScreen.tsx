@@ -32,7 +32,9 @@ import { OutsidePlanSheet } from '../../components/OutsidePlanSheet'
 import { OneOffSheet } from '../../components/OneOffSheet'
 import { arcLoadOn } from '../../lib/arcLoad'
 import { tracksOn } from '../../lib/tracksFlag'
-import { useProgramTracks } from '../../lib/tracksData'
+import { fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
+import { goalsTrainedBy } from '../../engine/goalSources'
+import { GoalChip } from './goalsUi'
 import { TrackedExerciseList } from './tracksUi'
 import type { TrackRef } from '../../engine/tracks'
 import { isOffPlan } from '../../engine/outsidePlan'
@@ -543,16 +545,19 @@ function SessionSheet({
  * target for the detail sheet, and only the next-up session carries a CTA.
  */
 function SessionCard({
-  routine, recommended, state, lastDone, plannedDow, onOpen, onStart, onStartIntervals,
+  routine, recommended, state, lastDone, plannedDow, goals, onOpen, onStart, onStartIntervals, onOpenGoal,
 }: {
   routine: RoutineRow
   recommended: boolean
   state: SessionState
   lastDone: string | null
   plannedDow: number | null
+  /** The goals this session's exercises feed (tracks_v1). */
+  goals: GoalView[]
   onOpen: () => void
   onStart: () => void
   onStartIntervals: () => void
+  onOpenGoal: (goalId: string) => void
 }) {
   const exCount = routine.exercises.length
   const chip = STATE_CHIP[state.kind]
@@ -585,6 +590,13 @@ function SessionCard({
         </div>
         <Chip tone={chip.tone}>{chip.label}</Chip>
       </div>
+
+      {goals.length > 0 && (
+        <div className="session-goals" onClick={(e) => e.stopPropagation()}>
+          <span className="session-goals__k">Moves</span>
+          {goals.map((g) => <GoalChip key={g.id} goal={g} onOpen={onOpenGoal} />)}
+        </div>
+      )}
 
       {showCta && (
         <div style={{ marginTop: 16 }} onClick={(e) => e.stopPropagation()}>
@@ -820,6 +832,12 @@ function StuckSessionsSheet({
  */
 export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreenProps) {
   const tracks = useProgramTracks(routines[0]?.program_id)
+  // Which goals each session moves: read off the goals' source bindings.
+  const { data: goalList } = useCachedLoader<GoalView[]>(
+    tracksOn() ? cacheKeys.goals(athleteId) : null,
+    () => fetchGoalsView(athleteId),
+  )
+  const goalsFor = (r: RoutineRow) => goalsTrainedBy(goalList ?? [], r.exercises.map((e) => e.name)).map((t) => t.goal)
   const navigate   = useNavigate()
   const location   = useLocation()
   // A session finished a moment ago rides in on router state. Cleared on dismiss
@@ -1332,6 +1350,8 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
                       state={statusFor(r.id)}
                       lastDone={lastDoneByRoutine[r.id] ?? null}
                       plannedDow={plannedDowFor(r)}
+                      goals={goalsFor(r)}
+                      onOpenGoal={(id) => navigate(`/app/goals/${id}`)}
                       onOpen={() => setOpenSessionId(r.id)}
                       onStart={() => navigate(startHref(r.id), { viewTransition: true })}
                       onStartIntervals={() => navigate(intervalsHref(r.id), { viewTransition: true })}

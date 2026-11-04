@@ -97,9 +97,79 @@ function slope(history: GoalMeasurement[]): number | null {
   return last - first
 }
 
+function dayNumber(day: string): number | null {
+  const t = Date.parse(`${String(day).slice(0, 10)}T12:00:00Z`)
+  return Number.isFinite(t) ? Math.round(t / 86_400_000) : null
+}
+
+/** The real measurements, oldest first. Seed rows are not evidence. */
+function realPoints(history: GoalMeasurement[]): Array<{ day: number; value: number }> {
+  const pts: Array<{ day: number; value: number }> = []
+  for (const h of history) {
+    if (isSeedMeasurement(h)) continue
+    const value = goalNumber(h.value)
+    const day = dayNumber(h.date)
+    if (value == null || day == null) continue
+    pts.push({ day, value })
+  }
+  return pts.sort((a, b) => a.day - b.day)
+}
+
+export interface GoalForecast {
+  /** Where the trend lands on the due date. */
+  value: number
+  /** The trend, per week, in the goal's unit. */
+  perWeek: number
+  /** What it would take from the latest point, per week, to land on the target. */
+  neededPerWeek: number | null
+  points: number
+}
+
+/**
+ * Least squares over the last three real measurements, projected to the due
+ * date. Three, not the whole history: a lift that climbed for a month and has
+ * sat flat for three weeks is flat now, and the forecast has to say so. Null
+ * without a due date or with fewer than two real points.
+ */
+export function forecastAtDue(
+  goal: Pick<GoalFields, 'due_date' | 'target'>,
+  history: GoalMeasurement[],
+): GoalForecast | null {
+  const due = goal.due_date ? dayNumber(goal.due_date) : null
+  if (due == null) return null
+  const pts = realPoints(history).slice(-3)
+  if (pts.length < 2) return null
+  const n = pts.length
+  const mx = pts.reduce((s, p) => s + p.day, 0) / n
+  const my = pts.reduce((s, p) => s + p.value, 0) / n
+  const sxx = pts.reduce((s, p) => s + (p.day - mx) ** 2, 0)
+  const slopePerDay = sxx === 0 ? 0 : pts.reduce((s, p) => s + (p.day - mx) * (p.value - my), 0) / sxx
+  const value = my + slopePerDay * (due - mx)
+  const last = pts[n - 1]
+  const target = goalNumber(goal.target)
+  const daysLeft = due - last.day
+  return {
+    value: Math.round(value * 10) / 10,
+    perWeek: Math.round(slopePerDay * 7 * 10) / 10,
+    neededPerWeek: target != null && daysLeft > 0 ? Math.round(((target - last.value) / daysLeft) * 7 * 10) / 10 : null,
+    points: n,
+  }
+}
+
+// A forecast reaches the target when it gets there at all. Overshooting a
+// target_range_hi is not falling behind, so the ceiling plays no part here.
+function forecastReaches(direction: string, value: number, target: number | null): boolean {
+  if (direction === 'pass') return value >= 1
+  if (target == null) return true
+  return direction === 'lower' ? value <= target : value >= target
+}
+
 /**
  * hit — current meets the target.
- * behind — due is within 21 days (or past) and trend is flat or away.
+ * behind — the forecast misses the target on the due date (at any distance
+ *   from it), or, with too little data to forecast, the due date is within 21
+ *   days (or past) and the trend is flat or away. With no due date, three real
+ *   measurements going flat or away is behind.
  * on_track — everything else, including pending baselines.
  */
 export function computeGoalStatus(
@@ -113,17 +183,38 @@ export function computeGoalStatus(
     return 'hit'
   }
   const dueIn = daysUntil(goal.due_date, today)
-  const trend = slope(history)
   const pending = current == null && goalNumber(goal.baseline) == null
   if (pending) {
     if (dueIn != null && dueIn <= 21) return 'behind'
     return 'on_track'
   }
-  if (dueIn != null && dueIn <= 21) {
-    const toward = goal.direction === 'lower' ? (trend ?? 0) < 0 : (trend ?? 0) > 0
-    if (!toward) return 'behind'
-  }
+  const forecast = forecastAtDue(goal, history)
+  if (forecast) return forecastReaches(goal.direction, forecast.value, target) ? 'on_track' : 'behind'
+  const trend = slope(history)
+  const toward = goal.direction === 'lower' ? (trend ?? 0) < 0 : (trend ?? 0) > 0
+  if (dueIn != null && dueIn <= 21 && !toward) return 'behind'
+  if (dueIn == null && realPoints(history).length >= 3 && !toward) return 'behind'
   return 'on_track'
+}
+
+/**
+ * Days between tests a free-text cadence asks for: "weekly", "biweekly",
+ * "every 2 weeks", "monthly", "every 10 days". Null when it can't be read, and
+ * an unreadable cadence never marks a goal stale.
+ */
+export function cadenceDays(cadence: string | null | undefined): number | null {
+  const c = String(cadence ?? '').trim().toLowerCase()
+  if (!c) return null
+  if (/\bdaily\b|every day/.test(c)) return 1
+  if (/\bbi-?weekly\b|fortnight/.test(c)) return 14
+  if (/\bweekly\b/.test(c)) return 7
+  if (/\bmonthly\b/.test(c)) return 30
+  const every = c.match(/(\d+)\s*(day|week|month)/)
+  if (every) {
+    const n = Number(every[1])
+    return every[2] === 'day' ? n : every[2] === 'week' ? n * 7 : n * 30
+  }
+  return null
 }
 
 /**
@@ -143,9 +234,17 @@ export const GOAL_DISPLAY_LABEL: Record<GoalDisplay, string> = {
   needs_test: 'Needs a test',
 }
 
-export function goalDisplayStatus(status: GoalStatus | string, lastMeasured: string | null): GoalDisplay {
+export function goalDisplayStatus(
+  status: GoalStatus | string,
+  lastMeasured: string | null,
+  stale?: { cadence: string | null | undefined; today: string },
+): GoalDisplay {
   if (!lastMeasured) return 'needs_test'
   if (status === 'hit') return 'zeroed'
+  // A goal tested on a cadence is unproven once that cadence lapses.
+  const every = stale ? cadenceDays(stale.cadence) : null
+  const since = stale ? daysUntil(lastMeasured, stale.today) : null
+  if (every != null && since != null && -since > every) return 'needs_test'
   if (status === 'behind') return 'off_course'
   return 'on_course'
 }

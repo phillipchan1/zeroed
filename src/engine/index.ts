@@ -31,7 +31,8 @@ import type {
 } from '../types/database'
 import { MOVEMENT_PATTERNS } from '../types/database'
 import { supabase } from '../lib/supabaseClient'
-import { ensureGeneralTrack } from '../lib/tracksData'
+import { ensureGeneralTrack, recordSessionGoals } from '../lib/tracksData'
+import { getDistanceUnit, getStorageWeightUnit } from '../lib/units'
 import { resolveWorkoutInsert } from '../lib/workoutCommit'
 import { orderByPlannedDay } from '../lib/weekOrder'
 import {
@@ -3847,6 +3848,19 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
     // 2. Onboarding state transition, if any.
     if (p.onboardingTransition) {
       await supabase.from('athlete').update({ onboarding_step: p.onboardingTransition }).eq('id', p.athleteId)
+    }
+
+    // The goals this session trained move now, debrief or not. Indices key
+    // actualWeights against the snapshot, the session as it was trained.
+    if (p.exercisesSnapshot?.length) {
+      await recordSessionGoals({
+        athleteId: p.athleteId,
+        workoutId,
+        performedOn: localDay(p.performedAt ?? new Date().toISOString(), Intl.DateTimeFormat().resolvedOptions().timeZone),
+        exercises: p.exercisesSnapshot.map((ex, i) => ({ name: ex.name, sets: p.actualWeights[String(i)] ?? [] })),
+        units: { weight: getStorageWeightUnit(), distance: getDistanceUnit() },
+        isEdit: p.editWorkoutId != null,
+      })
     }
 
     // Skipped debrief → the workout is the whole record.

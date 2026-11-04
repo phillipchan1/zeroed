@@ -2,7 +2,8 @@
  * tracks_v1 MCP tools. Writes preview unless confirm=true.
  * SQL is scoped to store.athleteId on every query.
  */
-import { applyMeasurement, computeGoalStatus, goalNumber, isGoalDirection, isGoalSide, lastMeasuredOn, pairKey, projectedAtDue, type GoalMeasurement } from '../../src/engine/goals.ts'
+import { applyMeasurement, computeGoalStatus, forecastAtDue, goalDisplayStatus, goalNumber, isGoalDirection, isGoalSide, lastMeasuredOn, pairKey, type GoalMeasurement } from '../../src/engine/goals.ts'
+import { formatGoalSource, parseGoalSource, SOURCE_KINDS } from '../../src/engine/goalSources.ts'
 import { mcpStamp, writePreview } from '../../src/engine/mcpStamp.ts'
 import { evaluateAutoregRules, type AutoregRule } from '../../src/engine/autoreg.ts'
 import { proposeNextWeek, type PerformedExercise, type ProgressionRule } from '../../src/engine/progression.ts'
@@ -508,8 +509,10 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
     target: number | null; target_range_hi: number | null
     baseline: number | null; current: number | null; best: number | null
     due_date: string | null; status: string; track_id: string | null
+    cadence: string | null; source_metric: string | null
   }[]>`
-    SELECT id, name, metric, unit, side, direction, target, target_range_hi, baseline, current, best, due_date::text, status, track_id
+    SELECT id, name, metric, unit, side, direction, target, target_range_hi, baseline, current, best, due_date::text, status, track_id,
+           cadence, source_metric
     FROM athlete_goal WHERE athlete_id = ${store.athleteId}
     ORDER BY name
   `
@@ -534,10 +537,15 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
   const today = todayISO(await athleteZone(store))
   let list = rows.map((g) => {
     const history = historyByGoal.get(g.id) ?? []
+    const computed = computeGoalStatus(g, history, today)
+    const last_measured = lastMeasuredOn(history)
     return {
       ...g,
-      status: computeGoalStatus(g, history, today),
-      last_measured: lastMeasuredOn(history),
+      status: computed,
+      // What the app shows: zeroed / on_course / off_course / needs_test.
+      display: goalDisplayStatus(computed, last_measured, { cadence: g.cadence, today }),
+      forecast: forecastAtDue(g, history),
+      last_measured,
       pair: pairKey(g.name),
     }
   })
@@ -556,7 +564,13 @@ async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) 
   const program = await activeProgram(store)
   const tracks = program ? await loadTracks(store, program.id) : []
   const track = findTrack(tracks, asString(args.track))
-  const diff = [{ op: 'upsert_goal', name, target: asNum(args.target), track: track?.name ?? null }]
+  const rawSource = asString(args.source_metric)
+  const source = rawSource ? parseGoalSource(rawSource) : null
+  if (rawSource && !source) {
+    throw new McpUserError(`source_metric must be kind:Exercise with kind one of ${SOURCE_KINDS.join(', ')} (test may omit the exercise), e.g. top_set:Strict Press`)
+  }
+  if (source) args = { ...args, source_metric: formatGoalSource(source) }
+  const diff = [{ op: 'upsert_goal', name, target: asNum(args.target), track: track?.name ?? null, source: source ? formatGoalSource(source) : null }]
   if (!asBool(args.confirm)) return writePreview(diff, [], { rationale: asString(args.rationale) ?? null })
   const goalId = asString(args.goal_id)
   if (goalId) {
@@ -707,7 +721,9 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
     goal: { ...goal, status: computeGoalStatus(goal, history, today), last_measured: lastMeasuredOn(history) },
     measurements: history,
     trend: history.length >= 2 ? history[history.length - 1].value - history[0].value : 0,
-    projected_at_due: projectedAtDue(history, goal.due_date),
+    // The same forecast the app's status reads: the last three real points.
+    projected_at_due: forecastAtDue(goal, history)?.value ?? null,
+    forecast: forecastAtDue(goal, history),
   }
 }
 
