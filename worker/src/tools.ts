@@ -45,6 +45,9 @@ import {
 } from './methodology.ts'
 import { validateEdit, warningsSection, type ValidateResult } from './methodology/validators.ts'
 import { actorRef } from './sessionOverride.ts'
+import { READINESS_TOOL_NAMES, READINESS_TOOLS, runReadinessTool } from './readiness.ts'
+import { statusBlockedRegions } from './regionStatus.ts'
+import { isReadTool, logCoachRead, logsReads } from './coachReads.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -293,7 +296,7 @@ function withValidatorArgs(tool: McpTool): McpTool {
  */
 export async function zeroedToolsFor(sql: Sql, athleteId: string): Promise<McpTool[]> {
   return await tracksV1On(storeForAthlete(sql, athleteId))
-    ? [...ZEROED_TOOLS.map(withApprovalArgs).map(withValidatorArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS, ...METHODOLOGY_TOOLS]
+    ? [...ZEROED_TOOLS.map(withApprovalArgs).map(withValidatorArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS, ...METHODOLOGY_TOOLS, ...READINESS_TOOLS]
     : ZEROED_TOOLS
 }
 
@@ -312,7 +315,7 @@ async function validateProgramEdits(store: ConnectedStore, live: LiveProgram, ed
   const base = liveToDraft(live)
   const { draft } = applyEditsToDraft(base, edits.map(toProgramEdit))
   const diff = diffDraft(base, draft)
-  const methodology = await resolveMethodology(store)
+  const [methodology, statusBlocked] = await Promise.all([resolveMethodology(store), statusBlockedRegions(store)])
   const week = (sessions: typeof base.sessions) => sessions.map((x) => ({
     key: x.routineId ?? `new:${x.name.trim().toLowerCase()}`,
     name: x.name,
@@ -326,7 +329,7 @@ async function validateProgramEdits(store: ConnectedStore, live: LiveProgram, ed
     changed: diff.added + diff.removed + diff.changed,
     total: base.sessions.reduce((n, x) => n + x.exercises.length, 0),
     rewrite,
-    blockedRegions: blockedRegions(methodology),
+    blockedRegions: [...new Set([...blockedRegions(methodology), ...statusBlocked])].sort(),
   })
 }
 
@@ -434,6 +437,14 @@ async function runZeroedTool(
   actor: OverrideActor,
 ): Promise<string> {
   const store = storeForAthlete(sql, athleteId)
+
+  // Section 8 / D3, tracks_v1: every coach read is logged before it runs.
+  // The athlete's own reads are not. Flag off: nothing is written.
+  if (isReadTool(name) && logsReads(actor) && await tracksV1On(store)) {
+    await logCoachRead(store, actor, name, args)
+  }
+
+  if (READINESS_TOOL_NAMES.has(name)) return runReadinessTool(store, name, args, actor)
 
   if (SESSION_OVERRIDE_TOOL_NAMES.has(name)) {
     return runSessionOverrideTool(store, name, args, actor, (refs) => resolveGoalIds(store, refs))

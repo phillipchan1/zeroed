@@ -130,6 +130,23 @@ export function summarizeChange(row: { tool: string; target_type: string; diff: 
       return clip(`Undid: ${str(d.undid) ?? 'a change'}`)
     case 'apply_methodology_override':
       return clip(`Rule ${String(d.path ?? '')}${str(d.track_id) ? ' (one track)' : ''}: ${JSON.stringify(d.before ?? null)} → ${d.override_id == null ? 'default' : JSON.stringify(d.after ?? null)}`)
+    case 'log_checkin': {
+      const c = obj(d.checkin)
+      const bits = [
+        c.sleep_hours != null ? `sleep ${String(c.sleep_hours)} h` : null,
+        c.stress != null ? `stress ${String(c.stress)}/5` : null,
+        c.soreness != null ? `soreness ${String(c.soreness)}/5` : null,
+        ...arr(d.pain).map(obj).map((p) => `${String(p.region ?? '').replace(/_/g, ' ')} ${String(p.score ?? '')}/10${arr(p.red_flags).length ? ' (red flag)' : ''}`),
+      ].filter(Boolean)
+      const blocked = arr(d.regions).map(obj).filter((m) => m.to === 'blocked').map((m) => String(m.region ?? '').replace(/_/g, ' '))
+      return clip(`Check-in${str(d.date) ? ` ${str(d.date)}` : ''}: ${bits.join(', ') || 'logged'}${blocked.length ? ` — ${blocked.join(', ')} blocked` : ''}`)
+    }
+    case 'clear_region':
+      return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} cleared by a clinician`)
+    case 'set_coach_health_access': {
+      const on = obj(d.share_health).after === true
+      return clip(`${on ? 'Shared' : 'Stopped sharing'} check-ins and pain with ${str(d.coach) ?? 'a coach'}`)
+    }
     default:
       return clip(`${row.tool.replace(/_/g, ' ')} (${row.target_type})`)
   }

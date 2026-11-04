@@ -75,6 +75,33 @@ export interface SessionPrescription {
    * "v1", or "v1+<hash>" with the athlete's overrides or the under-18 rules.
    */
   methodology_version?: string
+  /**
+   * tracks_v1 only, and only when the date has a check-in, a pain report or a
+   * blocked region (G4): the day's readiness flags (U6) and region calls (U7).
+   */
+  readiness?: RxReadiness
+  /** With readiness: every change it made to this session, each with its rule. */
+  adjustments?: RxAdjustment[]
+}
+
+export interface RxReadiness {
+  date: string
+  flags: Array<{ kind: string; message: string; rule_refs: string[] }>
+  level: 'none' | 'trim_accessories' | 'pull_hiit_plyo'
+  regions: Array<{ region: string; status: 'ok' | 'capped' | 'blocked'; score: number; cap: number; reason: string; rule_refs: string[]; refer_out: boolean }>
+  blocked_regions: string[]
+  /** Set when a region is blocked: see a clinician before loading it. */
+  refer_out: string | null
+}
+
+export interface RxAdjustment {
+  index: number
+  exercise: string
+  action: 'skip' | 'trim_sets' | 'reduce_load' | 'check_region'
+  reason: string
+  rule_refs: string[]
+  before?: number | null
+  after?: number | null
 }
 
 export interface SessionRxInput {

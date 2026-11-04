@@ -37,6 +37,8 @@ import { goalsTrainedBy } from '../../engine/goalSources'
 import { GOAL_DISPLAY_LABEL, progressRatio } from '../../engine/goals'
 import { GoalReticle } from '../../components/convergence/GoalReticle'
 import { GoalChip } from './goalsUi'
+import { CheckinCard } from './CheckinCard'
+import { fetchReadinessToday } from '../../lib/readiness'
 import { TrackedExerciseList } from './tracksUi'
 import type { TrackRef } from '../../engine/tracks'
 import { isOffPlan } from '../../engine/outsidePlan'
@@ -891,6 +893,11 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
     tracksOn() ? cacheKeys.goals(athleteId) : null,
     () => fetchGoalsView(athleteId),
   )
+  // tracks_v1: today's check-in (G4). Null key with the flag off: nothing fetched, nothing shown.
+  const { data: readinessToday, refetch: refetchReadiness } = useCachedLoader(
+    tracksOn() ? cacheKeys.readiness(athleteId) : null,
+    fetchReadinessToday,
+  )
   const goalsFor = (r: RoutineRow) => goalsTrainedBy(goalList ?? [], r.exercises.map((e) => e.name)).map((t) => t.goal)
   const navigate   = useNavigate()
   const location   = useLocation()
@@ -1209,8 +1216,16 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
     saveCache(seenKey, rxVersion)
   }, [rxVersion, athleteId])
 
+  // A check-in changes today's prescriptions: drop the held ones so they refetch.
+  function afterCheckin() {
+    invalidateCache((k) => k.startsWith('rx:') || k.startsWith('workout:') || k === cacheKeys.rxVersion(athleteId))
+    refetchReadiness()
+    refetchRxVersion()
+  }
+
   function pullRefresh() {
     invalidateCache((k) => k.startsWith('rx:') || k.startsWith('overrides:') || k === cacheKeys.rxVersion(athleteId))
+    if (tracksOn()) refetchReadiness()
     refetch()
     refetchPager()
     refetchRxVersion()
@@ -1346,6 +1361,10 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
                 </span>
                 <ChevronRight size={18} strokeWidth={2} className="goal-line__chev" />
               </button>
+            )}
+
+            {tracksOn() && wOffset === 0 && readinessToday?.available && (
+              <CheckinCard key={`${readinessToday.date}:${readinessToday.checkin?.sleep_hours ?? ''}:${readinessToday.checkin?.stress ?? ''}:${readinessToday.checkin?.soreness ?? ''}`} today={readinessToday} onSaved={afterCheckin} />
             )}
 
             {/* THE WEEK, AT A GLANCE — a ring and seven dots instead of a

@@ -1025,6 +1025,10 @@ export const PUBLIC_RESTORE_ORDER = [
   'change_preview',
   'approval',
   'methodology_override',
+  'checkin',
+  'pain_report',
+  'region_status',
+  'coach_read_log',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]

@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Readiness + pain check-in (G4), weekly review (G8), coach-read logging, tracks_v1
+
+Behind `athlete.flags.tracks_v1`; with it off `/api/session-rx`, the MCP tool list and every tool are byte-for-byte as before, no check-in card shows, no read is logged, and `/api/readiness` + `/api/weekly-review` answer 404.
+
+- **Daily check-in (manual only).** New append-only `checkin` (sleep h, stress 1–5, soreness 1–5) and `pain_report` (region, 0–10, section 8 red flags). The athlete logs them from a small card on Today; each submission is one `log_checkin` change_log row under `standing:logging`.
+- **U6 in the engine.** Flags: today's sleep < 6 h, stress ≥ 4, soreness ≥ 4, plus one more for each 3-day streak (sleep < 6 h 3+ nights, stress/soreness ≥ 4 3+ days). One flag trims accessories a set; two or more also pull HIIT and plyos (cut order HIIT, then accessories). The main lift is never touched. Thresholds come from the athlete's methodology (G3).
+- **U7 in the engine.** ≤ cap (3) proceeds; 4–5 drops impact and takes 10% off loaded work for that region; > 5, worse than yesterday (above the cap) or any red flag sets the region `blocked` in `region_status`: nothing loads it, a refer-out notice is returned, and it stays blocked until the athlete marks it cleared by a clinician (athlete only, logged with their tap; no coach, app_coach included, can clear it). Red flags win over a raised cap; a raised cap counts only for an adult and only if the region settled the day before. Region mapping is the G5 classify table; an exercise it can't place, on a day with a blocked region, is flagged rather than silently loaded. Previews refuse loading a blocked region.
+- **Structured explanation.** With a check-in, pain report or open block for the date, each prescription carries `readiness` and `adjustments` (`skip` / `trim_sets` / `reduce_load` / `check_region`, each with a reason and `rule_refs`), the response carries `readiness`, and the version strings change so the app refetches. With none, the output is the G3 output exactly.
+- **Health data (D3).** `mcp_token.share_health`, default on. The athlete switches it per coach under Profile → Coach access (logged). Off: `get_checkins` / `get_region_status` refuse, `get_weekly_review` omits pain and check-ins, and check-in rows in `get_change_log` are redacted for that coach.
+- **Weekly review (U15).** `get_weekly_review(week?)` and `GET /api/weekly-review?week=`: compliance (planned vs logged, target 80%), priority-lift e1RM trend, maintenance held (U12), pain trend, check-in averages, and progress / hold / deload with `rule_refs` and one line of why. Read-only.
+- **Coach reads are logged.** Every MCP `get_*` / `list_*` / `search_*` call and every app_coach read appends a `coach_read_log` row (actor, tool, scope) before it runs, and refuses if it can't. The athlete's own reads are not logged. The athlete sees the list under Profile → Coach access.
+
+**Deploy:** hand-apply `worker/schema/readiness.sql` on Neon (`supabase/migrations/20261104000006_readiness.sql` on Supabase) after `methodology.sql` and BEFORE deploying this Worker for anyone with `tracks_v1` on (coach reads refuse until `coach_read_log` exists). Rollback is in the SQL header.
+
 ### Methodology as config (G3), preview validators (G5), proposal created_by (G10 follow-up), tracks_v1
 
 Behind `athlete.flags.tracks_v1`; with it off `/api/session-rx`, previews, proposals and the MCP tool list are byte-for-byte as before, and no new column or table is read or written.
