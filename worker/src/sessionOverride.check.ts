@@ -86,7 +86,10 @@ const D5 = addDays(today, 5)
 type Single = { prescription: SessionPrescription; version: string; program_version: string }
 async function rx(athleteId: string, body: Record<string, unknown>): Promise<{ status: number; text: string; out: Single }> {
   const [out, status] = await sessionRxForAthlete(sql, athleteId, { unit: 'lb', storage_unit: 'lb', ...body })
-  return { status, text: JSON.stringify(out), out: out as Single }
+  // G3 stamps methodology_version on every flag-on response (methodology.check.ts
+  // covers it); these comparisons are about overrides, so it is left out of text.
+  const text = JSON.stringify(out, (k, v) => (k === 'methodology_version' ? undefined : v))
+  return { status, text, out: out as Single }
 }
 const call = (store: 'A' | 'B', name: string, args: Record<string, unknown>, actor: OverrideActor) =>
   executeZeroedTool(sql, store === 'A' ? A : B, name, args, {}, actor)
@@ -158,7 +161,8 @@ const swapOps = [
   { op: 'adjust', exercise_name: 'Triceps Pushdown', sets: 2 },
   { op: 'add', exercise: { name: 'Face Pull', sets: 2, reps: '15', load: 'light' }, after: 'Chest-Supported Row' },
 ]
-const p1 = await call('A', 'preview_session_override', { date: D1, session: 'Upper', ops: swapOps, rationale: 'Bench is taken Thursday.' }, coachA)
+// Four changes is over the U13 small-edit cap (G5), so this preview says rewrite=true.
+const p1 = await call('A', 'preview_session_override', { date: D1, session: 'Upper', ops: swapOps, rationale: 'Bench is taken Thursday.', rewrite: true }, coachA)
 const p1Id = previewIdOf(p1)
 ok(p1Id !== '', 'preview: returns a preview_id')
 ok(p1.includes('+ DB Bench Press') && p1.includes('− Bench Press') && p1.includes('− Plank') && p1.includes('~ Triceps Pushdown') && p1.includes('+ Face Pull'), 'preview: diff names every change')

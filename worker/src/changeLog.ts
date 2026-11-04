@@ -37,6 +37,7 @@ import {
 } from './approvals.ts'
 import type { ConnectedStore } from './store.ts'
 import { McpUserError } from './userError.ts'
+import { methodologyVersionFor } from './methodology.ts'
 
 export type ChangeActor = OverrideActor
 
@@ -137,15 +138,17 @@ export interface ChangeEntry {
 export async function writeChange(store: ConnectedStore, e: ChangeEntry): Promise<string> {
   const id = e.id ?? crypto.randomUUID()
   const rationale = e.rationale?.trim() ? e.rationale.trim() : null
+  // G3: the methodology version (with this athlete's overrides) the write ran on.
+  const methodology = await methodologyVersionFor(store)
   if (e.approvalId) {
     await store.sql`
       INSERT INTO change_log (
         id, athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
-        approval_ref, approval_id, preview_id, expires_on, revert_of
+        approval_ref, approval_id, preview_id, expires_on, revert_of, methodology_version
       ) VALUES (
         ${id}, ${store.athleteId}, ${e.actor.type}, ${e.actor.id}, ${e.tool}, ${e.targetType}, ${e.targetId},
         ${jsonParam(store.sql, e.diff ?? {})}, ${rationale}, ${jsonParam(store.sql, e.ruleRefs ?? ruleRefsFrom(rationale))},
-        ${e.approvalRef}, ${e.approvalId}, ${e.previewId ?? null}, ${e.expiresOn ?? null}, ${e.revertOf ?? null}
+        ${e.approvalRef}, ${e.approvalId}, ${e.previewId ?? null}, ${e.expiresOn ?? null}, ${e.revertOf ?? null}, ${methodology}
       )
     `
     return id
@@ -154,11 +157,11 @@ export async function writeChange(store: ConnectedStore, e: ChangeEntry): Promis
   await store.sql`
     INSERT INTO change_log (
       id, athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
-      approval_ref, preview_id, expires_on, revert_of
+      approval_ref, preview_id, expires_on, revert_of, methodology_version
     ) VALUES (
       ${id}, ${store.athleteId}, ${e.actor.type}, ${e.actor.id}, ${e.tool}, ${e.targetType}, ${e.targetId},
       ${jsonParam(store.sql, e.diff ?? {})}, ${rationale}, ${jsonParam(store.sql, e.ruleRefs ?? ruleRefsFrom(rationale))},
-      ${e.approvalRef}, ${e.previewId ?? null}, ${e.expiresOn ?? null}, ${e.revertOf ?? null}
+      ${e.approvalRef}, ${e.previewId ?? null}, ${e.expiresOn ?? null}, ${e.revertOf ?? null}, ${methodology}
     )
   `
   return id
@@ -351,6 +354,22 @@ export async function liveCoachTokenIds(store: ConnectedStore): Promise<string[]
   return rows.map((r) => r.id)
 }
 
+/** Pending proposals this coach parked → stale + voided_at. Before methodology.sql: none. */
+async function voidCoachProposals(store: ConnectedStore, tokenId: string): Promise<Array<{ id: string; preview_id: string }>> {
+  const [ready] = await store.sql<{ ok: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'coach_proposal' AND column_name = 'created_by'
+    ) AS ok
+  `
+  if (!ready?.ok) return []
+  return store.sql<Array<{ id: string; preview_id: string }>>`
+    UPDATE coach_proposal SET status = 'stale', resolved_at = NOW(), voided_at = NOW()
+    WHERE athlete_id = ${store.athleteId} AND status = 'pending' AND created_by = ${`mcp:${tokenId}`}
+    RETURNING id::text AS id, preview_id
+  `
+}
+
 /**
  * Revoking a coach ends its MCP access (resolveMcpToken refuses it) and, here,
  * voids its open previews and every unconsumed approval of them (G10) at once
@@ -383,13 +402,21 @@ export async function voidRevokedCoachPreviews(store: ConnectedStore, wasLive: s
       RETURNING preview_id
     `
     const voided = [...changed, ...overrides].map((r) => r.preview_id).sort()
-    const approvals = await voidCoachApprovals(store, t.id)
+    // G3: proposals this coach parked (created_by names it; rows parked
+    // before G3 have none and are left alone) can't be accepted any more.
+    const proposals = await voidCoachProposals(store, t.id)
+    const approvals = await voidCoachApprovals(store, t.id, proposals.flatMap((p) => [p.id, p.preview_id]))
     await writeChange(store, {
       actor: { type: 'system', id: 'revocation' },
       tool: 'revoke_coach',
       targetType: 'mcp_token',
       targetId: t.id,
-      diff: { coach: t.name, voided_previews: voided, ...(approvals.length ? { voided_approvals: approvals } : {}) },
+      diff: {
+        coach: t.name,
+        voided_previews: voided,
+        ...(proposals.length ? { voided_proposals: proposals.map((p) => p.id).sort() } : {}),
+        ...(approvals.length ? { voided_approvals: approvals } : {}),
+      },
       rationale: 'The athlete revoked this coach.',
       approvalRef: null,
     })
@@ -583,6 +610,8 @@ export function notRevertibleReason(tool: string, diff: unknown): string | null 
       return 'Access changes can\'t be undone. Invite the coach again instead.'
     case 'revert_change':
       return 'This is already an undo.'
+    case 'apply_methodology_override':
+      return 'Rule changes go back through your coach: ask them to preview clearing it, and approve that.'
     default:
       return 'This kind of change can\'t be undone yet.'
   }

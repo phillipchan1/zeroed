@@ -24,11 +24,11 @@
  */
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import { beginAuthCors, json } from './cors.ts'
-import { asJson, withSql, type Sql, type WaitUntil } from './db.ts'
+import { asJson, pgArrayLiteral, withSql, type Sql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { makeStore } from './store.ts'
-import { canonicalJson, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
+import { actorFromRef, canonicalJson, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import type { ConnectedStore } from './store.ts'
 import { McpUserError } from './userError.ts'
 
@@ -143,10 +143,10 @@ async function loadPreviewTarget(store: ConnectedStore, previewId: string): Prom
   if (UUID_RE.test(id)) {
     const [p] = await store.sql<{
       id: string; preview_id: string; edits: unknown; timing: string; diff: unknown; program_fingerprint: string
-      status: string; source: string; kind: string | null; created_at: string; fresh: boolean
+      status: string; source: string; kind: string | null; created_by: string | null; created_at: string; fresh: boolean
     }[]>`
       SELECT id::text AS id, preview_id, edits, timing, diff, program_fingerprint, status, source,
-             to_jsonb(cp) ->> 'kind' AS kind, to_json(created_at) #>> '{}' AS created_at,
+             to_jsonb(cp) ->> 'kind' AS kind, to_jsonb(cp) ->> 'created_by' AS created_by, to_json(created_at) #>> '{}' AS created_at,
              (created_at > NOW() - make_interval(hours => ${ttl}::int)) AS fresh
       FROM coach_proposal cp WHERE id = ${id} AND athlete_id = ${store.athleteId} LIMIT 1
     `
@@ -158,7 +158,8 @@ async function loadPreviewTarget(store: ConnectedStore, previewId: string): Prom
       previewId: p.id,
       diff: proposalApprovalState(p),
       createdAt: p.created_at,
-      requestedBy: p.source === 'app' ? { type: 'app_coach', id: 'app_coach' } : { type: 'mcp', id: 'coach' },
+      // G3: the coach that parked it, so revoking that coach voids this approval too.
+      requestedBy: actorFromRef(p.created_by) ?? (p.source === 'app' ? { type: 'app_coach', id: 'app_coach' } : { type: 'mcp', id: 'coach' }),
       closed: p.status !== 'pending' ? `this proposal was already ${p.status}` : !p.fresh ? `this was proposed more than ${ttl} h ago` : null,
     }
   }
@@ -339,12 +340,18 @@ async function approvalTable(sql: Sql): Promise<boolean> {
   return row?.ok === true
 }
 
-/** Void every unconsumed approval of this coach's previews. Ids voided. Safe before the table exists. */
-export async function voidCoachApprovals(store: ConnectedStore, tokenId: string): Promise<string[]> {
+/**
+ * Void every unconsumed approval of this coach's previews, and (G3) of the
+ * previews behind proposals it parked (`previewIds`). Ids voided. Safe before
+ * the table exists.
+ */
+export async function voidCoachApprovals(store: ConnectedStore, tokenId: string, previewIds: string[] = []): Promise<string[]> {
   if (!(await approvalTable(store.sql))) return []
   const rows = await store.sql<{ id: string }[]>`
     UPDATE approval SET voided_at = NOW()
-    WHERE athlete_id = ${store.athleteId} AND requested_by_type = 'mcp' AND requested_by_id = ${tokenId}
+    WHERE athlete_id = ${store.athleteId}
+      AND ((requested_by_type = 'mcp' AND requested_by_id = ${tokenId})
+           OR preview_id = ANY(${pgArrayLiteral(previewIds)}::text[]))
       AND consumed_at IS NULL AND voided_at IS NULL
     RETURNING id::text AS id
   `

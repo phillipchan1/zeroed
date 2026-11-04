@@ -39,6 +39,12 @@ import {
 import { approvalMissing, approvalsUnavailable, APPROVAL_TOOL_NAMES, APPROVAL_TOOLS, runApprovalTool } from './approvals.ts'
 import { isMcpUserError } from './userError.ts'
 import type { LiveProgram } from './store.ts'
+import {
+  blockedRegions, METHODOLOGY_TOOL_NAMES, METHODOLOGY_TOOLS, methodologyMissing, methodologyUnavailable, resolveMethodology,
+  runMethodologyTool,
+} from './methodology.ts'
+import { validateEdit, warningsSection, type ValidateResult } from './methodology/validators.ts'
+import { actorRef } from './sessionOverride.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -263,6 +269,23 @@ function withApprovalArgs(tool: McpTool): McpTool {
   }
 }
 
+/** preview_program_edits as tracks_v1 athletes' coaches see it: rewrite (U13) and rule_refs. */
+function withValidatorArgs(tool: McpTool): McpTool {
+  if (tool.name !== 'preview_program_edits') return tool
+  const schema = tool.inputSchema as { properties?: Record<string, unknown> } & Record<string, unknown>
+  return {
+    ...tool,
+    description: `${tool.description} The preview runs the methodology validators (U8 session order, U9 interference, U10 supersets) and lists warnings; changing more than 30% of the week's exercises fails it (U13) unless rewrite=true, and loading a red-flagged region fails it (U7).`,
+    inputSchema: {
+      ...schema,
+      properties: {
+        ...schema.properties,
+        rewrite: { type: 'boolean', description: 'This edit is a deliberate rewrite of the week: lifts the U13 small-edit cap.' },
+      },
+    },
+  }
+}
+
 /**
  * The tools this athlete's coach sees. tracks_v1 adds the week-only override,
  * change-log and approval-lookup tools, and the approval arguments on writes;
@@ -270,7 +293,7 @@ function withApprovalArgs(tool: McpTool): McpTool {
  */
 export async function zeroedToolsFor(sql: Sql, athleteId: string): Promise<McpTool[]> {
   return await tracksV1On(storeForAthlete(sql, athleteId))
-    ? [...ZEROED_TOOLS.map(withApprovalArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS]
+    ? [...ZEROED_TOOLS.map(withApprovalArgs).map(withValidatorArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS, ...METHODOLOGY_TOOLS]
     : ZEROED_TOOLS
 }
 
@@ -279,6 +302,32 @@ async function programEditState(live: LiveProgram, edits: EditInput[]) {
   const base = liveToDraft(live)
   const { draft } = applyEditsToDraft(base, edits.map(toProgramEdit))
   return { fingerprint: await programFingerprint(live), revision: revisionPayload(base.sessions, diffDraft(base, draft)) }
+}
+
+/**
+ * G5 on program edits (tracks_v1): the live week before and after the edits,
+ * against this athlete's methodology.
+ */
+async function validateProgramEdits(store: ConnectedStore, live: LiveProgram, edits: EditInput[], rewrite: boolean): Promise<ValidateResult> {
+  const base = liveToDraft(live)
+  const { draft } = applyEditsToDraft(base, edits.map(toProgramEdit))
+  const diff = diffDraft(base, draft)
+  const methodology = await resolveMethodology(store)
+  const week = (sessions: typeof base.sessions) => sessions.map((x) => ({
+    key: x.routineId ?? `new:${x.name.trim().toLowerCase()}`,
+    name: x.name,
+    dow: x.intendedDow,
+    exercises: x.exercises,
+  }))
+  return validateEdit({
+    before: week(base.sessions),
+    after: week(draft.sessions),
+    params: methodology.params,
+    changed: diff.added + diff.removed + diff.changed,
+    total: base.sessions.reduce((n, x) => n + x.exercises.length, 0),
+    rewrite,
+    blockedRegions: blockedRegions(methodology),
+  })
 }
 
 /** apply_program_edits(edits) with tracks_v1 on: approved, previewed, written and logged in one transaction. */
@@ -370,6 +419,8 @@ export async function executeZeroedTool(
     if (changeLogMissing(e)) throw new McpUserError(changeLogUnavailable)
     // …or before worker/schema/approval.sql (G10).
     if (approvalMissing(e)) throw new McpUserError(approvalsUnavailable)
+    // …or before worker/schema/methodology.sql (G3).
+    if (methodologyMissing(e)) throw new McpUserError(methodologyUnavailable)
     throw e
   }
 }
@@ -391,6 +442,8 @@ async function runZeroedTool(
   if (CHANGE_LOG_TOOL_NAMES.has(name)) return runChangeLogTool(store, name, args, actor)
 
   if (APPROVAL_TOOL_NAMES.has(name)) return runApprovalTool(store, name, args)
+
+  if (METHODOLOGY_TOOL_NAMES.has(name)) return runMethodologyTool(store, name, args, actor)
 
   // G2: with tracks_v1 on, writes go through the gate (approval, preview, change_log).
   // Off, gate stays undefined and every path below is exactly as before.
@@ -540,10 +593,16 @@ async function runZeroedTool(
       const live = await loadLiveProgram(store)
       if (!live) return 'No active program/phase to edit.'
       const preview = previewEdits(live, edits as EditInput[], asString(args.week_start))
+      // G5 (tracks_v1 only): warnings in the preview; U13 and red flags refuse it.
+      const checked = gate ? await validateProgramEdits(store, live, edits as EditInput[], args.rewrite === true) : null
+      const warned = checked?.warnings.length ? `${preview.text}\n\n${warningsSection(checked.warnings)}` : preview.text
+      if (checked?.blocked) {
+        return `Refused (${checked.blocked.rule}): ${checked.blocked.message} Nothing was kept or parked.\n\n${warned}`
+      }
       if (args.propose !== true) {
         if (!gate) return preview.text
         const id = await gate.preview('apply_program_edits', await programEditState(live, edits as EditInput[]), null)
-        return `${preview.text}\n\n${previewFooter(id)}`
+        return `${warned}\n\n${previewFooter(id)}`
       }
       const title = asString(args.title)
       if (!title) throw new McpUserError('title is required with propose=true: one sentence the athlete reads')
@@ -553,13 +612,14 @@ async function runZeroedTool(
         goalIds: await resolveGoalIds(store, args.goal_ids),
         timing: args.timing === 'next_week' ? 'next_week' : 'now',
         request: null,
+        ...(gate ? { createdBy: actorRef(actor) } : {}),
       })
       if (!parked.ok) {
-        return `${preview.text}\n\n${parked.reason === 'unavailable'
+        return `${warned}\n\n${parked.reason === 'unavailable'
           ? 'Not parked: proposals are not set up on this database yet. Ask the athlete here and apply with confirm=true.'
           : 'Not parked: these edits change nothing in the live week.'}`
       }
-      return `${preview.text}\n\n## Proposed\n${parked.reused ? 'Already parked' : 'Parked'} for the athlete as proposal ${parked.id} (preview ${parked.previewId}). They see it in the app and accept it there; apply_program_edits with proposal_id does the same once they say yes here.`
+      return `${warned}\n\n## Proposed\n${parked.reused ? 'Already parked' : 'Parked'} for the athlete as proposal ${parked.id} (preview ${parked.previewId}). They see it in the app and accept it there; apply_program_edits with proposal_id does the same once they say yes here.`
     }
     case 'apply_program_edits': {
       if (args.confirm !== true) {
