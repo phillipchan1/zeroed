@@ -11,9 +11,10 @@ import { withSql, type Sql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 import { parseRpeHalfStepsFlag, rpeHalfStepsOn, workoutRpeError } from '../../src/engine/rpeScale.ts'
 import { GENERAL_TRACK_SEED } from '../../src/engine/tracks.ts'
-import { changeLogOnFor, liveCoachTokenIds, voidRevokedCoachPreviews, withTx, writeChange } from './changeLog.ts'
+import { appEditorDelta, changeLogOnFor, liveCoachTokenIds, voidRevokedCoachPreviews, withTx, writeChange } from './changeLog.ts'
 import { ApprovalSpent, consumeApproval, directTapApproval } from './approvals.ts'
 import { makeStore } from './store.ts'
+import { DATA_ROUTE_TOMB_TABLES, hiddenIdsFor, idList, type TombTable } from './tombstones.ts'
 
 export type FilterOp = 'eq' | 'neq' | 'in' | 'gte' | 'gt' | 'lte' | 'lt' | 'ilike' | 'not_in'
 
@@ -895,6 +896,14 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       walkEmbeds(table, items, joins)
       for (const filter of query.filters ?? []) walkFilterPath(table, filter.column, joins)
       const where = whereClause(table, ctx.athleteId, ctx.userId, query.filters ?? [], joins, 1)
+      // tracks_v1: a row a revert retired or voided reads as gone (it is kept). Nothing hidden: unchanged.
+      const hidden = ctx.athleteId && DATA_ROUTE_TOMB_TABLES.has(table)
+        ? await hiddenIdsFor(sql, ctx.athleteId, table as TombTable)
+        : []
+      if (hidden.length) {
+        where.text += `${where.text ? ' AND' : 'WHERE'} NOT (${table}.id::text = ANY($${where.params.length + 1}::text[]))`
+        where.params.push(idList(hidden))
+      }
       const from = fromSql(table, joins)
       let count: number | null = null
       if (query.count === 'exact') {
@@ -1112,6 +1121,8 @@ async function logAppRevisions(sql: Sql, athleteId: string, rows: Record<string,
         effective_on: row.effective_on ?? null,
         summary: row.summary ?? null,
         revision: row.diff ?? {},
+        // What its undo puts back (Round 2 item 3).
+        ...(await appEditorDelta(store, row)),
       },
       rationale: Array.isArray(row.requests) ? row.requests.filter((r) => typeof r === 'string').join(' ') || null : null,
       ruleRefs: [],

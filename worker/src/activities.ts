@@ -41,6 +41,7 @@ import { seesHealth, statusBlockedRegions } from './regionStatus.ts'
 import { athleteToday, canonicalJson, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { runTrackTool } from './trackTools.ts'
 import type { ConnectedStore } from './store.ts'
+import { hiddenIds, idList, tombstonesReady } from './tombstones.ts'
 import { McpUserError } from './userError.ts'
 import {
   addDaysIso, compose, composeKey, recomposeReason, TRAINING_AGES, weekLines,
@@ -152,11 +153,36 @@ interface GoalRow {
   track_id: string | null
 }
 
+/** A track a revert retired, brought back by a block that names it again. Before change-tombstone.sql: never retired. */
+async function liftRetiredTrack(store: ConnectedStore, trackId: string, changeId: string): Promise<boolean> {
+  if (!(await tombstonesReady(store))) return false
+  const rows = await store.sql<{ id: string }[]>`
+    UPDATE change_tombstone SET lifted_at = NOW(), lifted_by = ${changeId}
+    WHERE athlete_id = ${store.athleteId} AND row_table = 'track' AND row_id = ${trackId} AND lifted_at IS NULL
+    RETURNING id::text AS id
+  `
+  return rows.length > 0
+}
+
+/** A goal a revert retired, brought back by a block that names it again: its id, or null. */
+async function liftRetiredGoal(store: ConnectedStore, name: string, changeId: string): Promise<string | null> {
+  if (!(await tombstonesReady(store))) return null
+  const [row] = await store.sql<{ id: string }[]>`
+    UPDATE change_tombstone x SET lifted_at = NOW(), lifted_by = ${changeId}
+    FROM athlete_goal g
+    WHERE x.athlete_id = ${store.athleteId} AND x.row_table = 'athlete_goal' AND x.lifted_at IS NULL
+      AND g.id = x.row_id AND g.athlete_id = ${store.athleteId} AND g.name = ${name}
+    RETURNING g.id::text AS id
+  `
+  return row?.id ?? null
+}
+
 async function loadGoals(store: ConnectedStore): Promise<GoalRow[]> {
   return store.sql<GoalRow[]>`
     SELECT id::text AS id, name, metric, test_protocol, due_date::text AS due_date, status, weight, quality, track_id::text AS track_id
     FROM athlete_goal
     WHERE athlete_id = ${store.athleteId} AND status <> 'hit' AND name NOT LIKE 'Screen: %'
+      AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
     ORDER BY created_at, id
   `
 }
@@ -723,6 +749,8 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
       if (activitiesAdded.length) diff.activities_added = activitiesAdded
       const goalIds = new Map<string, string>()
       const goalsAdded: string[] = []
+      const goalsUnretired: string[] = []
+      let back: string | null = null
       const weighted: Obj[] = []
       for (const g of b.goals) {
         const fromReq = (req.add_goals ?? []).find((x) => x.name.toLowerCase() === g.name.toLowerCase())
@@ -740,6 +768,14 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
             weighted.push({ goal_id: g.id, before: { weight: was.weight, quality: was.quality }, after: { weight: g.requested, quality } })
           }
           goalIds.set(g.name.toLowerCase(), g.id)
+        } else if (fromReq && (back = await liftRetiredGoal(store, fromReq.name, changeId))) {
+          // A goal an undo retired comes back under its name (the block's revert retires it again).
+          await store.sql`
+            UPDATE athlete_goal SET weight = ${g.requested}, quality = ${g.quality ?? null}, updated_at = NOW()
+            WHERE id = ${back} AND athlete_id = ${store.athleteId}
+          `
+          goalsUnretired.push(back)
+          goalIds.set(g.name.toLowerCase(), back)
         } else if (fromReq) {
           const [row] = await store.sql<{ id: string }[]>`
             INSERT INTO athlete_goal (athlete_id, name, metric, unit, direction, target, baseline, current, due_date, test_protocol, status, weight, quality)
@@ -758,6 +794,11 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
       const screenGoals: string[] = []
       for (const s of b.screens) {
         const def = SCREENS[s.key]
+        const revived = await liftRetiredGoal(store, `Screen: ${def.name}`, changeId)
+        if (revived) {
+          goalsUnretired.push(revived)
+          continue
+        }
         const [row] = await store.sql<{ id: string }[]>`
           INSERT INTO athlete_goal (athlete_id, name, metric, unit, side, direction, test_protocol, cadence, status, weight, quality)
           VALUES (${store.athleteId}, ${`Screen: ${def.name}`}, ${def.key}, ${def.unit === 'pass' ? null : def.unit},
@@ -769,6 +810,7 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
         if (row) screenGoals.push(row.id)
       }
       if (goalsAdded.length) diff.goals_added = goalsAdded
+      if (goalsUnretired.length) diff.goals_unretired = goalsUnretired
       if (screenGoals.length) diff.screen_goals_added = screenGoals
       if (weighted.length) diff.goals_weighted = weighted
 
@@ -778,6 +820,8 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
       `
       if (program) {
         const tracksOut: Obj[] = []
+        const endedRuleEnds: Record<string, string | null> = {}
+        const goalsTracked: Obj[] = []
         // D3: a track's purpose is program data every coach reads, so it never
         // names a red-flagged region; the block of record keeps the full why.
         const safeWhy = new Map(redactHealth(b).tracks.map((t) => [t.name, t.why]))
@@ -787,6 +831,8 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
             SELECT id::text AS id, purpose FROM track WHERE program_id = ${program.id} AND lower(name) = ${t.name.toLowerCase()} LIMIT 1
           `
           let trackId = existing?.id ?? null
+          // A track an undo retired comes back under the same name (its revert retires it again).
+          const unretired = existing ? (await liftRetiredTrack(store, existing.id, changeId)) : false
           if (existing) {
             await store.sql`UPDATE track SET purpose = ${purpose} WHERE id = ${existing.id} AND program_id = ${program.id}`
           } else {
@@ -801,11 +847,17 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
           }
           // Rules still open at the block start end the day before it (a rule a
           // superseded block started on the same day ends before it began).
-          const ended = await store.sql<{ id: string }[]>`
-            UPDATE progression_rule SET active_to = (${b.start}::date - 1)
-            WHERE track_id = ${trackId} AND program_id = ${program.id} AND (active_to IS NULL OR active_to >= ${b.start}::date)
-            RETURNING id::text AS id
+          const ended = await store.sql<{ id: string; was: string | null }[]>`
+            WITH prior AS (
+              SELECT id, active_to FROM progression_rule
+              WHERE track_id = ${trackId} AND program_id = ${program.id} AND (active_to IS NULL OR active_to >= ${b.start}::date)
+            )
+            UPDATE progression_rule pr SET active_to = (${b.start}::date - 1)
+            FROM prior WHERE pr.id = prior.id
+            RETURNING pr.id::text AS id, prior.active_to::text AS was
           `
+          // What each rule's end was, so the block's revert puts it back.
+          for (const r of ended) endedRuleEnds[r.id] = r.was
           const [rule] = await store.sql<{ id: string }[]>`
             INSERT INTO progression_rule (program_id, track_id, exercise_name, engine_type, params, active_from)
             VALUES (${program.id}, ${trackId}, NULL, ${t.engine_type}, ${jsonParam(store.sql, { ...t.params, role: t.role, block_id: blockId })}, ${b.start}::date)
@@ -813,17 +865,19 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
           `
           tracksOut.push({
             track_id: trackId, name: t.name, role: t.role, created: !existing, purpose_before: existing?.purpose ?? null,
-            rule_id: rule.id, ended_rules: ended.map((r) => r.id).sort(),
+            rule_id: rule.id, ended_rules: ended.map((r) => r.id).sort(), ...(unretired ? { unretired: true } : {}),
           })
         }
         for (const g of b.goals) {
           const id = goalIds.get(g.name.toLowerCase())
           const track = tracksOut.find((t) => t.name === g.track)
           if (id && track) {
-            await store.sql`
+            const linked = await store.sql<{ id: string }[]>`
               UPDATE athlete_goal SET track_id = ${String(track.track_id)}
               WHERE id = ${id} AND athlete_id = ${store.athleteId} AND track_id IS NULL
+              RETURNING id::text AS id
             `
+            if (linked.length) goalsTracked.push({ goal_id: id, track_id: String(track.track_id) })
           }
         }
         const metaBefore = await programMetaSnapshot(store, program.id)
@@ -834,6 +888,8 @@ async function applyBlock(store: ConnectedStore, args: Obj, actor: ChangeActor):
         `
         diff.program_id = program.id
         diff.tracks = tracksOut
+        diff.ended_rule_ends = endedRuleEnds
+        if (goalsTracked.length) diff.goals_tracked = goalsTracked
         diff.program_meta = { before: metaBefore, after: await programMetaSnapshot(store, program.id) }
       } else {
         diff.program_id = null

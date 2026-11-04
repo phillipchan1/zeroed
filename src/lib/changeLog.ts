@@ -22,7 +22,25 @@ export interface ChangeItem {
   reverted_by: string | null
   revert_of: string | null
   revertible: boolean
+  /** What the tap does: undo the change, or redo one an undo took back. */
+  revert_action?: 'undo' | 'redo' | null
   revert_suggested: boolean
+}
+
+/** A newer change to the same thing, which has to be undone first. */
+export interface RevertConflict {
+  id: string
+  at: string
+  who: string
+  summary: string
+}
+
+export interface UndoPreview {
+  ok: boolean
+  preview_id?: string
+  direction?: 'undo' | 'redo'
+  text: string
+  conflicts?: RevertConflict[]
 }
 
 export interface UndoResult {
@@ -58,10 +76,29 @@ export async function fetchChanges(): Promise<ChangeItem[]> {
   }
 }
 
-/** The athlete's Undo. The tap is the approval; the Worker refuses when the target moved since. */
-export async function undoChange(id: string): Promise<UndoResult> {
+/** What Undo (or Redo) would do, or the newer change that stops it. Writes nothing. */
+export async function previewUndo(id: string): Promise<UndoPreview> {
   try {
-    const out = await post({ action: 'revert', id }) as Partial<UndoResult>
+    const out = await post({ action: 'preview_revert', id }) as Partial<UndoPreview> & { conflicts?: RevertConflict[] }
+    return {
+      ok: out?.ok === true,
+      preview_id: typeof out?.preview_id === 'string' ? out.preview_id : undefined,
+      direction: out?.direction === 'redo' ? 'redo' : 'undo',
+      text: String(out?.text ?? ''),
+      conflicts: Array.isArray(out?.conflicts) ? out.conflicts : [],
+    }
+  } catch {
+    return { ok: false, text: 'Couldn’t reach the server. Nothing changed; try again when you’re online.' }
+  }
+}
+
+/**
+ * The athlete's Undo. The tap is the approval; with the preview they saw, the
+ * Worker applies exactly that or asks to preview again.
+ */
+export async function undoChange(id: string, previewId?: string): Promise<UndoResult> {
+  try {
+    const out = await post({ action: 'revert', id, ...(previewId ? { preview_id: previewId } : {}) }) as Partial<UndoResult>
     return { ok: out?.ok === true, reason: out?.reason, text: String(out?.text ?? '') }
   } catch {
     return { ok: false, reason: 'error', text: 'Couldn’t reach the server. Nothing changed; try again when you’re online.' }

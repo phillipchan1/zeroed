@@ -1156,3 +1156,56 @@ BEGIN
   END IF;
 END
 $c$;
+
+-- =============================================================================
+-- CHANGE TOMBSTONE (Round 2 item 3, tracks_v1) — mirrors supabase/migrations/20261104000010_change_tombstone.sql
+-- =============================================================================
+-- One row per row a revert hid instead of deleting it: 'void' for a logging
+-- write undone (check-in, pain report, session RPE tap, goal measurement,
+-- workout note), 'retire' for a row a change created (track, goal, autoreg
+-- rule). Readers skip a live tombstone only with tracks_v1 on. Redoing the
+-- revert lifts it, once. Region blocks are never voided. Not in /api/data.
+CREATE TABLE IF NOT EXISTS public.change_tombstone (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id     UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  row_table      TEXT NOT NULL CHECK (row_table IN (
+                   'checkin', 'pain_report', 'session_rpe', 'goal_measurement', 'workout_note',
+                   'track', 'athlete_goal', 'autoreg_rule')),
+  row_id         UUID NOT NULL,
+  row_change_id  UUID,
+  kind           TEXT NOT NULL CHECK (kind IN ('void', 'retire')),
+  change_id      UUID NOT NULL,
+  voids_change_id UUID,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  lifted_at      TIMESTAMPTZ,
+  lifted_by      UUID,
+  CONSTRAINT change_tombstone_lifted_pair CHECK ((lifted_at IS NULL) = (lifted_by IS NULL))
+);
+CREATE INDEX IF NOT EXISTS change_tombstone_athlete_idx
+  ON public.change_tombstone (athlete_id, row_table)
+  WHERE lifted_at IS NULL;
+CREATE INDEX IF NOT EXISTS change_tombstone_change_idx
+  ON public.change_tombstone (athlete_id, change_id);
+CREATE UNIQUE INDEX IF NOT EXISTS change_tombstone_live_uidx
+  ON public.change_tombstone (athlete_id, row_table, row_id)
+  WHERE lifted_at IS NULL;
+CREATE OR REPLACE FUNCTION public.change_tombstone_append_only()
+RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM public.athlete WHERE id = OLD.athlete_id) THEN
+      RAISE EXCEPTION 'change_tombstone is append-only';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF OLD.lifted_at IS NULL AND NEW.lifted_at IS NOT NULL
+     AND (to_jsonb(NEW) - 'lifted_at' - 'lifted_by') = (to_jsonb(OLD) - 'lifted_at' - 'lifted_by') THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'change_tombstone is append-only: it may be lifted, once';
+END
+$fn$;
+DROP TRIGGER IF EXISTS change_tombstone_append_only ON public.change_tombstone;
+CREATE TRIGGER change_tombstone_append_only
+  BEFORE UPDATE OR DELETE ON public.change_tombstone
+  FOR EACH ROW EXECUTE FUNCTION public.change_tombstone_append_only();

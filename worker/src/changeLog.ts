@@ -16,35 +16,41 @@
  *             write, once. app_coach never supplies one. Previews for these
  *             writes live in change_preview; week-only overrides keep
  *             session_override_preview.
- *   undo      athlete only. Applies the inverse of a row's diff when the
- *             target still looks exactly like the row left it; refuses when
- *             it moved since, when the type can't be undone without deleting
- *             data, or when the row was already undone. A coach can preview
- *             an undo (preview_revert_change) and the feed shows it as
- *             suggested; only the athlete's tap applies it.
+ *   undo      athlete only, every type (reverts.ts): restores the target when
+ *             it still looks exactly like the row left it, retires or voids
+ *             rows instead of deleting them, re-blocks a cleared region, and
+ *             redoes when the row is itself an undo. Refuses when a later
+ *             change touched the same target, when it moved since, or when
+ *             it would loosen an under-18 rule or unblock a region. A coach
+ *             can preview one (preview_revert_change) and the feed shows it
+ *             as suggested; only the athlete's tap applies it.
  *
  * Tables are hand-applied on Neon (worker/schema/change-log.sql). With the
  * flag off nothing here is called.
  */
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import { asJson, jsonParam, pgArrayLiteral, type Sql } from './db.ts'
-import { insertProgramRevision } from './edits.ts'
 import { athleteToday, canonicalJson, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
+import { addDaysISO, sundayOnOrAfterISO } from '../../supabase/functions/_shared/engine/weekDates.ts'
 import { actorLabel, ruleRefsFrom, summarizeChange } from './changeSummary.ts'
 import {
-  APPROVAL_REF_SHAPE, ApprovalSpent, checkApproval, coachTokenGone, consumeApproval, directTapApproval,
+  APPROVAL_REF_SHAPE, ApprovalSpent, checkApproval, coachTokenGone, consumeApproval,
   parseApprovalRef, voidCoachApprovals,
 } from './approvals.ts'
 import type { ConnectedStore } from './store.ts'
 import { McpUserError } from './userError.ts'
 import { methodologyVersionFor } from './methodology.ts'
 import { seesHealth } from './regionStatus.ts'
+import { previewRevert, revertInfo } from './reverts.ts'
+
+// The revert flow lives in reverts.ts; these names are kept for existing callers.
+export { notRevertibleReason, previewRevert, revertChange, type RevertResult } from './reverts.ts'
 
 export type ChangeActor = OverrideActor
 
 export const STANDING_LOGGING = 'standing:logging'
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
 function missingSchema(e: unknown): boolean {
   const code = (e as { code?: string })?.code
@@ -59,7 +65,7 @@ export function changeLogMissing(e: unknown): boolean {
 }
 
 type Obj = Record<string, unknown>
-const obj = (v: unknown): Obj => (v && typeof v === 'object' && !Array.isArray(v) ? v as Obj : {})
+export const obj = (v: unknown): Obj => (v && typeof v === 'object' && !Array.isArray(v) ? v as Obj : {})
 
 // ---- transactions -----------------------------------------------------------------
 
@@ -87,7 +93,7 @@ export async function withTx<T>(sql: Sql, fn: () => Promise<T>): Promise<T> {
 }
 
 /** Thrown inside a transaction to roll it back and answer with `result`. */
-class Refusal<T> extends Error {
+export class Refusal<T> extends Error {
   result: T
   constructor(result: T) {
     super('refused')
@@ -449,6 +455,8 @@ export interface ChangeView {
   revert_of: string | null
   /** The type can be undone (state is checked again at undo time). */
   revertible: boolean
+  /** What the athlete's tap does: undo a change, redo one an undo took back; null when there is none. */
+  revert_action: 'undo' | 'redo' | null
   /** A coach previewed undoing this in the last 24 h. */
   revert_suggested: boolean
 }
@@ -476,6 +484,7 @@ interface ChangeRow {
 
 function view(r: ChangeRow): ChangeView {
   const diff = asJson<unknown>(r.diff, {})
+  const info = revertInfo({ tool: r.tool, diff, reverted_by: r.reverted_by })
   return {
     id: r.id,
     created_at: r.created_at,
@@ -495,7 +504,8 @@ function view(r: ChangeRow): ChangeView {
     expires_on: r.expires_on,
     reverted_by: r.reverted_by,
     revert_of: r.revert_of,
-    revertible: !r.reverted_by && !r.revert_of && notRevertibleReason(r.tool, diff) == null,
+    revertible: info.action != null,
+    revert_action: info.action,
     revert_suggested: r.revert_suggested === true && !r.reverted_by,
   }
 }
@@ -550,7 +560,7 @@ export async function listChanges(
              EXISTS (
                SELECT 1 FROM change_preview p
                WHERE p.athlete_id = c.athlete_id AND p.tool = 'revert_change' AND p.target_id = c.id::text
-                 AND p.used_at IS NULL AND p.voided_at IS NULL
+                 AND p.actor_type <> 'athlete' AND p.used_at IS NULL AND p.voided_at IS NULL
                  AND p.created_at > NOW() - make_interval(hours => ${PREVIEW_TTL_HOURS}::int)
              ) AS revert_suggested
       FROM change_log c
@@ -574,90 +584,9 @@ export async function listChanges(
   }
 }
 
-// ---- undo -------------------------------------------------------------------------
+// ---- snapshots (what before/after diffs hold; reverts.ts restores them) ----------------
 
-/** Why this kind of row can't be undone, or null when it can. */
-export function notRevertibleReason(tool: string, diff: unknown): string | null {
-  const d = obj(diff)
-  switch (tool) {
-    case 'apply_session_override':
-    case 'update_track':
-    case 'set_track_progression_rule':
-    case 'update_athlete_target':
-    case 'update_program_meta':
-    case 'set_training_max':
-      return null
-    case 'apply_program_edits':
-    case 'accept_proposal':
-    case 'assign_exercise_to_track':
-      if (d.timing === 'next_week') return 'This change queued a new block for next Monday; undo isn\'t available for a queued block. Ask your coach to change it.'
-      if (Number(d.inserted ?? 0) > 0) return 'This change added a session. Undoing it would delete that session, so it can\'t be undone here.'
-      return null
-    case 'upsert_goal':
-      return d.before == null ? 'This change created the goal. Undoing it would delete the goal, so it can\'t be undone here.' : null
-    case 'create_track':
-      return 'Undoing this would delete the track, so it can\'t be undone here.'
-    case 'upsert_autoreg_rule':
-      return 'Undoing this would delete the rule. Ask your coach to change it instead.'
-    case 'log_goal_measurement':
-    case 'add_workout_note':
-      return 'Logged results and notes stay in your log; they aren\'t undone.'
-    case 'clear_session_override':
-      return 'This put a session back to the plan. Make the week-only change again instead.'
-    case 'app_editor':
-      return 'You made this in the program editor; change it there again.'
-    case 'revoke_coach':
-    case 'void_preview':
-      return 'Access changes can\'t be undone. Invite the coach again instead.'
-    case 'revert_change':
-      return 'This is already an undo.'
-    case 'apply_methodology_override':
-      return 'Rule changes go back through your coach: ask them to preview clearing it, and approve that.'
-    case 'log_checkin':
-      return 'Check-ins stay in your log; log a new one to update today.'
-    case 'clear_region':
-      return 'A cleared region stays cleared. If it hurts again, log it in today\'s check-in.'
-    case 'set_coach_health_access':
-    case 'set_coach_role':
-      return 'Change it again under Profile → Coach access.'
-    case 'clear_red_flag':
-      return 'A cleared red flag stays cleared. If it flares again, log it in today\'s check-in.'
-    case 'log_session_rpe':
-      return 'Session effort stays in your log; tap it again on the day to change it.'
-    case 'apply_activity_change':
-      return 'Change the activity again instead: ask your coach to preview it, and approve that.'
-    case 'apply_composed_block':
-      return 'A block is replaced, not undone: ask your coach to re-compose, and approve the new block.'
-    case 'set_birth_date':
-      return 'Your birth date is set once at intake.'
-    default:
-      return 'This kind of change can\'t be undone yet.'
-  }
-}
-
-export type RevertResult =
-  | { ok: true; change_id: string; summary: string; text: string }
-  | { ok: false; reason: 'off' | 'unavailable' | 'not_found' | 'refused' | 'stale' | 'not_revertible'; text: string }
-
-type Fail = Extract<RevertResult, { ok: false }>
-
-interface RevertPlan {
-  /** The new row's diff: the inverse, plus what it undid. */
-  diff: Obj
-  targetType: string
-  targetId: string | null
-  /** Runs inside the undo's transaction. Throws Refusal(stale) if a guard misses. */
-  apply: (approvalRef: string, changeId: string) => Promise<void>
-}
-
-const stale = (what: string): Fail => ({
-  ok: false,
-  reason: 'stale',
-  text: `Can't undo: ${what} changed since, so undoing would overwrite newer work. Ask your coach to look again.`,
-})
-const staleRefusal = (what: string) => new Refusal<RevertResult>(stale(what))
-
-interface RoutineSnap {
+export interface RoutineSnap {
   id: string
   name: string
   session_type: string | null
@@ -690,92 +619,119 @@ export async function phaseRoutineSnapshots(store: ConnectedStore, phaseId: stri
   return rows.map((r) => ({ ...r, exercises: asJson<unknown>(r.exercises, []) }))
 }
 
-/** Routines a write changed: before and after snapshots of each, and how many it added. */
-export function routineDelta(before: RoutineSnap[], after: RoutineSnap[]): { before: RoutineSnap[]; after: RoutineSnap[]; inserted: number } {
+/**
+ * Routines a write changed: before and after snapshots of each, and the ones
+ * it added (so an undo can take them out of the week without deleting them).
+ */
+export function routineDelta(before: RoutineSnap[], after: RoutineSnap[]): { before: RoutineSnap[]; after: RoutineSnap[]; inserted: number; added: RoutineSnap[] } {
   const was = new Map(before.map((r) => [r.id, r]))
   const touched = after.filter((r) => was.has(r.id) && canonicalJson(r) !== canonicalJson(was.get(r.id)))
+  const added = after.filter((r) => !was.has(r.id))
   return {
     before: touched.map((r) => was.get(r.id)!),
     after: touched,
-    inserted: after.filter((r) => !was.has(r.id)).length,
+    inserted: added.length,
+    added,
   }
 }
 
-function invertRevision(revision: unknown): Obj {
-  const r = obj(revision)
-  const flip = (c: Obj): Obj => (c.kind === 'added'
-    ? { ...c, kind: 'removed', before: c.after ?? null, after: null }
-    : c.kind === 'removed'
-      ? { ...c, kind: 'added', after: c.before ?? null, before: null }
-      : { ...c, before: c.after ?? null, after: c.before ?? null })
-  const sessions = (Array.isArray(r.sessions) ? r.sessions : []).map((s) => ({
-    ...obj(s),
-    changes: (Array.isArray(obj(s).changes) ? obj(s).changes as unknown[] : []).map((c) => flip(obj(c))),
-  }))
-  return {
-    added: Number(r.removed ?? 0),
-    removed: Number(r.added ?? 0),
-    changed: Number(r.changed ?? 0),
-    new_sessions: 0,
-    sessions,
-  }
+/**
+ * A block a write queued for next Monday, and this week's end date before and
+ * after it: what undoing the queue needs (skip the block, put the date back).
+ */
+export async function queuedSnapshot(
+  store: ConnectedStore,
+  programId: string,
+  livePhaseId: string,
+  liveWeekEndBefore: string,
+): Promise<Obj | null> {
+  const [queued] = await store.sql<{ id: string; week_start: string }[]>`
+    SELECT ph.id::text AS id, ph.week_start::text AS week_start
+    FROM phase ph JOIN program p ON p.id = ph.program_id
+    WHERE p.athlete_id = ${store.athleteId} AND ph.program_id = ${programId} AND ph.status = 'pending'
+    ORDER BY ph.week_start LIMIT 1
+  `
+  const [live] = await store.sql<{ week_end: string }[]>`
+    SELECT ph.week_end::text AS week_end FROM phase ph JOIN program p ON p.id = ph.program_id
+    WHERE p.athlete_id = ${store.athleteId} AND ph.id = ${livePhaseId}
+  `
+  if (!queued || !live) return null
+  return { phase_id: queued.id, week_start: queued.week_start, live_phase_id: livePhaseId, live_week_end_before: liveWeekEndBefore, live_week_end_after: live.week_end }
 }
 
-async function planRoutines(store: ConnectedStore, tool: string, d: Obj): Promise<RevertPlan | Fail> {
-  const before = (Array.isArray(d.before) ? d.before : []) as RoutineSnap[]
-  const after = (Array.isArray(d.after) ? d.after : []) as RoutineSnap[]
-  const current = new Map((await routineSnapshots(store, after.map((r) => r.id))).map((r) => [r.id, r]))
-  for (const a of after) {
-    const now = current.get(a.id)
-    if (!now || canonicalJson(now) !== canonicalJson(a)) return stale(`the ${a.name} session`)
+/**
+ * What an in-app editor revision changed, for its undo. The app writes the
+ * routines itself and then the revision; its snapshot is the week before the
+ * edit, by session name. Only exercises are put back (what the revision
+ * records). Sessions that can't be matched by name mark the row unmatched,
+ * and its undo is refused rather than guessed.
+ */
+export async function appEditorDelta(store: ConnectedStore, row: Record<string, unknown>): Promise<Obj> {
+  const phaseId = typeof row.phase_id === 'string' && UUID_RE.test(row.phase_id) ? row.phase_id : null
+  const programId = typeof row.program_id === 'string' ? row.program_id : null
+  if (!phaseId || !programId) return {}
+  const today = await athleteToday(store)
+  const effective = typeof row.effective_on === 'string' && /^\d{4}-\d{2}-\d{2}/.test(row.effective_on) ? row.effective_on.slice(0, 10) : today
+  // Queued for Monday: the app ended this week on the Sunday before and queued
+  // a pending phase starting on the revision's date. Its end date before is
+  // the queued block's, unless the app padded it (then it can't be told
+  // apart, and is left out).
+  const [queued] = effective > addDaysISO(today, -1)
+    ? await store.sql<{ id: string; week_start: string; week_end: string }[]>`
+        SELECT ph.id::text AS id, ph.week_start::text AS week_start, ph.week_end::text AS week_end
+        FROM phase ph JOIN program p ON p.id = ph.program_id
+        WHERE p.athlete_id = ${store.athleteId} AND ph.program_id = ${programId} AND ph.status = 'pending' AND ph.week_start = ${effective}::date
+        ORDER BY ph.id LIMIT 1
+      `
+    : []
+  if (queued) {
+    const [live] = await store.sql<{ week_end: string }[]>`
+      SELECT ph.week_end::text AS week_end FROM phase ph JOIN program p ON p.id = ph.program_id
+      WHERE p.athlete_id = ${store.athleteId} AND ph.id = ${phaseId}
+    `
+    if (!live) return { timing: 'next_week', program_id: programId, phase_id: phaseId }
+    const padded = sundayOnOrAfterISO(addDaysISO(queued.week_start, 27))
+    return {
+      timing: 'next_week',
+      program_id: programId,
+      phase_id: phaseId,
+      queued: {
+        phase_id: queued.id, week_start: queued.week_start, live_phase_id: phaseId,
+        live_week_end_before: queued.week_end === padded ? null : queued.week_end, live_week_end_after: live.week_end,
+      },
+    }
   }
-  const spw = d.sessions_per_week ? obj(d.sessions_per_week) : null
-  if (spw) {
-    const [row] = await store.sql<{ n: number | null }[]>`SELECT sessions_per_week AS n FROM athlete WHERE id = ${store.athleteId}`
-    if (Number(row?.n) !== Number(spw.after)) return stale('sessions per week')
+  const snapshot = (Array.isArray(row.snapshot) ? row.snapshot : []).map(obj)
+  const revision = obj(row.diff)
+  const changed = new Set((Array.isArray(revision.sessions) ? revision.sessions : []).map((x) => String(obj(x).name ?? '').toLowerCase()))
+  const current = await phaseRoutineSnapshots(store, phaseId)
+  const byName = new Map<string, Obj>()
+  let unmatched = snapshot.some((x, i) => snapshot.findIndex((y) => String(y.name).toLowerCase() === String(x.name).toLowerCase()) !== i)
+  for (const x of snapshot) byName.set(String(x.name ?? '').toLowerCase(), x)
+  const before: RoutineSnap[] = []
+  const after: RoutineSnap[] = []
+  const added: RoutineSnap[] = []
+  for (const r of current) {
+    const was = byName.get(r.name.toLowerCase())
+    if (!was) {
+      added.push(r)
+      continue
+    }
+    if (!changed.has(r.name.toLowerCase()) || canonicalJson(was.exercises ?? []) === canonicalJson(r.exercises)) continue
+    before.push({ ...r, exercises: was.exercises ?? [] })
+    after.push(r)
   }
-  const revision = invertRevision(d.revision)
+  if ([...changed].some((n) => !current.some((r) => r.name.toLowerCase() === n))) unmatched = true
+  if (added.length !== Number(revision.new_sessions ?? 0)) unmatched = true
   return {
-    targetType: tool === 'assign_exercise_to_track' ? 'routine' : 'program',
-    targetId: typeof d.phase_id === 'string' ? d.phase_id : null,
-    diff: {
-      before: after,
-      after: before,
-      ...(spw ? { sessions_per_week: { before: spw.after, after: spw.before } } : {}),
-      ...(tool === 'assign_exercise_to_track' ? {} : { revision }),
-    },
-    apply: async () => {
-      for (const b of before) {
-        const a = after.find((x) => x.id === b.id)
-        const done = await store.sql<{ id: string }[]>`
-          UPDATE routine r
-          SET name = ${b.name}, session_type = ${b.session_type}, exercises = ${jsonParam(store.sql, b.exercises)},
-              intent = ${b.intent}, intended_dow = ${b.intended_dow}
-          FROM program p
-          WHERE r.id = ${b.id} AND r.program_id = p.id AND p.athlete_id = ${store.athleteId}
-            AND r.exercises = ${jsonParam(store.sql, a?.exercises ?? null)}
-          RETURNING r.id
-        `
-        if (!done.length) throw staleRefusal(`the ${b.name} session`)
-      }
-      if (spw) {
-        await store.sql`
-          UPDATE athlete SET sessions_per_week = ${Number(spw.before)}
-          WHERE id = ${store.athleteId} AND sessions_per_week = ${Number(spw.after)}
-        `
-      }
-      if (tool !== 'assign_exercise_to_track' && typeof d.program_id === 'string' && typeof d.phase_id === 'string') {
-        // The program changed, so the journey records it like any other edit.
-        await insertProgramRevision(store, { programId: d.program_id, phaseId: d.phase_id }, {
-          trigger: 'editor',
-          effectiveOn: await athleteToday(store),
-          requests: [],
-          snapshot: after.map((s) => ({ name: s.name, intent: s.intent, session_type: s.session_type, intended_dow: s.intended_dow, exercises: s.exercises })),
-          diff: revision,
-          summary: 'Undid a coach change',
-        })
-      }
-    },
+    timing: 'now',
+    program_id: programId,
+    phase_id: phaseId,
+    before,
+    after,
+    inserted: added.length,
+    added,
+    ...(unmatched ? { unmatched: true } : {}),
   }
 }
 
@@ -793,7 +749,7 @@ export async function trackSnapshot(store: ConnectedStore, trackId: string): Pro
   return row ? Object.fromEntries(TRACK_FIELDS.map((k) => [k, jsonb.has(k) ? asJson<unknown>(row[k], null) : row[k] ?? null])) : null
 }
 
-const GOAL_FIELDS = ['name', 'metric', 'unit', 'side', 'direction', 'target', 'target_range_hi', 'due_date', 'test_protocol', 'cadence', 'source_metric', 'track_id'] as const
+export const GOAL_FIELDS = ['name', 'metric', 'unit', 'side', 'direction', 'target', 'target_range_hi', 'due_date', 'test_protocol', 'cadence', 'source_metric', 'track_id'] as const
 
 /**
  * The goal's definition. Not baseline/current/best/status: logging a
@@ -835,323 +791,6 @@ export async function trainingMaxEntry(store: ConnectedStore, lift: string): Pro
   return asJson<unknown>(row?.entry ?? null, null)
 }
 
-const same = (a: unknown, b: unknown) => canonicalJson(a ?? null) === canonicalJson(b ?? null)
-
-async function planRevert(store: ConnectedStore, tool: string, d: Obj): Promise<RevertPlan | Fail> {
-  const reason = notRevertibleReason(tool, d)
-  if (reason) return { ok: false, reason: 'not_revertible', text: `Can't undo: ${reason}` }
-  switch (tool) {
-    case 'apply_program_edits':
-    case 'accept_proposal':
-    case 'assign_exercise_to_track':
-      return planRoutines(store, tool, d)
-    case 'apply_session_override': {
-      const ids = (Array.isArray(d.override_ids) ? d.override_ids : []).map(String).filter((id) => UUID_RE.test(id))
-      if (!ids.length) return { ok: false, reason: 'not_revertible', text: 'Can\'t undo: this row names no override.' }
-      const today = await athleteToday(store)
-      const rows = await store.sql<{ id: string; voided: boolean; expires_on: string }[]>`
-        SELECT id::text AS id, voided_at IS NOT NULL AS voided, expires_on::text AS expires_on
-        FROM session_override
-        WHERE athlete_id = ${store.athleteId} AND id::text = ANY(${pgArrayLiteral(ids)}::text[])
-      `
-      if (rows.length !== ids.length || rows.some((r) => r.voided)) return stale('that week-only change (it was cleared)')
-      if (rows.every((r) => r.expires_on < today)) return { ok: false, reason: 'stale', text: 'Can\'t undo: that week-only change has already expired; there is nothing left to undo.' }
-      return {
-        targetType: 'session_override',
-        targetId: ids[0],
-        diff: { override_ids: ids, sessions: d.sessions ?? [] },
-        apply: async (approvalRef, changeId) => {
-          const voided = await store.sql<{ id: string }[]>`
-            WITH v AS (
-              UPDATE session_override
-              SET voided_at = NOW(), void_approval_ref = ${approvalRef}::text, void_preview_id = ${`revert:${changeId}`}::text
-              WHERE athlete_id = ${store.athleteId} AND voided_at IS NULL AND id::text = ANY(${pgArrayLiteral(ids)}::text[])
-              RETURNING id, date, routine_id, expires_on
-            ),
-            logged AS (
-              INSERT INTO session_override_log (
-                athlete_id, actor_type, actor_id, tool, target, diff, rationale, approval_ref, preview_id, expires_on
-              )
-              SELECT ${store.athleteId}::uuid, 'athlete', ${store.athleteId}::text, 'revert_session_override',
-                     jsonb_build_object('override_id', v.id, 'date', v.date, 'routine_id', v.routine_id, 'revert_of', ${changeId}::text),
-                     '{}'::jsonb, 'Undone by the athlete.', ${approvalRef}::text, ${`revert:${changeId}`}::text, v.expires_on
-              FROM v
-              RETURNING id
-            )
-            SELECT id::text AS id FROM v
-          `
-          if (voided.length !== ids.length) throw staleRefusal('that week-only change')
-        },
-      }
-    }
-    case 'update_track': {
-      const id = String(d.track_id ?? '')
-      const now = await trackSnapshot(store, id)
-      if (!now || !same(now, d.after)) return stale('that track')
-      return {
-        targetType: 'track',
-        targetId: id,
-        diff: { track_id: id, before: d.after, after: d.before },
-        apply: async () => {
-          const b = obj(d.before)
-          const done = await store.sql<{ id: string }[]>`
-            UPDATE track SET name = ${b.name as string}, color = ${(b.color ?? null) as string | null}, icon = ${(b.icon ?? null) as string | null},
-                   purpose = ${(b.purpose ?? null) as string | null}, methodology_text = ${(b.methodology_text ?? null) as string | null},
-                   sources = ${jsonParam(store.sql, b.sources ?? [])}, sort_order = ${Number(b.sort_order ?? 0)},
-                   deload_policy = ${b.deload_policy == null ? null : jsonParam(store.sql, b.deload_policy)},
-                   retest_policy = ${b.retest_policy == null ? null : jsonParam(store.sql, b.retest_policy)}
-            WHERE id = ${id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})
-            RETURNING id
-          `
-          if (!done.length) throw staleRefusal('that track')
-        },
-      }
-    }
-    case 'set_track_progression_rule': {
-      const id = String(d.rule_id ?? '')
-      if (!UUID_RE.test(id)) return { ok: false, reason: 'not_revertible', text: 'Can\'t undo: this row names no rule.' }
-      const a = obj(d.after)
-      const [row] = await store.sql<{ engine_type: string; params: unknown; active_to: string | null }[]>`
-        SELECT pr.engine_type, pr.params, pr.active_to::text AS active_to
-        FROM progression_rule pr JOIN program p ON p.id = pr.program_id
-        WHERE pr.id = ${id} AND p.athlete_id = ${store.athleteId}
-        LIMIT 1
-      `
-      if (!row || row.active_to != null || row.engine_type !== a.engine_type || !same(asJson(row.params, {}), a.params ?? {})) {
-        return stale('that progression rule')
-      }
-      return {
-        targetType: 'progression_rule',
-        targetId: id,
-        diff: { rule_id: id, before: { ...a, active_to: null }, after: { ...a, active_to: 'yesterday' } },
-        apply: async () => {
-          // Ended, not deleted: readers already skip a rule whose active_to has passed.
-          const done = await store.sql<{ id: string }[]>`
-            UPDATE progression_rule SET active_to = CURRENT_DATE - 1
-            WHERE id = ${id} AND active_to IS NULL
-              AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})
-            RETURNING id
-          `
-          if (!done.length) throw staleRefusal('that progression rule')
-        },
-      }
-    }
-    case 'upsert_goal': {
-      const id = String(d.goal_id ?? '')
-      const now = await goalSnapshot(store, { id })
-      const after = obj(d.after)
-      if (!now || !same(Object.fromEntries(GOAL_FIELDS.map((k) => [k, now[k] ?? null])), Object.fromEntries(GOAL_FIELDS.map((k) => [k, after[k] ?? null])))) {
-        return stale('that goal')
-      }
-      const b = obj(d.before)
-      return {
-        targetType: 'athlete_goal',
-        targetId: id,
-        diff: { goal_id: id, before: d.after, after: d.before },
-        apply: async () => {
-          const done = await store.sql<{ id: string }[]>`
-            UPDATE athlete_goal SET
-              name = ${b.name as string}, metric = ${b.metric as string}, unit = ${(b.unit ?? null) as string | null},
-              side = ${(b.side ?? null) as string | null}, direction = ${b.direction as string},
-              target = ${(b.target ?? null) as number | null}, target_range_hi = ${(b.target_range_hi ?? null) as number | null},
-              due_date = ${(b.due_date ?? null) as string | null},
-              test_protocol = ${(b.test_protocol ?? null) as string | null}, cadence = ${(b.cadence ?? null) as string | null},
-              source_metric = ${(b.source_metric ?? null) as string | null}, track_id = ${(b.track_id ?? null) as string | null},
-              updated_at = NOW()
-            WHERE id = ${id} AND athlete_id = ${store.athleteId}
-            RETURNING id
-          `
-          if (!done.length) throw staleRefusal('that goal')
-        },
-      }
-    }
-    case 'update_athlete_target': {
-      const [row] = await store.sql<{ goals: string | null }[]>`SELECT goals FROM athlete WHERE id = ${store.athleteId}`
-      if (!same(row?.goals ?? null, obj(d.after).goals ?? null)) return stale('your target')
-      const before = (obj(d.before).goals ?? null) as string | null
-      return {
-        targetType: 'athlete',
-        targetId: store.athleteId,
-        diff: { before: d.after, after: d.before },
-        apply: async () => {
-          await store.sql`UPDATE athlete SET goals = ${before} WHERE id = ${store.athleteId}`
-        },
-      }
-    }
-    case 'update_program_meta': {
-      const id = String(d.program_id ?? '')
-      const now = await programMetaSnapshot(store, id)
-      if (!now || !same(now, d.after)) return stale('the block details')
-      const b = obj(d.before)
-      return {
-        targetType: 'program',
-        targetId: id,
-        diff: { program_id: id, before: d.after, after: d.before },
-        apply: async () => {
-          const done = await store.sql<{ id: string }[]>`
-            UPDATE program SET
-              name = ${(b.name ?? null) as string | null}, block_phase = ${(b.block_phase ?? null) as string | null},
-              start_date = ${(b.start_date ?? null) as string | null}::date, end_date = ${(b.end_date ?? null) as string | null}::date,
-              deload_week_start = ${(b.deload_week_start ?? null) as string | null}::date,
-              retest_start = ${(b.retest_start ?? null) as string | null}::date, retest_end = ${(b.retest_end ?? null) as string | null}::date
-            WHERE id = ${id} AND athlete_id = ${store.athleteId}
-            RETURNING id
-          `
-          if (!done.length) throw staleRefusal('the block details')
-        },
-      }
-    }
-    case 'set_training_max': {
-      const lift = String(d.lift ?? '')
-      if (!/^(squat|bench|deadlift|ohp)$/.test(lift)) return { ok: false, reason: 'not_revertible', text: 'Can\'t undo: this row names no lift.' }
-      if (!same(await trainingMaxEntry(store, lift), d.after)) return stale(`the ${lift} training max`)
-      const before = d.before ?? null
-      return {
-        targetType: 'training_max',
-        targetId: lift,
-        diff: { lift, before: d.after ?? null, after: before },
-        apply: async () => {
-          // Only the lift this change set, and only back to what it was.
-          const json = before == null ? null : JSON.stringify(before)
-          await store.sql`
-            UPDATE athlete SET training_max_overrides = CASE
-              WHEN ${json}::jsonb IS NULL THEN COALESCE(training_max_overrides, '{}'::jsonb) - ${lift}::text
-              ELSE COALESCE(training_max_overrides, '{}'::jsonb) || jsonb_build_object(${lift}::text, ${json}::jsonb)
-            END
-            WHERE id = ${store.athleteId}
-          `
-        },
-      }
-    }
-    default:
-      return { ok: false, reason: 'not_revertible', text: 'Can\'t undo: this kind of change can\'t be undone yet.' }
-  }
-}
-
-interface LoadedChange {
-  id: string
-  tool: string
-  target_type: string
-  diff: unknown
-  reverted_by: string | null
-  revert_of: string | null
-}
-
-async function loadChange(store: ConnectedStore, changeId: string, lock: boolean): Promise<LoadedChange | null> {
-  if (!UUID_RE.test(changeId)) return null
-  const rows = lock
-    ? await store.sql<LoadedChange[]>`
-        SELECT id::text AS id, tool, target_type, diff, reverted_by::text AS reverted_by, revert_of::text AS revert_of
-        FROM change_log WHERE id = ${changeId} AND athlete_id = ${store.athleteId}
-        FOR UPDATE
-      `
-    : await store.sql<LoadedChange[]>`
-        SELECT id::text AS id, tool, target_type, diff, reverted_by::text AS reverted_by, revert_of::text AS revert_of
-        FROM change_log WHERE id = ${changeId} AND athlete_id = ${store.athleteId}
-      `
-  return rows[0] ? { ...rows[0], diff: asJson<unknown>(rows[0].diff, {}) } : null
-}
-
-function precheck(row: LoadedChange | null): Fail | null {
-  if (!row) return { ok: false, reason: 'not_found', text: 'No such change.' }
-  if (row.revert_of) return { ok: false, reason: 'not_revertible', text: 'Can\'t undo: this is already an undo.' }
-  if (row.reverted_by) return { ok: false, reason: 'refused', text: 'Already undone.' }
-  return null
-}
-
-/**
- * The athlete's one-tap undo. Writes a new change_log row (revert_of = the
- * original), sets reverted_by on the original, and restores the target — all
- * in one transaction, or nothing. Only the athlete's own session may call it;
- * a coach previews (previewRevert) and the athlete taps.
- */
-export async function revertChange(store: ConnectedStore, actor: ChangeActor, changeId: string): Promise<RevertResult> {
-  if (actor.type !== 'athlete' || actor.id !== store.athleteId) {
-    return { ok: false, reason: 'refused', text: 'Refused: only the athlete can undo a change. A coach can suggest it with preview_revert_change.' }
-  }
-  if (!(await tracksV1On(store))) return { ok: false, reason: 'off', text: 'The change log is off for this athlete.' }
-  try {
-    return await withTx(store.sql, async () => {
-      const row = await loadChange(store, changeId, true)
-      const pre = precheck(row)
-      if (pre) throw new Refusal<RevertResult>(pre)
-      const plan = await planRevert(store, row!.tool, obj(row!.diff))
-      if ('ok' in plan) throw new Refusal<RevertResult>(plan)
-      const summary = summarizeChange({ tool: row!.tool, target_type: row!.target_type, diff: row!.diff })
-      const newId = crypto.randomUUID()
-      // The athlete's tap on Undo is the preview and the approval (G10): a
-      // real approval row, consumed by this undo's change_log row.
-      const tap = await directTapApproval(store, 'revert', `revert:${row!.id}`, plan.diff)
-      const approvalRef = tap.ref
-      await plan.apply(approvalRef, newId)
-      await writeChange(store, {
-        id: newId,
-        actor,
-        tool: 'revert_change',
-        targetType: plan.targetType,
-        targetId: plan.targetId,
-        diff: { ...plan.diff, undid: summary, undid_tool: row!.tool },
-        rationale: 'Undone by the athlete.',
-        ruleRefs: [],
-        approvalRef,
-        approvalId: tap.id,
-        revertOf: row!.id,
-      })
-      if (!(await consumeApproval(store, tap.id, newId))) throw new ApprovalSpent()
-      const claimed = await store.sql<{ id: string }[]>`
-        UPDATE change_log SET reverted_by = ${newId}
-        WHERE id = ${row!.id} AND athlete_id = ${store.athleteId} AND reverted_by IS NULL
-        RETURNING id
-      `
-      if (!claimed.length) throw new Refusal<RevertResult>({ ok: false, reason: 'refused', text: 'Already undone.' })
-      // A coach's suggestion to undo this is spent.
-      await store.sql`
-        UPDATE change_preview SET used_at = NOW()
-        WHERE athlete_id = ${store.athleteId} AND tool = 'revert_change' AND target_id = ${row!.id}
-          AND used_at IS NULL AND voided_at IS NULL
-      `
-      await store.sql`
-        INSERT INTO coach_message (athlete_id, role, kind, body, ref_id)
-        VALUES (${store.athleteId}, 'coach', 'note', ${`You undid: ${summary}`}, ${null})
-      `
-      return { ok: true as const, change_id: newId, summary, text: `Undone: ${summary}` }
-    })
-  } catch (e) {
-    if (e instanceof Refusal) return e.result as RevertResult
-    if (e instanceof ApprovalSpent) return { ok: false, reason: 'refused', text: e.message }
-    if (missingSchema(e)) return { ok: false, reason: 'unavailable', text: changeLogUnavailable }
-    throw e
-  }
-}
-
-/**
- * What undoing a row would do, for a coach to suggest. Writes no change; a
- * coach's preview is kept (tool revert_change) so the athlete's feed shows
- * the suggestion. There is no coach-side apply.
- */
-export async function previewRevert(store: ConnectedStore, actor: ChangeActor, changeId: string, rationale: string | null): Promise<string> {
-  const row = await loadChange(store, changeId, false)
-  const pre = precheck(row)
-  if (pre) return pre.text
-  const plan = await planRevert(store, row!.tool, obj(row!.diff))
-  if ('ok' in plan) return plan.text
-  const summary = summarizeChange({ tool: row!.tool, target_type: row!.target_type, diff: row!.diff })
-  const previewId = await storeChangePreview(store, actor, 'revert_change', { change_id: row!.id, inverse: plan.diff }, {
-    rationale,
-    targetId: row!.id,
-  })
-  return [
-    '# Preview: undo a change',
-    `Undo: ${summary}`,
-    '',
-    '## What undoing restores',
-    JSON.stringify(plan.diff, null, 2),
-    '',
-    `preview_id: ${previewId}`,
-    'Nothing was written. Only the athlete can undo: it now shows as suggested on this change in their Changes feed (Program → Changes), and their tap is the approval. There is no coach-side apply.',
-  ].join('\n')
-}
-
 // ---- MCP --------------------------------------------------------------------------
 
 export const CHANGE_LOG_TOOLS: McpTool[] = [
@@ -1173,7 +812,7 @@ export const CHANGE_LOG_TOOLS: McpTool[] = [
   },
   {
     name: 'preview_revert_change',
-    description: 'Preview undoing one change_log row: what it would restore, or why it can\'t (the target changed since, it was already undone, or undoing would delete data). Writes nothing. Only the athlete can undo; this marks the change as suggested in their Changes feed and their tap applies it.',
+    description: 'Preview reverting one change_log row: what it would restore, or why it can\'t (a newer change touched the same target, the target moved since, it was already undone, or it would loosen an under-18 rule or unblock a region). Every type has a defined revert: edits are restored, created rows retired, logging voided (never deleted), cleared blocks re-blocked; reverting an undo redoes it. Writes nothing. Only the athlete applies it; this marks the change as suggested in their Changes feed and their tap applies it.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1250,6 +889,7 @@ export async function runChangeLogTool(store: ConnectedStore, name: string, args
           reverted_by: c.reverted_by,
           revert_of: c.revert_of,
           revertible: c.revertible,
+          revert_action: c.revert_action,
         })),
         next_before: page.next_before,
       }, null, 2)

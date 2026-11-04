@@ -1,23 +1,41 @@
 import { useState } from 'react'
 import { Button, Chip } from '../../components/ui'
-import { undoChange, whenLabel, type ChangeItem } from '../../lib/changeLog'
+import { previewUndo, undoChange, whenLabel, type ChangeItem } from '../../lib/changeLog'
 import { success } from '../../lib/haptics'
 
-type Phase = 'idle' | 'confirm' | 'working' | 'undone' | 'refused'
+type Phase = 'idle' | 'previewing' | 'confirm' | 'working' | 'undone' | 'refused'
 
 /**
- * One recorded change: who made it, what moved, why, when. Undo is one tap
- * and a confirm; the Worker refuses (and says why) if what it changed has
- * moved since. A row that was undone stays, marked, so the record is whole.
+ * One recorded change: who made it, what moved, why, when. Undo (or Redo, on
+ * a row that was itself an undo) previews first: what it puts back, or the
+ * newer change that has to go first. The confirm applies exactly that
+ * preview; if anything moved since, the Worker refuses and asks to preview
+ * again. A row that was undone stays, marked, so the record is whole.
  */
 function ChangeRow({ change, onUndone }: { change: ChangeItem; onUndone: () => void }) {
   const [phase, setPhase] = useState<Phase>('idle')
   const [message, setMessage] = useState<string | null>(null)
+  const [previewId, setPreviewId] = useState<string | undefined>(undefined)
   const undone = phase === 'undone' || change.reverted_by != null
+  const redo = change.revert_action === 'redo'
+  const verb = redo ? 'Redo' : 'Undo'
+
+  async function preview() {
+    setPhase('previewing')
+    const res = await previewUndo(change.id)
+    if (!res.ok || !res.preview_id) {
+      setPhase('refused')
+      setMessage(res.text || null)
+      return
+    }
+    setPreviewId(res.preview_id)
+    setMessage(res.text || null)
+    setPhase('confirm')
+  }
 
   async function undo() {
     setPhase('working')
-    const res = await undoChange(change.id)
+    const res = await undoChange(change.id, previewId)
     setPhase(res.ok ? 'undone' : 'refused')
     setMessage(res.ok ? null : res.text || null)
     if (res.ok) {
@@ -32,7 +50,7 @@ function ChangeRow({ change, onUndone }: { change: ChangeItem; onUndone: () => v
         <span className="change__who">{change.who}</span>
         <span className="change__when">{whenLabel(change.created_at)}</span>
         {undone && <Chip tone="pending">Undone</Chip>}
-        {change.revert_of && <Chip tone="info">Undo</Chip>}
+        {change.revert_of && <Chip tone="info">{change.summary.startsWith('Redid') ? 'Redo' : 'Undo'}</Chip>}
       </p>
       <p className="change__what">{change.summary}</p>
       {(change.rationale || change.rule_refs.length > 0) && (
@@ -48,11 +66,11 @@ function ChangeRow({ change, onUndone }: { change: ChangeItem; onUndone: () => v
       {change.revertible && !undone && phase !== 'refused' && (
         phase === 'confirm' || phase === 'working' ? (
           <div className="change__acts">
-            <Button variant="primary" disabled={phase === 'working'} onClick={() => void undo()}>Undo it</Button>
-            <Button variant="outline" disabled={phase === 'working'} onClick={() => setPhase('idle')}>Keep</Button>
+            <Button variant="primary" disabled={phase === 'working'} onClick={() => void undo()}>{`${verb} it`}</Button>
+            <Button variant="outline" disabled={phase === 'working'} onClick={() => { setPhase('idle'); setMessage(null) }}>Keep</Button>
           </div>
         ) : (
-          <button type="button" className="change__undo" onClick={() => setPhase('confirm')}>Undo</button>
+          <button type="button" className="change__undo" disabled={phase === 'previewing'} onClick={() => void preview()}>{verb}</button>
         )
       )}
     </div>

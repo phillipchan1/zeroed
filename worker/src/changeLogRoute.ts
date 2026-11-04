@@ -6,16 +6,21 @@ import { beginAuthCors, json } from './cors.ts'
 import { withSql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 import { resolveAthleteId, sessionFromRequest } from './data.ts'
-import { listChanges, revertChange } from './changeLog.ts'
+import { listChanges } from './changeLog.ts'
+import { previewRevertFor, revertChange } from './reverts.ts'
 import { tracksV1On } from './sessionOverride.ts'
 import { makeStore, type ConnectedStore } from './store.ts'
 
 type Obj = Record<string, unknown>
 
 /**
- * POST /api/change-log            { action: 'list', before?, limit? } → ChangePage
- *                                 { action: 'revert', id }            → RevertResult
- * POST /api/change-log/:id/revert                                     → RevertResult
+ * POST /api/change-log            { action: 'list', before?, limit? }       → ChangePage
+ *                                 { action: 'preview_revert', id }          → RevertPreview
+ *                                 { action: 'revert', id, preview_id? }     → RevertResult
+ * POST /api/change-log/:id/revert                                           → RevertResult
+ * preview_revert shows what the tap would restore, or the conflict that stops
+ * it; revert with that preview_id applies exactly that, or asks to preview
+ * again.
  * The athlete's own session; same auth as /api/session-rx. 404 unless
  * tracks_v1 is on, so the route reads as absent with the flag off.
  */
@@ -57,9 +62,14 @@ export async function athleteChangeLogAction(store: ConnectedStore, body: Obj): 
       const page = await listChanges(store, { before: body.before, limit: typeof body.limit === 'number' ? body.limit : 30 })
       return [page ?? { changes: null, next_before: null }, 200]
     }
+    case 'preview_revert': {
+      const id = typeof body.id === 'string' ? body.id : ''
+      return [await previewRevertFor(store, { type: 'athlete', id: store.athleteId }, id, null), 200]
+    }
     case 'revert': {
       const id = typeof body.id === 'string' ? body.id : ''
-      return [await revertChange(store, { type: 'athlete', id: store.athleteId }, id), 200]
+      const previewId = typeof body.preview_id === 'string' ? body.preview_id : null
+      return [await revertChange(store, { type: 'athlete', id: store.athleteId }, id, { previewId }), 200]
     }
     default:
       return [{ error: 'unknown action' }, 400]

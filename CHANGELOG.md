@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### Every change type revertible (Round 2 item 3, spec section 6), tracks_v1
+
+Behind `athlete.flags.tracks_v1`; with it off the MCP tool list, every tool, `/api/session-rx` and every read are exactly as before, and `/api/change-log` answers 404.
+
+- **One handler per change type.** `worker/src/reverts.ts` has a revert handler for each of the 29 change_log types the Worker writes (28, plus `revert_change` itself), and `reverts.check.ts` scans the code and fails if one is written without one. A revert is still one logged `revert_change` row (`revert_of` → the row, which gains `reverted_by`), with the athlete's tap as its approval, in one transaction.
+- **What reverting means, per kind.** Edits are put back when the target still looks exactly like the change left it: program edits (incl. the in-app editor, now recorded with before/after sessions), proposals, assignments, tracks, rules, goals, block details, training max, methodology overrides, activities, coach role / health toggle. Rows a change created are **retired**, never deleted: a track, a goal, an autoreg rule; an added session comes out of the week (kept), a queued next-week block is skipped and this week's end date put back. Logging is **voided** with a tombstone (append-only tables stay append-only): check-ins and their pain scores, session RPE (a second tap goes back to the first), goal measurements (the goal's numbers go back), notes. A cleared block or red flag is **re-blocked**. Reverting a revert **redoes** it through the same guards.
+- **Never reverted, by definition:** revoking a coach (access is never given back by an undo; invite again) and the system's voided preview. Redoing a clinician clear is refused, and so is redoing a composed block (re-compose instead, on the current methodology).
+- **Safety.** No revert loosens an under-18 rule (all methodology guards run as the athlete), lifts a red flag, or unblocks a region; voiding a check-in keeps the block it set; a minor's birth date is never undone.
+- **Conflicts.** A later change, not since undone, to the same target shows in the revert preview and blocks it ("undo that first"). The athlete's feed previews before applying (`{ action: 'preview_revert' }`), and the tap applies exactly that preview (`{ action: 'revert', preview_id }`) or asks to preview again. A coach without the health toggle can't preview reverting a health row.
+- **Feed.** Revert shows on every row that has one: Undo, or Redo on an undo row (`revert_action`). The athlete's own previews don't show as coach suggestions.
+- **Schema (additive).** `change_tombstone` (one row per voided or retired row; lifted once on redo). Readers skip a live tombstone only with the flag on, so rollback reads every row as before.
+
+**Deploy:** hand-apply `worker/schema/change-tombstone.sql` on Neon (`supabase/migrations/20261104000010_change_tombstone.sql` on Supabase) after `coach-roles.sql` and before deploying this Worker for anyone with `tracks_v1` on. Rollback is in the SQL header.
+
 ### Activity modules + composer (G6), intake + server-side app coach (G7), coach_v1
 
 Behind a new per-athlete flag `athlete.flags.coach_v1`, which only counts together with `tracks_v1`. With it off the MCP tool list, every tool, `/api/session-rx`, the Coach screen's chat and every route are exactly as after G9, and `/api/coach` answers 404. No script or migration turns it on.

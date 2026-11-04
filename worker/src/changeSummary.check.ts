@@ -32,6 +32,7 @@ eq(summarizeChange({
 }), 'This week only: − Plank (Upper · Thu 5 Nov)', 'summary: week-only override')
 eq(summarizeChange({ tool: 'update_track', target_type: 'track', diff: { before: { name: 'Speed', purpose: 'a' }, after: { name: 'Speed', purpose: 'b' } } }), 'Updated the Speed track: purpose', 'summary: track fields that changed')
 eq(summarizeChange({ tool: 'revert_change', target_type: 'track', diff: { undid: 'Updated the Speed track: purpose' } }), 'Undid: Updated the Speed track: purpose', 'summary: an undo names what it undid')
+eq(summarizeChange({ tool: 'revert_change', target_type: 'track', diff: { undid: 'Updated the Speed track: purpose', direction: 'redo' } }), 'Redid: Updated the Speed track: purpose', 'summary: a redo names what it re-applied')
 eq(summarizeChange({ tool: 'add_workout_note', target_type: 'workout_note', diff: { text: 'x'.repeat(200) } }).length, 90, 'summary: clipped to one line')
 
 console.log(`${checks} checks, ${fails.length} failed`)
