@@ -213,12 +213,15 @@ async function prescribeOne(
     today: displaySrc.today ?? '',
   })
   const readiness = opts.readiness ?? null
+  // v1.2: a temporary block (that day and the next session) is skipped by
+  // applyReadiness with its own reason, not as a clinician-clearance block.
+  const temporary = readiness ? readiness.temporary.map((t) => t.region) : []
   const limited = opts.methodology
-    ? applyMethodologyLimits(computed, exercises, opts.methodology, readiness ? readiness.blocked : blockedRegions(opts.methodology))
+    ? applyMethodologyLimits(computed, exercises, opts.methodology, readiness ? readiness.blocked.filter((r) => !temporary.includes(r)) : blockedRegions(opts.methodology))
     : computed
   const adjusted = opts.methodology && readiness
     ? applyReadiness(limited, exercises, {
-      date: readiness.date, flags: readiness.flags, regions: readiness.regions, blocked: readiness.blocked,
+      date: readiness.date, flags: readiness.flags, regions: readiness.regions, blocked: readiness.blocked, temporary,
       params: opts.methodology.params, unit: opts.u.unit,
     })
     : null

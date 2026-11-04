@@ -31,14 +31,18 @@ export interface ReadinessToday {
   readiness: {
     flags: Array<{ kind: string; message: string }>
     level: 'none' | 'trim_accessories' | 'pull_hiit_plyo'
-    regions: Array<{ region: string; status: RegionStatus; score: number; reason: string }>
+    regions: Array<{ region: string; status: RegionStatus; score: number; reason: string; block?: 'persistent' | 'temporary' }>
     blocked_regions: string[]
+    /** Methodology v1.2: blocked only for today and the next session. */
+    temporary_regions?: string[]
     refer_out: string | null
   }
   /** Blocks from the check-in (U7 region status), cleared with clearRegion. */
   blocked: Array<{ region: string; reason: string | null; since: string; kind?: 'checkin'; also_rule?: boolean }>
   /** Red flags set in the athlete's rules (methodology), cleared with clearRedFlag. Absent on older Workers. */
   rule_blocked?: Array<{ region: string; reason: string | null; since: string; kind: 'rule'; also_checkin: boolean }>
+  /** v1.2: pain blocks that lapse after the next session; nothing to clear. Absent on older Workers. */
+  temporary_blocked?: Array<{ region: string; reason: string; since: string }>
   regions: string[]
   red_flags: string[]
 }

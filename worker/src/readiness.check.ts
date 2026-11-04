@@ -3,8 +3,9 @@
 // the routes and the read log are exactly as before. Flag on: U6 trims
 // accessories at one flag and also pulls HIIT/plyos at two (multi-day flags
 // count); U7 proceeds at ≤ 3, regresses at 4–5 and blocks above 5, when worse
-// than yesterday, or on any red flag; a block persists until the athlete
-// clears it and no coach can; minors never get a raised cap; the health
+// than yesterday, or on any red flag; a red-flag block persists until the
+// athlete clears it and no coach can (v1.2's temporary blocks and every
+// boundary: methodologyV12.check.ts); the pure rules here run on v1; minors never get a raised cap; the health
 // toggle hides pain and check-ins from that coach; the weekly review makes
 // its call on synthetic weeks; coach reads are logged and the athlete's are
 // not. Athletes A and B never see each other's rows.
@@ -17,7 +18,7 @@ import { sessionRxForAthlete } from './sessionRx.ts'
 import { athleteToday, type OverrideActor } from './sessionOverride.ts'
 import { executeZeroedTool, ZEROED_TOOLS, zeroedToolsFor } from './tools.ts'
 import { athleteReadinessAction, clearRegion, HEALTH_HIDDEN, READINESS_TOOLS, saveCheckin, setCoachHealth } from './readiness.ts'
-import { addDays, applyReadiness, evaluateRegion, u6Flags, type PainEntry } from './readiness/rules.ts'
+import { addDays, applyReadiness, evaluateRegion, REFER_OUT_TEMPORARY, u6Flags, type PainEntry } from './readiness/rules.ts'
 import { weeklyCall, type LiftTrend } from './weeklyReview.ts'
 import { METHODOLOGY_V1 } from './methodology/v1.ts'
 import { makeStore } from './store.ts'
@@ -176,7 +177,8 @@ ok(acc.coaches.every((c) => c.share_health === true), 'D3: health data is on by 
 ok(acc.coaches.length === 2, 'coach access lists only A\'s live coaches')
 
 // ---- U6 -----------------------------------------------------------------------------------------
-const one = await checkin({ sleep_hours: 5 })
+// Methodology v1.2: one day alone is a flag only under 5 h of sleep, or at stress / soreness 5.
+const one = await checkin({ sleep_hours: 4.5 })
 ok(one.ok && one.readiness?.level === 'trim_accessories', 'U6: one flag → trim accessories')
 const [logRow] = await harness.query<{ tool: string; actor_type: string; approval_ref: string; target_type: string }>(`SELECT tool, actor_type, approval_ref, target_type FROM change_log WHERE id = $1`, [one.change_id])
 ok(logRow?.tool === 'log_checkin' && logRow.actor_type === 'athlete' && logRow.approval_ref === 'standing:logging', 'check-in: logged under standing approval')
@@ -189,7 +191,7 @@ ok(r1.prescription.readiness?.flags.length === 1 && (r1 as { readiness?: unknown
 ok(r1.version !== onEmpty.out.version && r1.program_version !== onEmpty.out.program_version, 'U6: the versions move so the app refetches')
 ok(JSON.stringify((await rx()).out) === JSON.stringify(r1), 'U6: deterministic')
 
-await checkin({ sleep_hours: 5, stress: 4 })
+await checkin({ sleep_hours: 4.5, stress: 5 })
 const r2 = (await rx()).out
 ok(r2.prescription.readiness?.level === 'pull_hiit_plyo', 'U6: two flags → pull HIIT/plyos')
 ok(ex(r2, 'Box Jump').skip && ex(r2, 'Assault Bike').skip, 'U6 two flags: HIIT and plyos pulled')
@@ -200,7 +202,7 @@ ok(adj2.findIndex((a) => a.action === 'skip') < adj2.findIndex((a) => a.action =
 
 await checkin({ date: addDays(T, -2), sleep_hours: 5 })
 await checkin({ date: addDays(T, -1), sleep_hours: 5.5 })
-await checkin({ sleep_hours: 5, stress: 2 })
+await checkin({ sleep_hours: 4.5, stress: 2 })
 const r3 = (await rx()).out
 ok(r3.prescription.readiness?.flags.map((f) => f.kind).join() === 'sleep,sleep_streak', 'U6 multi-day: 3 short nights count as a second flag')
 ok(ex(r3, 'Assault Bike').skip, 'U6 multi-day: two flags pull HIIT')
@@ -225,7 +227,7 @@ ok((await harness.query<{ status: string }>(`SELECT status FROM region_status WH
 await checkin({ pain: [{ region: 'knee', score: 1 }] })
 
 const elbow = await checkin({ pain: [{ region: 'elbow', score: 6 }] })
-ok(elbow.ok && elbow.text.includes('clinician') && elbow.refer_out != null, 'U7 > 5: blocked, with a refer-out notice')
+ok(elbow.ok && elbow.text.includes('doctor or physio') && elbow.refer_out === REFER_OUT_TEMPORARY, 'U7 > 5: blocked, with a refer-out notice')
 const p6 = (await rx()).out
 ok(ex(p6, 'Dumbbell Row').skip && ex(p6, 'Dumbbell Row').load == null, 'U7 > 5: no loading of the elbow')
 ok(p6.prescription.readiness?.blocked_regions.includes('elbow') && p6.prescription.readiness?.refer_out != null, 'U7 > 5: response names the block and refers out')
@@ -348,7 +350,7 @@ ok(await count('change_log') === writesBefore, 'review: read-only')
 const bView = (await athleteReadinessAction(storeB, { action: 'today' }))[0] as { checkin: unknown; pain: Array<{ region: string }>; blocked: Array<{ region: string }> }
 ok(bView.checkin === null && bView.pain.every((p) => p.region === 'knee') && !bView.blocked.some((x) => x.region === 'elbow'), 'isolation: B sees none of A\'s check-ins, pain or blocks')
 const bCoach = await call('get_checkins', { since: addDays(T, -7) }, coachB, B)
-ok(!bCoach.includes('"sleep_hours": 5') && !bCoach.includes('elbow'), 'isolation: B\'s coach reads none of A\'s rows')
+ok(!bCoach.includes('"sleep_hours": 4.5') && !bCoach.includes('elbow'), 'isolation: B\'s coach reads none of A\'s rows')
 ok(!(await clearRegion(storeB, athleteB, 'elbow')).ok, 'isolation: B can\'t clear A\'s block')
 ok((await rx()).out.prescription.readiness?.blocked_regions.includes('elbow') === true, 'isolation: A\'s block untouched by B')
 const bRx = await rx(B, B_DAY)

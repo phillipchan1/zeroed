@@ -39,10 +39,13 @@ import { CURRENT_METHODOLOGY, PAIN_REGIONS, type PainRegion } from './methodolog
 import { resolveParams } from './methodology/resolve.ts'
 import { isCoachRole, parseRole, type CoachRole } from './coachRoles.ts'
 import {
-  addDays, evaluateRegion, isPainRegion, isRedFlag, readinessView, REFER_OUT, RED_FLAGS, regionLabel, u6Flags,
+  addDays, evaluateReport, isPainRegion, isRedFlag, readinessView, REFER_OUT, REFER_OUT_TEMPORARY, RED_FLAGS, regionLabel, u6Flags,
   type PainEntry, type ReadinessFlag, type ReadinessView, type RedFlag, type RegionEval,
 } from './readiness/rules.ts'
-import { blocksNow, loadCheckins, loadPain, loadRegionStatus, readinessTables, seesHealth } from './regionStatus.ts'
+import {
+  blocksNow, loadCheckins, loadPain, loadRegionStatus, readinessTables, seesHealth, workoutDates,
+  type PainRow, type RegionStatusRow,
+} from './regionStatus.ts'
 
 export { seesHealth }
 import { athleteToday, tracksV1On, type OverrideActor } from './sessionOverride.ts'
@@ -60,12 +63,22 @@ function isAthlete(store: ConnectedStore, actor: OverrideActor): boolean {
 
 // ---- the engine's view of a day ------------------------------------------------------
 
+/** v1.2: a block that covers the day it was set and the next session, then lapses on its own. */
+export interface TemporaryBlock {
+  region: string
+  /** The date of the report that set it. */
+  since: string
+  reason: string
+}
+
 export interface ReadinessContext {
   date: string
   flags: ReadinessFlag[]
   regions: RegionEval[]
-  /** Methodology red flags ∪ open region_status blocks ∪ today's new blocks. */
+  /** Methodology red flags ∪ open region_status blocks ∪ today's new blocks ∪ (v1.2) temporary blocks. */
   blocked: string[]
+  /** v1.2: the regions in `blocked` only for a temporary block. Empty in v1 / v1.1 and under 18. */
+  temporary: TemporaryBlock[]
   /**
    * Anything readiness has to say about this date: a check-in, a pain report,
    * or an open block. False: the prescription is exactly the G3 one.
@@ -74,46 +87,86 @@ export interface ReadinessContext {
   view: ReadinessView
 }
 
+interface PainCall {
+  report: PainRow
+  call: RegionEval
+}
+
+/**
+ * U7 calls for the reports on `date`, and (v1.2, temporary blocks on) for
+ * each report in the 14 days before it, each against its own day before and
+ * earlier reports. In v1 / v1.1 only the day before matters.
+ */
+async function painCalls(store: ConnectedStore, date: string, methodology: Resolved): Promise<{ today: PainCall[]; earlier: PainCall[] }> {
+  const p = methodology.params.U7
+  const days = p.persistent_after?.within_days ?? 0
+  const window = p.temporary_blocks ? days * 2 : days
+  const pain = await loadPain(store, addDays(date, -Math.max(1, window)), date)
+  const todays = pain.filter((x) => x.date === date)
+  const earlier = p.temporary_blocks ? pain.filter((x) => x.date < date && x.date >= addDays(date, -days)) : []
+  if (!todays.length && !earlier.length) return { today: [], earlier: [] }
+  const adult = (await athleteMinor(store)) === false && !methodology.minor
+  const callOf = (report: PainRow): PainCall => ({ report, call: evaluateReport(pain, report, p, adult) })
+  return { today: todays.map(callOf), earlier: earlier.map(callOf) }
+}
+
 /** Today's U7 calls for the pain reported on `date`. */
 async function regionCalls(store: ConnectedStore, date: string, methodology: Resolved): Promise<RegionEval[]> {
-  const pain = await loadPain(store, addDays(date, -1), date)
-  const todays = pain.filter((p) => p.date === date)
-  if (!todays.length) return []
-  const adult = (await athleteMinor(store)) === false
-  return todays.map((today) => evaluateRegion({
-    today,
-    yesterday: pain.find((p) => p.date === addDays(date, -1) && p.region === today.region) ?? null,
-    params: methodology.params.U7,
-    raised: methodology.params.U7.regions[today.region]?.raised_cap === true,
-    adult: adult && !methodology.minor,
-  }))
+  return (await painCalls(store, date, methodology)).today.map((c) => c.call)
+}
+
+const after = (a: string | null | undefined, b: string) => a != null && Date.parse(a) > Date.parse(b)
+
+/**
+ * v1.2: temporary blocks in force on `date` — set by a report that day, or by
+ * one on an earlier day with no session logged since (that day and the next
+ * session). A clinician clear after the report lifts it too.
+ */
+async function temporaryBlocks(store: ConnectedStore, date: string, calls: { today: PainCall[]; earlier: PainCall[] }, status: RegionStatusRow[]): Promise<TemporaryBlock[]> {
+  const temp = (c: PainCall) => c.call.status === 'blocked' && c.call.block === 'temporary'
+    && !after(status.find((s) => s.region === c.report.region)?.cleared_at, c.report.created_at)
+  const earlier = calls.earlier.filter(temp)
+  const sessions = earlier.length ? await workoutDates(store, earlier.map((c) => c.report.date).sort()[0], addDays(date, -1)) : []
+  const out = new Map<string, TemporaryBlock>()
+  for (const c of [...earlier, ...calls.today.filter(temp)]) {
+    if (c.report.date < date && sessions.some((d) => d > c.report.date)) continue
+    out.set(c.report.region, { region: c.report.region, since: c.report.date, reason: c.call.reason })
+  }
+  return [...out.values()].sort((a, b) => a.region.localeCompare(b.region))
 }
 
 export async function readinessContextFor(store: ConnectedStore, date: string, methodology: Resolved): Promise<ReadinessContext> {
   const [checkins, calls, status] = await Promise.all([
     loadCheckins(store, addDays(date, -6), date),
-    regionCalls(store, date, methodology),
+    painCalls(store, date, methodology),
     loadRegionStatus(store),
   ])
   const open = status.filter(blocksNow).map((s) => s.region)
   // A block the athlete has since cleared (by a clinician) no longer blocks,
   // even though the report that set it still reads as a block.
-  const regions = calls.map((c): RegionEval => {
+  const regions = calls.today.map(({ report, call: c }): RegionEval => {
     const s = status.find((x) => x.region === c.region)
-    return c.status === 'blocked' && s?.status === 'blocked' && s.cleared_at
+    return c.status === 'blocked' && s?.status === 'blocked' && after(s.cleared_at, report.created_at)
       ? { ...c, status: 'ok', refer_out: false, reason: `${regionLabel(c.region)} was cleared by a clinician after this report (U7).` }
       : c
   })
+  const temporary = methodology.params.U7.temporary_blocks ? await temporaryBlocks(store, date, calls, status) : []
+  const persistent = [...new Set([
+    ...blockedRegions(methodology), ...open,
+    ...regions.filter((r) => r.status === 'blocked' && r.block !== 'temporary').map((r) => r.region),
+  ])]
+  const tempOnly = temporary.filter((t) => !persistent.includes(t.region))
+  const blocked = [...new Set([...persistent, ...tempOnly.map((t) => t.region)])].sort()
   const flags = u6Flags(checkins, date, methodology.params.U6)
-  const blocked = [...new Set([...blockedRegions(methodology), ...open, ...regions.filter((r) => r.status === 'blocked').map((r) => r.region)])].sort()
-  const active = flags.length > 0 || regions.length > 0 || open.length > 0
+  const active = flags.length > 0 || regions.length > 0 || open.length > 0 || tempOnly.length > 0
   return {
     date,
     flags,
     regions,
     blocked,
+    temporary: tempOnly,
     active,
-    view: readinessView({ date, flags, regions, blocked, params: methodology.params }),
+    view: readinessView({ date, flags, regions, blocked, temporary: tempOnly.map((t) => t.region), params: methodology.params }),
   }
 }
 
@@ -208,10 +261,17 @@ export async function saveCheckin(store: ConnectedStore, actor: OverrideActor, b
     const calls = parsed.pain.length ? await regionCalls(store, parsed.date, methodology) : []
     const current = new Map((await loadRegionStatus(store)).map((s) => [s.region, s]))
     const moves: Array<{ region: string; from: string; to: string; reason: string }> = []
+    // v1.2: a temporary block (that day and the next session) is derived from
+    // the report itself, so it writes no region_status row; it lapses on its own.
+    const temporary: Array<{ region: string; reason: string }> = []
     for (const c of calls.filter((x) => painIds.has(x.region))) {
       const now = current.get(c.region)
       // A block stays until the athlete clears it; a low score doesn't lift it.
       if (blocksNow(now)) continue
+      if (c.status === 'blocked' && c.block === 'temporary') {
+        temporary.push({ region: c.region, reason: c.reason })
+        continue
+      }
       const from = now && !(now.status === 'blocked' && now.cleared_at) ? now.status : 'ok'
       if (from === c.status) continue
       await store.sql`
@@ -231,6 +291,7 @@ export async function saveCheckin(store: ConnectedStore, actor: OverrideActor, b
         checkin: checkinId ? { sleep_hours: parsed.sleep_hours, stress: parsed.stress, soreness: parsed.soreness } : null,
         pain: parsed.pain,
         regions: moves,
+        ...(temporary.length ? { temporary_blocks: temporary } : {}),
       },
       rationale: null,
       ruleRefs: [...(checkinId ? ['U6'] : []), ...(parsed.pain.length ? ['U7'] : [])],
@@ -239,11 +300,13 @@ export async function saveCheckin(store: ConnectedStore, actor: OverrideActor, b
     })
     const ctx = await readinessContextFor(store, parsed.date, methodology)
     const blockedNow = moves.filter((m) => m.to === 'blocked')
+    const notes = [
+      ...(blockedNow.length ? [blockedNow.map((m) => m.reason).join(' '), REFER_OUT] : []),
+      ...(temporary.length ? [temporary.map((m) => m.reason).join(' '), REFER_OUT_TEMPORARY] : []),
+    ]
     return {
       ok: true,
-      text: blockedNow.length
-        ? `Logged. ${blockedNow.map((m) => m.reason).join(' ')} ${REFER_OUT}`
-        : 'Logged.',
+      text: notes.length ? `Logged. ${notes.join(' ')}` : 'Logged.',
       date: parsed.date,
       change_id: changeId,
       regions: calls,
@@ -525,7 +588,7 @@ export const READINESS_TOOLS: McpTool[] = [
   },
   {
     name: 'get_region_status',
-    description: 'Each body region\'s pain status (U7): ok, capped (4–5: regress load, drop impact) or blocked (> 5, worse the next morning, or a red flag: no loading there and refer out). A block stays until the athlete marks it cleared by a clinician; no coach can clear one. Health data: only if the athlete shares it with you.',
+    description: 'Each body region\'s pain status (U7): ok, capped (4–5: regress load, drop impact) or blocked (> 5, worse the next morning — above the day before and ≥ 4 — or a red flag: no loading there and refer out). A block with block "temporary" covers that day and the next session, then lapses on its own. Any other block (a red flag, > 5 twice within 14 days, a rating rising across 3 sessions; every block under 18) stays until the athlete marks it cleared by a clinician; no coach can clear one. Health data: only if the athlete shares it with you.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   },
   WEEKLY_REVIEW_TOOL,
@@ -535,20 +598,26 @@ export const READINESS_TOOL_NAMES = new Set(READINESS_TOOLS.map((t) => t.name))
 
 async function regionStatusView(store: ConnectedStore, methodology: Resolved) {
   const today = await athleteToday(store)
-  const [status, pain] = await Promise.all([loadRegionStatus(store), loadPain(store, addDays(today, -13), today)])
+  const [status, pain, ctx] = await Promise.all([
+    loadRegionStatus(store), loadPain(store, addDays(today, -13), today), readinessContextFor(store, today, methodology),
+  ])
   const latest = new Map<string, PainEntry>()
   for (const p of pain) latest.set(p.region, p)
-  const regions = [...new Set([...status.map((s) => s.region), ...latest.keys(), ...blockedRegions(methodology)])].sort()
+  const temporary = new Map(ctx.temporary.map((t) => [t.region, t]))
+  const regions = [...new Set([...status.map((s) => s.region), ...latest.keys(), ...blockedRegions(methodology), ...temporary.keys()])].sort()
   const flagged = new Set(blockedRegions(methodology))
   return regions.map((region) => {
     const s = status.find((x) => x.region === region)
     const open = blocksNow(s)
     const p = latest.get(region) ?? null
+    // v1.2: blocked today and the next session, then it lapses; no clinician clear needed.
+    const temp = !open && !flagged.has(region) ? temporary.get(region) : undefined
     return {
       region,
-      status: open || flagged.has(region) ? 'blocked' : s && s.status !== 'blocked' && p?.date === today ? s.status : 'ok',
-      reason: open ? s!.reason : flagged.has(region) ? 'Red flag set in the athlete\'s rules (U7.regions).' : s?.reason ?? null,
-      since: open ? s!.created_at : null,
+      status: open || flagged.has(region) || temp ? 'blocked' : s && s.status !== 'blocked' && p?.date === today ? s.status : 'ok',
+      reason: open ? s!.reason : flagged.has(region) ? 'Red flag set in the athlete\'s rules (U7.regions).' : temp ? temp.reason : s?.reason ?? null,
+      since: open ? s!.created_at : temp ? temp.since : null,
+      ...(temp ? { block: 'temporary', lapses: 'after the next session' } : {}),
       last_cleared: s?.cleared_at ? { at: s.cleared_at, by: 'the athlete (cleared by a clinician)' } : null,
       latest_score: p ? { date: p.date, score: p.score, red_flags: p.red_flags } : null,
     }
@@ -570,7 +639,9 @@ export async function runReadinessTool(store: ConnectedStore, name: string, args
   if (name === 'get_region_status') {
     const regions = await regionStatusView(store, methodology)
     const blocked = regions.filter((r) => r.status === 'blocked').map((r) => r.region)
-    return JSON.stringify({ regions, blocked_regions: blocked, refer_out: blocked.length ? REFER_OUT : null, pain_cap: methodology.params.U7.pain_cap }, null, 2)
+    const persistent = regions.some((r) => r.status === 'blocked' && !('block' in r))
+    const referOut = persistent ? REFER_OUT : blocked.length ? REFER_OUT_TEMPORARY : null
+    return JSON.stringify({ regions, blocked_regions: blocked, refer_out: referOut, pain_cap: methodology.params.U7.pain_cap }, null, 2)
   }
   const today = await athleteToday(store)
   const since = typeof args.since === 'string' ? args.since.trim().slice(0, 10) : ''
@@ -624,6 +695,8 @@ export async function athleteReadinessAction(store: ConnectedStore, body: Record
           const o = redFlagOverride(overrides, region)
           return o ? [{ region, reason: o.rationale, since: o.created_at, kind: 'rule', also_checkin: openRegions.has(region) }] : []
         }),
+        // v1.2: blocks that lapse after the next session. Nothing to clear.
+        temporary_blocked: ctx.temporary,
         regions: PAIN_REGIONS,
         red_flags: RED_FLAGS,
       }, 200]

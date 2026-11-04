@@ -107,6 +107,14 @@ function clampForMinor(p: MethodologyParams, m: MinorsRules): void {
   for (const rule of Object.values(p.U7.regions)) {
     if (rule) delete rule.raised_cap
   }
+  // v1.2 (section 11a) loosened two rules for adults. Under 18 the stricter
+  // v1.1 behaviour stands (D6): one short night or one day at stress /
+  // soreness 4 is still a flag, and a block stays until a clinician clears
+  // it. v1.2's tighter parts (worse-next-morning at ≥ 4, rising 3 sessions,
+  // > 5 twice in 14 days) apply to minors too.
+  delete p.U6.single_day_sleep_under_hours
+  delete p.U6.single_day_stress_soreness_at
+  if (p.U7.temporary_blocks) p.U7.temporary_blocks = false
 }
 
 /** Effective params for an athlete (and optionally one track). */
@@ -221,6 +229,7 @@ const FIXED: Array<[RegExp, string]> = [
   [/^preview_ttl_hours$|^params\.preview_ttl_hours$/, 'previews expire after 24 h for everyone (section 6)'],
   [/^U8\.order$/, 'session order is the rule the validator checks (U8)'],
   [/^U4\.(e1rm_source|written_load_wins)$/, 'a written load always beats TM math (U4, #49)'],
+  [/^U6\.single_day_(sleep_under_hours|stress_soreness_at)$|^U7\.(worse_next_morning_at|temporary_blocks|persistent_after(\..+)?)$/, 'the readiness and pain thresholds are set by the methodology version (U6, U7, section 11a)'],
   [/^U4\.e1rm_without_rpe$/, 'how an RPE-less set is estimated is set by the methodology version (U4, section 11)'],
   [/^minors\.(age_under|parental_consent_required|max_testing|raised_pain_cap)$/, 'under-18 rules can only be tightened, and these are already at their strictest (D6)'],
 ]

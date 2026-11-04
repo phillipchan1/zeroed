@@ -32,10 +32,12 @@ function summary(t: ReadinessToday): string {
   return bits.length ? bits.join(' · ') : 'sleep, stress, soreness, pain'
 }
 
-// Two kinds of block, each cleared on its own: one set by a check-in (pain
-// over the cap, worse than yesterday, a red flag ticked) and a red flag set in
-// the athlete's rules. Each row says which kind it is and whether the other
-// still blocks the region; only the athlete can clear either.
+// Two kinds of block, each cleared on its own: one set by a check-in (a red
+// flag ticked, pain over 5 twice in 14 days, or rising 3 sessions running)
+// and a red flag set in the athlete's rules. Each row says which kind it is
+// and whether the other still blocks the region; only the athlete can clear
+// either. A one-off over 5, or worse the next morning, only blocks today and
+// the next session (methodology v1.2): shown, with nothing to clear.
 function BlockedRow({ region, reason, kind, otherBlocks, onCleared }: {
   region: string
   reason: string | null
@@ -138,6 +140,13 @@ export function CheckinCard({ today, onSaved }: { today: ReadinessToday; onSaved
       {(today.rule_blocked ?? []).map((b) => (
         <BlockedRow key={`rule:${b.region}`} region={b.region} reason={b.reason} kind="rule" otherBlocks={b.also_checkin} onCleared={onCleared} />
       ))}
+      {(today.temporary_blocked ?? []).map((b) => (
+        <div key={`temp:${b.region}`} className="checkin__blocked">
+          <p className="text-sm">
+            <strong>{regionLabel(b.region)}: no loading today or next session.</strong> {b.reason}
+          </p>
+        </div>
+      ))}
       {clearNote && <p className="text-xs text-dim checkin__note">{clearNote}</p>}
       {r.refer_out && <p className="text-xs text-dim checkin__note">{r.refer_out}</p>}
       {r.flags.length > 0 && (
@@ -223,7 +232,7 @@ export function CheckinCard({ today, onSaved }: { today: ReadinessToday; onSaved
           </div>
           {message && <p className="text-xs text-dim checkin__note">{message}</p>}
           <p className="text-xs text-dim checkin__note">
-            Pain over 3/10 lightens that area today; over 5, worse than yesterday, or any red flag stops loading it until a clinician clears it.
+            Pain over 3/10 lightens that area today. Over 5, or worse the next morning (4 or more), stops loading it today and next session. A red flag, over 5 twice in 14 days, or pain rising 3 sessions running stops it until a clinician clears it (under 18, every block does).
           </p>
         </>
       )}

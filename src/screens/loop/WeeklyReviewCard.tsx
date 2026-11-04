@@ -84,7 +84,7 @@ function ReviewBody({ review }: { review: WeeklyReview }) {
           ))}
           {review.pain.blocked.length > 0 && (
             <p className="wreview__line wreview__line--over">
-              Blocked: {review.pain.blocked.map(regionLabel).join(', ')}. No loading there until a clinician clears it (U7).
+              Blocked this week: {review.pain.blocked.map(regionLabel).join(', ')}. No loading there while blocked (U7).
             </p>
           )}
         </Section>

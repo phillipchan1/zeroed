@@ -127,8 +127,9 @@ for (const edits of [addRow, dropRow]) {
   const tap = await createApproval(storeA, athleteA, { preview_id: kept(p) })
   await call('apply_program_edits', { edits, confirm: true, preview_id: kept(p), approval_ref: tap.ok ? tap.approval_ref : '' })
 }
-const elbow = await saveCheckin(storeA, athleteA, { pain: [{ region: 'elbow', score: 6 }] })
-ok(elbow.ok, 'red flag: elbow 6/10 blocks the elbow')
+// v1.2: a red flag makes the block persistent (6/10 alone lapses after the next session).
+const elbow = await saveCheckin(storeA, athleteA, { pain: [{ region: 'elbow', score: 6, red_flags: ['swelling'] }] })
+ok(elbow.ok, 'red flag: elbow 6/10 with swelling blocks the elbow')
 const rowOps = [{ op: 'add', exercise: { name: 'Dumbbell Row', sets: 3, reps: '10' } }]
 const [red] = await athleteOverrideAction(storeA, { action: 'preview', date: today, session: A_DAY, ops: rowOps })
 const redOut = red as { ok: boolean; text: string; warnings?: unknown }

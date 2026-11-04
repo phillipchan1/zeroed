@@ -450,8 +450,9 @@ const reflagRedo = await tapRevert((reflag?.id ?? ''))
 ok(!reflagRedo.ok && /clinician/.test(reflagRedo.text) && (await blockedRules()).includes('shoulder'), 'safety: redoing a red-flag clear is refused; still blocked')
 
 // A check-in that blocked a region: undoing the check-in voids it, and the block stays.
-const knee = await saveCheckin(storeA, me, { sleep_hours: 5, stress: 4, pain: [{ region: 'knee', score: 7, red_flags: [] }] })
-ok(knee.ok, 'log_checkin: knee 7/10 blocks the knee')
+// v1.2: the red flag makes it a persistent block (7/10 alone lapses after the next session).
+const knee = await saveCheckin(storeA, me, { sleep_hours: 5, stress: 4, pain: [{ region: 'knee', score: 7, red_flags: ['swelling'] }] })
+ok(knee.ok, 'log_checkin: knee 7/10 with swelling blocks the knee')
 const kneeBlocked = async () => blocksNow((await loadRegionStatus(storeA)).find((s) => s.region === 'knee'))
 ok(await kneeBlocked(), 'log_checkin: knee blocked')
 const ck = await lastLog(A, 'log_checkin')
