@@ -70,6 +70,10 @@
 
   /* Touch — Apple HIG minimum is 44px; primary actions get 52px so they're
      hittable with a chalked thumb, mid-set, without looking. */
+  --nav-h:    68px;       /* bottom nav content height */
+  /* What the nav actually occupies: its content PLUS the home-indicator inset it
+     pads itself by. Everything that sits above it reserves this, never 68px. */
+  --nav-total: calc(var(--nav-h) + env(safe-area-inset-bottom, 0px));
   --tap:      48px;
   --tap-lg:   54px;
 
@@ -961,7 +965,10 @@ textarea.input {
   bottom: 0;
   left: 0;
   right: 0;
-  height: 68px;
+  /* Content height + the inset it pads by. It was a flat 68px with border-box,
+     so on a phone with a home indicator the padding left ~34px of content and
+     flexbox crushed every icon to nothing. */
+  height: var(--nav-total);
   background: rgba(18, 18, 18, 0.92);
   backdrop-filter: blur(12px);
   -webkit-backdrop-filter: blur(12px);
@@ -1008,7 +1015,7 @@ textarea.input {
 
 /* Main content area when nav is shown */
 .with-nav {
-  padding-bottom: calc(68px + env(safe-area-inset-bottom, 0px));
+  padding-bottom: var(--nav-total);
 }
 
 /* --- Responsive app shell ------------------------------------------------- */
@@ -1096,12 +1103,6 @@ textarea.input {
 
 .today-week { margin-top: 28px; }
 @media (min-width: 1000px) { .today-week { margin-top: 0; } }
-
-/* Coach conversation — separator below the read on mobile, side pane on desktop. */
-.coach-convo { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
-@media (min-width: 1000px) {
-  .coach-convo { margin-top: 0; padding-top: 0; border-top: none; }
-}
 
 /* Program non-negotiables — separator on mobile, flush in the desktop rail. */
 .program-rules { margin-top: 28px; padding-top: 24px; border-top: 1px solid var(--line); }
@@ -2033,17 +2034,30 @@ textarea.input {
 }
 .stack-toggle:hover { color: var(--text); }
 
-/* --- Markdown (coach copy: bold / italic / code / lists) ------------------ */
-/* The coach speaks markdown; this renders the small subset it uses. Margins
-   collapse at the edges so a bubble or card hugs its text. */
+/* --- Markdown (coach copy) ------------------------------------------------ */
+/* The coach speaks markdown; lib/markdown parses the subset it uses and the Markdown
+   component renders it. Margins collapse at the edges so a bubble or card hugs
+   its text, and nothing in here is allowed to be wider than the bubble that
+   holds it: text wraps anywhere, and the two things that are inherently wide —
+   code and tables — scroll inside their own box instead of widening the page. */
+.md { min-width: 0; overflow-wrap: anywhere; }
 .md > :first-child { margin-top: 0; }
 .md > :last-child  { margin-bottom: 0; }
 .md p { margin: 0.55em 0; }
-.md ul, .md ol { margin: 0.5em 0; padding-left: 1.25em; }
-.md li { margin: 0.2em 0; }
+.md ul, .md ol { margin: 0.5em 0; padding-left: 1.3em; }
+.md li { margin: 0.25em 0; }
+.md li > ul, .md li > ol { margin: 0.2em 0; }
 .md li::marker { color: var(--text-dim); }
 .md strong { font-weight: 600; color: var(--text); }
 .md em { font-style: italic; }
+/* Not signal-yellow: that belongs to the one thing on the screen waiting on you. */
+.md a {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: var(--text-dim);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
 .md code {
   font-family: var(--font-mono);
   font-size: 0.88em;
@@ -2058,9 +2072,70 @@ textarea.input {
   margin: 0.7em 0 0.3em;
   letter-spacing: 0.01em;
 }
+.md blockquote {
+  margin: 0.6em 0;
+  padding: 2px 0 2px 12px;
+  border-left: 2px solid var(--line);
+  color: var(--text-dim);
+}
+.md hr { margin: 0.9em 0; border: 0; border-top: 1px solid var(--line); }
+.md__pre {
+  margin: 0.6em 0;
+  padding: 10px 12px;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  line-height: 1.55;
+  white-space: pre;
+  tab-size: 2;
+}
+.md__pre code { padding: 0; background: none; border: 0; font-size: inherit; overflow-wrap: normal; }
+.md__table {
+  margin: 0.6em 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+.md table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+}
+/* Cells wrap at spaces, never mid-word: a table squeezed to a phone would
+   otherwise break "Copenhagen" into single letters. Past ~22 characters the
+   column stops growing and the box scrolls instead. */
+.md th, .md td {
+  min-width: 7ch;
+  max-width: 22ch;
+  padding: 8px 12px;
+  text-align: left;
+  vertical-align: top;
+  border-bottom: 1px solid var(--line);
+  overflow-wrap: normal;
+}
+.md tbody tr:last-child td { border-bottom: 0; }
+.md th {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  background: var(--ground);
+}
 
-/* --- Coach chat (the warm layer — read-only conversation) ----------------- */
+/* --- Coach chat (the warm layer) ------------------------------------------ */
 .coach-chat {
+  position: relative;       /* turns are measured from here (useThreadScroll) */
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -2070,17 +2145,25 @@ textarea.input {
   display: flex;
   flex-direction: column;
   max-width: 88%;
+  min-width: 0;
 }
 /* Coach speaks from the left; the athlete's questions sit right-aligned.
-   Speaker is read from alignment + fill — no labels, no per-message dot. */
-.coach-msg--coach   { align-self: flex-start; }
+   Speaker is read from alignment + fill — no labels, no per-message dot. The
+   coach gets the full measure: a table, a code block or a three-level list is
+   cramped in 88% of a phone. Short replies still hug their text. */
+.coach-msg--coach   { align-self: flex-start; max-width: 100%; }
 .coach-msg--athlete { align-self: flex-end; align-items: flex-end; }
 
 .coach-msg__body {
+  min-width: 0;
+  max-width: 100%;
   font-size: var(--fs-base);
   line-height: 1.55;
   padding: 12px 15px;
   border-radius: 14px;
+  /* A pasted URL or an unbroken token wraps instead of pushing the bubble past
+     the edge of the screen. */
+  overflow-wrap: anywhere;
 }
 /* Coach output is the signal — a solid surface bubble. */
 .coach-msg--coach .coach-msg__body {
@@ -2089,14 +2172,70 @@ textarea.input {
   border-top-left-radius: 3px;
   color: var(--text);
 }
-/* The athlete's own words stay quiet and neutral — never a second accent.
-   (Doctrine: one signal-yellow per screen; that belongs to the read.) */
+/* The athlete's own words stay neutral — never a second accent. (Doctrine: one
+   signal-yellow per screen; that belongs to the read.) Outline vs. fill and the
+   right edge say who spoke; the text itself is full strength, because a
+   three-line question in dim grey on black is a readability problem, not quiet.
+   pre-wrap: the composer lets a thumb type a second paragraph, so the bubble has
+   to show it — as a <p> it collapsed every line break into one run-on line. */
 .coach-msg--athlete .coach-msg__body {
+  white-space: pre-wrap;
   background: transparent;
   border: 1px solid var(--line);
   border-top-right-radius: 3px;
-  color: var(--text-dim);
+  color: var(--text);
 }
+
+/* Copy — under a finished reply. 32px of icon in a 44px hit area (::after), so it
+   doesn't add a tall row to every message. */
+.coach-msg__tool {
+  position: relative;
+  align-self: flex-start;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  margin: 2px 0 -6px 4px;
+  padding: 0 8px;
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  color: var(--text-dim);
+  cursor: pointer;
+  -webkit-tap-highlight-color: transparent;
+}
+.coach-msg__tool::after { content: ''; position: absolute; inset: -6px -4px; }
+.coach-msg__tool:hover { color: var(--text); }
+.coach-msg__tool-label {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* What an apply did: a ✓ or the reason, one row per change. */
+.coach-applied {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 4px 0;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+.coach-applied__row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 8px 14px;
+  font-size: var(--fs-sm);
+  line-height: 1.4;
+  color: var(--text-dim);
+  overflow-wrap: anywhere;
+}
+.coach-applied__row svg { flex: none; margin-top: 2px; color: var(--confirmed); }
+.coach-applied__row.is-fail { color: var(--text); }
+.coach-applied__row.is-fail svg { color: var(--pending); }
+.coach-applied__err { color: var(--text-dim); }
 
 /* Generating — three dots inside a coach bubble. The shimmer bar this replaced
    read as a piece of the page still loading; dots read as "a reply is coming",
@@ -2128,12 +2267,14 @@ textarea.input {
 }
 
 /* Suggestion bubbles — grounded prompts, tap to ask. Quiet chips, not buttons:
-   they offer a path without competing with the read or the reply. */
+   they offer a path without competing with the read or the reply. A long
+   follow-up wraps inside its chip (a pill radius on three lines looks like a
+   blob, so the radius is a rounded rectangle). */
 .coach-suggestions {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-top: 10px;
+  gap: 8px;
+  margin-top: 2px;
 }
 .coach-presence {
   display: flex;
@@ -2142,16 +2283,18 @@ textarea.input {
 }
 .coach-suggestion {
   min-height: 44px;   /* the tap floor; they were 42px */
+  max-width: 100%;
   font-family: var(--font-sans);
   font-size: var(--fs-sm);
   line-height: 1.3;
   padding: 10px 14px;
   background: transparent;
   border: 1px solid var(--line);
-  border-radius: 999px;
+  border-radius: 18px;
   color: var(--text-dim);
   cursor: pointer;
   text-align: left;
+  overflow-wrap: anywhere;
   transition: border-color var(--dur-fast) var(--ease-out),
               color var(--dur-fast) var(--ease-out);
 }
@@ -2163,6 +2306,133 @@ textarea.input {
   border-color: var(--computing);
   color: var(--text);
 }
+
+/* --- The proposed-changes card --------------------------------------------- */
+/* The coach can write, but only behind this card and only on a tap. Each change
+   is a row — what, where, the numbers as chips, the long field as a clamped
+   quote, then why — instead of one unbroken line of text. The yellow border is
+   the screen's one call to act. */
+.chg {
+  flex: none;
+  margin-top: 4px;
+  background: var(--surface);
+  border: 1px solid var(--signal);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+.chg__head { padding: 14px 16px 12px; }
+.chg__k {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--signal);
+}
+.chg__count {
+  min-width: 20px;
+  padding: 0 7px;
+  text-align: center;
+  letter-spacing: 0;
+  border: 1px solid var(--signal);
+  border-radius: 999px;
+}
+.chg__note { margin-top: 4px; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.45; }
+.chg__list { margin: 0; padding: 0; list-style: none; }
+.chg__item {
+  display: flex;
+  gap: 12px;
+  padding: 12px 16px;
+  border-top: 1px solid var(--line);
+}
+.chg__icon {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text-dim);
+}
+.chg__body { flex: 1; min-width: 0; }
+.chg__title { font-size: var(--fs-base); font-weight: 600; line-height: 1.35; overflow-wrap: anywhere; }
+.chg__where { margin-top: 2px; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.4; overflow-wrap: anywhere; }
+.chg__chips { display: flex; flex-wrap: wrap; gap: 6px; margin: 8px 0 0; padding: 0; list-style: none; }
+.chg__chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 3px 10px;
+  background: var(--ground);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  font-size: var(--fs-xs);
+  color: var(--text-dim);
+}
+.chg__chip b { font-size: var(--fs-sm); font-weight: 600; color: var(--text); overflow-wrap: anywhere; }
+.chg__quote { margin-top: 8px; padding-left: 10px; border-left: 2px solid var(--line); }
+.chg__quote-k {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.chg__quote p { margin-top: 2px; font-size: var(--fs-sm); line-height: 1.5; color: #CFCFCF; overflow-wrap: anywhere; }
+.chg__quote p.is-clamped {
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.chg__link {
+  position: relative;
+  margin-top: 2px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--text);
+  font-size: var(--fs-xs);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+.chg__link::after { content: ''; position: absolute; inset: -12px -10px; }   /* a 44px target */
+.chg__why { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.5; overflow-wrap: anywhere; }
+.chg__more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 44px;
+  background: transparent;
+  border: 0;
+  border-top: 1px solid var(--line);
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.chg__acts {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 8px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--line);
+}
+
+/* A change waiting on you, on a phone: one line, never a card the size of the
+   screen. Opens the full diff in a sheet. */
+.coach-proposals .banner { margin-bottom: 8px; padding: 12px 14px; }
+.coach-proposals .banner__sub { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* Input row — an auto-growing composer (chat-app convention): starts one line
    tall, grows with the draft up to a cap, then scrolls. The button sits at the
@@ -2181,9 +2451,11 @@ textarea.input {
   min-height: var(--tap);
   resize: none;
   /* Room for a real paragraph — roughly seven lines before it scrolls, so a
-     long message can be read back before it's sent. */
-  max-height: 176px;
+     long message can be read back before it's sent. Capped by the screen too:
+     on a short phone with the keyboard up, 176px is a third of what's left. */
+  max-height: min(176px, 34dvh);
   overflow-y: auto;
+  overscroll-behavior: contain;
   /* Tighter than a single-line field: the padding was eating the width that
      the text needs, which is most of why this felt cramped. */
   padding: 11px 15px;
@@ -2236,12 +2508,35 @@ textarea.input {
   cursor: default;
 }
 
-/* --- Coach: full-screen chat treatment ------------------------------------
-   The conversation is the screen. The read instrument folds behind a header
-   so chat isn't stranded at the bottom of a long page (the old behaviour). */
+/* --- Coach screen layout ---------------------------------------------------
+   One structure at every width: a header, a conversation that is the only thing
+   that scrolls, and a composer docked under it.
 
-/* Header / read toggle — looks like a plain page header; on mobile it's a tap
-   target that expands the read. */
+   It used to be a stack — proposals, header, read, then the chat in whatever was
+   left — inside a screen locked to the viewport height. A single pending
+   proposal (a diff card ~1100px tall) took everything; the thread got a 72px
+   sliver, and a multi-line draft squeezed it to nothing and pushed the composer
+   under the nav. Nothing above the thread may be unbounded now: the header is
+   one line, what's waiting on you is one line, and the read folds away. */
+
+.coach-convo { display: flex; flex-direction: column; min-height: 0; }
+.coach-thread {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.coach-thread .coach-chat {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 4px 0 16px;
+}
+.coach-dock { flex: none; }
+
 .coach-read-toggle {
   display: flex;
   align-items: flex-end;
@@ -2253,32 +2548,127 @@ textarea.input {
   border: none;
   color: var(--text);
   text-align: left;
-  cursor: pointer;
   -webkit-tap-highlight-color: transparent;
 }
+button.coach-read-toggle { cursor: pointer; }
+.coach-read-toggle__title { display: flex; flex-direction: column; gap: 4px; text-align: left; min-width: 0; }
 .coach-read-toggle__hint {
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
   white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: var(--fs-xs);
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
 }
 
+/* Jump to latest — appears once you've scrolled away from the bottom. */
+.coach-jump {
+  position: absolute;
+  right: 4px;
+  bottom: 12px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 14px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  cursor: pointer;
+  animation: sheet-fade var(--dur-fast) var(--ease-out);
+}
+
+/* The mobile-only close bar of the full-screen read. */
+.coach-read__bar { display: none; }
+
 @media (min-width: 1000px) {
-  /* Desktop keeps the split layout — the read is the left column, always open. */
+  /* Desktop keeps the split layout — the read is the left column, always open —
+     and the conversation is a column that holds its place while the left side
+     scrolls: the composer never scrolls away from a long thread. (page padding
+     is 40px top, 64px bottom.) */
   .coach-read-toggle { cursor: default; }
   .coach-read-toggle__hint { display: none; }
   .coach-read { display: block !important; }
+  .coach-screen .coach-convo {
+    position: sticky;
+    top: 40px;
+    height: calc(100dvh - 104px);
+  }
+  .coach-dock { padding-top: 12px; }
 }
 
 @media (max-width: 999px) {
-  /* The read collapses; the conversation takes the viewport. */
-  .coach-read { display: none; }
+  /* The screen fills the gap between the status bar and the nav, and manages
+     its own internal scroll instead of scrolling the whole page. */
+  .coach-screen.with-nav {
+    height: calc(100dvh - env(safe-area-inset-top, 0px) - var(--nav-total));
+    min-height: 0;
+    padding-bottom: 0;
+    overflow: hidden;
+  }
+  /* Keyboard up: the nav would sit between the composer and the keys. */
+  body.is-typing .nav { display: none; }
+  body.is-typing .coach-screen.with-nav {
+    height: calc(100dvh - env(safe-area-inset-top, 0px));
+  }
 
-  /* Opened, the board takes the WHOLE screen instead of squeezing into 45vh
-     above the thread. Inline it was a second scroll container stacked on the
-     thread's — two clipped panes, neither showing its top or bottom, inside a
-     screen already locked to the viewport height. A phone can show one thing
-     properly or three things badly; the board is worth reading, so it gets the
-     screen and hands it straight back. Desktop keeps the side-by-side split,
-     where there is room for both. */
+  .coach-screen .page--split {
+    display: flex;
+    flex-direction: column;
+    flex: 1;
+    min-height: 0;
+    padding: 0 var(--sp-4);
+  }
+  .coach-screen .coach-read-pane { flex: 0 0 auto; }
+
+  /* One line: title left, the read right. */
+  .coach-read-toggle {
+    align-items: center;
+    min-height: 56px;
+    padding: 0;
+  }
+  .coach-read-toggle .eyebrow { display: none; }
+  .coach-read-toggle .screen-title { font-size: var(--fs-xl); }
+  .coach-read-toggle__hint {
+    min-height: 36px;
+    padding: 0 8px 0 14px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+  }
+
+  .coach-screen .coach-convo {
+    flex: 1;
+    min-height: 0;
+    margin: 0;
+    padding: 0;
+    border: 0;
+  }
+  /* Full-bleed scroller so the thread's edge is the screen's edge. */
+  .coach-thread .coach-chat {
+    margin: 0 calc(-1 * var(--sp-4));
+    padding: 4px var(--sp-4) 16px;
+  }
+  .coach-dock { padding: 8px 0 10px; }
+  .coach-screen .coach-input { margin-top: 0; }
+  /* The read-only line is a desktop nicety; the docked input is enough
+     context on a phone. */
+  .coach-foot { display: none; }
+
+  /* The read folds away; opened, it takes the WHOLE screen. A phone can show one
+     thing properly or three things badly, and the board is worth reading. It
+     brings its own close bar — a full-screen layer with no way out of it covers
+     the nav and the header that opened it. */
+  .coach-read { display: none; }
   .coach-read.is-open {
     display: block;
     position: fixed;
@@ -2287,77 +2677,50 @@ textarea.input {
     background: var(--ground);
     overflow-y: auto;
     -webkit-overflow-scrolling: touch;
-    margin-bottom: 0;
-    padding: calc(env(safe-area-inset-top, 0px) + 60px) var(--sp-4)
-             calc(env(safe-area-inset-bottom, 0px) + var(--sp-8));
+    overscroll-behavior: contain;
+    padding: 0 var(--sp-4) calc(env(safe-area-inset-bottom, 0px) + var(--sp-8));
     animation: sheet-fade var(--dur-enter) var(--ease-out);
   }
-
-  /* The toggle rides up with it and becomes the way out — the control that
-     opened the board is the one that closes it, in the same place. */
-  .coach-read-pane.is-open .coach-read-toggle {
-    position: fixed;
-    top: env(safe-area-inset-top, 0px);
-    left: 0;
-    right: 0;
-    z-index: 151;
-    height: 60px;
+  .coach-read.is-open .coach-read__bar {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+    display: flex;
     align-items: center;
-    margin: 0;
-    padding: 0 var(--sp-4);
+    justify-content: space-between;
+    min-height: calc(60px + env(safe-area-inset-top, 0px));
+    margin: 0 calc(-1 * var(--sp-4)) var(--sp-4);
+    padding: env(safe-area-inset-top, 0px) var(--sp-4) 0;
     background: var(--ground);
     border-bottom: 1px solid var(--line);
   }
-  /* One line in a 60px bar: the eyebrow is scene-setting for a screen you're
-     already looking at, and the title carries the meaning on its own. */
-  .coach-read-pane.is-open .coach-read-toggle .eyebrow { display: none; }
-  .coach-read-pane.is-open .coach-read-toggle .screen-title { font-size: var(--fs-xl); }
-  .coach-read-pane.is-open .coach-read-toggle__hint { color: var(--signal); }
+  .coach-read__bar-title { font-size: var(--fs-xl); font-weight: 700; letter-spacing: -0.01em; }
+  .coach-read__close {
+    display: grid;
+    place-items: center;
+    width: var(--tap);
+    height: var(--tap);
+    margin-right: -10px;
+    background: transparent;
+    border: 0;
+    border-radius: 50%;
+    color: var(--text);
+    cursor: pointer;
+    -webkit-tap-highlight-color: transparent;
+  }
+}
 
-  /* The screen fills the gap between the status bar and the fixed nav, and
-     manages its own internal scroll instead of scrolling the whole page. */
-  .coach-screen.with-nav {
-    height: calc(100dvh
-      - env(safe-area-inset-top, 0px)
-      - env(safe-area-inset-bottom, 0px)
-      - 68px);
-    min-height: 0;
-    padding-bottom: 0;
-    overflow: hidden;
-  }
-  .coach-screen .page--split {
-    display: flex;
-    flex-direction: column;
-    flex: 1;
-    min-height: 0;
-    padding-top: 16px;
-    padding-bottom: 0;
-  }
-  .coach-screen .coach-read-pane {
-    flex: 0 0 auto;
-    min-height: 0;
-  }
-  /* Conversation pane becomes the flex body — thread scrolls, input docks. */
-  .coach-screen .coach-convo {
-    flex: 1;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    margin-top: 0;
-    padding-top: 0;
-    border-top: none;
-  }
-  .coach-screen .coach-chat {
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    margin-top: 12px;
-    padding-bottom: 4px;
-  }
-  .coach-screen .coach-input { margin-top: 12px; }
-  /* The read-only disclaimer is a desktop nicety; the docked input is enough
-     context on a phone, and dropping it keeps the input flush to the nav. */
-  .coach-screen .coach-convo > p:last-child { display: none; }
+/* Room is the scarce thing on a phone, and the thread is what it's for: with the
+   keyboard up, or on a short screen, the reticle and the banner's second line
+   give way. (What's waiting on you is one tap away again the moment the field
+   loses focus.) */
+@media (max-width: 999px) {
+  body.is-typing .coach-presence,
+  body.is-typing .coach-proposals { display: none; }
+}
+@media (max-width: 999px) and (max-height: 700px) {
+  .coach-presence { display: none; }
+  .coach-proposals .banner__sub { display: none; }
 }
 
 /* A freshly-arrived reply settles in (the type-on it replaced). */
@@ -5403,20 +5766,20 @@ textarea.input {
 .proposal__diff { margin-top: 14px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-btn); background: var(--ground); display: flex; flex-direction: column; gap: 10px; }
 .proposal__session-name { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
 .proposal__lock { display: flex; }
-.proposal__change { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 3px 0; font-size: var(--fs-sm); }
-.proposal__sign { font-family: var(--font-mono); width: 12px; flex-shrink: 0; color: var(--text-dim); }
+/* One change = the name (free to wrap) with its numbers under it. It was name and
+   numbers on one nowrap line, so on a phone a long exercise name was cut to
+   "Tempo …" — the athlete was asked to approve something they couldn't read. */
+.proposal__change { display: grid; grid-template-columns: 12px minmax(0, 1fr); column-gap: 8px; row-gap: 1px; width: 100%; padding: 4px 0; font-size: var(--fs-sm); }
+.proposal__sign { font-family: var(--font-mono); color: var(--text-dim); }
 .proposal__change--added .proposal__sign { color: var(--signal); }
 .proposal--applied .proposal__change--added { animation: proposal-arrive 420ms var(--ease-snap) backwards; }
 .proposal--applied .proposal__change--added .proposal__sign { color: var(--confirmed); }
 .proposal--applied .proposal__change--removed { opacity: 0.4; transition: opacity 400ms var(--ease-out); }
 .proposal__change--removed .proposal__change-name { text-decoration: line-through; color: var(--text-dim); }
-.proposal__change-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.proposal__change-rx { margin-left: auto; font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
+.proposal__change-name { grid-column: 2; min-width: 0; line-height: 1.35; overflow-wrap: anywhere; }
+.proposal__change-rx { grid-column: 2; min-width: 0; font-size: var(--fs-xs); color: var(--text-dim); overflow-wrap: anywhere; }
+.proposal__change-rx:empty { display: none; }
 .proposal__change-rx s { color: var(--text-dim); opacity: 0.7; }
-/* A retuned movement's before → after is long; it reads under the name. */
-.proposal__change--changed { flex-wrap: wrap; }
-.proposal__change--changed .proposal__change-name { flex: 1; }
-.proposal__change--changed .proposal__change-rx { flex-basis: 100%; margin-left: 20px; white-space: normal; }
 .proposal__timing { font-size: var(--fs-xs); color: var(--text-dim); }
 .proposal__message { margin-top: 10px; font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.45; }
 .proposal__acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }

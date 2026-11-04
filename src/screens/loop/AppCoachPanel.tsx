@@ -3,6 +3,7 @@ import { useNavigate } from 'react-router-dom'
 import { Banner, Button, ChatComposer, Markdown, TypingDots } from '../../components/ui'
 import { approvePreview, fetchCoachState, sendCoachMessage, type ChatMessage, type CoachState } from '../../lib/coachV1'
 import { invalidateLoopViews } from '../../lib/loopCache'
+import { useThreadScroll } from './CoachThread'
 
 /**
  * The app coach's conversation (coach_v1). The Worker keeps the chat and runs
@@ -17,12 +18,15 @@ export function AppCoachPanel() {
   const [draft, setDraft] = useState('')
   const [pending, setPending] = useState(false)
   const [open, setOpen] = useState<string[]>([])
-  const endRef = useRef<HTMLDivElement | null>(null)
+  const chatRef = useRef<HTMLDivElement | null>(null)
+  const { toBottom } = useThreadScroll(chatRef)
 
   useEffect(() => {
     void fetchCoachState().then((s) => { setState(s); setChat(s?.chat ?? []) })
   }, [])
-  useEffect(() => { endRef.current?.scrollIntoView({ block: 'end' }) }, [chat, pending])
+  // Scrolls the thread's own box, never the page: scrollIntoView walks every
+  // scrollable ancestor, including the one this screen is locked inside.
+  useEffect(() => { toBottom() }, [chat, pending, toBottom])
 
   async function send(text: string, approves?: string) {
     const q = text.trim()
@@ -55,15 +59,16 @@ export function AppCoachPanel() {
       {state?.block && state.recompose && (
         <Banner title="Time to re-compose" sub={state.recompose === 'block_boundary' ? 'Your block ended.' : 'An activity or goal changed.'} onClick={() => void send('Re-compose my block.')} />
       )}
-      <div className="coach-chat" style={{ marginTop: 12 }}>
+      <div className="coach-thread">
+      <div className="coach-chat" ref={chatRef}>
         {chat.length === 0 && (
           <div className="coach-msg coach-msg--coach fade-rise">
-            <Markdown className="coach-msg__body" text="Ask me about your week, your goals, or how something felt. I propose; you approve; the engine does the math." />
+            <Markdown className="coach-msg__body" breaks text="Ask me about your week, your goals, or how something felt. I propose; you approve; the engine does the math." />
           </div>
         )}
         {chat.map((m) => (
           <div key={m.id} className={`coach-msg coach-msg--${m.role === 'athlete' ? 'athlete' : 'coach'} fade-rise`}>
-            {m.role === 'athlete' ? <p className="coach-msg__body">{m.body}</p> : <Markdown className="coach-msg__body" text={m.body} />}
+            {m.role === 'athlete' ? <p className="coach-msg__body">{m.body}</p> : <Markdown className="coach-msg__body" text={m.body} breaks />}
           </div>
         ))}
         {pending && <div className="coach-msg coach-msg--coach"><TypingDots /></div>}
@@ -79,20 +84,22 @@ export function AppCoachPanel() {
             </div>
           </div>
         ))}
-        <div ref={endRef} />
       </div>
-      <ChatComposer
-        value={draft}
-        onChange={setDraft}
-        onSend={() => void send(draft)}
-        placeholder="Ask your coach…"
-        disabled={pending}
-        ariaLabel="Ask the coach"
-        sendLabel="Ask"
-      />
-      <p className="text-xs text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>
-        Nothing is written until you approve it. The coach doesn't give medical, supplement or diet advice.
-      </p>
+      </div>
+      <div className="coach-dock">
+        <ChatComposer
+          value={draft}
+          onChange={setDraft}
+          onSend={() => void send(draft)}
+          placeholder="Ask your coach…"
+          sendDisabled={pending}
+          ariaLabel="Ask the coach"
+          sendLabel="Ask"
+        />
+        <p className="coach-foot text-xs text-dim" style={{ marginTop: 10, lineHeight: 1.5 }}>
+          Nothing is written until you approve it. The coach doesn't give medical, supplement or diet advice.
+        </p>
+      </div>
     </div>
   )
 }

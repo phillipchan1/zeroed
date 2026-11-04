@@ -117,6 +117,18 @@ Behind `athlete.flags.tracks_v1`; with it off `/api/session-rx`, previews, propo
 
 **Deploy:** hand-apply `worker/schema/methodology.sql` on Neon (`supabase/migrations/20261104000005_methodology.sql` on Supabase) after `approval.sql` and BEFORE deploying this Worker for anyone with `tracks_v1` on. Rollback is in the SQL header: drop the flag per athlete (instant), or redeploy the previous Worker; the table and columns can be dropped afterwards.
 
+### Coach chat: a real mobile chat interface
+
+No flag, no backend change. Details in `docs/mobile-ux-audit.md` ("The Coach chat (second pass)").
+
+- **The conversation owns the screen.** A pending proposal used to take ~1,100px above the thread and leave the chat a 72px sliver (4px with a multi-line draft, composer under the nav). Now: fixed one-line header, one scrolling thread, docked composer; what's waiting on you is a one-line banner that opens the diff in a sheet. Opening "The read" had no way out (the close CSS keyed off a class the JSX never set); it now has a close bar.
+- **Multi-line is first class.** The athlete's bubble keeps its line breaks; the coach's single newlines are kept; the textarea stays enabled (and focused) while a reply is pending, so the keyboard no longer drops on every send (also Workout, Program edit, one-off sheet).
+- **Replies render like a reply.** New tested parser (`lib/markdown.ts`): tables, fenced code, quotes, links, nested lists; long URLs/tokens wrap, code and tables scroll in their own box.
+- **Proposed changes are rows, not a sentence:** what, where, numbers as chips, clamped cue/note, why; follows its reply; applying reports ✓/✗ per change. The proposal diff no longer truncates names ("Tempo …").
+- **Scroll like a chat app:** a long reply lands on its first line, "Jump to latest" / "Review changes" when you've scrolled away, copy under each reply.
+- **`coach_v1` panel too.** The server-side app coach (`AppCoachPanel`) sits on the same thread / docked-composer skeleton, so its chat scrolls inside the locked-height screen on a phone instead of being clipped, scrolls its own box rather than the page, and keeps the keyboard up while a reply is pending.
+- **Notched phones:** the bottom nav is `68px + the home-indicator inset` (it was a flat 68px, which crushed the icons to 0px and left a 34px dead strip above it on Coach).
+
 ### Approval capture (G10, tracks_v1)
 
 Behind `athlete.flags.tracks_v1`; with it off no `approval` row is written, the MCP tool list and schemas are exactly as before, Accept applies as before, and `/api/approvals` answers 404.

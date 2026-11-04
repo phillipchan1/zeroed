@@ -1096,7 +1096,8 @@ function WorkoutCoachSheet({ athleteId, onClose }: { athleteId: string; onClose:
           onChange={setDraft}
           onSend={() => void send(draft)}
           placeholder={context ? 'What, how, or why…' : 'Loading your read…'}
-          disabled={!context || pending}
+          disabled={!context}
+          sendDisabled={pending}
           ariaLabel="Ask the coach"
           sendLabel="Ask"
         />
@@ -1105,7 +1106,7 @@ function WorkoutCoachSheet({ athleteId, onClose }: { athleteId: string; onClose:
       <div className="coach-chat">
         {context && turns.length === 0 && (
           <div className="coach-msg coach-msg--coach fade-rise">
-            <Markdown className="coach-msg__body" text="What's up? Ask about this lift, this session, or the read behind it." />
+            <Markdown className="coach-msg__body" breaks text="What's up? Ask about this lift, this session, or the read behind it." />
           </div>
         )}
 
@@ -1116,7 +1117,7 @@ function WorkoutCoachSheet({ athleteId, onClose }: { athleteId: string; onClose:
             </div>
           ) : (
             <div key={i} className={`coach-msg coach-msg--coach fade-rise${t.fresh ? ' coach-msg--fresh' : ''}`}>
-              <Markdown className="coach-msg__body" text={t.content} />
+              <Markdown className="coach-msg__body" text={t.content} breaks />
             </div>
           ),
         )}

@@ -1,8 +1,9 @@
 import {
   type ReactNode, type ButtonHTMLAttributes, type InputHTMLAttributes,
-  useEffect, useRef, useState,
+  useEffect, useMemo, useRef, useState,
 } from 'react'
 import { X, ChevronRight, ChevronDown, ChevronLeft, ArrowUp } from 'lucide-react'
+import { parseMarkdown, type Block, type Inline } from '../../lib/markdown'
 
 // ---- Logo / Wordmark -------------------------------------------------------
 
@@ -606,77 +607,81 @@ export function TypeOn({ text, delay = 60, className }: TypeOnProps) {
 }
 
 // ---- Markdown — lightweight renderer for coach copy ------------------------
-// The coach speaks markdown (**bold**, *italic*, `code`, - bullets). The model
-// output was rendering raw, asterisks and all. This is a small, safe subset —
-// no HTML injection: every node is built as React, never dangerouslySetInnerHTML.
+// The coach speaks markdown. Parsing lives in lib/markdown (pure, checked with
+// node); this only turns that tree into React. Every node is built as an element
+// — never dangerouslySetInnerHTML — and links are filtered to http(s)/mailto
+// before they get here, so there is no injection surface.
 
-// Inline: **bold**, __bold__, *italic*, _italic_, `code`. Flat (no nesting) by
-// design — coach copy never nests emphasis, and flat keeps the parser honest.
-function renderInline(text: string): ReactNode[] {
-  const nodes: ReactNode[] = []
-  const re = /(\*\*([^*]+)\*\*|__([^_]+)__|\*([^*\n]+)\*|(?<![A-Za-z0-9])_([^_\n]+)_(?![A-Za-z0-9])|`([^`]+)`)/g
-  let last = 0
-  let key = 0
-  let m: RegExpExecArray | null
-  while ((m = re.exec(text)) !== null) {
-    if (m.index > last) nodes.push(text.slice(last, m.index))
-    if (m[2] !== undefined || m[3] !== undefined) {
-      nodes.push(<strong key={key++}>{m[2] ?? m[3]}</strong>)
-    } else if (m[4] !== undefined || m[5] !== undefined) {
-      nodes.push(<em key={key++}>{m[4] ?? m[5]}</em>)
-    } else if (m[6] !== undefined) {
-      nodes.push(<code key={key++}>{m[6]}</code>)
+function renderInline(nodes: Inline[]): ReactNode[] {
+  return nodes.map((n, i) => {
+    switch (n.t) {
+      case 'strong': return <strong key={i}>{n.v}</strong>
+      case 'em':     return <em key={i}>{n.v}</em>
+      case 'code':   return <code key={i}>{n.v}</code>
+      case 'br':     return <br key={i} />
+      case 'link':
+        return <a key={i} href={n.href} target="_blank" rel="noopener noreferrer">{n.v}</a>
+      default:       return n.v
     }
-    last = re.lastIndex
+  })
+}
+
+function renderBlock(b: Block, key: number): ReactNode {
+  switch (b.t) {
+    case 'p': return <p key={key}>{renderInline(b.c)}</p>
+    case 'h': {
+      const Tag = (`h${b.level}`) as 'h1' | 'h2' | 'h3'
+      return <Tag key={key}>{renderInline(b.c)}</Tag>
+    }
+    case 'list': {
+      const items = b.items.map((li, i) => (
+        <li key={i}>
+          {renderInline(li.c)}
+          {li.sub?.map((s, j) => renderBlock(s, j))}
+        </li>
+      ))
+      return b.ordered
+        ? <ol key={key} start={b.start !== 1 ? b.start : undefined}>{items}</ol>
+        : <ul key={key}>{items}</ul>
+    }
+    case 'quote': return <blockquote key={key}>{b.c.map(renderBlock)}</blockquote>
+    case 'hr':    return <hr key={key} />
+    case 'code':
+      // Long lines scroll inside the block instead of widening the bubble; it
+      // is focusable so a keyboard / switch user can scroll it too.
+      return <pre key={key} className="md__pre" tabIndex={0}><code>{b.v}</code></pre>
+    case 'table':
+      return (
+        <div key={key} className="md__table" role="region" aria-label="Table" tabIndex={0}>
+          <table>
+            <thead>
+              <tr>{b.head.map((c, i) => <th key={i} style={b.align[i] ? { textAlign: b.align[i] as 'left' } : undefined}>{renderInline(c)}</th>)}</tr>
+            </thead>
+            <tbody>
+              {b.rows.map((r, ri) => (
+                <tr key={ri}>{r.map((c, i) => <td key={i} style={b.align[i] ? { textAlign: b.align[i] as 'left' } : undefined}>{renderInline(c)}</td>)}</tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )
   }
-  if (last < text.length) nodes.push(text.slice(last))
-  return nodes
 }
 
 interface MarkdownProps {
   text: string
   className?: string
   style?: React.CSSProperties
+  /**
+   * Keep single newlines as line breaks. Chat surfaces want this (a line break
+   * in a reply is meant); documents keep standard Markdown and join with a space.
+   */
+  breaks?: boolean
 }
 
-export function Markdown({ text, className, style }: MarkdownProps) {
-  const blocks: ReactNode[] = []
-  let para: string[] = []
-  let list: string[] = []
-  let ordered = false
-  let key = 0
-
-  const flushPara = () => {
-    if (para.length) { blocks.push(<p key={key++}>{renderInline(para.join(' '))}</p>); para = [] }
-  }
-  const flushList = () => {
-    if (!list.length) return
-    const items = list.map((li, i) => <li key={i}>{renderInline(li)}</li>)
-    blocks.push(ordered ? <ol key={key++}>{items}</ol> : <ul key={key++}>{items}</ul>)
-    list = []
-  }
-
-  for (const raw of (text ?? '').split('\n')) {
-    const line = raw.trim()
-    if (!line) { flushPara(); flushList(); continue }
-    const heading = line.match(/^(#{1,3})\s+(.*)/)
-    const bullet = line.match(/^[-*]\s+(.*)/)
-    const numbered = line.match(/^\d+[.)]\s+(.*)/)
-    if (heading) {
-      flushPara(); flushList()
-      const Tag = (`h${heading[1].length}`) as 'h1' | 'h2' | 'h3'
-      blocks.push(<Tag key={key++}>{renderInline(heading[2])}</Tag>)
-    } else if (bullet) {
-      flushPara(); if (ordered) flushList(); ordered = false; list.push(bullet[1])
-    } else if (numbered) {
-      flushPara(); if (!ordered && list.length) flushList(); ordered = true; list.push(numbered[1])
-    } else {
-      flushList(); para.push(line)
-    }
-  }
-  flushPara(); flushList()
-
-  return <div className={`md${className ? ` ${className}` : ''}`} style={style}>{blocks}</div>
+export function Markdown({ text, className, style, breaks }: MarkdownProps) {
+  const blocks = useMemo(() => parseMarkdown(text ?? '', { breaks }), [text, breaks])
+  return <div className={`md${className ? ` ${className}` : ''}`} style={style}>{blocks.map(renderBlock)}</div>
 }
 
 // ---- TickingNumber — animates integer changes ------------------------------
@@ -912,7 +917,14 @@ interface ChatComposerProps {
   ariaLabel: string
   /** Announced name for the send control (the button itself draws an arrow). */
   sendLabel?: string
+  /** The field itself is unavailable (nothing to ask about yet). */
   disabled?: boolean
+  /**
+   * Sending is blocked but typing is not — a reply is still on its way. The
+   * field must stay enabled: disabling a focused textarea blurs it, which drops
+   * the keyboard on every send and makes you tap back in to write your next line.
+   */
+  sendDisabled?: boolean
 }
 
 /**
@@ -928,7 +940,7 @@ interface ChatComposerProps {
  *    so you can read back what you wrote before you send it.
  */
 export function ChatComposer({
-  value, onChange, onSend, placeholder, ariaLabel, sendLabel = 'Send', disabled,
+  value, onChange, onSend, placeholder, ariaLabel, sendLabel = 'Send', disabled, sendDisabled,
 }: ChatComposerProps) {
   const ref = useRef<HTMLTextAreaElement | null>(null)
   const [enterSends] = useState(hasHardwareKeyboard)
@@ -944,7 +956,7 @@ export function ChatComposer({
   return (
     <form
       className="coach-input"
-      onSubmit={(e) => { e.preventDefault(); onSend() }}
+      onSubmit={(e) => { e.preventDefault(); if (!sendDisabled && value.trim()) onSend() }}
     >
       <textarea
         ref={ref}
@@ -956,14 +968,24 @@ export function ChatComposer({
           if (e.key !== 'Enter' || e.nativeEvent.isComposing) return
           if (!enterSends || e.shiftKey) return   // let the newline through
           e.preventDefault()
-          onSend()
+          if (!sendDisabled && value.trim()) onSend()
         }}
         enterKeyHint={enterSends ? 'send' : 'enter'}
         placeholder={placeholder}
         disabled={disabled}
         aria-label={ariaLabel}
+        aria-multiline="true"
       />
-      <button type="submit" disabled={disabled || !value.trim()} aria-label={sendLabel} title={sendLabel}>
+      {/* mousedown is cancelled so tapping send leaves focus in the field: a
+          blur here would drop the keyboard, the layout would shift under the
+          finger mid-tap, and the next line would need another tap to start. */}
+      <button
+        type="submit"
+        disabled={disabled || sendDisabled || !value.trim()}
+        aria-label={sendLabel}
+        title={sendLabel}
+        onMouseDown={(e) => e.preventDefault()}
+      >
         <ArrowUp size={20} strokeWidth={2.25} />
       </button>
     </form>

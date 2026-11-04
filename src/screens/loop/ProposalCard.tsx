@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Button, LockOn, SectionHeader } from '../../components/ui'
+import { Banner, Button, LockOn, SectionHeader, Sheet } from '../../components/ui'
 import { invalidateCache, useCachedLoader } from '../../lib/cache'
 import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
 import { fetchProposals, resolveProposal, type CoachProposal } from '../../lib/proposals'
@@ -109,6 +109,34 @@ export function ProposalCard({ proposal, goalNames, onResolved }: {
 }
 
 /**
+ * The list of what's waiting, shared by every way of showing it. A resolved
+ * card stays where it was, showing what happened, even after the refreshed list
+ * no longer includes it.
+ */
+function usePendingProposals(athleteId: string, goalId?: string) {
+  const { data: proposals } = useCachedLoader<CoachProposal[]>(
+    tracksOn() ? cacheKeys.proposals(athleteId) : null,
+    fetchProposals,
+  )
+  const { data: goals } = useCachedLoader<GoalView[]>(
+    tracksOn() ? cacheKeys.goals(athleteId) : null,
+    () => fetchGoalsView(athleteId),
+  )
+  const [kept, setKept] = useState<CoachProposal[]>([])
+  const pending = (proposals ?? []).filter((p) => !goalId || (p.goal_ids ?? []).includes(goalId))
+  const list = [...pending, ...kept.filter((k) => !pending.some((p) => p.id === k.id))]
+  const nameOf = (id: string) => goals?.find((g) => g.id === id)?.name
+  const goalNamesOf = (p: CoachProposal) => (p.goal_ids ?? []).map(nameOf).filter((n): n is string => !!n)
+  const onResolved = (p: CoachProposal) => (status: Phase) => {
+    if (status === 'applied' || status === 'declined' || status === 'stale') {
+      setKept((prev) => (prev.some((k) => k.id === p.id) ? prev : [...prev, p]))
+      invalidateCache(cacheKeys.proposals(athleteId))
+    }
+  }
+  return { pending, list, goalNamesOf, onResolved }
+}
+
+/**
  * What the coach is waiting on you for. Coach shows every pending proposal;
  * a goal's page shows the ones that serve it (pass goalId). Nothing renders
  * when there are none, or when the backend can't hold proposals yet.
@@ -118,21 +146,8 @@ export function PendingProposals({ athleteId, goalId, heading = true }: {
   goalId?: string
   heading?: boolean
 }) {
-  const { data: proposals } = useCachedLoader<CoachProposal[]>(
-    tracksOn() ? cacheKeys.proposals(athleteId) : null,
-    fetchProposals,
-  )
-  const { data: goals } = useCachedLoader<GoalView[]>(
-    tracksOn() ? cacheKeys.goals(athleteId) : null,
-    () => fetchGoalsView(athleteId),
-  )
-  // A resolved card stays where it was, showing what happened, even after the
-  // refreshed list no longer includes it.
-  const [kept, setKept] = useState<CoachProposal[]>([])
-  const pending = (proposals ?? []).filter((p) => !goalId || (p.goal_ids ?? []).includes(goalId))
-  const list = [...pending, ...kept.filter((k) => !pending.some((p) => p.id === k.id))]
+  const { list, goalNamesOf, onResolved } = usePendingProposals(athleteId, goalId)
   if (!list.length) return null
-  const nameOf = (id: string) => goals?.find((g) => g.id === id)?.name
   return (
     <div className="pending-proposals fade-rise">
       {heading && <SectionHeader>Waiting on you</SectionHeader>}
@@ -141,16 +156,49 @@ export function PendingProposals({ athleteId, goalId, heading = true }: {
           <ProposalCard
             key={p.id}
             proposal={p}
-            goalNames={(p.goal_ids ?? []).map(nameOf).filter((n): n is string => !!n)}
-            onResolved={(status) => {
-              if (status === 'applied' || status === 'declined' || status === 'stale') {
-                setKept((prev) => (prev.some((k) => k.id === p.id) ? prev : [...prev, p]))
-                invalidateCache(cacheKeys.proposals(athleteId))
-              }
-            }}
+            goalNames={goalNamesOf(p)}
+            onResolved={onResolved(p)}
           />
         ))}
       </div>
+    </div>
+  )
+}
+
+/**
+ * The same proposals for a phone, where a full diff card cannot sit above a
+ * conversation: one proposal with its diff is taller than the screen, and on the
+ * Coach screen (which does not scroll as a page) it left the chat a 72px sliver.
+ * Here the thing waiting on you is one line you can see at a glance, and the
+ * diff opens in a sheet that scrolls on its own and can be dismissed.
+ */
+export function ProposalsBanner({ athleteId }: { athleteId: string }) {
+  const { pending, list, goalNamesOf, onResolved } = usePendingProposals(athleteId)
+  const [open, setOpen] = useState(false)
+  // Stay mounted while the sheet is open: approving removes the proposal from
+  // `pending`, and the card inside must keep showing what just happened.
+  if (!pending.length && !open) return null
+  return (
+    <div className="coach-proposals">
+      {pending.length > 0 && (
+        <Banner
+          title={pending.length === 1 ? 'A change is waiting on you' : `${pending.length} changes are waiting on you`}
+          sub={pending[0].title}
+          onClick={() => setOpen(true)}
+        />
+      )}
+      {open && (
+        <Sheet title="Waiting on you" onClose={() => setOpen(false)}>
+          {list.map((p) => (
+            <ProposalCard
+              key={p.id}
+              proposal={p}
+              goalNames={goalNamesOf(p)}
+              onResolved={onResolved(p)}
+            />
+          ))}
+        </Sheet>
+      )}
     </div>
   )
 }
