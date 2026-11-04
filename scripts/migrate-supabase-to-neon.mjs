@@ -1023,6 +1023,7 @@ export const PUBLIC_RESTORE_ORDER = [
   'session_override_log',
   'change_log',
   'change_preview',
+  'approval',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]

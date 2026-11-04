@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Approval capture (G10, tracks_v1)
+
+Behind `athlete.flags.tracks_v1`; with it off no `approval` row is written, the MCP tool list and schemas are exactly as before, Accept applies as before, and `/api/approvals` answers 404.
+
+- **The athlete's yes is a row.** New append-only `approval` (id, athlete, created_at, `preview_id`, `preview_kind` program_edits | session_override | revert | proposal | change | app_editor, `diff_hash` = SHA-256 of the diff the athlete saw, `channel` tap | chat, `message_id`, the coach that asked, `consumed_at` + `consumed_by_change_id`, `voided_at`). A trigger allows only consuming it once or voiding it once; DELETE only with the athlete's account. `change_log` gains `approval_id`, so every row's `approval_ref` links to its approval.
+- **Only the athlete creates one.** `POST /api/approvals { action: 'approve', preview_id }` (a tap) or `{ ..., message_id }` (a chat yes: the message must be the athlete's, written by them, not the coach, and newer than the preview). Coaches (MCP or `app_coach`) cannot create approvals; the generic data route can't write the table. `approval_ref` is now `tap:<approval id>` or `msg:<approval id>`.
+- **Every apply resolves it.** G2 write tools, `apply_program_edits` (edits or `proposal_id`), proposal Accept, `apply_session_override` (apply and clear), undo and the in-app editor all check: same athlete, same preview, `diff_hash` equals the diff recomputed now, under 24 h, not consumed, not voided, its coach still has access. The write consumes it in the same transaction (in the same SQL statement for overrides) and names the `change_log` row. Single use. `standing:logging` still covers logging only. Free-form `msg:<id>` refs are refused.
+- **Accept is approve + apply.** The proposal card's button reads Approve; the tap records an approval of exactly that proposal and the apply spends it. Undo and the athlete's own override apply mint their tap server-side the same way.
+- **MCP.** `list_approvals(preview_id)` shows an outside coach the athlete's approvals of a preview it made, so it can apply with that ref. Preview footers and tool descriptions say so.
+- **Revocation.** Revoking a coach voids its open previews and every unconsumed approval of them at once, and the `revoke_coach` change_log row names both.
+
+**Deploy:** hand-apply `worker/schema/approval.sql` on Neon (`supabase/migrations/20261104000004_approval.sql` on Supabase) after `change-log.sql` and BEFORE deploying this Worker for anyone with `tracks_v1` on. Rollback is in the SQL header: drop the flag per athlete (instant), or redeploy the previous Worker; the table and column can be dropped afterwards.
+
 ### change_log, get_change_log, Changes feed and one-tap undo (G2, tracks_v1)
 
 Behind `athlete.flags.tracks_v1`; with it off no `change_log` row is written, the MCP tool list and schemas are exactly as before, writes need no approval, `/api/change-log` answers 404 and Program has no Changes feed.

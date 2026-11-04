@@ -9,11 +9,13 @@
  *
  * The contract (spec section 6, propose-only v1):
  *   logging   workout results, notes, goal measurements: standing:logging.
- *   anything  confirm=true, approval_ref (msg:<id> from a coach, a server-
- *   else      minted tap:<id> from the athlete; app_coach never) and a
- *             preview_id under 24 h old whose diff still matches. Previews
- *             for these writes live in change_preview; week-only overrides
- *             keep session_override_preview.
+ *   anything  confirm=true, approval_ref and a preview_id under 24 h old
+ *   else      whose diff still matches. approval_ref resolves to an
+ *             approval row the athlete created for that preview and diff
+ *             (G10, approvals.ts): tap:<id> or msg:<id>, consumed by the
+ *             write, once. app_coach never supplies one. Previews for these
+ *             writes live in change_preview; week-only overrides keep
+ *             session_override_preview.
  *   undo      athlete only. Applies the inverse of a row's diff when the
  *             target still looks exactly like the row left it; refuses when
  *             it moved since, when the type can't be undone without deleting
@@ -29,6 +31,10 @@ import { asJson, jsonParam, pgArrayLiteral, type Sql } from './db.ts'
 import { insertProgramRevision } from './edits.ts'
 import { athleteToday, canonicalJson, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { actorLabel, ruleRefsFrom, summarizeChange } from './changeSummary.ts'
+import {
+  APPROVAL_REF_SHAPE, ApprovalSpent, checkApproval, coachTokenGone, consumeApproval, directTapApproval,
+  parseApprovalRef, voidCoachApprovals,
+} from './approvals.ts'
 import type { ConnectedStore } from './store.ts'
 import { McpUserError } from './userError.ts'
 
@@ -37,7 +43,6 @@ export type ChangeActor = OverrideActor
 export const STANDING_LOGGING = 'standing:logging'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
-const REF_BODY = /^[A-Za-z0-9._:-]{1,128}$/
 
 function missingSchema(e: unknown): boolean {
   const code = (e as { code?: string })?.code
@@ -92,7 +97,8 @@ class Refusal<T> extends Error {
 
 /**
  * Null when this actor may make a non-logging write with this approval_ref;
- * otherwise why not. Same rules as week-only overrides (phase 1).
+ * otherwise why not. Same rules as week-only overrides (phase 1). Shape only:
+ * the ref must then resolve to a real approval (checkApproval).
  */
 export function writeApprovalProblem(actor: ChangeActor, ref: unknown): string | null {
   if (actor.type === 'app_coach') {
@@ -100,18 +106,11 @@ export function writeApprovalProblem(actor: ChangeActor, ref: unknown): string |
   }
   if (actor.type === 'system') return 'Refused: system writes cannot approve a change.'
   if (typeof ref !== 'string' || !ref.trim()) {
-    return 'Refused: approval_ref is required (msg:<id> of the message where the athlete said yes). Only logging (results, notes, measurements) has standing approval.'
+    return 'Refused: approval_ref is required (the approval the athlete created for this preview; see list_approvals). Only logging (results, notes, measurements) has standing approval.'
   }
   const r = ref.trim()
   if (r.startsWith('standing:')) return 'Refused: standing approval covers logging only (results, notes, measurements).'
-  if (actor.type === 'mcp') {
-    if (r.startsWith('tap:')) return 'Refused: tap approvals come from the athlete\'s app, not from a coach.'
-    if (!r.startsWith('msg:') || !REF_BODY.test(r.slice(4))) {
-      return 'Refused: approval_ref must be msg:<message id> — the chat message where the athlete said yes.'
-    }
-    return null
-  }
-  if (!r.startsWith('tap:') || !REF_BODY.test(r.slice(4))) return 'Refused: the athlete approves with a tap.'
+  if (!parseApprovalRef(r)) return `Refused: ${APPROVAL_REF_SHAPE}`
   return null
 }
 
@@ -126,6 +125,8 @@ export interface ChangeEntry {
   rationale?: string | null
   ruleRefs?: string[]
   approvalRef: string | null
+  /** The approval row approvalRef resolves to (G10). */
+  approvalId?: string | null
   previewId?: string | null
   expiresOn?: string | null
   revertOf?: string | null
@@ -136,6 +137,20 @@ export interface ChangeEntry {
 export async function writeChange(store: ConnectedStore, e: ChangeEntry): Promise<string> {
   const id = e.id ?? crypto.randomUUID()
   const rationale = e.rationale?.trim() ? e.rationale.trim() : null
+  if (e.approvalId) {
+    await store.sql`
+      INSERT INTO change_log (
+        id, athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
+        approval_ref, approval_id, preview_id, expires_on, revert_of
+      ) VALUES (
+        ${id}, ${store.athleteId}, ${e.actor.type}, ${e.actor.id}, ${e.tool}, ${e.targetType}, ${e.targetId},
+        ${jsonParam(store.sql, e.diff ?? {})}, ${rationale}, ${jsonParam(store.sql, e.ruleRefs ?? ruleRefsFrom(rationale))},
+        ${e.approvalRef}, ${e.approvalId}, ${e.previewId ?? null}, ${e.expiresOn ?? null}, ${e.revertOf ?? null}
+      )
+    `
+    return id
+  }
+  // No approval row (standing:logging, system): the G2 insert, unchanged.
   await store.sql`
     INSERT INTO change_log (
       id, athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
@@ -173,7 +188,7 @@ export async function storeChangePreview(
 }
 
 export function previewFooter(previewId: string): string {
-  return `preview_id: ${previewId} (valid ${PREVIEW_TTL_HOURS} h, and only while this diff still matches). Apply with confirm=true, this preview_id and approval_ref=msg:<id of the message where the athlete said yes>.`
+  return `preview_id: ${previewId} (valid ${PREVIEW_TTL_HOURS} h, and only while this diff still matches). Show the athlete this diff; once they approve it in the app, list_approvals(preview_id) gives their approval_ref. Apply with confirm=true, this preview_id and that approval_ref (it applies once).`
 }
 
 interface ChangePreviewRow {
@@ -188,25 +203,15 @@ interface ChangePreviewRow {
   fresh: boolean
 }
 
-/** A coach token that is revoked, expired or gone. */
-async function coachGone(store: ConnectedStore, actorId: string): Promise<boolean> {
-  if (!UUID_RE.test(actorId)) return true
-  const [row] = await store.sql<{ gone: boolean }[]>`
-    SELECT (revoked_at IS NOT NULL
-            OR COALESCE((to_jsonb(t) ->> 'expires_at')::timestamptz < NOW(), false)) AS gone
-    FROM mcp_token t
-    WHERE id = ${actorId} AND athlete_id = ${store.athleteId}
-    LIMIT 1
-  `
-  return !row || row.gone
-}
-
-export type Authorized = { ok: true; approvalRef: string; previewId: string; previewRowId: string } | { ok: false; text: string }
+export type Authorized =
+  | { ok: true; approvalRef: string; approvalId: string; previewId: string; previewRowId: string }
+  | { ok: false; text: string }
 
 /**
- * Everything a non-logging write must show before it runs: approval_ref, and
- * a preview of this tool, under 24 h old, unused, not voided, whose stored
- * diff equals `state` recomputed now. Writes nothing.
+ * Everything a non-logging write must show before it runs: a preview of this
+ * tool, under 24 h old, unused, not voided, whose stored diff equals `state`
+ * recomputed now, and an approval the athlete made for that preview and that
+ * diff (G10). Writes nothing.
  */
 export async function authorizeWrite(
   store: ConnectedStore,
@@ -231,7 +236,7 @@ export async function authorizeWrite(
   `
   if (!p || p.tool !== tool) return { ok: false, text: `Refused: no ${tool} preview with that id on this athlete. Preview again.` }
   if (p.used_at) return { ok: false, text: 'Refused: this preview was already applied. Preview again.' }
-  if (p.voided_at || (p.actor_type === 'mcp' && await coachGone(store, p.actor_id))) {
+  if (p.voided_at || (p.actor_type === 'mcp' && await coachTokenGone(store, p.actor_id))) {
     return { ok: false, text: 'Refused: this preview was voided (its coach no longer has access). Preview again.' }
   }
   if (!p.fresh) {
@@ -240,7 +245,9 @@ export async function authorizeWrite(
   if (canonicalJson(asJson(p.diff, {})) !== canonicalJson(state)) {
     return { ok: false, text: 'Refused: the diff no longer matches the preview (the request or what it changes moved since). Preview again.' }
   }
-  return { ok: true, approvalRef: String(args.approval_ref).trim(), previewId: p.preview_id, previewRowId: p.id }
+  const approval = await checkApproval(store, args.approval_ref, { previewId: p.preview_id, currentDiff: state })
+  if (!approval.ok) return approval
+  return { ok: true, approvalRef: approval.approvalRef, approvalId: approval.approvalId, previewId: p.preview_id, previewRowId: p.id }
 }
 
 /** Claim a preview inside the write's transaction, so it applies once. */
@@ -314,15 +321,18 @@ export async function commitAuthorized<T>(
       const { result, entry } = await write()
       if (!entry) throw new Refusal(result)
       const why = typeof rationale === 'string' && rationale.trim() ? rationale.trim() : entry.rationale ?? null
-      await writeChange(store, {
+      const changeId = await writeChange(store, {
         ...entry,
         rationale: why,
         ruleRefs: ruleRefsFrom(why, ruleRefs),
         actor,
         tool,
         approvalRef: auth.approvalRef,
+        approvalId: auth.approvalId,
         previewId: auth.previewId,
       })
+      // Single use: spent by this change, or the whole write rolls back.
+      if (!(await consumeApproval(store, auth.approvalId, changeId))) throw new ApprovalSpent()
       return result
     })
   } catch (e) {
@@ -343,9 +353,10 @@ export async function liveCoachTokenIds(store: ConnectedStore): Promise<string[]
 
 /**
  * Revoking a coach ends its MCP access (resolveMcpToken refuses it) and, here,
- * voids its open previews at once rather than at the next apply. Both are one
- * change_log row per token this revoke just ended (`wasLive`: the ids that were
- * live before it). Idempotent: a token already logged is skipped.
+ * voids its open previews and every unconsumed approval of them (G10) at once
+ * rather than at the next apply. Both are one change_log row per token this
+ * revoke just ended (`wasLive`: the ids that were live before it). Idempotent:
+ * a token already logged is skipped.
  */
 export async function voidRevokedCoachPreviews(store: ConnectedStore, wasLive: string[]): Promise<number> {
   if (!wasLive.length) return 0
@@ -372,12 +383,13 @@ export async function voidRevokedCoachPreviews(store: ConnectedStore, wasLive: s
       RETURNING preview_id
     `
     const voided = [...changed, ...overrides].map((r) => r.preview_id).sort()
+    const approvals = await voidCoachApprovals(store, t.id)
     await writeChange(store, {
       actor: { type: 'system', id: 'revocation' },
       tool: 'revoke_coach',
       targetType: 'mcp_token',
       targetId: t.id,
-      diff: { coach: t.name, voided_previews: voided },
+      diff: { coach: t.name, voided_previews: voided, ...(approvals.length ? { voided_approvals: approvals } : {}) },
       rationale: 'The athlete revoked this coach.',
       approvalRef: null,
     })
@@ -401,6 +413,8 @@ export interface ChangeView {
   rationale: string | null
   rule_refs: string[]
   approval_ref: string | null
+  /** The approval row approval_ref resolves to (G10); null before G10 and for standing:logging. */
+  approval_id: string | null
   preview_id: string | null
   expires_on: string | null
   reverted_by: string | null
@@ -424,6 +438,7 @@ interface ChangeRow {
   rationale: string | null
   rule_refs: unknown
   approval_ref: string | null
+  approval_id: string | null
   preview_id: string | null
   expires_on: string | null
   reverted_by: string | null
@@ -447,6 +462,7 @@ function view(r: ChangeRow): ChangeView {
     rationale: r.rationale,
     rule_refs: asJson<string[]>(r.rule_refs, []),
     approval_ref: r.approval_ref,
+    approval_id: r.approval_id ?? null,
     preview_id: r.preview_id,
     expires_on: r.expires_on,
     reverted_by: r.reverted_by,
@@ -501,7 +517,7 @@ export async function listChanges(
     const rows = await store.sql<ChangeRow[]>`
       SELECT c.id::text AS id, to_json(c.created_at) #>> '{}' AS created_at, c.actor_type, c.actor_id,
              t.name AS token_name, c.tool, c.target_type, c.target_id, c.diff, c.rationale, c.rule_refs,
-             c.approval_ref, c.preview_id, c.expires_on::text AS expires_on,
+             c.approval_ref, to_jsonb(c) ->> 'approval_id' AS approval_id, c.preview_id, c.expires_on::text AS expires_on,
              c.reverted_by::text AS reverted_by, c.revert_of::text AS revert_of,
              EXISTS (
                SELECT 1 FROM change_preview p
@@ -1016,7 +1032,10 @@ export async function revertChange(store: ConnectedStore, actor: ChangeActor, ch
       if ('ok' in plan) throw new Refusal<RevertResult>(plan)
       const summary = summarizeChange({ tool: row!.tool, target_type: row!.target_type, diff: row!.diff })
       const newId = crypto.randomUUID()
-      const approvalRef = `tap:${row!.id}`
+      // The athlete's tap on Undo is the preview and the approval (G10): a
+      // real approval row, consumed by this undo's change_log row.
+      const tap = await directTapApproval(store, 'revert', `revert:${row!.id}`, plan.diff)
+      const approvalRef = tap.ref
       await plan.apply(approvalRef, newId)
       await writeChange(store, {
         id: newId,
@@ -1028,8 +1047,10 @@ export async function revertChange(store: ConnectedStore, actor: ChangeActor, ch
         rationale: 'Undone by the athlete.',
         ruleRefs: [],
         approvalRef,
+        approvalId: tap.id,
         revertOf: row!.id,
       })
+      if (!(await consumeApproval(store, tap.id, newId))) throw new ApprovalSpent()
       const claimed = await store.sql<{ id: string }[]>`
         UPDATE change_log SET reverted_by = ${newId}
         WHERE id = ${row!.id} AND athlete_id = ${store.athleteId} AND reverted_by IS NULL
@@ -1050,6 +1071,7 @@ export async function revertChange(store: ConnectedStore, actor: ChangeActor, ch
     })
   } catch (e) {
     if (e instanceof Refusal) return e.result as RevertResult
+    if (e instanceof ApprovalSpent) return { ok: false, reason: 'refused', text: e.message }
     if (missingSchema(e)) return { ok: false, reason: 'unavailable', text: changeLogUnavailable }
     throw e
   }
@@ -1140,6 +1162,7 @@ export async function runChangeLogTool(store: ConnectedStore, name: string, args
           rationale: c.rationale,
           rule_refs: c.rule_refs,
           approval_ref: c.approval_ref,
+          approval_id: c.approval_id,
           preview_id: c.preview_id,
           expires_on: c.expires_on,
           reverted_by: c.reverted_by,

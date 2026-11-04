@@ -9,7 +9,8 @@ import type { Env } from './env.ts'
 import { openIsolationHarness } from './isolationDb.ts'
 import { handleMcp } from './mcp.ts'
 import { sha256Hex } from './mcpToken.ts'
-import { acceptProposal, listProposals } from './proposals.ts'
+import { acceptProposal, approveAndAccept, listProposals } from './proposals.ts'
+import { createApproval } from './approvals.ts'
 import { sessionRxForAthlete } from './sessionRx.ts'
 import {
   APP_COACH, athleteOverrideAction, athleteToday, listOverrides, SESSION_OVERRIDE_TOOLS,
@@ -44,6 +45,13 @@ const harness = await openIsolationHarness()
 const sql = harness.sql
 const env = {} as Env
 const storeA = makeStore(sql, A)
+// A well-formed approval_ref that resolves to no approval row.
+const NO_APPROVAL = 'msg:00000000-0000-4000-8000-000000000000'
+/** The athlete taps Approve on a preview (G10); its approval_ref, or NO_APPROVAL if refused. */
+async function yes(previewId: string): Promise<string> {
+  const r = await createApproval(storeA, { type: 'athlete', id: A }, { preview_id: previewId })
+  return r.ok ? r.approval_ref : NO_APPROVAL
+}
 const storeB = makeStore(sql, B)
 const coachA: OverrideActor = { type: 'mcp', id: TOKEN_A_ID }
 const coachB: OverrideActor = { type: 'mcp', id: TOKEN_B_ID }
@@ -162,33 +170,36 @@ ok(refusedNoConfirm.startsWith('Refused') && refusedNoConfirm.includes('confirm=
 const refusedNoRef = await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true }, coachA)
 ok(refusedNoRef.startsWith('Refused') && refusedNoRef.includes('approval_ref'), 'apply: approval_ref required')
 ok((await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: 'standing:logging' }, coachA)).includes('logging only'), 'apply: standing approval does not cover overrides')
-ok((await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: 'tap:forged' }, coachA)).includes('tap approvals come from'), 'apply: a coach cannot forge a tap approval')
+ok((await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: 'tap:forged' }, coachA)).includes('approval_ref must be'), 'apply: a malformed tap approval is rejected')
+ok((await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: 'tap:aaaaaaaa-0000-4000-8000-000000000000' }, coachA)).includes('no such approval'), 'apply: a coach cannot forge a tap approval')
 ok((await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: 'yes' }, coachA)).startsWith('Refused'), 'apply: a free-form approval_ref is rejected')
-ok((await call('A', 'apply_session_override', { preview_id: 'sop_000000000000000000000000', confirm: true, approval_ref: 'msg:chat-1' }, coachA)).includes('no such preview'), 'apply: an unknown preview_id is rejected')
-ok((await call('A', 'apply_session_override', { confirm: true, approval_ref: 'msg:chat-1' }, coachA)).includes('preview_id is required'), 'apply: no preview_id is rejected')
+ok((await call('A', 'apply_session_override', { preview_id: 'sop_000000000000000000000000', confirm: true, approval_ref: NO_APPROVAL }, coachA)).includes('no such preview'), 'apply: an unknown preview_id is rejected')
+ok((await call('A', 'apply_session_override', { confirm: true, approval_ref: NO_APPROVAL }, coachA)).includes('preview_id is required'), 'apply: no preview_id is rejected')
 ok(await countRows('session_override') === 0, 'apply: every refusal wrote nothing')
 
 // app_coach never supplies approval_ref.
-const coachRef = await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: 'msg:chat-1' }, APP_COACH)
+const coachRef = await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: await yes(p1Id) }, APP_COACH)
 ok(coachRef.includes('app_coach cannot supply approval_ref'), 'app_coach: approval_ref is rejected')
-const defaultActor = await executeZeroedTool(sql, A, 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: 'msg:chat-1' })
+const defaultActor = await executeZeroedTool(sql, A, 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: await yes(p1Id) })
 ok(defaultActor.includes('app_coach cannot supply approval_ref'), 'a caller that names no actor gets app_coach powers')
 ok(await countRows('session_override') === 0, 'app_coach: nothing written')
 
 // The good path.
-const applied = await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: 'msg:chat-1' }, coachA)
+const ref1 = await yes(p1Id)
+ok(ref1.startsWith('tap:'), 'approval: the athlete\'s tap creates an approval row')
+const applied = await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: ref1 }, coachA)
 ok(applied.startsWith('Applied 1 week-only override row'), `apply: writes with a fresh preview and approval (${applied.slice(0, 80)})`)
 const [row1] = await harness.query<{ id: string; actor_type: string; actor_id: string; approval_ref: string; preview_id: string; expires_on: string; rationale: string }>(
   `SELECT id, actor_type, actor_id, approval_ref, preview_id, expires_on::text AS expires_on, rationale FROM session_override WHERE athlete_id = $1`, [A],
 )
-ok(row1?.actor_type === 'mcp' && row1.actor_id === TOKEN_A_ID && row1.approval_ref === 'msg:chat-1' && row1.preview_id === p1Id, 'apply: row records who, approval and preview')
+ok(row1?.actor_type === 'mcp' && row1.actor_id === TOKEN_A_ID && row1.approval_ref === ref1 && row1.preview_id === p1Id, 'apply: row records who, approval and preview')
 ok(row1?.rationale === 'Bench is taken Thursday.', 'apply: row keeps the rationale')
 ok(row1 != null && row1.expires_on >= D1 && row1.expires_on <= addDays(D1, 6), 'apply: default expiry is the end of that ISO week')
 const [log1] = await harness.query<{ tool: string; approval_ref: string; preview_id: string; actor_type: string }>(
   `SELECT tool, approval_ref, preview_id, actor_type FROM session_override_log WHERE athlete_id = $1 ORDER BY created_at`, [A],
 )
-ok(log1?.tool === 'apply_session_override' && log1.approval_ref === 'msg:chat-1' && log1.preview_id === p1Id, 'audit: the apply is logged with approval and preview')
-ok((await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: 'msg:chat-1' }, coachA)).includes('already applied'), 'apply: a preview applies once')
+ok(log1?.tool === 'apply_session_override' && log1.approval_ref === ref1 && log1.preview_id === p1Id, 'audit: the apply is logged with approval and preview')
+ok((await call('A', 'apply_session_override', { preview_id: p1Id, confirm: true, approval_ref: ref1 }, coachA)).includes('already applied'), 'apply: a preview applies once')
 ok(await templateOf(UPPER) === upperTemplate, 'template: routine.exercises untouched')
 
 // Session-rx applies it on that date only.
@@ -225,7 +236,7 @@ const pMove = await call('A', 'preview_session_override', {
   date: today, session: 'Lower', ops: [{ op: 'move', exercise_name: 'Back Squat', to_date: D1, to_session: 'Upper' }], rationale: 'Missed the squat today.',
 }, coachA)
 ok(pMove.includes('moved to'), 'move: preview shows where it goes')
-ok((await call('A', 'apply_session_override', { preview_id: previewIdOf(pMove), confirm: true, approval_ref: 'msg:chat-2' }, coachA)).startsWith('Applied 2'), 'move: writes two rows')
+ok((await call('A', 'apply_session_override', { preview_id: previewIdOf(pMove), confirm: true, approval_ref: await yes(previewIdOf(pMove)) }, coachA)).startsWith('Applied 2'), 'move: writes two rows')
 const pair = await harness.query<{ id: string; date: string; pair_id: string | null }>(
   `SELECT id, date::text AS date, pair_id::text AS pair_id FROM session_override WHERE preview_id = $1 ORDER BY date`, [previewIdOf(pMove)],
 )
@@ -240,9 +251,9 @@ ok(await templateOf(LOWER) === lowerTemplate && await templateOf(UPPER) === uppe
 
 // Move a whole session; it moves as it stands that day, edits included.
 const pPre = await call('A', 'preview_session_override', { date: D2, session: LOWER, ops: [{ op: 'swap', exercise_name: 'Back Squat', with: { name: 'Leg Press' } }] }, coachA)
-await call('A', 'apply_session_override', { preview_id: previewIdOf(pPre), confirm: true, approval_ref: 'msg:chat-3a' }, coachA)
+await call('A', 'apply_session_override', { preview_id: previewIdOf(pPre), confirm: true, approval_ref: await yes(previewIdOf(pPre)) }, coachA)
 const pWhole = await call('A', 'preview_session_override', { date: D2, session: LOWER, ops: [{ op: 'move', to_date: D3 }] }, coachA)
-ok((await call('A', 'apply_session_override', { preview_id: previewIdOf(pWhole), confirm: true, approval_ref: 'msg:chat-3' }, coachA)).startsWith('Applied 2'), 'move session: two rows')
+ok((await call('A', 'apply_session_override', { preview_id: previewIdOf(pWhole), confirm: true, approval_ref: await yes(previewIdOf(pWhole)) }, coachA)).startsWith('Applied 2'), 'move session: two rows')
 const out = (await rx(A, { routine_id: LOWER, date: D2 })).out.prescription.override
 ok(out != null && out.exercises.length === 0 && out.moved_out[0]?.name == null && out.moved_out[0]?.to_date === D3, 'move session: the source date is empty')
 const into = (await rx(A, { routine_id: LOWER, date: D3 })).out.prescription.override
@@ -252,25 +263,25 @@ ok(into?.exercises[0]?.name === 'Leg Press', 'move session: carries the source d
 // Stale previews: older than 24 h, or the diff no longer matches.
 const pOld = await call('A', 'preview_session_override', { date: D4, session: 'Upper', ops: [{ op: 'drop', exercise_name: 'Plank' }] }, coachA)
 await harness.query(`UPDATE session_override_preview SET created_at = NOW() - INTERVAL '25 hours' WHERE preview_id = $1`, [previewIdOf(pOld)])
-const oldText = await call('A', 'apply_session_override', { preview_id: previewIdOf(pOld), confirm: true, approval_ref: 'msg:chat-4' }, coachA)
+const oldText = await call('A', 'apply_session_override', { preview_id: previewIdOf(pOld), confirm: true, approval_ref: await yes(previewIdOf(pOld)) }, coachA)
 ok(oldText.includes('more than 24 h old'), 'stale: a preview over 24 h old is rejected')
 const pAdj = await call('A', 'preview_session_override', { date: D4, session: 'Upper', ops: [{ op: 'adjust', exercise_name: 'Bench Press', sets: 5 }] }, coachA)
 const pDrop = await call('A', 'preview_session_override', { date: D4, session: 'Upper', ops: [{ op: 'drop', exercise_name: 'Triceps Pushdown' }] }, coachA)
-await call('A', 'apply_session_override', { preview_id: previewIdOf(pDrop), confirm: true, approval_ref: 'msg:chat-5' }, coachA)
-const mismatch = await call('A', 'apply_session_override', { preview_id: previewIdOf(pAdj), confirm: true, approval_ref: 'msg:chat-6' }, coachA)
+await call('A', 'apply_session_override', { preview_id: previewIdOf(pDrop), confirm: true, approval_ref: await yes(previewIdOf(pDrop)) }, coachA)
+const mismatch = await call('A', 'apply_session_override', { preview_id: previewIdOf(pAdj), confirm: true, approval_ref: await yes(previewIdOf(pAdj)) }, coachA)
 ok(mismatch.includes('no longer matches'), `stale: a preview whose diff changed is rejected (${mismatch.slice(0, 90)})`)
 const pTpl = await call('A', 'preview_session_override', { date: D5, session: 'Upper', ops: [{ op: 'adjust', exercise_name: 'Plank', reps: '45s' }] }, coachA)
 await harness.query(`UPDATE routine SET exercises = $1::jsonb WHERE id = $2`, [JSON.stringify(upperExercises.map((e) => e.name === 'Plank' ? { ...e, reps: '40s' } : e)), UPPER])
-const tplText = await call('A', 'apply_session_override', { preview_id: previewIdOf(pTpl), confirm: true, approval_ref: 'msg:chat-7' }, coachA)
+const tplText = await call('A', 'apply_session_override', { preview_id: previewIdOf(pTpl), confirm: true, approval_ref: await yes(previewIdOf(pTpl)) }, coachA)
 ok(tplText.startsWith('Refused') && /no longer matches|changed since/.test(tplText), 'stale: a template change since the preview is rejected')
 await harness.query(`UPDATE routine SET exercises = $1::jsonb WHERE id = $2`, [JSON.stringify(upperExercises), UPPER])
 
 // A revoked coach's preview is void, and that is logged.
 const pRevoked = await call('A', 'preview_session_override', { date: D5, session: 'Upper', ops: [{ op: 'drop', exercise_name: 'Plank' }] }, { type: 'mcp', id: TOKEN_REVOKED_ID })
-const revokedText = await call('A', 'apply_session_override', { preview_id: previewIdOf(pRevoked), confirm: true, approval_ref: 'msg:chat-8' }, coachA)
+const revokedText = await call('A', 'apply_session_override', { preview_id: previewIdOf(pRevoked), confirm: true, approval_ref: await yes(previewIdOf(pRevoked)) }, coachA)
 ok(revokedText.includes('voided'), 'revoke: a revoked coach\'s preview cannot be applied')
 const pExpiredTok = await call('A', 'preview_session_override', { date: D5, session: 'Upper', ops: [{ op: 'drop', exercise_name: 'Plank' }] }, { type: 'mcp', id: 'aaaa8888-0000-4000-8000-000000000001' })
-ok((await call('A', 'apply_session_override', { preview_id: previewIdOf(pExpiredTok), confirm: true, approval_ref: 'msg:chat-8b' }, coachA)).includes('voided'), 'revoke: an expired coach token\'s preview is void too')
+ok((await call('A', 'apply_session_override', { preview_id: previewIdOf(pExpiredTok), confirm: true, approval_ref: await yes(previewIdOf(pExpiredTok)) }, coachA)).includes('voided'), 'revoke: an expired coach token\'s preview is void too')
 const [voidLog] = await harness.query<{ n: string }>(`SELECT count(*)::text AS n FROM session_override_log WHERE athlete_id = $1 AND tool = 'void_preview'`, [A])
 ok(Number(voidLog.n) === 2, 'revoke: each void is logged')
 
@@ -285,18 +296,20 @@ const overrideProposal = pending?.find((p) => p.kind === 'session_override')
 ok(overrideProposal != null && (overrideProposal.diff as { sessions?: unknown[] }).sessions?.length === 1, 'proposal: listed with kind and a card-shaped diff')
 ok(pending?.filter((p) => p.kind !== 'session_override').every((p) => !('kind' in p)) === true, 'proposal: program-edit proposals read back without a kind field')
 const parkedId = previewIdOf(proposed)
-const coachGrab = await call('A', 'apply_session_override', { preview_id: parkedId, confirm: true, approval_ref: 'msg:chat-10' }, coachA)
+const coachGrab = await call('A', 'apply_session_override', { preview_id: parkedId, confirm: true, approval_ref: await yes(parkedId) }, coachA)
 ok(coachGrab.includes('parked for the athlete'), 'proposal: a coach cannot apply a preview parked for the athlete')
 const viaMcp = await acceptProposal(storeA, overrideProposal!.id)
 ok(!viaMcp.ok && viaMcp.text.includes('accepts it in the app'), 'proposal: MCP apply_program_edits(proposal_id) cannot accept an override')
-const byB = await acceptProposal(storeB, overrideProposal!.id, { approvalRef: `tap:${overrideProposal!.id}` })
+const byB = await approveAndAccept(storeB, overrideProposal!.id)
 ok(!byB.ok && byB.status === 'not_found', 'isolation: B cannot accept A\'s proposal')
-const tapped = await acceptProposal(storeA, overrideProposal!.id, { approvalRef: `tap:${overrideProposal!.id}` })
+const forgedTap = await acceptProposal(storeA, overrideProposal!.id, { approvalRef: `tap:${overrideProposal!.id}` })
+ok(!forgedTap.ok && forgedTap.text.includes('no such approval'), 'proposal: a tap ref that is not an approval row is refused')
+const tapped = await approveAndAccept(storeA, overrideProposal!.id)
 ok(tapped.ok && tapped.status === 'applied', `proposal: the athlete's tap applies it (${tapped.text.slice(0, 80)})`)
 const [fromCoach] = await harness.query<{ actor_type: string; approval_ref: string }>(
   `SELECT actor_type, approval_ref FROM session_override WHERE athlete_id = $1 AND actor_type = 'app_coach'`, [A],
 )
-ok(fromCoach?.approval_ref === `tap:${overrideProposal!.id}`, 'proposal: created_by app_coach, approved by the athlete\'s tap')
+ok(fromCoach?.approval_ref === tapped.approval_ref && /^tap:[0-9a-f-]{36}$/.test(String(tapped.approval_ref)), 'proposal: created_by app_coach, approved by the athlete\'s tap (a real approval row)')
 
 // The athlete's own app session: the tap is the approval, minted server-side.
 const [prevOut, prevStatus] = await athleteOverrideAction(storeA, { action: 'preview', date: D3, session: UPPER, ops: [{ op: 'drop', exercise_name: 'Plank' }] })
@@ -317,8 +330,9 @@ const moveSrc = pair[0].id
 const pClear = await call('A', 'preview_clear_session_override', { override_id: moveSrc, rationale: 'Squat got done after all.' }, coachA)
 ok(pClear.includes('Preview: clear'), 'clear: preview')
 ok((await call('A', 'apply_session_override', { preview_id: previewIdOf(pClear), confirm: true }, coachA)).includes('approval_ref is required'), 'clear: needs approval')
-ok((await call('A', 'apply_session_override', { preview_id: previewIdOf(pClear), confirm: true, approval_ref: 'msg:chat-9' }, coachA)).startsWith('Cleared 2'), 'clear: both halves of the move clear')
-const [cleared] = await harness.query<{ n: string }>(`SELECT count(*)::text AS n FROM session_override WHERE pair_id = $1 AND voided_at IS NOT NULL AND void_approval_ref = 'msg:chat-9'`, [pair[0].pair_id])
+const ref9 = await yes(previewIdOf(pClear))
+ok((await call('A', 'apply_session_override', { preview_id: previewIdOf(pClear), confirm: true, approval_ref: ref9 }, coachA)).startsWith('Cleared 2'), 'clear: both halves of the move clear')
+const [cleared] = await harness.query<{ n: string }>(`SELECT count(*)::text AS n FROM session_override WHERE pair_id = $1 AND voided_at IS NOT NULL AND void_approval_ref = $2`, [pair[0].pair_id, ref9])
 ok(Number(cleared.n) === 2, 'clear: rows kept, voided with the approval')
 const [clearLog] = await harness.query<{ n: string }>(`SELECT count(*)::text AS n FROM session_override_log WHERE athlete_id = $1 AND tool = 'clear_session_override'`, [A])
 ok(Number(clearLog.n) === 2, 'clear: logged')
@@ -329,7 +343,8 @@ ok(afterClear.override == null, 'clear: the source date follows the plan again')
 ok((await call('B', 'preview_session_override', { date: D1, session: UPPER, ops: [{ op: 'drop', exercise_name: 'Plank' }] }, coachB)).includes('No session'), 'isolation: B cannot preview on A\'s session')
 ok(!(await call('B', 'preview_session_override', { date: D1, session: 'Upper', ops: [{ op: 'drop', exercise_name: 'Plank' }] }, coachB)).includes('preview_id:'), 'isolation: B name lookup only sees B sessions')
 const pA = await call('A', 'preview_session_override', { date: D2, session: 'Upper', ops: [{ op: 'drop', exercise_name: 'Plank' }] }, coachA)
-ok((await call('B', 'apply_session_override', { preview_id: previewIdOf(pA), confirm: true, approval_ref: 'msg:b' }, coachB)).includes('no such preview'), 'isolation: B cannot apply A\'s preview')
+const refA = await yes(previewIdOf(pA))
+ok((await call('B', 'apply_session_override', { preview_id: previewIdOf(pA), confirm: true, approval_ref: refA }, coachB)).includes('no such preview'), 'isolation: B cannot apply A\'s preview, even with A\'s approval')
 ok((await call('B', 'preview_clear_session_override', { override_id: row1!.id }, coachB)).includes('No active override'), 'isolation: B cannot clear A\'s override')
 ok((await listOverrides(storeB, { includeInactive: true }))?.length === 0, 'isolation: B lists none of A\'s overrides')
 ok((await call('B', 'list_session_overrides', { include_inactive: true }, coachB)).includes('No week-only overrides'), 'isolation: B MCP list is empty')

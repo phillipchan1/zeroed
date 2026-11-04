@@ -14,7 +14,8 @@ import {
   CHANGE_LOG_TOOLS, listChanges, revertChange, type ChangeView,
 } from './changeLog.ts'
 import { athleteChangeLogAction } from './changeLogRoute.ts'
-import { acceptProposal } from './proposals.ts'
+import { approveAndAccept } from './proposals.ts'
+import { createApproval } from './approvals.ts'
 import { APP_COACH, athleteToday, type OverrideActor } from './sessionOverride.ts'
 import { executeZeroedTool, ZEROED_TOOLS, zeroedToolsFor } from './tools.ts'
 import { makeStore } from './store.ts'
@@ -45,6 +46,13 @@ const storeB = makeStore(sql, B)
 const coachA: OverrideActor = { type: 'mcp', id: TOKEN_A_ID }
 const coachB: OverrideActor = { type: 'mcp', id: TOKEN_B_ID }
 const me: OverrideActor = { type: 'athlete', id: A }
+// A well-formed approval_ref that resolves to no approval row.
+const NO_APPROVAL = 'msg:00000000-0000-4000-8000-000000000000'
+/** The athlete taps Approve on a preview (G10): its approval_ref, or NO_APPROVAL if refused. */
+async function yes(previewId: string, athlete = A): Promise<string> {
+  const r = await createApproval(makeStore(sql, athlete), { type: 'athlete', id: athlete }, { preview_id: previewId })
+  return r.ok ? r.approval_ref : NO_APPROVAL
+}
 
 const upperExercises = [
   { name: 'Bench Press', sets: 4, reps: '5', load: 'heavy', target_rpe: 8 },
@@ -100,9 +108,9 @@ async function onePath(label: string, run: () => Promise<unknown>, athleteId = A
   return lastLog(athleteId)
 }
 /** A previewed, approved coach write: preview (no confirm), then confirm with its preview_id. */
-async function approved(name: string, args: Record<string, unknown>, ref: string, actor: OverrideActor = coachA, athlete = A): Promise<string> {
+async function approved(name: string, args: Record<string, unknown>, actor: OverrideActor = coachA, athlete = A): Promise<string> {
   const preview = await call(name, args, actor, athlete)
-  return call(name, { ...args, confirm: true, preview_id: kept(preview), approval_ref: ref }, actor, athlete)
+  return call(name, { ...args, confirm: true, preview_id: kept(preview), approval_ref: await yes(kept(preview), athlete) }, actor, athlete)
 }
 const appRevert = async (store: typeof storeA, id: string) =>
   (await athleteChangeLogAction(store, { action: 'revert', id }))[0] as { ok: boolean; reason?: string; text: string; change_id?: string }
@@ -144,45 +152,49 @@ const pTrackId = kept(pTrack)
 ok(pTrackId.startsWith('chp_'), 'flag on: a preview is kept and returns a chp_ preview_id')
 const trackArgs = { name: 'Speed', purpose: 'sprints', rationale: 'Two priorities max (U2).', confirm: true }
 ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId })).includes('approval_ref is required'), 'refuse: no approval_ref')
-ok((await callErr('create_track', { ...trackArgs, approval_ref: 'msg:chat-1' })).includes('preview_id is required'), 'refuse: no preview_id')
+ok((await callErr('create_track', { ...trackArgs, approval_ref: NO_APPROVAL })).includes('preview_id is required'), 'refuse: no preview_id')
 ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'standing:logging' })).includes('logging only'), 'refuse: standing approval does not cover a track')
-ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'tap:forged' })).includes('tap approvals come from'), 'refuse: a coach cannot forge a tap')
+ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'tap:forged' })).includes('approval_ref must be'), 'refuse: a malformed tap')
+ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'tap:aaaaaaaa-0000-4000-8000-000000000000' })).includes('no such approval'), 'refuse: a coach cannot forge a tap')
+ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'msg:chat-1' })).includes('approval_ref must be'), 'refuse: a bare chat message id is not an approval')
 ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'ok' })).startsWith('Refused'), 'refuse: free-form approval_ref')
 ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'msg:chat-1' }, APP_COACH)).includes('app_coach cannot supply approval_ref'), 'refuse: app_coach never approves')
 ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'msg:chat-1' }, APP_COACH)).includes('app_coach'), 'refuse: an unnamed caller gets app_coach powers')
-ok((await callErr('create_track', { ...trackArgs, name: 'Power', preview_id: pTrackId, approval_ref: 'msg:chat-1' })).includes('no longer matches'), 'refuse: the confirmed request must match the preview')
+ok((await callErr('create_track', { ...trackArgs, name: 'Power', preview_id: pTrackId, approval_ref: NO_APPROVAL })).includes('no longer matches'), 'refuse: the confirmed request must match the preview')
 const pRule = await call('upsert_autoreg_rule', { signal: 'sleep_hours', op: '<', value: 6, action: 'trim_accessories', message: 'Short sleep trims accessories.' })
-ok((await callErr('create_track', { ...trackArgs, preview_id: kept(pRule), approval_ref: 'msg:chat-1' })).includes('no create_track preview'), 'refuse: another tool\'s preview')
+ok((await callErr('create_track', { ...trackArgs, preview_id: kept(pRule), approval_ref: NO_APPROVAL })).includes('no create_track preview'), 'refuse: another tool\'s preview')
 const pOld = await call('create_track', { name: 'Old', purpose: 'x' })
 await harness.query(`UPDATE change_preview SET created_at = NOW() - INTERVAL '25 hours' WHERE preview_id = $1`, [kept(pOld)])
-ok((await callErr('create_track', { name: 'Old', purpose: 'x', confirm: true, preview_id: kept(pOld), approval_ref: 'msg:chat-1' })).includes('more than 24 h old'), 'refuse: a preview over 24 h old')
+ok((await callErr('create_track', { name: 'Old', purpose: 'x', confirm: true, preview_id: kept(pOld), approval_ref: NO_APPROVAL })).includes('more than 24 h old'), 'refuse: a preview over 24 h old')
 ok(await count('track', 'program_id = $1', [PROG_A]) === tracksBefore && await logCount() === 0, 'refuse: every refusal wrote nothing and logged nothing')
 
 // ---- each covered path: exactly one row, right actor and approval ------------------
-const created = await onePath('create_track', () => call('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'msg:chat-1' }))
+const refTrack = await yes(pTrackId)
+const created = await onePath('create_track', () => call('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: refTrack }))
 ok(created.tool === 'create_track' && created.actor_type === 'mcp' && created.actor_id === TOKEN_A_ID, 'create_track: actor is the coach token')
-ok(created.approval_ref === 'msg:chat-1' && created.preview_id === pTrackId, 'create_track: approval and preview recorded')
+ok(created.approval_ref === refTrack && created.preview_id === pTrackId, 'create_track: approval and preview recorded')
 ok(JSON.stringify(created.rule_refs) === '["U2"]', 'create_track: rule_refs read from the rationale')
-ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: 'msg:chat-1' })).includes('already applied'), 'a preview applies once')
+ok((await callErr('create_track', { ...trackArgs, preview_id: pTrackId, approval_ref: refTrack })).includes('already applied'), 'a preview applies once')
 const [speed] = await harness.query<{ id: string }>(`SELECT id::text AS id FROM track WHERE program_id = $1 AND name = 'Speed'`, [PROG_A])
 
-const upd1 = await onePath('update_track', () => approved('update_track', { track: 'Speed', set_purpose: 'acceleration', rationale: 'U14 contacts' }, 'msg:chat-2'))
+const upd1 = await onePath('update_track', () => approved('update_track', { track: 'Speed', set_purpose: 'acceleration', rationale: 'U14 contacts' }))
 ok(upd1.target_type === 'track' && upd1.target_id === speed.id, 'update_track: target is the track')
 // A preview whose target moved since no longer matches.
 const pUpd = await call('update_track', { track: 'Speed', set_color: '#FF0000' })
 await harness.query(`UPDATE track SET methodology_text = 'changed elsewhere' WHERE id = $1`, [speed.id])
-ok((await callErr('update_track', { track: 'Speed', set_color: '#FF0000', confirm: true, preview_id: kept(pUpd), approval_ref: 'msg:chat-3' })).includes('no longer matches'), 'refuse: a preview whose target changed since')
+ok((await callErr('update_track', { track: 'Speed', set_color: '#FF0000', confirm: true, preview_id: kept(pUpd), approval_ref: await yes(kept(pUpd)) })).includes('no longer matches'), 'refuse: a preview whose target changed since')
 await harness.query(`UPDATE track SET methodology_text = NULL WHERE id = $1`, [speed.id])
-const upd2 = await onePath('update_track again', () => approved('update_track', { track: 'Speed', set_purpose: 'top speed' }, 'msg:chat-4'))
+const upd2 = await onePath('update_track again', () => approved('update_track', { track: 'Speed', set_purpose: 'top speed' }))
 
-const rule = await onePath('set_track_progression_rule', () => approved('set_track_progression_rule', { track: 'Speed', engine_type: 'double_progression', params: { step: 5 } }, 'msg:chat-5'))
+const rule = await onePath('set_track_progression_rule', () => approved('set_track_progression_rule', { track: 'Speed', engine_type: 'double_progression', params: { step: 5 } }))
+const refRule = await yes(kept(pRule))
 const autoreg = await onePath('upsert_autoreg_rule', () => call('upsert_autoreg_rule', {
-  signal: 'sleep_hours', op: '<', value: 6, action: 'trim_accessories', message: 'Short sleep trims accessories.', confirm: true, preview_id: kept(pRule), approval_ref: 'msg:chat-6',
+  signal: 'sleep_hours', op: '<', value: 6, action: 'trim_accessories', message: 'Short sleep trims accessories.', confirm: true, preview_id: kept(pRule), approval_ref: refRule,
 }))
-const goalNew = await onePath('upsert_goal (new)', () => approved('upsert_goal', { name: 'Broad Jump', metric: 'distance', unit: 'in', direction: 'higher', target: 100 }, 'msg:chat-7'))
+const goalNew = await onePath('upsert_goal (new)', () => approved('upsert_goal', { name: 'Broad Jump', metric: 'distance', unit: 'in', direction: 'higher', target: 100 }))
 ok(goalNew.diff.before == null, 'upsert_goal (new): before is null')
 const goalId = String(goalNew.target_id)
-const goalUpd = await onePath('upsert_goal (update)', () => approved('upsert_goal', { goal_id: goalId, name: 'Broad Jump', direction: 'higher', target: 104 }, 'msg:chat-8'))
+const goalUpd = await onePath('upsert_goal (update)', () => approved('upsert_goal', { goal_id: goalId, name: 'Broad Jump', direction: 'higher', target: 104 }))
 const meas = await onePath('log_goal_measurement', () => call('log_goal_measurement', { goal: 'Broad Jump', value: 96, date: '2026-11-03', confirm: true }))
 ok(meas.approval_ref === 'standing:logging' && meas.preview_id == null, 'logging: standing:logging, no preview needed')
 const measDup = await logCount()
@@ -191,23 +203,23 @@ await call('log_goal_measurement', { goal: 'Broad Jump', value: 99, date: '2026-
 ok(await logCount() === measDup + 1, 'logging: a reused client_key writes and logs nothing')
 const note = await onePath('add_workout_note', () => call('add_workout_note', { session_name: 'A day', text: 'Felt quick.', confirm: true }))
 ok(note.approval_ref === 'standing:logging', 'add_workout_note: standing:logging')
-const target = await onePath('update_athlete_target', () => approved('update_athlete_target', { text: 'Jump farther' }, 'msg:chat-9'))
-const meta = await onePath('update_program_meta', () => approved('update_program_meta', { set_phase: 'build', deload_week_start: '2026-11-23' }, 'msg:chat-10'))
+const target = await onePath('update_athlete_target', () => approved('update_athlete_target', { text: 'Jump farther' }))
+const meta = await onePath('update_program_meta', () => approved('update_program_meta', { set_phase: 'build', deload_week_start: '2026-11-23' }))
 const assigned = await onePath('assign_exercise_to_track', () => approved('assign_exercise_to_track', {
   assignments: [{ session_name: 'Upper', exercise_name: 'Plank', track: 'Speed' }],
-}, 'msg:chat-11'))
+}))
 ok(assigned.target_type === 'routine', 'assign_exercise_to_track: target is the routine')
 
 // set_training_max keeps the prior value.
 const tm1 = await onePath('set_training_max', async () => {
   const p = await call('set_training_max', { lift: 'squat', training_max: 300 })
   ok(kept(p) !== '' && p.includes('Preview only'), 'set_training_max: preview keeps a preview_id')
-  return call('set_training_max', { lift: 'squat', training_max: 300, confirm: true, preview_id: kept(p), approval_ref: 'msg:chat-12' })
+  return call('set_training_max', { lift: 'squat', training_max: 300, confirm: true, preview_id: kept(p), approval_ref: await yes(kept(p)) })
 })
 ok(tm1.diff.before == null && (tm1.diff.after as { value?: number })?.value === 300, 'set_training_max: before → after recorded')
 const tm2 = await onePath('set_training_max again', async () => {
   const p = await call('set_training_max', { lift: 'squat', training_max: 315 })
-  return call('set_training_max', { lift: 'squat', training_max: 315, confirm: true, preview_id: kept(p), approval_ref: 'msg:chat-13' })
+  return call('set_training_max', { lift: 'squat', training_max: 315, confirm: true, preview_id: kept(p), approval_ref: await yes(kept(p)) })
 })
 ok((await callErr('set_training_max', { lift: 'squat', training_max: 320, confirm: true })).includes('approval_ref is required'), 'refuse: set_training_max without approval')
 
@@ -218,8 +230,10 @@ ok(kept(pEdit) !== '', 'preview_program_edits: a kept preview_id')
 ok((await call('apply_program_edits', { ...editArgs, confirm: true, preview_id: kept(pEdit) })).includes('approval_ref is required'), 'refuse: apply_program_edits without approval')
 const upperBefore = await exercisesOf(UPPER)
 const revisionsBefore = await count('program_revision', 'program_id = $1', [PROG_A])
-const edit = await onePath('apply_program_edits', () => call('apply_program_edits', { ...editArgs, confirm: true, preview_id: kept(pEdit), approval_ref: 'msg:chat-14' }))
-ok(edit.tool === 'apply_program_edits' && edit.approval_ref === 'msg:chat-14' && JSON.stringify(edit.rule_refs) === '["U5"]', 'apply_program_edits: approval and rule refs')
+const refEdit = await yes(kept(pEdit))
+ok(refEdit.startsWith('tap:'), 'approval: the athlete approves a program-edit preview')
+const edit = await onePath('apply_program_edits', () => call('apply_program_edits', { ...editArgs, confirm: true, preview_id: kept(pEdit), approval_ref: refEdit }))
+ok(edit.tool === 'apply_program_edits' && edit.approval_ref === refEdit && JSON.stringify(edit.rule_refs) === '["U5"]', 'apply_program_edits: approval and rule refs')
 ok(await count('program_revision', 'program_id = $1', [PROG_A]) === revisionsBefore + 1, 'apply_program_edits: program_revision is still written as before')
 ok(await exercisesOf(UPPER) !== upperBefore, 'apply_program_edits: the routine changed')
 
@@ -227,29 +241,34 @@ ok(await exercisesOf(UPPER) !== upperBefore, 'apply_program_edits: the routine c
 const proposed = await call('preview_program_edits', { propose: true, title: 'Add face pulls.', edits: [{ type: 'add_exercise', session_name: 'Upper', exercise_name: 'Face Pull', sets: 2, reps: '15', load: 'light' }] })
 ok(proposed.includes('Parked'), 'proposal: parked')
 const [prop] = await harness.query<{ id: string }>(`SELECT id::text AS id FROM coach_proposal WHERE athlete_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1`, [A])
+let acceptRef = ''
 const accepted = await onePath('accept_proposal', async () => {
-  const res = await acceptProposal(storeA, prop.id, { approvalRef: `tap:${prop.id}` })
+  const res = await approveAndAccept(storeA, prop.id)
+  acceptRef = res.approval_ref ?? ''
   ok(res.ok, `proposal: the athlete's tap applies it (${res.text.slice(0, 60)})`)
 })
-ok(accepted.tool === 'accept_proposal' && accepted.approval_ref === `tap:${prop.id}` && accepted.actor_type === 'mcp', 'accept_proposal: authored by the coach, approved by the tap')
+ok(accepted.tool === 'accept_proposal' && accepted.approval_ref === acceptRef && acceptRef.startsWith('tap:') && accepted.actor_type === 'mcp', 'accept_proposal: authored by the coach, approved by the tap')
 const proposedOld = await call('preview_program_edits', { propose: true, title: 'Add curls.', edits: [{ type: 'add_exercise', session_name: 'Upper', exercise_name: 'Curl', sets: 2, reps: '12', load: 'light' }] })
 ok(proposedOld.includes('Parked'), 'proposal: second parked')
 const [oldProp] = await harness.query<{ id: string }>(`SELECT id::text AS id FROM coach_proposal WHERE athlete_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1`, [A])
 await harness.query(`UPDATE coach_proposal SET created_at = NOW() - INTERVAL '25 hours' WHERE id = $1`, [oldProp.id])
 const beforeOld = await logCount()
-const oldRes = await acceptProposal(storeA, oldProp.id, { approvalRef: `tap:${oldProp.id}` })
+const oldRes = await approveAndAccept(storeA, oldProp.id)
 ok(!oldRes.ok && oldRes.status === 'stale' && await logCount() === beforeOld, 'proposal: over 24 h old is stale and logs nothing')
 
 // Week-only override (a move is still one change).
 const today = await athleteToday(storeA)
 const pOv = await call('preview_session_override', { date: addDays(today, 1), session: 'Upper', ops: [{ op: 'drop', exercise_name: 'Plank' }], rationale: 'Short on time.' })
-const override = await onePath('apply_session_override', () => call('apply_session_override', { preview_id: sop(pOv), confirm: true, approval_ref: 'msg:chat-15' }))
+const refOv = await yes(sop(pOv))
+const override = await onePath('apply_session_override', () => call('apply_session_override', { preview_id: sop(pOv), confirm: true, approval_ref: refOv }))
 ok(override.tool === 'apply_session_override' && override.preview_id === sop(pOv) && Array.isArray(override.diff.override_ids), 'apply_session_override: logged with its override ids')
 const pMove = await call('preview_session_override', { date: today, session: 'A day', ops: [{ op: 'move', exercise_name: 'Back Squat', to_date: addDays(today, 2), to_session: 'Upper' }] })
-const moved = await onePath('apply_session_override (move)', () => call('apply_session_override', { preview_id: sop(pMove), confirm: true, approval_ref: 'msg:chat-16' }))
+const refMove = await yes(sop(pMove))
+const moved = await onePath('apply_session_override (move)', () => call('apply_session_override', { preview_id: sop(pMove), confirm: true, approval_ref: refMove }))
 ok((moved.diff.override_ids as unknown[]).length === 2, 'apply_session_override (move): two rows, one change')
 const pClr = await call('preview_clear_session_override', { override_id: (moved.diff.override_ids as string[])[0] })
-const cleared = await onePath('clear_session_override', () => call('apply_session_override', { preview_id: sop(pClr), confirm: true, approval_ref: 'msg:chat-17' }))
+const refClr = await yes(sop(pClr))
+const cleared = await onePath('clear_session_override', () => call('apply_session_override', { preview_id: sop(pClr), confirm: true, approval_ref: refClr }))
 ok(cleared.tool === 'clear_session_override', 'clear_session_override: logged')
 
 // The app editor's own program_revision.
@@ -282,7 +301,11 @@ ok(undo2.ok, `undo: the latest track update undoes (${undo2.text})`)
 const undoRow = await lastLog()
 const origRow = await logById(upd2.id)
 ok(undoRow.tool === 'revert_change' && undoRow.revert_of === upd2.id && origRow.reverted_by === undoRow.id, 'undo: new row with revert_of, original carries reverted_by')
-ok(undoRow.actor_type === 'athlete' && undoRow.approval_ref === `tap:${upd2.id}`, 'undo: by the athlete, with their tap')
+ok(undoRow.actor_type === 'athlete' && /^tap:[0-9a-f-]{36}$/.test(String(undoRow.approval_ref)), 'undo: by the athlete, with their tap')
+const [undoApproval] = await harness.query<{ preview_kind: string; consumed_by: string | null }>(
+  `SELECT preview_kind, consumed_by_change_id::text AS consumed_by FROM approval WHERE id::text = $1`, [String(undoRow.approval_ref).slice(4)],
+)
+ok(undoApproval?.preview_kind === 'revert' && undoApproval.consumed_by === undoRow.id, 'undo: its tap is an approval row, spent by the undo')
 ok((await harness.query<{ purpose: string }>(`SELECT purpose FROM track WHERE id = $1`, [speed.id]))[0].purpose === 'acceleration', 'undo: track restored to before that change')
 ok((await listChanges(storeA, { limit: 100 }))?.changes.find((c) => c.id === upd2.id)?.revert_suggested === false, 'undo: the suggestion is spent')
 ok(!(await appRevert(storeA, upd2.id)).ok && (await appRevert(storeA, upd2.id)).text.includes('Already undone'), 'undo: double undo refused')
@@ -296,7 +319,8 @@ ok(!editUndo.ok && editUndo.reason === 'stale', 'undo: program edit refused once
 const upperNow = await exercisesOf(UPPER)
 const aDayBefore = await exercisesOf(ROUTINE_A)
 const pEdit2 = await call('preview_program_edits', { edits: [{ type: 'update_exercise', session_name: 'A day', exercise_name: 'Back Squat', reps: '3' }] })
-const edit2 = await onePath('apply_program_edits (A day)', () => call('apply_program_edits', { edits: [{ type: 'update_exercise', session_name: 'A day', exercise_name: 'Back Squat', reps: '3' }], confirm: true, preview_id: kept(pEdit2), approval_ref: 'msg:chat-18' }))
+const refEdit2 = await yes(kept(pEdit2))
+const edit2 = await onePath('apply_program_edits (A day)', () => call('apply_program_edits', { edits: [{ type: 'update_exercise', session_name: 'A day', exercise_name: 'Back Squat', reps: '3' }], confirm: true, preview_id: kept(pEdit2), approval_ref: refEdit2 }))
 const aDayEdited = await exercisesOf(ROUTINE_A)
 ok(aDayEdited !== aDayBefore, 'apply_program_edits (A day): the routine changed')
 const revBeforeUndo = await count('program_revision', 'program_id = $1', [PROG_A])
@@ -306,7 +330,7 @@ ok(await exercisesOf(UPPER) === upperNow, 'undo: untouched routines stay as they
 ok(await count('program_revision', 'program_id = $1 AND summary = $2', [PROG_A, 'Undid a coach change']) === 1 && await count('program_revision', 'program_id = $1', [PROG_A]) === revBeforeUndo + 1, 'undo: the journey records the undo as a revision')
 const pAdd = await call('preview_program_edits', { edits: [{ type: 'add_session', session_name: 'Conditioning', exercises: [{ name: 'Bike', sets: 1, reps: '20 min' }] }] })
 const added = await onePath('apply_program_edits (add_session)', async () => {
-  const t = await call('apply_program_edits', { edits: [{ type: 'add_session', session_name: 'Conditioning', exercises: [{ name: 'Bike', sets: 1, reps: '20 min' }] }], confirm: true, preview_id: kept(pAdd), approval_ref: 'msg:chat-19' })
+  const t = await call('apply_program_edits', { edits: [{ type: 'add_session', session_name: 'Conditioning', exercises: [{ name: 'Bike', sets: 1, reps: '20 min' }] }], confirm: true, preview_id: kept(pAdd), approval_ref: await yes(kept(pAdd)) })
   ok(t.startsWith('Applied now'), `apply_program_edits (add_session): applied (${t.slice(0, 120)})`)
 })
 const addUndo = await appRevert(storeA, added.id)
@@ -350,7 +374,7 @@ const [revLog] = await harness.query<{ diff: { voided_previews: string[] }; acto
   `SELECT diff, actor_type FROM change_log WHERE athlete_id = $1 AND tool = 'revoke_coach' AND target_id = $2`, [A, TOKEN_LATE_ID],
 )
 ok(revLog?.actor_type === 'system' && revLog.diff.voided_previews.includes(kept(pLate)), 'revoke: logged once, by system, naming the voided preview')
-ok((await callErr('create_track', { name: 'Late', confirm: true, preview_id: kept(pLate), approval_ref: 'msg:chat-20' })).includes('voided'), 'revoke: the voided preview cannot be applied by anyone')
+ok((await callErr('create_track', { name: 'Late', confirm: true, preview_id: kept(pLate), approval_ref: NO_APPROVAL })).includes('voided'), 'revoke: the voided preview cannot be applied by anyone')
 ok(await count('change_log', 'athlete_id = $1 AND tool = $2', [A, 'revoke_coach']) === 1, 'revoke: only the coach just revoked is logged (not ones revoked before)')
 
 // ---- reading -----------------------------------------------------------------------
@@ -384,8 +408,8 @@ const bRevert = await appRevert(storeB, edit.id)
 ok(!bRevert.ok && bRevert.reason === 'not_found', 'isolation: B cannot undo A\'s change')
 ok((await call('preview_revert_change', { change_id: edit.id }, coachB, B)).includes('No such change'), 'isolation: B\'s coach cannot preview undoing A\'s change')
 const pA = await call('create_track', { name: 'A Only' })
-ok((await callErr('create_track', { name: 'A Only', confirm: true, preview_id: kept(pA), approval_ref: 'msg:b' }, coachB, B)).includes('no create_track preview'), 'isolation: B cannot apply A\'s preview')
-await onePath('B create_track', () => approved('create_track', { name: 'B Track' }, 'msg:b-1', coachB, B).then((t) => {
+ok((await callErr('create_track', { name: 'A Only', confirm: true, preview_id: kept(pA), approval_ref: await yes(kept(pA)) }, coachB, B)).includes('no create_track preview'), 'isolation: B cannot apply A\'s preview')
+await onePath('B create_track', () => approved('create_track', { name: 'B Track' }, coachB, B).then((t) => {
   ok(t.includes('B Track'), 'B: approved write lands on B')
 }), B)
 ok(await count('change_log', 'athlete_id = $1 AND tool = $2', [A, 'create_track']) === 1, 'isolation: B\'s write logs only under B')

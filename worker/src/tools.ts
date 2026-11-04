@@ -36,6 +36,7 @@ import {
   CHANGE_LOG_TOOLS, CHANGE_LOG_TOOL_NAMES, changeLogMissing, changeLogUnavailable, makeWriteGate, phaseRoutineSnapshots,
   previewFooter, routineDelta, runChangeLogTool, trainingMaxEntry, writeApprovalProblem, type WriteGate,
 } from './changeLog.ts'
+import { approvalMissing, approvalsUnavailable, APPROVAL_TOOL_NAMES, APPROVAL_TOOLS, runApprovalTool } from './approvals.ts'
 import { isMcpUserError } from './userError.ts'
 import type { LiveProgram } from './store.ts'
 
@@ -249,13 +250,13 @@ function withApprovalArgs(tool: McpTool): McpTool {
   const schema = tool.inputSchema as { properties?: Record<string, unknown> } & Record<string, unknown>
   return {
     ...tool,
-    description: `${tool.description} With confirm=true it also needs approval_ref = msg:<id of the message where the athlete said yes> and the preview_id the preview call returned (under 24 h old, diff unchanged)${tool.name === 'apply_program_edits' ? '; a proposal_id stands in for the preview' : ''}. Every write is recorded in the change log.`,
+    description: `${tool.description} With confirm=true it also needs the preview_id the preview call returned (under 24 h old, diff unchanged) and approval_ref = the approval the athlete created for that preview in the app (tap:<id> or msg:<id>; list_approvals(preview_id) shows it)${tool.name === 'apply_program_edits' ? '; a proposal_id stands in for the preview' : ''}. Coaches cannot create approvals, and each one applies once. Every write is recorded in the change log.`,
     inputSchema: {
       ...schema,
       properties: {
         ...schema.properties,
         preview_id: { type: 'string', description: 'With confirm=true: the preview_id from the preview call.' },
-        approval_ref: { type: 'string', description: 'With confirm=true: msg:<message id> where the athlete approved this diff.' },
+        approval_ref: { type: 'string', description: 'With confirm=true: the athlete\'s approval of this preview, tap:<approval id> or msg:<approval id> (from list_approvals).' },
         rule_refs: { type: 'array', items: { type: 'string' }, description: 'Methodology rules this applies, e.g. ["U5"]. U# named in the rationale are picked up too.' },
       },
     },
@@ -263,13 +264,13 @@ function withApprovalArgs(tool: McpTool): McpTool {
 }
 
 /**
- * The tools this athlete's coach sees. tracks_v1 adds the week-only override
- * and change-log tools, and the approval arguments on writes; with it off the
- * list is exactly ZEROED_TOOLS.
+ * The tools this athlete's coach sees. tracks_v1 adds the week-only override,
+ * change-log and approval-lookup tools, and the approval arguments on writes;
+ * with it off the list is exactly ZEROED_TOOLS.
  */
 export async function zeroedToolsFor(sql: Sql, athleteId: string): Promise<McpTool[]> {
   return await tracksV1On(storeForAthlete(sql, athleteId))
-    ? [...ZEROED_TOOLS.map(withApprovalArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS]
+    ? [...ZEROED_TOOLS.map(withApprovalArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS]
     : ZEROED_TOOLS
 }
 
@@ -367,6 +368,8 @@ export async function executeZeroedTool(
   } catch (e) {
     // tracks_v1 on before worker/schema/change-log.sql: the write rolled back.
     if (changeLogMissing(e)) throw new McpUserError(changeLogUnavailable)
+    // …or before worker/schema/approval.sql (G10).
+    if (approvalMissing(e)) throw new McpUserError(approvalsUnavailable)
     throw e
   }
 }
@@ -386,6 +389,8 @@ async function runZeroedTool(
   }
 
   if (CHANGE_LOG_TOOL_NAMES.has(name)) return runChangeLogTool(store, name, args, actor)
+
+  if (APPROVAL_TOOL_NAMES.has(name)) return runApprovalTool(store, name, args)
 
   // G2: with tracks_v1 on, writes go through the gate (approval, preview, change_log).
   // Off, gate stays undefined and every path below is exactly as before.

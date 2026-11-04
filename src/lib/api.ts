@@ -101,6 +101,12 @@ export function changeLogUrl(): string | null {
   return `${base}/change-log`
 }
 
+export function approvalsUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/approvals`
+}
+
 export function authBaseUrl(): string | null {
   const base = apiBaseUrl()
   if (!base || !isCloudflareApi()) return null

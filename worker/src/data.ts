@@ -12,6 +12,7 @@ import type { Env } from './env.ts'
 import { parseRpeHalfStepsFlag, rpeHalfStepsOn, workoutRpeError } from '../../src/engine/rpeScale.ts'
 import { GENERAL_TRACK_SEED } from '../../src/engine/tracks.ts'
 import { changeLogOnFor, liveCoachTokenIds, voidRevokedCoachPreviews, withTx, writeChange } from './changeLog.ts'
+import { ApprovalSpent, consumeApproval, directTapApproval } from './approvals.ts'
 import { makeStore } from './store.ts'
 
 export type FilterOp = 'eq' | 'neq' | 'in' | 'gte' | 'gt' | 'lte' | 'lt' | 'ilike' | 'not_in'
@@ -1091,12 +1092,16 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
   }
 }
 
-/** One change_log row per in-app program_revision: the athlete's own edit, their own tap. */
+/**
+ * One change_log row per in-app program_revision: the athlete's own edit,
+ * their own tap. The tap is a real approval row (G10), spent by that row.
+ */
 async function logAppRevisions(sql: Sql, athleteId: string, rows: Record<string, unknown>[]): Promise<void> {
   const store = makeStore(sql, athleteId)
   for (const row of rows) {
     const id = String(row.id)
-    await writeChange(store, {
+    const tap = await directTapApproval(store, 'app_editor', `revision:${id}`, row.diff ?? {})
+    const changeId = await writeChange(store, {
       actor: { type: 'athlete', id: athleteId },
       tool: 'app_editor',
       targetType: 'program',
@@ -1110,8 +1115,10 @@ async function logAppRevisions(sql: Sql, athleteId: string, rows: Record<string,
       },
       rationale: Array.isArray(row.requests) ? row.requests.filter((r) => typeof r === 'string').join(' ') || null : null,
       ruleRefs: [],
-      approvalRef: `tap:${id}`,
+      approvalRef: tap.ref,
+      approvalId: tap.id,
     })
+    if (!(await consumeApproval(store, tap.id, changeId))) throw new ApprovalSpent()
   }
 }
 
