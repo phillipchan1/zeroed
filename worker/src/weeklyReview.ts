@@ -9,7 +9,10 @@
  *   deload  compliance under the U11 trigger (70%), a priority lift's e1RM
  *           down 2 sessions in a row, or U6 flags on 5+ days (U11)
  *   hold    compliance under target (U15), a region blocked or over its cap
- *           this week (U7), U6 flags on 3+ days, or a priority lift down (U5)
+ *           this week (U7; v1.2: a temporary block counts too), U6 flags on
+ *           3+ days, or a priority lift down (U5)
+ * U6 flags are counted with the methodology's own thresholds (v1.2: one day
+ * alone only at sleep < 5 h, stress 5 or soreness 5).
  *   progress  otherwise (U5, U15)
  *
  * Priority lifts: the main lifts in the live week whose progression rule is
@@ -26,8 +29,8 @@ import { canonicalLiftId, estimateE1rm, type E1rmMethod } from '../../src/engine
 import { readLoggedExercises } from '../../src/engine/loggedSets.ts'
 import { mcpStamp } from '../../src/engine/mcpStamp.ts'
 import { topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
-import { resolveMethodology, blockedRegions } from './methodology.ts'
-import { addDays, u6Flags, type CheckinDay } from './readiness/rules.ts'
+import { athleteMinor, resolveMethodology, blockedRegions } from './methodology.ts'
+import { addDays, evaluateReport, u6Flags, type CheckinDay } from './readiness/rules.ts'
 import { blockedDuring, loadCheckins, loadPain } from './regionStatus.ts'
 import { athleteToday } from './sessionOverride.ts'
 import { sessionLoadForWeek, type SessionLoadView } from './sessionRpe.ts'
@@ -236,12 +239,16 @@ export async function computeWeeklyReview(
   })
 
   // ---- health ----
-  const [checkins, pain, statusBlocked, sessionLoad] = await Promise.all([
+  const temporaryOn = params.U7.temporary_blocks === true
+  const [checkins, painAll, statusBlocked, sessionLoad, minor] = await Promise.all([
     loadCheckins(store, addDays(monday, -2), sunday),
-    loadPain(store, addDays(monday, -7), sunday),
+    // v1.2: 14 days before the week too, for the persistence criteria (U7).
+    loadPain(store, addDays(monday, temporaryOn ? -(params.U7.persistent_after?.within_days ?? 7) : -7), sunday),
     blockedDuring(store, monday, sunday),
     opts.showHealth ? sessionLoadForWeek(store, monday) : null,
+    temporaryOn ? athleteMinor(store) : null,
   ])
+  const pain = painAll.filter((p) => p.date >= addDays(monday, -7))
   const days: CheckinDay[] = checkins
   const weekCheckins = checkins.filter((c) => inWeek(c.date))
   let flagDays = 0
@@ -256,8 +263,13 @@ export async function computeWeeklyReview(
     const b = avg(before)
     return { region, avg: a, max: Math.max(...now), prior_avg: b, trend: b == null ? 'new' : a > b + 0.5 ? 'worse' : a < b - 0.5 ? 'better' : 'same' }
   })
+  // v1.2: a temporary block (that day and the next session) writes no
+  // region_status row; a report this week that set one counts as blocked.
+  const temporaryBlocked = temporaryOn
+    ? painAll.filter((p) => inWeek(p.date)).filter((p) => evaluateReport(painAll, p, params.U7, minor === false && !methodology.minor).status === 'blocked').map((p) => p.region)
+    : []
   // Red flags in the athlete's rules are current state: they count for this week and later.
-  const blocked = [...new Set([...statusBlocked, ...(sunday >= today ? blockedRegions(methodology) : [])])].sort()
+  const blocked = [...new Set([...statusBlocked, ...temporaryBlocked, ...(sunday >= today ? blockedRegions(methodology) : [])])].sort()
   const painRegions = [...new Set([...blocked, ...painTrend.filter((p) => p.max > cap).map((p) => p.region)])].sort()
 
   const { call, reasons } = weeklyCall({

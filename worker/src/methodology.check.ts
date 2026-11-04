@@ -91,10 +91,10 @@ ok(await count('methodology_override') === 0 && await count('change_log') === 0,
 // ---- flag ON ------------------------------------------------------------------------------
 await flag(A, true)
 const on = await rx()
-ok(on.out.methodology_version === 'v1.1' && on.out.prescription.methodology_version === 'v1.1', 'flag on: session-rx and the prescription record methodology v1.1')
+ok(on.out.methodology_version === 'v1.2' && on.out.prescription.methodology_version === 'v1.2', 'flag on: session-rx and the prescription record methodology v1.2')
 ok(strip(on.text) === off.text, 'flag on, defaults: every number and version string is byte-identical to flag off')
 const [versionOnly] = await sessionRxForAthlete(sql, A, { routine_id: A_DAY, version_only: true })
-ok((versionOnly as { methodology_version?: string }).methodology_version === 'v1.1', 'flag on: version_only carries it too')
+ok((versionOnly as { methodology_version?: string }).methodology_version === 'v1.2', 'flag on: version_only carries it too')
 const onTools = await zeroedToolsFor(sql, A)
 ok(METHODOLOGY_TOOLS.every((t) => onTools.some((x) => x.name === t.name)), 'flag on: methodology tools are listed')
 ok(JSON.stringify(onTools.find((t) => t.name === 'preview_program_edits')?.inputSchema).includes('rewrite'), 'flag on: preview_program_edits takes rewrite')
@@ -128,7 +128,7 @@ ok(JSON.stringify((cleanOut as { warnings?: unknown[] }).warnings) === '[]', 'cl
 
 // get_methodology.
 const got = JSON.parse(await call('get_methodology', {})) as { methodology_version: string; params: { U4: { tm_fraction: number } }; overrides: unknown[]; overridable_paths: string[] }
-ok(got.methodology_version === 'v1.1' && got.params.U4.tm_fraction === 0.9 && got.overrides.length === 0, 'get_methodology: v1.1, defaults, no overrides')
+ok(got.methodology_version === 'v1.2' && got.params.U4.tm_fraction === 0.9 && got.overrides.length === 0, 'get_methodology: v1.2, defaults, no overrides')
 ok(got.overridable_paths.includes('U4.tm_fraction') && got.overridable_paths.some((p) => p.startsWith('U7.regions.')), 'get_methodology: lists the overridable paths')
 
 // Unknown paths and bad values.
@@ -153,14 +153,14 @@ ok((await call('apply_methodology_override', { preview_id: pTmId, confirm: true,
 const [tmRow] = await harness.query<{ value: number; approval_ref: string; methodology_version: string; actor_id: string; change_id: string }>(
   `SELECT value, approval_ref, methodology_version, actor_id, change_id::text AS change_id FROM methodology_override WHERE athlete_id = $1 AND path = 'U4.tm_fraction'`, [A],
 )
-ok(Number(tmRow?.value) === 0.85 && tmRow.approval_ref === refTm && tmRow.methodology_version === 'v1.1' && tmRow.actor_id === TOKEN_A_ID, 'override: row records value, approval, base version, who')
+ok(Number(tmRow?.value) === 0.85 && tmRow.approval_ref === refTm && tmRow.methodology_version === 'v1.2' && tmRow.actor_id === TOKEN_A_ID, 'override: row records value, approval, base version, who')
 const [tmLog] = await harness.query<{ tool: string; rule_refs: string[]; methodology_version: string; approval_ref: string; preview_id: string }>(
   `SELECT tool, rule_refs, methodology_version, approval_ref, preview_id FROM change_log WHERE id::text = $1`, [tmRow.change_id],
 )
 ok(tmLog?.tool === 'apply_methodology_override' && JSON.stringify(tmLog.rule_refs) === '["U4"]' && tmLog.approval_ref === refTm && tmLog.preview_id === pTmId, 'override: logged in change_log with rule_refs')
-ok(/^v1\.1\+[0-9a-f]{8}$/.test(tmLog.methodology_version), 'override: the change_log row records the methodology version')
+ok(/^v1\.2\+[0-9a-f]{8}$/.test(tmLog.methodology_version), 'override: the change_log row records the methodology version')
 const afterTm = await rx()
-ok(/^v1\.1\+[0-9a-f]{8}$/.test(afterTm.out.methodology_version ?? '') && afterTm.out.prescription.methodology_version === afterTm.out.methodology_version, 'override: prescriptions now record v1.1+<overrides>')
+ok(/^v1\.2\+[0-9a-f]{8}$/.test(afterTm.out.methodology_version ?? '') && afterTm.out.prescription.methodology_version === afterTm.out.methodology_version, 'override: prescriptions now record v1.2+<overrides>')
 ok(afterTm.out.program_version !== on.out.program_version, 'override: program_version bumps so the app refetches')
 ok(squat(afterTm.out).load != null && squat(afterTm.out).load! <= squat(on.out).load!, 'override: the engine runs on the lower TM fraction')
 
@@ -217,7 +217,7 @@ ok(await count('change_log', 'athlete_id = $1 AND methodology_version IS NULL', 
 // ---- isolation ----------------------------------------------------------------------------
 await flag(B, true)
 const bView = JSON.parse(await call('get_methodology', {}, coachB, B)) as { methodology_version: string; overrides: unknown[] }
-ok(bView.methodology_version === 'v1.1' && bView.overrides.length === 0, 'isolation: B sees none of A\'s overrides')
+ok(bView.methodology_version === 'v1.2' && bView.overrides.length === 0, 'isolation: B sees none of A\'s overrides')
 const pA = chp(await call('preview_methodology_override', { path: 'U9.hiit_max_per_week', value: 1 }))
 const refA = await tap(pA)
 ok((await call('apply_methodology_override', { preview_id: pA, confirm: true, approval_ref: refA }, coachB, B)).includes('no apply_methodology_override preview'), 'isolation: B cannot apply A\'s preview, even with A\'s approval')

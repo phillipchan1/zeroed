@@ -248,8 +248,8 @@ ok((await call('preview_methodology_override', { path: 'U7.regions.knee.blocked'
 ok(blockedRegions(await resolveMethodology(storeA)).includes('knee'), 'clear flag: still flagged after the coaches tried')
 
 // Both kinds at once: a check-in block on the knee too.
-const knee = await saveCheckin(storeA, athleteA, { pain: [{ region: 'knee', score: 7 }] })
-ok(knee.ok, 'setup: a 7/10 knee in the check-in blocks it')
+const knee = await saveCheckin(storeA, athleteA, { pain: [{ region: 'knee', score: 7, red_flags: ['locking'] }] })
+ok(knee.ok, 'setup: a 7/10 knee with locking in the check-in blocks it')
 view = await today()
 ok(view.blocked.find((b) => b.region === 'knee')?.also_rule === true && view.rule_blocked?.find((b) => b.region === 'knee')?.also_checkin === true, 'today: each kind says the other also blocks')
 

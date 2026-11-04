@@ -6,8 +6,9 @@
  * Before worker/schema/readiness.sql is applied every read here is empty
  * ("no check-ins, nothing blocked"), so prescriptions run as before.
  */
+import { mcpStamp } from '../../src/engine/mcpStamp.ts'
 import { asJson } from './db.ts'
-import type { ConnectedStore } from './store.ts'
+import { calendarZone, type ConnectedStore } from './store.ts'
 import { hiddenIds, idList } from './tombstones.ts'
 import type { OverrideActor } from './sessionOverride.ts'
 import { isPainRegion, isRedFlag, type CheckinDay, type PainEntry, type RegionState } from './readiness/rules.ts'
@@ -127,6 +128,26 @@ export async function blockedDuring(store: ConnectedStore, from: string, to: str
     ORDER BY s.region
   `
   return rows.map((r) => r.region)
+}
+
+/**
+ * The athlete's local dates with a logged workout in [from, to], sorted. A
+ * temporary U7 block (v1.2) lapses once a session has been logged after the
+ * day it was set.
+ */
+export async function workoutDates(store: ConnectedStore, from: string, to: string): Promise<string[]> {
+  const [tz] = await store.sql<{ time_zone: string | null }[]>`SELECT time_zone FROM athlete WHERE id = ${store.athleteId}`
+  const zone = calendarZone(tz?.time_zone)
+  const rows = await store.sql<{ performed_at: string }[]>`
+    SELECT to_json(w.performed_at) #>> '{}' AS performed_at
+    FROM workout w
+    JOIN routine r ON r.id = w.routine_id
+    JOIN program p ON p.id = r.program_id
+    WHERE p.athlete_id = ${store.athleteId}
+      AND w.performed_at >= (${from}::date - 1) AND w.performed_at < (${to}::date + 2)
+  `
+  const dates = rows.map((r) => mcpStamp(new Date(r.performed_at), zone).local_date).filter((d) => d >= from && d <= to)
+  return [...new Set(dates)].sort()
 }
 
 /** Regions with an open block (U7), sorted. Empty before readiness.sql. */

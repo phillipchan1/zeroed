@@ -88,9 +88,11 @@ export interface RxReadiness {
   date: string
   flags: Array<{ kind: string; message: string; rule_refs: string[] }>
   level: 'none' | 'trim_accessories' | 'pull_hiit_plyo'
-  regions: Array<{ region: string; status: 'ok' | 'capped' | 'blocked'; score: number; cap: number; reason: string; rule_refs: string[]; refer_out: boolean }>
+  regions: Array<{ region: string; status: 'ok' | 'capped' | 'blocked'; score: number; cap: number; reason: string; rule_refs: string[]; refer_out: boolean; block?: 'persistent' | 'temporary' }>
   blocked_regions: string[]
-  /** Set when a region is blocked: see a clinician before loading it. */
+  /** Methodology v1.2: the blocked regions that lapse after the next session. Absent when none. */
+  temporary_regions?: string[]
+  /** Set when a region is blocked: see a clinician before loading it (or, only temporary blocks, if it doesn't settle). */
   refer_out: string | null
 }
 

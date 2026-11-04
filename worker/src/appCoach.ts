@@ -397,7 +397,8 @@ export async function runIntake(store: ConnectedStore, answers: unknown): Promis
   if (!row?.birth_date && intake.birth_date) await recordBirthDate(store, intake.birth_date, intake.minor)
 
   // Pain and the recovery baseline are a check-in: standing approval, and a
-  // red flag (or pain above the stop line) blocks the region (U7) on the spot.
+  // red flag (or pain above the stop line) blocks the region (U7) on the spot
+  // (v1.2: pain above the stop line alone, for that day and the next session).
   let checkinChange: string | null = null
   const r = intake.recovery
   if (intake.pain.length || r.sleep_hours != null || r.stress != null || r.soreness != null) {

@@ -11,7 +11,7 @@
 //   hidden and every read is logged. The athlete, app_coach and a coach with
 //   the toggle on still see the region.
 //   U4: RPE-chart e1RM with an RPE, Epley without, the method recorded.
-//   Minors: 60 contacts a session (v1.1), tighten-only; v1 still resolves.
+//   Minors: 60 contacts a session (v1.1, kept in v1.2), tighten-only; v1 and v1.1 still resolve.
 //   Athletes A and B never see each other's rows.
 // Synthetic athletes A and B from isolation-seed.sql; synthetic numbers only.
 // Uses throwaway Postgres when ZEROED_TEST_DATABASE_URL is set, else PGlite.
@@ -27,7 +27,7 @@ import { logSessionRpe, SESSION_RPE_HIDDEN } from './sessionRpe.ts'
 import { HEALTH_PATH_HIDDEN } from './methodology.ts'
 import { HEALTH_HELD_TEXT } from './methodology/validators.ts'
 import { checkOverride, engineParams, resolveParams } from './methodology/resolve.ts'
-import { CURRENT_METHODOLOGY, METHODOLOGIES, METHODOLOGY_V1, METHODOLOGY_V1_1 } from './methodology/v1.ts'
+import { CURRENT_METHODOLOGY, METHODOLOGIES, METHODOLOGY_V1, METHODOLOGY_V1_1, METHODOLOGY_V1_2 } from './methodology/v1.ts'
 import { compose, type ComposeInput } from './coach/composer.ts'
 import { redactHealth } from './activities.ts'
 import { redactHealthText } from './regionStatus.ts'
@@ -133,7 +133,8 @@ ok(!JSON.stringify(modelOff).includes('e1rmMethod') && !renderLiftModel(modelOff
 ok(renderLiftModel(modelOn).includes('e1RM 350 (Epley)') && renderLiftModel(modelOn).includes('by Epley (U4)'), 'lift model, v1.1: the estimate says Epley')
 
 // ---- pure: methodology v1.1, minors -------------------------------------------------------------
-ok(CURRENT_METHODOLOGY.version === 'v1.1' && METHODOLOGIES.v1 === METHODOLOGY_V1 && METHODOLOGIES['v1.1'] === METHODOLOGY_V1_1, 'versions: v1.1 is current, v1 still resolves')
+ok(CURRENT_METHODOLOGY.version === 'v1.2' && METHODOLOGIES.v1 === METHODOLOGY_V1 && METHODOLOGIES['v1.1'] === METHODOLOGY_V1_1, 'versions: v1.2 is current, v1 and v1.1 still resolve')
+ok(METHODOLOGY_V1_2.minors.contacts_per_session_max === 60 && METHODOLOGY_V1_2.params.U4.e1rm_without_rpe === 'epley' && JSON.stringify(METHODOLOGY_V1_2.params.U15) === JSON.stringify(METHODOLOGY_V1_1.params.U15), 'v1.2: minors 60, U4 and U15 as v1.1')
 ok(METHODOLOGY_V1.minors.contacts_per_session_max === 80 && METHODOLOGY_V1.params.U4.e1rm_without_rpe === undefined, 'v1 is untouched (80, chart at RPE 10)')
 ok(METHODOLOGY_V1_1.minors.contacts_per_session_max === 60 && METHODOLOGY_V1_1.params.U4.e1rm_without_rpe === 'epley', 'v1.1: minors 60 contacts, U4 Epley fallback')
 ok(JSON.stringify({ ...METHODOLOGY_V1_1.params, U4: METHODOLOGY_V1.params.U4 }) === JSON.stringify(METHODOLOGY_V1.params), 'v1.1: no other param moved (U6, U7, U15 thresholds unchanged)')
@@ -196,8 +197,10 @@ await flag(A, true)
 await flag(B, true)
 ok((await setCoachHealth(storeA, athleteA, TOKEN_A2_ID, true)).ok && (await setCoachHealth(storeA, athleteA, TOKEN_A2_ID, false)).ok, 'toggle: health off for the private coach (logged)')
 await harness.query(`UPDATE athlete SET birth_date = '1990-01-01' WHERE id = $1`, [A])
+// v1.2: over 5 twice within 14 days is a persistent block (one alone lapses after the next session).
+await saveCheckin(storeA, athleteA, { date: addDays(await athleteToday(storeA), -3), pain: [{ region: 'knee', score: 7 }] })
 const blocked = await saveCheckin(storeA, athleteA, { pain: [{ region: 'knee', score: 7 }] })
-ok(blocked.ok, 'setup: the athlete\'s knee is blocked (pain > 5)')
+ok(blocked.ok, 'setup: the athlete\'s knee is blocked (pain > 5, twice in 14 days)')
 await harness.query(
   `INSERT INTO methodology_override (athlete_id, methodology_version, path, value, actor_type, actor_id, approval_ref, preview_id, change_id)
    VALUES ($1::uuid, 'v1.1', 'U7.regions.ankle.blocked', 'true'::jsonb, 'athlete', $1::text, 'tap:synthetic', 'chp_synthetic', gen_random_uuid())`, [A],
@@ -210,9 +213,9 @@ ok((await call('get_lift_model', { lift: 'squat' })).includes('(RPE chart)'), 'U
 const onSearch = await call('search_lifts', { exercise: 'deadlift' })
 ok(onSearch.includes('(e1RM 350, Epley)') && onSearch.includes('Epley when no RPE is logged (U4)'), 'U4 on: search_lifts records the method per estimate')
 const review = JSON.parse(await call('get_weekly_review', {})) as { methodology_version: string; priority_lifts: Array<{ lift: string; e1rm_week_method: string | null; e1rm_prior_method: string | null }> }
-ok(review.methodology_version.startsWith('v1.1') && review.priority_lifts.every((l) => 'e1rm_week_method' in l && 'e1rm_prior_method' in l), 'U4 on: the weekly review records the method beside each e1RM, on v1.1')
+ok(review.methodology_version.startsWith('v1.2') && review.priority_lifts.every((l) => 'e1rm_week_method' in l && 'e1rm_prior_method' in l), 'U4 on: the weekly review records the method beside each e1RM, on v1.2')
 const meth = JSON.parse(await call('get_methodology', {})) as { methodology_version: string; params: { U4: { e1rm_without_rpe: string } }; minors: { contacts_per_session_max: number } }
-ok(meth.methodology_version.startsWith('v1.1') && meth.params.U4.e1rm_without_rpe === 'epley' && meth.minors.contacts_per_session_max === 60, 'get_methodology: v1.1, U4 Epley fallback, minors 60')
+ok(meth.methodology_version.startsWith('v1.2') && meth.params.U4.e1rm_without_rpe === 'epley' && meth.minors.contacts_per_session_max === 60, 'get_methodology: v1.2, U4 Epley fallback, minors 60')
 ok((await call('preview_methodology_override', { path: 'minors.contacts_per_session_max', value: 70 })).includes('only be tightened'), 'MCP: raising the minors ceiling is refused')
 ok(chp(await call('preview_methodology_override', { path: 'minors.contacts_per_session_max', value: 50 })) !== '', 'MCP: lowering it previews')
 

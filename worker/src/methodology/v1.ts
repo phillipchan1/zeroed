@@ -26,11 +26,34 @@
  *   minors.contacts_per_session_max 60   was an 80 placeholder; still tighten-only
  * v1 stays resolvable (METHODOLOGIES) for prescriptions already stamped with it.
  *
+ * v1.2 (spec section 11a, S&C review, Nov 4 2026) is v1.1 plus:
+ *   U6  one day is a flag only at sleep < 5 h, stress 5 or soreness 5;
+ *       sleep < 6 h and stress / soreness ≥ 4 count only as a 3-day streak.
+ *       The main lift is never touched (as before).
+ *   U7  "worse the next morning" needs the next-morning rating above the
+ *       session's and ≥ 4. A rating > 5 blocks the region for that day and
+ *       the next session, with the refer-out notice, then lapses. A block is
+ *       persistent (clinician clearance) only on a red flag, > 5 twice within
+ *       14 days, or a rating rising across 3 sessions. The 4–5 rule is unchanged.
+ *   Under 18 the two loosenings (fewer single-day flags, blocks that lapse)
+ *   don't apply: resolve.ts keeps the v1.1 behaviour for a minor (D6).
+ * Absent keys (v1, v1.1) mean the v1.1 rules, so both still resolve exactly.
+ *
+ * Stored data under v1.2 (readiness.ts): nothing is rewritten. A temporary
+ * block is derived from the pain report (no region_status row); a persistent
+ * one writes a 'blocked' row as before. A 'blocked' row stored under v1.1
+ * (e.g. a single 6/10) is not re-judged: rows don't record the version or
+ * the history behind them, and a block the athlete was told needs a
+ * clinician should not silently lift on deploy. It stays until the athlete
+ * marks it cleared, as it always did. Rollback: tracks_v1 off (instant), or
+ * redeploy the v1.1 Worker; there is no schema change to undo.
+ *
  * Numbers are coaching defaults, not medical prescriptions.
  */
 
 export const METHODOLOGY_V1_VERSION = 'v1'
 export const METHODOLOGY_V1_1_VERSION = 'v1.1'
+export const METHODOLOGY_V1_2_VERSION = 'v1.2'
 
 /** Pain regions a cap or a red flag can be set on (U7). */
 export const PAIN_REGIONS = [
@@ -68,12 +91,30 @@ export interface MethodologyParams {
   U6: {
     trim_accessories_at_flags: number; pull_hiit_plyo_at_flags: number; cut_order: string[]
     sleep_flag_hours: number; sleep_flag_nights: number; stress_soreness_flag_at: number; stress_soreness_flag_days: number
+    /** v1.2: one day alone is a flag only under this many hours. Absent (v1, v1.1): sleep_flag_hours. */
+    single_day_sleep_under_hours?: number
+    /** v1.2: one day alone is a flag only at this stress / soreness. Absent (v1, v1.1): stress_soreness_flag_at. */
+    single_day_stress_soreness_at?: number
   }
   U7: {
     pain_cap: number; regress_band: Range; stop_above: number
     raised_cap: number; raised_cap_requires: 'settled_by_next_morning'
     red_flags_block: true
     regions: Partial<Record<PainRegion, RegionRule>>
+    /**
+     * v1.2: "worse the next morning" blocks when the next-morning rating is
+     * above the session's and at least this. Absent (v1, v1.1): the session's
+     * rating was over pain_cap and the next morning's above it.
+     */
+    worse_next_morning_at?: number
+    /**
+     * v1.2: a block that meets no persistent_after criterion (and has no red
+     * flag) covers that day and the next session, then lapses. Absent or
+     * false (v1, v1.1, under 18): every block stays until a clinician clears it.
+     */
+    temporary_blocks?: boolean
+    /** v1.2: what makes a block persistent, besides a red flag. */
+    persistent_after?: { over_stop_times: number; within_days: number; rising_sessions: number }
   }
   U8: { order: Array<'warmup' | 'speed' | 'heavy' | 'accessory' | 'conditioning'> }
   U9: { hiit_minutes: Range; hiit_max_per_week: number; conditioning_gap_hours: number; prefer_modalities: string[]; no_hiit_day_before_heavy_lower: true }
@@ -195,11 +236,28 @@ export const METHODOLOGY_V1_1: Methodology = {
   minors: { ...METHODOLOGY_V1.minors, contacts_per_session_max: 60 },
 }
 
+/** v1.2 (section 11a): the S&C review's U6 and U7 fixes. Everything else is v1.1. */
+export const METHODOLOGY_V1_2: Methodology = {
+  ...METHODOLOGY_V1_1,
+  version: METHODOLOGY_V1_2_VERSION,
+  params: {
+    ...METHODOLOGY_V1_1.params,
+    U6: { ...METHODOLOGY_V1_1.params.U6, single_day_sleep_under_hours: 5, single_day_stress_soreness_at: 5 },
+    U7: {
+      ...METHODOLOGY_V1_1.params.U7,
+      worse_next_morning_at: 4,
+      temporary_blocks: true,
+      persistent_after: { over_stop_times: 2, within_days: 14, rising_sessions: 3 },
+    },
+  },
+}
+
 /** Every version the Worker can still resolve, by version string. */
 export const METHODOLOGIES: Record<string, Methodology> = {
   [METHODOLOGY_V1_VERSION]: METHODOLOGY_V1,
   [METHODOLOGY_V1_1_VERSION]: METHODOLOGY_V1_1,
+  [METHODOLOGY_V1_2_VERSION]: METHODOLOGY_V1_2,
 }
 
 /** The version new prescriptions run on. */
-export const CURRENT_METHODOLOGY = METHODOLOGY_V1_1
+export const CURRENT_METHODOLOGY = METHODOLOGY_V1_2
