@@ -4205,6 +4205,36 @@ textarea.input {
 }
 .checkin__field .input { height: 44px; }
 
+/* The daily check-in on Today (tracks_v1): the same card, plus pain by region. */
+.checkin--daily { margin: 0 0 24px; }
+.checkin__note { margin-top: 8px; line-height: 1.5; }
+.checkin__pain { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
+.checkin__flags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.checkin__flag {
+  min-height: 32px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-dim);
+  font-size: var(--fs-micro);
+  cursor: pointer;
+}
+.checkin__flag--on { border-color: var(--danger, #c44); color: var(--text); }
+.checkin__blocked { margin: 8px 0; padding: 10px 0; border-top: 1px solid var(--line); }
+.checkin__clear {
+  min-height: 32px;
+  margin-top: 6px;
+  padding: 0;
+  background: none;
+  border: 0;
+  color: var(--text-dim);
+  font-size: var(--fs-sm);
+  text-decoration: underline;
+  cursor: pointer;
+}
+.checkin__acts { display: flex; gap: 8px; margin-top: 12px; }
+
 .lift-reason { margin-top: 8px; }
 .lift-reason p { color: var(--text); line-height: 1.45; }
 .lift-reason ul { margin: 4px 0 0; padding-left: 16px; }

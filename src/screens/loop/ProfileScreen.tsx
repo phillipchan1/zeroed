@@ -12,6 +12,9 @@ import {
   PageHeader, SectionHeader, Skeleton, Button, Input, Row, Sheet,
 } from '../../components/ui'
 import { TrainingMaxes } from './TrainingMaxes'
+import { tracksOn } from '../../lib/tracksFlag'
+import { fetchCoachAccess, readLabel, setCoachHealth } from '../../lib/readiness'
+import { whenLabel } from '../../lib/changeLog'
 
 interface McpTokenRow {
   id: string
@@ -110,6 +113,21 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   const [freshToken, setFreshToken] = useState<{ name: string; token: string } | null>(null)
   const [copied, setCopied] = useState(false)
 
+  // tracks_v1: what each coach may see (D3) and every read they made.
+  const { data: coachAccess, refetch: refetchCoachAccess } = useCachedLoader(
+    tracksOn() ? cacheKeys.coachAccess(athleteId) : null,
+    fetchCoachAccess,
+  )
+
+  async function toggleHealth(id: string, on: boolean) {
+    if (mcpBusy) return
+    setMcpBusy(true)
+    const res = await setCoachHealth(id, on)
+    setMcpBusy(false)
+    if (!res.ok) setMcpError(res.text)
+    refetchCoachAccess()
+  }
+
   const reloadMcpTokens = useCallback(async () => {
     const { data, error } = await supabase
       .from('mcp_token')
@@ -162,6 +180,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
         .eq('id', id)
       if (error) throw error
       await reloadMcpTokens()
+      if (tracksOn()) refetchCoachAccess()
     } catch (e) {
       setMcpError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -366,6 +385,36 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
               <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)' }}>No active tokens yet.</p>
             )}
           </div>
+          {tracksOn() && coachAccess && coachAccess.coaches.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <SectionHeader>Coach access</SectionHeader>
+              <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)', lineHeight: 1.45 }}>
+                Coaches read your log and propose changes; only you approve. Check-ins and pain are shared only while the switch is on.
+              </p>
+              {coachAccess.coaches.map((c) => (
+                <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 44, fontSize: 'var(--fs-sm)' }}>
+                  <input
+                    type="checkbox"
+                    checked={c.share_health}
+                    disabled={mcpBusy}
+                    onChange={(e) => void toggleHealth(c.id, e.target.checked)}
+                  />
+                  <span>{c.name} sees check-ins and pain</span>
+                </label>
+              ))}
+              {coachAccess.reads.length > 0 ? (
+                <ul style={{ margin: '8px 0 0', padding: 0, listStyle: 'none' }}>
+                  {coachAccess.reads.map((r) => (
+                    <li key={r.id} className="text-dim" style={{ fontSize: 'var(--fs-sm)', lineHeight: 1.6 }}>
+                      {r.who} read {readLabel(r.tool)} · {whenLabel(r.created_at)}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)' }}>No coach has read anything yet.</p>
+              )}
+            </div>
+          )}
         </div>
 
         <Button variant="ghost" full onClick={handleSignOut} disabled={signingOut}>

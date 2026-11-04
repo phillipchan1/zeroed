@@ -107,6 +107,12 @@ export function approvalsUrl(): string | null {
   return `${base}/approvals`
 }
 
+export function readinessUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/readiness`
+}
+
 export function authBaseUrl(): string | null {
   const base = apiBaseUrl()
   if (!base || !isCloudflareApi()) return null

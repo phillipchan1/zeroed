@@ -1,0 +1,206 @@
+import { useState } from 'react'
+import { ChevronRight } from 'lucide-react'
+import { Button } from '../../components/ui'
+import { success } from '../../lib/haptics'
+import {
+  clearRegion, RED_FLAG_LABEL, regionLabel, submitCheckin,
+  type PainInput, type ReadinessToday,
+} from '../../lib/readiness'
+
+// ---- Daily check-in (tracks_v1, G4) ------------------------------------------
+// Sleep, stress, soreness and pain by region, once a day. The Worker turns it
+// into today's adjustments (U6 trims accessories, then pulls HIIT/plyos; U7
+// regresses or blocks a painful region) and the session shows them with why.
+// Folded to one line until it's wanted; skipping it is fine.
+
+const FIELDS = [
+  { key: 'sleep_hours', label: 'Sleep h', min: 0, max: 24, step: 0.5 },
+  { key: 'stress', label: 'Stress 1–5', min: 1, max: 5, step: 1 },
+  { key: 'soreness', label: 'Soreness 1–5', min: 1, max: 5, step: 1 },
+] as const
+
+type FieldKey = typeof FIELDS[number]['key']
+
+function summary(t: ReadinessToday): string {
+  const c = t.checkin
+  const bits = [
+    c?.sleep_hours != null ? `${c.sleep_hours}h sleep` : null,
+    c?.stress != null ? `stress ${c.stress}` : null,
+    c?.soreness != null ? `soreness ${c.soreness}` : null,
+    ...t.pain.map((p) => `${regionLabel(p.region).toLowerCase()} ${p.score}/10`),
+  ].filter(Boolean)
+  return bits.length ? bits.join(' · ') : 'sleep, stress, soreness, pain'
+}
+
+function BlockedRow({ region, reason, onCleared }: { region: string; reason: string | null; onCleared: () => void }) {
+  const [phase, setPhase] = useState<'idle' | 'confirm' | 'working'>('idle')
+  const [message, setMessage] = useState<string | null>(null)
+  async function clear() {
+    setPhase('working')
+    const res = await clearRegion(region)
+    setPhase('idle')
+    setMessage(res.ok ? null : res.text)
+    if (res.ok) {
+      success()
+      onCleared()
+    }
+  }
+  return (
+    <div className="checkin__blocked">
+      <p className="text-sm"><strong>{regionLabel(region)}: no loading.</strong> {reason}</p>
+      {message && <p className="text-xs text-dim">{message}</p>}
+      {phase === 'idle' ? (
+        <button type="button" className="checkin__clear" onClick={() => setPhase('confirm')}>A clinician cleared it</button>
+      ) : (
+        <div className="checkin__acts">
+          <Button variant="primary" disabled={phase === 'working'} onClick={() => void clear()}>Yes, cleared</Button>
+          <Button variant="outline" disabled={phase === 'working'} onClick={() => setPhase('idle')}>Not yet</Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
+export function CheckinCard({ today, onSaved }: { today: ReadinessToday; onSaved: () => void }) {
+  const [open, setOpen] = useState(false)
+  const [values, setValues] = useState<Record<FieldKey, number | null>>({
+    sleep_hours: today.checkin?.sleep_hours ?? null,
+    stress: today.checkin?.stress ?? null,
+    soreness: today.checkin?.soreness ?? null,
+  })
+  const [pain, setPain] = useState<PainInput[]>([])
+  const [adding, setAdding] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<string | null>(null)
+
+  const setField = (key: FieldKey, raw: string, min: number, max: number) => {
+    const n = raw === '' ? null : Number(raw)
+    setValues({ ...values, [key]: n == null || !Number.isFinite(n) ? null : Math.min(max, Math.max(min, n)) })
+  }
+  const setPainAt = (i: number, next: Partial<PainInput>) => setPain(pain.map((p, k) => (k === i ? { ...p, ...next } : p)))
+  const toggleFlag = (i: number, flag: string) => {
+    const has = pain[i].red_flags.includes(flag)
+    setPainAt(i, { red_flags: has ? pain[i].red_flags.filter((f) => f !== flag) : [...pain[i].red_flags, flag] })
+  }
+  const nothing = values.sleep_hours == null && values.stress == null && values.soreness == null && !pain.length
+
+  async function save() {
+    if (busy || nothing) return
+    setBusy(true)
+    const res = await submitCheckin({ ...values, pain })
+    setBusy(false)
+    setMessage(res.text || null)
+    if (res.ok) {
+      success()
+      setPain([])
+      onSaved()
+    }
+  }
+
+  const r = today.readiness
+  return (
+    <div className="checkin checkin--daily fade-rise">
+      <button
+        type="button"
+        className="checkin__toggle"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+        aria-label={`Daily check-in: ${summary(today)}`}
+      >
+        <span className="checkin__label">Check-in</span>
+        <span className="checkin__summary">{summary(today)}</span>
+        <ChevronRight size={14} strokeWidth={2} style={{ transform: open ? 'rotate(90deg)' : undefined, color: 'var(--text-dim)' }} />
+      </button>
+
+      {today.blocked.map((b) => <BlockedRow key={b.region} region={b.region} reason={b.reason} onCleared={onSaved} />)}
+      {r.refer_out && <p className="text-xs text-dim checkin__note">{r.refer_out}</p>}
+      {r.flags.length > 0 && (
+        <p className="text-xs text-dim checkin__note">
+          {r.flags.map((f) => f.message).join(' · ')} — {r.level === 'pull_hiit_plyo' ? 'accessories trimmed, HIIT and plyos pulled today' : 'accessories trimmed today'}. Main lifts stay.
+        </p>
+      )}
+
+      {open && (
+        <>
+          <div className="checkin__grid">
+            {FIELDS.map((f) => (
+              <label key={f.key} className="checkin__field">
+                <span>{f.label}</span>
+                <input
+                  className="input"
+                  type="number"
+                  inputMode="decimal"
+                  aria-label={f.label}
+                  min={f.min}
+                  max={f.max}
+                  step={f.step}
+                  value={values[f.key] ?? ''}
+                  onChange={(e) => setField(f.key, e.target.value, f.min, f.max)}
+                />
+              </label>
+            ))}
+          </div>
+
+          {pain.map((p, i) => (
+            <div key={p.region} className="checkin__pain">
+              <label className="checkin__field">
+                <span>{regionLabel(p.region)} pain 0–10</span>
+                <input
+                  className="input"
+                  type="number"
+                  inputMode="numeric"
+                  aria-label={`${regionLabel(p.region)} pain 0 to 10`}
+                  min={0}
+                  max={10}
+                  step={1}
+                  value={p.score}
+                  onChange={(e) => setPainAt(i, { score: Math.min(10, Math.max(0, Math.round(Number(e.target.value) || 0))) })}
+                />
+              </label>
+              <div className="checkin__flags" role="group" aria-label={`${regionLabel(p.region)} red flags`}>
+                {today.red_flags.map((flag) => (
+                  <button
+                    key={flag}
+                    type="button"
+                    className={`checkin__flag${p.red_flags.includes(flag) ? ' checkin__flag--on' : ''}`}
+                    aria-pressed={p.red_flags.includes(flag)}
+                    onClick={() => toggleFlag(i, flag)}
+                  >
+                    {RED_FLAG_LABEL[flag] ?? flag}
+                  </button>
+                ))}
+              </div>
+              <button type="button" className="checkin__clear" onClick={() => setPain(pain.filter((_, k) => k !== i))}>Remove</button>
+            </div>
+          ))}
+
+          <label className="checkin__field" style={{ marginTop: 10 }}>
+            <span>Pain somewhere?</span>
+            <select
+              className="input"
+              value={adding}
+              onChange={(e) => {
+                const region = e.target.value
+                setAdding('')
+                if (region && !pain.some((p) => p.region === region)) setPain([...pain, { region, score: 0, red_flags: [] }])
+              }}
+            >
+              <option value="">Add a region…</option>
+              {today.regions.filter((x) => !pain.some((p) => p.region === x)).map((x) => (
+                <option key={x} value={x}>{regionLabel(x)}</option>
+              ))}
+            </select>
+          </label>
+
+          <div className="checkin__acts">
+            <Button variant="primary" disabled={busy || nothing} onClick={() => void save()}>{busy ? 'Saving…' : 'Log check-in'}</Button>
+          </div>
+          {message && <p className="text-xs text-dim checkin__note">{message}</p>}
+          <p className="text-xs text-dim checkin__note">
+            Pain over 3/10 lightens that area today; over 5, worse than yesterday, or any red flag stops loading it until a clinician clears it.
+          </p>
+        </>
+      )}
+    </div>
+  )
+}

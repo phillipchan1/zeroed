@@ -17,9 +17,11 @@ import type { Env } from './env.ts'
 import { sessionFromRequest, resolveAthleteId } from './data.ts'
 import { athleteOwnsRoutine } from './edits.ts'
 import { loadInsights, loadLiftModelSources, loadLiveProgram, makeStore, type ConnectedStore } from './store.ts'
-import { overrideContextFor, tracksV1On, type OverrideContext } from './sessionOverride.ts'
+import { athleteToday, overrideContextFor, tracksV1On, type OverrideContext } from './sessionOverride.ts'
 import { blockedRegions, engineParams, resolveMethodology, type Resolved } from './methodology.ts'
 import { classify } from './methodology/classify.ts'
+import { readinessContextFor, type ReadinessContext } from './readiness.ts'
+import { applyReadiness } from './readiness/rules.ts'
 
 export interface SessionRxBody {
   routine_id?: string
@@ -119,15 +121,29 @@ function liftSrcForDisplay(src: LiftModelSources, u: ReturnType<typeof unitConte
   }
 }
 
+/** What readiness changes for a date, as a version input. Only present when it changes something. */
+function readinessKey(r: ReadinessContext | null): unknown {
+  if (!r) return null
+  return {
+    date: r.date,
+    flags: r.flags.map((f) => f.kind),
+    regions: r.regions.map((x) => [x.region, x.status, x.score]),
+    blocked: r.blocked,
+  }
+}
+
 async function programVersionOf(
   live: Awaited<ReturnType<typeof loadLiveProgram>>,
   liftSrc: LiftModelSources,
   methodology: Resolved | null,
+  readiness: ReadinessContext | null = null,
 ): Promise<string> {
   return rxVersionHash({
     // An override changes every number, so the app refetches. Absent with the
     // defaults: the same version as before G3.
     ...(methodology && methodology.version !== methodology.base_version ? { methodology: methodology.version } : {}),
+    // G4: a check-in or a block changes today's numbers. Absent without one.
+    ...(readiness ? { readiness: readinessKey(readiness) } : {}),
     sessions: (live?.sessions ?? []).map((s) => ({
       id: s.routineId,
       name: s.name,
@@ -153,6 +169,8 @@ async function prescribeOne(
     programVersion: string
     overrides?: OverrideContext | null
     methodology?: Resolved | null
+    /** G4, tracks_v1: null unless the date has a check-in, a pain report or an open block. */
+    readiness?: ReadinessContext | null
   },
 ): Promise<{ prescription: SessionPrescription; version: string }> {
   const session = opts.live?.sessions.find((s) => s.routineId === opts.routineId)
@@ -194,7 +212,17 @@ async function prescribeOne(
     dayOf: opts.dayOf,
     today: displaySrc.today ?? '',
   })
-  const rx = opts.methodology ? applyMethodologyLimits(computed, exercises, opts.methodology) : computed
+  const readiness = opts.readiness ?? null
+  const limited = opts.methodology
+    ? applyMethodologyLimits(computed, exercises, opts.methodology, readiness ? readiness.blocked : blockedRegions(opts.methodology))
+    : computed
+  const adjusted = opts.methodology && readiness
+    ? applyReadiness(limited, exercises, {
+      date: readiness.date, flags: readiness.flags, regions: readiness.regions, blocked: readiness.blocked,
+      params: opts.methodology.params, unit: opts.u.unit,
+    })
+    : null
+  const rx = adjusted ? { ...adjusted.rx, readiness: readiness!.view, adjustments: adjusted.adjustments } : limited
   const version = rxVersionHash({
     exercises: exercises.map(exerciseStamp),
     rules: displaySrc.progressionRules ?? [],
@@ -207,6 +235,7 @@ async function prescribeOne(
     // Only once an override or the under-18 rules change the numbers; the
     // defaults reproduce today's math, so today's version string stays.
     ...(opts.methodology && opts.methodology.version !== opts.methodology.base_version ? { methodology: opts.methodology.version } : {}),
+    ...(readiness ? { readiness: readinessKey(readiness) } : {}),
   })
   const stamped = opts.methodology ? { ...rx, methodology_version: opts.methodology.version } : rx
   return { prescription: override ? { ...stamped, version, override } : { ...stamped, version }, version }
@@ -215,11 +244,10 @@ async function prescribeOne(
 /**
  * tracks_v1: what the methodology forbids outright, applied after the math.
  * A red-flagged region (U7) is not loaded: those exercises are skipped with
- * the reason. Under 18 no RPE above the cap (D6); main lifts already ran at
+ * the reason (G4: open region_status blocks too). Under 18 no RPE above the cap (D6); main lifts already ran at
  * it (engineParams.maxRpe), this caps the rest. Nothing changes otherwise.
  */
-function applyMethodologyLimits(rx: SessionPrescription, exercises: ExerciseTemplate[], m: Resolved): SessionPrescription {
-  const blocked = blockedRegions(m)
+function applyMethodologyLimits(rx: SessionPrescription, exercises: ExerciseTemplate[], m: Resolved, blocked: string[]): SessionPrescription {
   const maxRpe = m.minor ? m.minors.max_rpe : null
   if (!blocked.length && maxRpe == null) return rx
   const out: SessionPrescription = {
@@ -269,10 +297,16 @@ export async function sessionRxForAthlete(sql: Sql, athleteId: string, body: Ses
   // flag off it is null and everything below is exactly the pre-G3 path.
   const methodology = flagOn ? await resolveMethodology(store) : null
   const liftSrc = methodology ? { ...loaded, params: engineParams(methodology) } : loaded
-  const stamp = methodology ? { methodology_version: methodology.version } : {}
+  // G4, tracks_v1 only: the day's check-in, pain and blocks. Null when there
+  // is nothing for this date, so the prescription is exactly the G3 one.
+  const readinessCtx = methodology
+    ? await readinessContextFor(store, typeof body.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(body.date) ? body.date : await athleteToday(store), methodology)
+    : null
+  const readiness = readinessCtx?.active ? readinessCtx : null
+  const stamp = methodology ? { methodology_version: methodology.version, ...(readiness ? { readiness: readiness.view } : {}) } : {}
   const p1 = insights[0] ? asInsight(insights[0]) : null
   const review = await latestReview(store, live?.programId ?? null)
-  const programVersion = await programVersionOf(live, loaded, methodology)
+  const programVersion = await programVersionOf(live, loaded, methodology, readiness)
   const dayOf = body.day_of ?? null
 
   if (body.version_only) {
@@ -299,7 +333,7 @@ export async function sessionRxForAthlete(sql: Sql, athleteId: string, body: Ses
     const one = await prescribeOne(store, {
       routineId: ids[0],
       exercises: body.exercises,
-      dayOf, u, liftSrc, live, p1, review, programVersion, overrides, methodology,
+      dayOf, u, liftSrc, live, p1, review, programVersion, overrides, methodology, readiness,
     })
     return [{
       prescription: one.prescription,
@@ -315,7 +349,7 @@ export async function sessionRxForAthlete(sql: Sql, athleteId: string, body: Ses
     const one = await prescribeOne(store, {
       routineId: id,
       exercises: body.exercises_by_id?.[id],
-      dayOf, u, liftSrc, live, p1, review, programVersion, overrides, methodology,
+      dayOf, u, liftSrc, live, p1, review, programVersion, overrides, methodology, readiness,
     })
     prescriptions[id] = one.prescription
     versions[id] = one.version

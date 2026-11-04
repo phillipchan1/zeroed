@@ -47,6 +47,9 @@ export const cacheKeys = {
   // tracks_v1: the Changes feed under Program — every recorded write, newest first.
   changes:     (athleteId: string) => `changes:${athleteId}`,
   rxVersion:   (athleteId: string) => `rxver:${athleteId}`,
+  // tracks_v1: today's check-in, pain and blocked regions (G4), and who read what.
+  readiness:   (athleteId: string) => `readiness:${athleteId}`,
+  coachAccess: (athleteId: string) => `coach-access:${athleteId}`,
   // One finished session as performed — what the preview of a DONE session reads
   // instead of the prescription.
   sessionActuals: (workoutId: string) => `actuals:${workoutId}`,

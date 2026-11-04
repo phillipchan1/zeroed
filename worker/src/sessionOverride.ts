@@ -41,6 +41,7 @@ import { APPROVAL_REF_SHAPE, checkApproval, createApproval, parseApprovalRef } f
 import { withTx } from './changeLog.ts'
 import { methodologyVersionFor, resolveMethodology, blockedRegions } from './methodology.ts'
 import { CURRENT_METHODOLOGY } from './methodology/v1.ts'
+import { statusBlockedRegions } from './regionStatus.ts'
 import { validateEdit, warningsSection, type PreviewWarning, type WeekSession } from './methodology/validators.ts'
 
 export type ActorType = 'athlete' | 'mcp' | 'app_coach' | 'system'
@@ -563,7 +564,7 @@ async function validateOverride(
   ops: OverrideInputOp[],
   rewrite: boolean,
 ): Promise<{ warnings: PreviewWarning[]; blocked: PreviewWarning | null }> {
-  const [live, methodology] = await Promise.all([loadLiveProgram(store), resolveMethodology(store)])
+  const [live, methodology, statusBlocked] = await Promise.all([loadLiveProgram(store), resolveMethodology(store), statusBlockedRegions(store)])
   const template: WeekSession[] = (live?.sessions ?? []).map((s) => ({ key: s.routineId, name: s.name, dow: s.intendedDow, exercises: s.exercises }))
   const dated = (side: 'before' | 'after'): WeekSession[] => {
     const replaced = new Set(sessions.filter((x) => template.some((t) => t.key === x.routine_id && t.dow === weekdayOf(x.date))).map((x) => x.routine_id))
@@ -579,7 +580,7 @@ async function validateOverride(
     changed: ops.filter((o) => o.op !== 'move').length,
     total: template.reduce((n, s) => n + s.exercises.length, 0),
     rewrite,
-    blockedRegions: blockedRegions(methodology),
+    blockedRegions: [...new Set([...blockedRegions(methodology), ...statusBlocked])].sort(),
   })
 }
 
