@@ -348,6 +348,60 @@ const weekPreview = toolText((await rpc(TOKEN_A, 'tools/call', {
 })).body)
 ok(weekPreview.includes('labeled 2026-11-09') || weekPreview.includes('Preview against'), 'e2e: preview week_start labels the header')
 
+const goalBrief = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'get_goal_brief', arguments: {} })).body)
+ok(goalBrief.includes('Hip IR L') && goalBrief.includes('"display"') && goalBrief.includes('pending_proposals'), 'brief: goals as the athlete sees them, plus what is waiting')
+ok(!toolText((await rpc(TOKEN_B, 'tools/call', { name: 'get_goal_brief', arguments: {} })).body).includes('Hip IR L'), 'isolation: B brief hides A goals')
+
+const pressEdit = { type: 'add_exercise', session_name: 'A day', exercise_name: 'Push Press', sets: 3, reps: '3', load: '105', rationale: 'second press exposure' }
+const proposed = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'preview_program_edits',
+  arguments: { propose: true, title: 'Add a push press.', rationale: 'Press has held for three weeks.', goal_ids: ['Hip IR L'], edits: [pressEdit] },
+})).body)
+ok(proposed.includes('Parked for the athlete as proposal'), 'propose: the preview is parked')
+const [prop] = await sql<{ id: string; status: string; goal_ids: unknown; athlete_id: string }[]>`
+  SELECT id, status, goal_ids, athlete_id FROM coach_proposal ORDER BY created_at DESC LIMIT 1
+`
+ok(prop?.athlete_id === A && prop.status === 'pending', 'propose: pending, on A')
+ok(Array.isArray(prop?.goal_ids) && (prop.goal_ids as unknown[]).length === 1, 'propose: a goal name resolves to its id')
+const again = toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'preview_program_edits',
+  arguments: { propose: true, title: 'Add a push press.', edits: [pressEdit] },
+})).body)
+ok(again.includes('Already parked'), 'propose: the same preview is not parked twice')
+const pressCount = async () => {
+  const rows = await sql<{ exercises: Array<{ name: string }> }[]>`
+    SELECT r.exercises FROM routine r JOIN program p ON p.id = r.program_id WHERE p.athlete_id = ${A}
+  `
+  return rows.reduce((n, r) => n + (Array.isArray(r.exercises) ? r.exercises.filter((e) => e.name === 'Push Press').length : 0), 0)
+}
+ok(await pressCount() === 0, 'propose: parking writes nothing to the program')
+
+const bAccept = toolText((await rpc(TOKEN_B, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: prop!.id } })).body)
+ok(bAccept.includes('No such proposal'), 'isolation: B cannot apply A proposal')
+const accepted = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: prop!.id } })).body)
+ok(!/^Refused/.test(accepted) && await pressCount() === 1, 'accept: applies exactly the stored edit')
+const [applied] = await sql<{ status: string }[]>`SELECT status FROM coach_proposal WHERE id = ${prop!.id}`
+ok(applied?.status === 'applied', 'accept: the proposal is marked applied')
+const [acceptNote] = await sql<{ ref_id: string | null }[]>`
+  SELECT ref_id::text FROM coach_message WHERE athlete_id = ${A} AND body LIKE 'Accepted: Add a push press.%'
+`
+ok(acceptNote?.ref_id === (prop!.goal_ids as string[])[0], 'accept: the move is pinned to the goal it serves')
+const twice = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: prop!.id } })).body)
+ok(twice.includes('already applied') && await pressCount() === 1, 'accept: a second accept changes nothing')
+
+toolText((await rpc(TOKEN_A, 'tools/call', {
+  name: 'preview_program_edits',
+  arguments: { propose: true, title: 'Add a landmine press.', edits: [{ ...pressEdit, exercise_name: 'Landmine Press' }] },
+})).body)
+const [stale] = await sql<{ id: string }[]>`SELECT id FROM coach_proposal WHERE status = 'pending' AND athlete_id = ${A} ORDER BY created_at DESC LIMIT 1`
+await rpc(TOKEN_A, 'tools/call', {
+  name: 'apply_program_edits',
+  arguments: { confirm: true, edits: [{ ...pressEdit, exercise_name: 'Face Pull', reps: '15', load: null }] },
+})
+const staleText = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: stale!.id } })).body)
+const [staleRow] = await sql<{ status: string }[]>`SELECT status FROM coach_proposal WHERE id = ${stale!.id}`
+ok(staleText.includes('changed after') && staleRow?.status === 'stale', 'accept: refuses when the program changed since the preview')
+
 await harness.close()
 
 console.log(`${checks} checks, ${fails.length} failed (${harness.backend})`)

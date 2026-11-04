@@ -12,6 +12,7 @@ import { fetchProfileMeta } from './ProfileScreen'
 import { GoalBar, GoalStatus, goalValue, shortDate } from './goalsUi'
 import { TrackGlyph } from './tracksUi'
 import { BlockRoad, blockWeeks } from './BlockRoad'
+import { fetchProposals, type CoachProposal } from '../../lib/proposals'
 
 /** Reticle labels: the goal's name without its side, short enough for a sector. */
 function axisLabel(g: GoalView): string {
@@ -40,6 +41,7 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
   const { data, loading } = useCachedLoader<GoalView[]>(cacheKeys.goals(athleteId), () => fetchGoalsView(athleteId))
   const { data: view } = useCachedLoader(cacheKeys.program(athleteId), () => fetchProgramView(athleteId))
   const { data: meta } = useCachedLoader(cacheKeys.profile(athleteId), () => fetchProfileMeta(athleteId))
+  const { data: proposals } = useCachedLoader<CoachProposal[]>(cacheKeys.proposals(athleteId), fetchProposals)
   const program = view?.program ?? null
   const phase = view?.phase ?? null
   const tracks = useProgramTracks(program?.id)
@@ -67,6 +69,9 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
   const urgent = useMemo(() => goals
     .filter((g) => g.display === 'off_course' || g.display === 'needs_test')
     .sort((a, b) => ORDER[a.display] - ORDER[b.display] || (a.due_date ?? '9').localeCompare(b.due_date ?? '9'))[0] ?? null, [goals])
+
+  // A change the coach parked for this goal turns the card's ask into "review it".
+  const urgentFix = urgent ? (proposals ?? []).find((p) => (p.goal_ids ?? []).includes(urgent.id)) ?? null : null
 
   let weekLine: string | null = null
   if (phase?.week_start && phase?.week_end) {
@@ -115,7 +120,7 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
                 <button
                   type="button"
                   className={`goals-act goals-act--${urgent.display} fade-rise`}
-                  onClick={() => navigate(`/app/goals/${urgent.id}`)}
+                  onClick={() => navigate(urgentFix ? '/app/coach' : `/app/goals/${urgent.id}`)}
                 >
                   <span className="goals-act__k">{GOAL_DISPLAY_LABEL[urgent.display]} · {urgent.name}</span>
                   <span className="goals-act__t">
@@ -130,7 +135,7 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
                         ? `Last tested ${shortDate(urgent.last_measured)}${urgent.cadence ? `, ${urgent.cadence}` : ''}.`
                         : 'Nothing real logged yet, so its status is unproven.'}
                   </span>
-                  <span className="goals-act__cta">Open the goal ›</span>
+                  <span className="goals-act__cta">{urgentFix ? 'Your coach proposed a fix · Review it ›' : 'Open the goal ›'}</span>
                 </button>
               )}
 

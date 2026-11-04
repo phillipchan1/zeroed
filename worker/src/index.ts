@@ -3,6 +3,7 @@ import { handleAgent } from './agent.ts'
 import { API_SECURITY, HEALTH_CORS, beginAuthCors, json } from './cors.ts'
 import { handleData } from './data.ts'
 import { handleSessionRx } from './sessionRx.ts'
+import { handleProposals } from './proposals.ts'
 import { authFailureMessage, handleAuthRequest } from './auth.ts'
 import type { Env } from './env.ts'
 import { handleMcp } from './mcp.ts'
@@ -77,6 +78,7 @@ app.all('/api/mcp', (c) => handleMcp(c.req.raw, c.env, waitUntilOf(c)))
 app.all('/mcp', (c) => handleMcp(c.req.raw, c.env, waitUntilOf(c)))
 app.all('/api/data', (c) => handleData(c.req.raw, c.env, waitUntilOf(c)))
 app.all('/api/session-rx', (c) => handleSessionRx(c.req.raw, c.env, waitUntilOf(c)))
+app.all('/api/proposals', (c) => handleProposals(c.req.raw, c.env, waitUntilOf(c)))
 
 // Compatibility aliases so VITE_API_BASE_URL can point at either
 // `https://<worker>/api` or the old `/functions/v1` prefix.

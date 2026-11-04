@@ -66,6 +66,7 @@ const ATHLETE_COL = new Set([
   'athlete_goal',
   'goal_measurement',
   'workout_note',
+  'coach_proposal',
 ])
 
 const VIA_PROGRAM = new Set([
@@ -138,6 +139,10 @@ const COLUMNS: Record<string, Set<string>> = {
   workout_note: new Set([
     'id', 'athlete_id', 'workout_id', 'session_id', 'author', 'body', 'client_key',
     'created_at',
+  ]),
+  coach_proposal: new Set([
+    'id', 'athlete_id', 'preview_id', 'title', 'rationale', 'goal_ids', 'edits', 'timing',
+    'request', 'diff', 'program_fingerprint', 'status', 'source', 'created_at', 'resolved_at',
   ]),
   phase: new Set([
     'id', 'program_id', 'name', 'week_start', 'week_end', 'non_negotiables',
@@ -280,6 +285,7 @@ const FOREIGN_KEYS: Record<string, readonly { column: string; parent: string; re
     { column: 'workout_id', parent: 'workout' },
     { column: 'session_id', parent: 'routine' },
   ],
+  coach_proposal: [{ column: 'athlete_id', parent: 'athlete' }],
 }
 
 const DELETABLE = new Set(['workout_draft', 'mcp_token', 'session_observation'])
@@ -353,6 +359,7 @@ export function ownerPredicate(table: string): string {
     case 'athlete_goal':
     case 'goal_measurement':
     case 'workout_note':
+    case 'coach_proposal':
       return 'athlete_id = ${athleteId}'
     case 'phase':
     case 'routine':
@@ -841,6 +848,12 @@ async function assertWritableRow(
 }
 
 async function resetOrientation(sql: Sql, athleteId: string): Promise<DataResult> {
+  // coach_proposal is hand-applied on Neon; until it exists there is nothing to
+  // clear. Checked first rather than caught, so a transaction is never poisoned.
+  const [proposals] = await runSql<{ t: string | null }>(sql, `SELECT to_regclass('public.coach_proposal')::text AS t`, [])
+  if (proposals?.t) {
+    await runSql(sql, `DELETE FROM coach_proposal WHERE ${bindOwner('coach_proposal', athleteId).text}`, [athleteId])
+  }
   await runSql(sql, `DELETE FROM session_observation WHERE ${bindOwner('session_observation', athleteId).text}`, [athleteId])
   await runSql(sql, `DELETE FROM workout_note WHERE ${bindOwner('workout_note', athleteId).text}`, [athleteId])
   await runSql(sql, `DELETE FROM goal_measurement WHERE ${bindOwner('goal_measurement', athleteId).text}`, [athleteId])

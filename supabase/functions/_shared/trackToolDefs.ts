@@ -180,6 +180,11 @@ export const TRACK_TOOLS: McpTool[] = [
     },
   },
   {
+    name: 'get_goal_brief',
+    description: 'Start here when planning. Every goal as the athlete sees it (zeroed / on_course / off_course / needs_test), its forecast (where the last three real measurements land on the due date, the rate needed, the rate trending), its lane, the source binding that lets logged sets move it, the sessions this week that train it, the last coach moves pinned to it, and proposals waiting on the athlete. Off course first.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  },
+  {
     name: 'upsert_goal',
     description: 'Create or update a structured goal. Preview unless confirm=true.',
     inputSchema: {

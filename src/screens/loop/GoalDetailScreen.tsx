@@ -7,6 +7,7 @@ import { fetchGoalExtras, fetchGoalsView, logMeasurement, type GoalExtras, type 
 import { isSeedMeasurement } from '../../engine/goals'
 import { ForecastChart, GoalBar, GoalStatus, goalValue, shortDate } from './goalsUi'
 import { TrackGlyph } from './tracksUi'
+import { PendingProposals } from './ProposalCard'
 
 const SOURCE_LABEL: Record<string, string> = {
   workout_log: 'from a session',
@@ -124,6 +125,8 @@ export function GoalDetailScreen({ athleteId }: { athleteId: string }) {
                   {goal.cadence ? ` · ${goal.cadence}` : ''}
                 </p>
               </div>
+
+              <PendingProposals athleteId={athleteId} goalId={goal.id} heading={false} />
 
               {track && (
                 <div className="card" style={{ marginBottom: 20, padding: '4px 20px' }}>

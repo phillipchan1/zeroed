@@ -508,6 +508,30 @@ CREATE UNIQUE INDEX IF NOT EXISTS workout_note_client_key_uidx
   ON public.workout_note (athlete_id, client_key)
   WHERE client_key IS NOT NULL;
 
+CREATE TABLE IF NOT EXISTS public.coach_proposal (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id          UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  preview_id          TEXT NOT NULL,
+  title               TEXT NOT NULL,
+  rationale           TEXT,
+  goal_ids            JSONB NOT NULL DEFAULT '[]'::jsonb,
+  edits               JSONB NOT NULL,
+  timing              TEXT NOT NULL DEFAULT 'now' CHECK (timing IN ('now', 'next_week')),
+  request             TEXT,
+  diff                JSONB NOT NULL DEFAULT '{}'::jsonb,
+  program_fingerprint TEXT NOT NULL,
+  status              TEXT NOT NULL DEFAULT 'pending'
+                       CHECK (status IN ('pending', 'applied', 'declined', 'stale')),
+  source              TEXT NOT NULL DEFAULT 'mcp' CHECK (source IN ('mcp', 'app')),
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at         TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS coach_proposal_athlete_idx
+  ON public.coach_proposal (athlete_id, status, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS coach_proposal_pending_preview_uidx
+  ON public.coach_proposal (athlete_id, preview_id)
+  WHERE status = 'pending';
+
 CREATE OR REPLACE FUNCTION public.tm_override_value(overrides jsonb, lift text)
 RETURNS numeric
 LANGUAGE sql

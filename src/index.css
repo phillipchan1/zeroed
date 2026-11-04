@@ -5334,4 +5334,43 @@ textarea.input {
 .goal-line__n--needs_test { color: var(--pending); }
 .goal-line__n--zeroed { color: var(--confirmed); }
 .goal-line__chev { color: var(--text-dim); flex-shrink: 0; }
+/* Coach proposals */
+.proposal {
+  padding: 16px;
+  margin-bottom: 14px;
+  border-radius: var(--radius-card);
+  border: 1px solid rgba(232, 204, 10, 0.45);
+  background: linear-gradient(180deg, rgba(232, 204, 10, 0.07), rgba(232, 204, 10, 0.015));
+  transition: border-color var(--dur-mid) var(--ease-out), background var(--dur-mid) var(--ease-out);
+}
+.proposal--applied, .proposal--declined, .proposal--stale { border-color: var(--line); background: var(--surface); }
+.proposal__k { font-family: var(--font-mono); font-size: var(--fs-micro); font-weight: 600; letter-spacing: 0.1em; text-transform: uppercase; color: var(--signal); }
+.proposal--applied .proposal__k { color: var(--confirmed); }
+.proposal--declined .proposal__k { color: var(--text-dim); }
+.proposal--stale .proposal__k { color: var(--pending); }
+.proposal__for { color: var(--text-dim); font-weight: 500; letter-spacing: 0.04em; text-transform: none; }
+.proposal__title { margin-top: 8px; font-size: var(--fs-lg); font-weight: 650; line-height: 1.3; }
+.proposal__why { margin-top: 8px; font-size: var(--fs-sm); color: #CFCFCF; line-height: 1.5; }
+.proposal__diff { margin-top: 14px; padding: 12px; border: 1px solid var(--line); border-radius: var(--radius-btn); background: var(--ground); display: flex; flex-direction: column; gap: 10px; }
+.proposal__session-name { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 4px; }
+.proposal__lock { display: flex; }
+.proposal__change { display: flex; align-items: baseline; gap: 8px; width: 100%; padding: 3px 0; font-size: var(--fs-sm); }
+.proposal__sign { font-family: var(--font-mono); width: 12px; flex-shrink: 0; color: var(--text-dim); }
+.proposal__change--added .proposal__sign { color: var(--signal); }
+.proposal--applied .proposal__change--added { animation: proposal-arrive 420ms var(--ease-snap) backwards; }
+.proposal--applied .proposal__change--added .proposal__sign { color: var(--confirmed); }
+.proposal--applied .proposal__change--removed { opacity: 0.4; transition: opacity 400ms var(--ease-out); }
+.proposal__change--removed .proposal__change-name { text-decoration: line-through; color: var(--text-dim); }
+.proposal__change-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.proposal__change-rx { margin-left: auto; font-size: var(--fs-xs); color: var(--text-dim); white-space: nowrap; }
+.proposal__change-rx s { color: var(--text-dim); opacity: 0.7; }
+/* A retuned movement's before → after is long; it reads under the name. */
+.proposal__change--changed { flex-wrap: wrap; }
+.proposal__change--changed .proposal__change-name { flex: 1; }
+.proposal__change--changed .proposal__change-rx { flex-basis: 100%; margin-left: 20px; white-space: normal; }
+.proposal__timing { font-size: var(--fs-xs); color: var(--text-dim); }
+.proposal__message { margin-top: 10px; font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.45; }
+.proposal__acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+@keyframes proposal-arrive { from { transform: translateX(24px); opacity: 0; } }
+
 .sidebar__goals-read { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }

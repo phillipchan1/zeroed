@@ -3,7 +3,8 @@
  * SQL is scoped to store.athleteId on every query.
  */
 import { applyMeasurement, computeGoalStatus, forecastAtDue, goalDisplayStatus, goalNumber, isGoalDirection, isGoalSide, lastMeasuredOn, pairKey, type GoalMeasurement } from '../../src/engine/goals.ts'
-import { formatGoalSource, parseGoalSource, SOURCE_KINDS } from '../../src/engine/goalSources.ts'
+import { formatGoalSource, goalSource, parseGoalSource, sourceMatches, SOURCE_KINDS } from '../../src/engine/goalSources.ts'
+import { listProposals } from './proposals.ts'
 import { mcpStamp, writePreview } from '../../src/engine/mcpStamp.ts'
 import { evaluateAutoregRules, type AutoregRule } from '../../src/engine/autoreg.ts'
 import { proposeNextWeek, type PerformedExercise, type ProgressionRule } from '../../src/engine/progression.ts'
@@ -145,6 +146,8 @@ export async function runTrackTool(
       return json(await upsertAutoregRule(store, args))
     case 'get_goals':
       return json(await getGoals(store, args))
+    case 'get_goal_brief':
+      return json(await getGoalBrief(store))
     case 'upsert_goal':
       return json(await upsertGoal(store, args))
     case 'log_goal_measurement':
@@ -166,7 +169,7 @@ export const TRACK_TOOL_NAMES = new Set([
   'list_tracks', 'get_track', 'create_track', 'update_track',
   'assign_exercise_to_track', 'get_track_progression', 'set_track_progression_rule',
   'list_autoreg_rules', 'upsert_autoreg_rule',
-  'get_goals', 'upsert_goal', 'log_goal_measurement', 'get_goal_history',
+  'get_goals', 'get_goal_brief', 'upsert_goal', 'log_goal_measurement', 'get_goal_history',
   'add_workout_note', 'update_athlete_target', 'update_program_meta',
 ])
 
@@ -552,6 +555,70 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
   if (track) list = list.filter((g) => g.track_id === track.id)
   if (status) list = list.filter((g) => g.status === status)
   return { ...mcpStamp(new Date(), await athleteZone(store)), goals: list }
+}
+
+const DISPLAY_ORDER: Record<string, number> = { off_course: 0, needs_test: 1, on_course: 2, zeroed: 3 }
+
+/**
+ * The goal-first read Claude plans from: every goal as the athlete sees it,
+ * where its trend lands, what trains it this week, what the coach last did
+ * for it, and what is waiting on the athlete. Off course first.
+ */
+async function getGoalBrief(store: ConnectedStore) {
+  const { goals } = await getGoals(store, {})
+  const program = await activeProgram(store)
+  const sessions = program ? await loadLiveSessions(store, program.id) : []
+  const exerciseNames = [...new Set(sessions.flatMap((s) => s.exercises.map((e) => e.name)))]
+  const lanes = await store.sql<{ id: string; name: string }[]>`
+    SELECT t.id, t.name FROM track t JOIN program p ON p.id = t.program_id
+    WHERE p.athlete_id = ${store.athleteId}
+  `
+  const laneName = new Map(lanes.map((t) => [t.id, t.name]))
+  const refs = [...new Set(goals.flatMap((g) => [g.id, g.track_id]).filter((id): id is string => !!id))]
+  const moves = refs.length
+    ? await store.sql<{ ref_id: string; body: string; created_at: string }[]>`
+        SELECT ref_id::text, body, to_json(created_at) #>> '{}' AS created_at
+        FROM coach_message
+        WHERE athlete_id = ${store.athleteId} AND kind = 'note' AND ref_id = ANY(${refs}::uuid[])
+        ORDER BY created_at DESC
+        LIMIT 60
+      `
+    : []
+  const proposals = await listProposals(store)
+  const brief = goals.map((g) => {
+    const src = goalSource(g, exerciseNames)
+    const trainedBy = src && src.kind !== 'test'
+      ? sessions.filter((s) => s.exercises.some((e) => sourceMatches(src, e.name))).map((s) => s.name)
+      : []
+    return {
+      id: g.id,
+      name: g.name,
+      lane: g.track_id ? laneName.get(g.track_id) ?? null : null,
+      display: g.display,
+      status: g.status,
+      current: g.current,
+      target: g.target,
+      unit: g.unit,
+      direction: g.direction,
+      due_date: g.due_date,
+      last_measured: g.last_measured,
+      cadence: g.cadence,
+      forecast: g.forecast,
+      source: src ? { binding: formatGoalSource(src), inferred: src.inferred } : null,
+      sessions_this_week: trainedBy,
+      recent_moves: moves.filter((m) => m.ref_id === g.id || m.ref_id === g.track_id).slice(0, 3)
+        .map((m) => ({ at: m.created_at, body: m.body })),
+      pending_proposals: (proposals ?? []).filter((p) => (p.goal_ids ?? []).includes(g.id)).map((p) => p.id),
+    }
+  }).sort((a, b) => (DISPLAY_ORDER[a.display] ?? 9) - (DISPLAY_ORDER[b.display] ?? 9) || a.name.localeCompare(b.name))
+  return {
+    ...mcpStamp(new Date(), await athleteZone(store)),
+    goals: brief,
+    pending_proposals: proposals == null
+      ? 'unavailable on this database'
+      : proposals.map((p) => ({ id: p.id, title: p.title, goal_ids: p.goal_ids, created_at: p.created_at })),
+    next: 'For an off_course goal: preview a change to the lane or sessions that train it, then preview_program_edits with propose=true and goal_ids so the athlete accepts it in the app. A needs_test goal wants a test, not a program change. Give a goal with no source a source_metric (upsert_goal) so logged sets move it.',
+  }
 }
 
 async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) {
