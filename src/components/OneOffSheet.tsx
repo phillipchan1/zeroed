@@ -109,7 +109,8 @@ export function OneOffSheet({ athleteId, athleteName, onboardingStep, onClose }:
             onChange={setDraft}
             onSend={() => void send(draft)}
             placeholder={session ? 'Change anything: shorter, no running…' : 'Time, kit, who with, how you feel…'}
-            disabled={thinking || starting}
+            disabled={starting}
+            sendDisabled={thinking}
             ariaLabel={session ? 'Ask for a change' : 'Describe the session'}
             sendLabel={session ? 'Change' : 'Plan it'}
           />
@@ -134,7 +135,7 @@ export function OneOffSheet({ athleteId, athleteName, onboardingStep, onClose }:
             </div>
           ) : (
             <div key={i} className="coach-msg coach-msg--coach fade-rise">
-              <Markdown className="coach-msg__body" text={t.content} />
+              <Markdown className="coach-msg__body" text={t.content} breaks />
             </div>
           ),
         )}

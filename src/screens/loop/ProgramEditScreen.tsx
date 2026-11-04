@@ -309,7 +309,7 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
                 </div>
               ) : (
                 <div key={i} className={`coach-msg coach-msg--coach fade-rise${t.fresh ? ' coach-msg--fresh' : ''}`}>
-                  <Markdown className="coach-msg__body" text={t.content} />
+                  <Markdown className="coach-msg__body" text={t.content} breaks />
                   {t.effect && (
                     <div className="edit-receipt">
                       {t.effect.sessions > 0 && <span style={{ color: 'var(--confirmed)' }}>{t.effect.sessions} new session{t.effect.sessions === 1 ? '' : 's'}</span>}
@@ -399,7 +399,8 @@ export function ProgramEditScreen({ athleteId }: { athleteId: string }) {
             onChange={setDraft}
             onSend={() => void send(draftText)}
             placeholder={state ? 'Add jumps, a HIIT day, volume…' : 'Loading your program…'}
-            disabled={!state || pending}
+            disabled={!state}
+            sendDisabled={pending}
             ariaLabel="Tell the coach what to change"
           />
 
