@@ -114,7 +114,11 @@ export function PendingProposals({ athleteId, goalId, heading = true }: {
     tracksOn() ? cacheKeys.goals(athleteId) : null,
     () => fetchGoalsView(athleteId),
   )
-  const list = (proposals ?? []).filter((p) => !goalId || (p.goal_ids ?? []).includes(goalId))
+  // A resolved card stays where it was, showing what happened, even after the
+  // refreshed list no longer includes it.
+  const [kept, setKept] = useState<CoachProposal[]>([])
+  const pending = (proposals ?? []).filter((p) => !goalId || (p.goal_ids ?? []).includes(goalId))
+  const list = [...pending, ...kept.filter((k) => !pending.some((p) => p.id === k.id))]
   if (!list.length) return null
   const nameOf = (id: string) => goals?.find((g) => g.id === id)?.name
   return (
@@ -128,8 +132,7 @@ export function PendingProposals({ athleteId, goalId, heading = true }: {
             goalNames={(p.goal_ids ?? []).map(nameOf).filter((n): n is string => !!n)}
             onResolved={(status) => {
               if (status === 'applied' || status === 'declined' || status === 'stale') {
-                // Keep the card on screen to show what happened; the list
-                // refreshes the next time it's read.
+                setKept((prev) => (prev.some((k) => k.id === p.id) ? prev : [...prev, p]))
                 invalidateCache(cacheKeys.proposals(athleteId))
               }
             }}

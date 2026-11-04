@@ -2,6 +2,7 @@ import { invalidateCache, useCachedLoader } from './cache'
 import { cacheKeys } from './loopCache'
 import { supabase } from './supabaseClient'
 import { tracksOn } from './tracksFlag'
+import { tracksV1Enabled } from './flags'
 import { computeGoalStatus, forecastAtDue, goalDisplayStatus, lastMeasuredOn, pairKey, type GoalDisplay, type GoalForecast, type GoalMeasurement } from '../engine/goals'
 import type { AutoregRule } from '../engine/autoreg'
 import {
@@ -259,13 +260,42 @@ export async function fetchGoalsForSources(athleteId: string): Promise<GoalForSo
 }
 
 /**
+ * Whether goals are on for this athlete, from the row itself when the screens
+ * haven't resolved the flag yet: the outbox flushes on launch, before the
+ * athlete row loads, and a session synced then must still move its goals.
+ */
+async function tracksOnFor(athleteId: string): Promise<boolean> {
+  if (tracksOn()) return true
+  const { data } = await supabase.from('athlete').select('flags').eq('id', athleteId).maybeSingle()
+  return tracksV1Enabled(import.meta.env, (data as { flags?: unknown } | null)?.flags, '')
+}
+
+/** current is the latest measurement, best the best one, baseline the first. */
+async function refreshGoalMarks(goal: Pick<GoalForSource, 'id' | 'direction' | 'baseline'>): Promise<void> {
+  const { data } = await supabase
+    .from('goal_measurement').select('value, measured_on')
+    .eq('goal_id', goal.id).order('measured_on', { ascending: false }).limit(60)
+  const values = ((data ?? []) as Array<{ value: number | string }>).map((r) => Number(r.value)).filter(Number.isFinite)
+  if (!values.length) return
+  const best = goal.direction === 'lower' ? Math.min(...values) : Math.max(...values)
+  await supabase.from('athlete_goal').update({
+    current: values[0],
+    best,
+    ...(goal.baseline == null ? { baseline: values[values.length - 1] } : {}),
+    updated_at: new Date().toISOString(),
+  }).eq('id', goal.id)
+}
+
+/**
  * A committed session moves the goals it trained: each goal whose source the
- * session matched gets a workout_log measurement, keyed per workout and goal so
- * an outbox retry or an edit never doubles it. Best-effort, like everything
- * after the workout row in commitSession: it never throws.
- *
- * On an edit the measurement takes the corrected value but the goal's current
- * is left alone, since the edited session may not be the latest one.
+ * session matched gets a workout_log measurement, keyed per workout and goal
+ * (wl:{workout}:{goal}) so an outbox retry never doubles it. A new session
+ * writes only when it holds or beats the goal's mark. An edit corrects: the
+ * row this workout already wrote takes the new value (even a lower one, so a
+ * typo can be taken back), a goal the session no longer feeds loses its row,
+ * and a goal it newly feeds is judged like a new session. The goal's current
+ * and best are then recomputed from its measurements. Best-effort, like
+ * everything after the workout row in commitSession: it never throws.
  */
 export async function recordSessionGoals(input: {
   athleteId: string
@@ -275,43 +305,61 @@ export async function recordSessionGoals(input: {
   units: SourceUnits
   isEdit: boolean
 }): Promise<DerivedMeasurement[]> {
-  if (!tracksOn()) return []
   try {
+    if (!(await tracksOnFor(input.athleteId))) return []
     const goals = await fetchGoalsForSources(input.athleteId)
-    const derived = deriveGoalMeasurements(input.exercises, goals, input.units)
-    for (const m of derived) {
+    const gated = deriveGoalMeasurements(input.exercises, goals, input.units)
+    const all = input.isEdit
+      ? deriveGoalMeasurements(input.exercises, goals, input.units, { requireHold: false })
+      : gated
+    const { data: ownRows } = await supabase
+      .from('goal_measurement').select('id, goal_id, client_key')
+      .eq('athlete_id', input.athleteId).eq('workout_id', input.workoutId)
+    const own = new Map(((ownRows ?? []) as Array<{ id: string; goal_id: string; client_key: string | null }>)
+      .filter((r) => r.client_key?.startsWith('wl:'))
+      .map((r) => [r.client_key as string, r]))
+    const written: DerivedMeasurement[] = []
+    const touched = new Set<string>()
+    for (const m of all) {
       const client_key = workoutMeasurementKey(input.workoutId, m.goal_id)
-      const { error } = await supabase.from('goal_measurement').insert({
-        athlete_id: input.athleteId,
-        goal_id: m.goal_id,
-        measured_on: input.performedOn,
-        value: m.value,
-        side: null,
-        source: 'workout_log',
-        workout_id: input.workoutId,
-        note: m.exercise,
-        client_key,
-      })
-      if (error) {
-        if (!/duplicate|unique/i.test(error.message ?? '')) continue
-        await supabase.from('goal_measurement').update({ value: m.value })
-          .eq('athlete_id', input.athleteId).eq('client_key', client_key)
+      const existing = own.get(client_key)
+      if (existing) {
+        // The Worker answers a duplicate insert with success, so a correction
+        // has to update the row it already holds.
+        await supabase.from('goal_measurement')
+          .update({ value: m.value, measured_on: input.performedOn, note: m.exercise })
+          .eq('id', existing.id)
+        own.delete(client_key)
+      } else {
+        if (!gated.some((g) => g.goal_id === m.goal_id)) continue
+        const { error } = await supabase.from('goal_measurement').insert({
+          athlete_id: input.athleteId,
+          goal_id: m.goal_id,
+          measured_on: input.performedOn,
+          value: m.value,
+          side: null,
+          source: 'workout_log',
+          workout_id: input.workoutId,
+          note: m.exercise,
+          client_key,
+        })
+        if (error && !/duplicate|unique/i.test(error.message ?? '')) continue
       }
-      if (input.isEdit) continue
-      const goal = goals.find((g) => g.id === m.goal_id)
-      const lower = goal?.direction === 'lower'
-      const priorBest = goal?.best != null ? Number(goal.best) : null
-      const best = priorBest == null || !Number.isFinite(priorBest) ? m.value
-        : lower ? Math.min(priorBest, m.value) : Math.max(priorBest, m.value)
-      await supabase.from('athlete_goal').update({
-        current: m.value,
-        best,
-        ...(goal?.baseline == null ? { baseline: m.value } : {}),
-        updated_at: new Date().toISOString(),
-      }).eq('id', m.goal_id)
+      written.push(m)
+      touched.add(m.goal_id)
     }
-    if (derived.length) invalidateCache(cacheKeys.goals(input.athleteId))
-    return derived
+    if (input.isEdit) {
+      for (const stale of own.values()) {
+        await supabase.from('goal_measurement').delete().eq('id', stale.id)
+        touched.add(stale.goal_id)
+      }
+    }
+    for (const id of touched) {
+      const goal = goals.find((g) => g.id === id)
+      if (goal) await refreshGoalMarks(goal)
+    }
+    if (touched.size) invalidateCache(cacheKeys.goals(input.athleteId))
+    return written
   } catch {
     return []
   }

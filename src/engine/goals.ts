@@ -125,11 +125,16 @@ export interface GoalForecast {
   points: number
 }
 
+// A trend needs time under it: two points from the same day, or a few days
+// apart, say nothing about where a goal is heading.
+const MIN_TREND_DAYS = 7
+
 /**
- * Least squares over the last three real measurements, projected to the due
- * date. Three, not the whole history: a lift that climbed for a month and has
- * sat flat for three weeks is flat now, and the forecast has to say so. Null
- * without a due date or with fewer than two real points.
+ * Least squares over the last three real measurement days, projected to the
+ * due date. Three, not the whole history: a lift that climbed for a month and
+ * has sat flat for three weeks is flat now, and the forecast has to say so.
+ * Several measurements on one day count once (the day's last). Null without a
+ * due date, with fewer than two days, or when they span less than a week.
  */
 export function forecastAtDue(
   goal: Pick<GoalFields, 'due_date' | 'target'>,
@@ -137,8 +142,10 @@ export function forecastAtDue(
 ): GoalForecast | null {
   const due = goal.due_date ? dayNumber(goal.due_date) : null
   if (due == null) return null
-  const pts = realPoints(history).slice(-3)
-  if (pts.length < 2) return null
+  const byDay = new Map<number, number>()
+  for (const p of realPoints(history)) byDay.set(p.day, p.value)
+  const pts = [...byDay.entries()].map(([day, value]) => ({ day, value })).sort((a, b) => a.day - b.day).slice(-3)
+  if (pts.length < 2 || pts[pts.length - 1].day - pts[0].day < MIN_TREND_DAYS) return null
   const n = pts.length
   const mx = pts.reduce((s, p) => s + p.day, 0) / n
   const my = pts.reduce((s, p) => s + p.value, 0) / n

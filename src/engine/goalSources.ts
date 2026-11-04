@@ -68,7 +68,13 @@ function kindFromUnit(goal: Pick<GoalFields, 'metric' | 'unit'>): SourceKind | n
   return null
 }
 
-/** Read a binding off the goal's name and unit, against the session's exercises. */
+/**
+ * Read a binding off the goal's name and unit, against the session's exercises.
+ * Exact names only: a "Deadlift" goal must not be fed by a Trap Bar Deadlift
+ * session. A goal named for a lift the program spells differently ("Bench 1RM"
+ * against Bench Press) needs an explicit source_metric, which get_goal_brief
+ * asks Claude to set.
+ */
 export function inferGoalSource(
   goal: Pick<GoalFields, 'name' | 'metric' | 'unit' | 'side'>,
   exerciseNames: string[],
@@ -79,10 +85,6 @@ export function inferGoalSource(
   const stem = normalizeExerciseName(goal.name).replace(STEM_NOISE, ' ').replace(/\s+/g, ' ').trim()
   if (stem.length < 4) return null
   const match = exerciseNames.find((n) => normalizeExerciseName(n) === stem)
-    ?? exerciseNames.find((n) => {
-      const ex = normalizeExerciseName(n)
-      return ex.length >= 4 && (ex.includes(stem) || stem.includes(ex))
-    })
   return match ? { kind, exercise: match, inferred: true } : null
 }
 
@@ -119,18 +121,49 @@ export interface SourceUnits {
 
 const LB_PER_KG = 2.2046226218
 
-function toGoalUnit(value: number, kind: SourceKind, goalUnit: string | null | undefined, units: SourceUnits): number {
+const WEIGHT_UNITS = ['', 'lb', 'lbs', 'kg']
+const DISTANCE_UNITS = ['', 'in', 'inch', 'inches', 'cm', 'm', 'ft', 'yd']
+const TIME_UNITS = ['', 's', 'sec', 'secs', 'seconds', 'min', 'mins', 'minutes']
+const COUNT_UNITS: Record<string, string[]> = {
+  reps: ['', 'rep', 'reps'],
+  rounds: ['', 'round', 'rounds', 'rds'],
+}
+
+/** Whether a session value of this kind can be stated in this goal unit. */
+export function sourceUnitSupported(kind: SourceKind, goalUnit: string | null | undefined): boolean {
+  const unit = String(goalUnit ?? '').trim().toLowerCase()
+  switch (kind) {
+    case 'e1rm':
+    case 'top_set': return WEIGHT_UNITS.includes(unit)
+    case 'distance': return DISTANCE_UNITS.includes(unit)
+    case 'time': return TIME_UNITS.includes(unit)
+    case 'reps':
+    case 'rounds': return COUNT_UNITS[kind].includes(unit)
+    default: return true
+  }
+}
+
+/** The session value in the goal's unit, or null when the unit can't be reached. */
+function toGoalUnit(value: number, kind: SourceKind, goalUnit: string | null | undefined, units: SourceUnits): number | null {
+  if (!sourceUnitSupported(kind, goalUnit)) return null
   const unit = String(goalUnit ?? '').trim().toLowerCase()
   if (kind === 'e1rm' || kind === 'top_set') {
-    if ((unit === 'kg') && units.weight === 'lb') return value / LB_PER_KG
+    if (unit === 'kg' && units.weight === 'lb') return value / LB_PER_KG
     if ((unit === 'lb' || unit === 'lbs') && units.weight === 'kg') return value * LB_PER_KG
+    return value
   }
   if (kind === 'distance') {
-    if (unit === 'cm' && units.distance === 'in') return value * 2.54
-    if ((unit === 'in' || unit === 'inch' || unit === 'inches') && units.distance === 'cm') return value / 2.54
-    if (unit === 'm') return (units.distance === 'in' ? value * 2.54 : value) / 100
-    if (unit === 'ft') return (units.distance === 'cm' ? value / 2.54 : value) / 12
+    const inches = units.distance === 'cm' ? value / 2.54 : value
+    switch (unit) {
+      case 'cm': return inches * 2.54
+      case 'm': return (inches * 2.54) / 100
+      case 'ft': return inches / 12
+      case 'yd': return inches / 36
+      case '': return value
+      default: return inches
+    }
   }
+  if (kind === 'time' && ['min', 'mins', 'minutes'].includes(unit)) return value / 60
   return value
 }
 
@@ -195,7 +228,11 @@ export function deriveGoalMeasurements(
   exercises: LoggedExercise[],
   goals: GoalForSource[],
   units: SourceUnits,
+  opts: { requireHold?: boolean } = {},
 ): DerivedMeasurement[] {
+  // An edit corrects what the session was; it isn't judged against the goal
+  // again, or a typo that became current could never be taken back.
+  const requireHold = opts.requireHold ?? true
   const names = exercises.map((e) => e.name)
   const out: DerivedMeasurement[] = []
   for (const goal of goals) {
@@ -207,12 +244,14 @@ export function deriveGoalMeasurements(
       if (!sourceMatches(src, ex.name)) continue
       const raw = sessionValue(src.kind, ex.sets, goal.direction)
       if (raw == null) continue
-      const value = round2(toGoalUnit(raw, src.kind, goal.unit, units))
+      const converted = toGoalUnit(raw, src.kind, goal.unit, units)
+      if (converted == null) continue
+      const value = round2(converted)
       if (!best || (lower ? value < best.value : value > best.value)) best = { value, exercise: ex.name }
     }
     if (!best) continue
     const previous = goalNumber(goal.current)
-    if (previous != null && (lower ? best.value > previous : best.value < previous)) continue
+    if (requireHold && previous != null && (lower ? best.value > previous : best.value < previous)) continue
     const target = goalNumber(goal.target)
     const hit = target != null && (lower ? best.value <= target : best.value >= target)
     out.push({ goal_id: goal.id, name: goal.name, value: best.value, previous, hit, exercise: best.exercise })

@@ -165,6 +165,9 @@ const benchHist = [
   { date: '2026-11-02', value: 275, source: 'workout_log' },
 ]
 ok(computeGoalStatus(benchGoal, benchHist, '2026-11-04') === 'on_track', 'bench climbing 4.5 a week reaches 285 by the 27th')
+const fresh = { name: 'Squat', metric: 'top_set', direction: 'higher' as const, target: 315, baseline: 225, current: 225, due_date: '2027-03-01' }
+ok(forecastAtDue(fresh, [{ date: '2026-11-02', value: 225, source: 'manual' }, { date: '2026-11-02', value: 225, source: 'workout_log' }]) === null, 'two points on one day are not a trend')
+ok(computeGoalStatus(fresh, [{ date: '2026-11-02', value: 225, source: 'manual' }, { date: '2026-11-04', value: 225, source: 'workout_log' }], '2026-11-04') === 'on_track', 'a brand-new goal is not off course on two points days apart')
 ok(forecastAtDue({ ...benchGoal, due_date: null }, benchHist) === null, 'no due date, no forecast')
 ok(forecastAtDue(benchGoal, [benchHist[0]]) === null, 'one point is not a trend')
 ok(forecastAtDue(benchGoal, [{ date: '2026-11-01', value: 270, source: 'manual', client_key: 'seed:a' }, ...benchHist.slice(2)]) === null, 'seed rows do not make a trend')

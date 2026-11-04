@@ -3,7 +3,7 @@
  * SQL is scoped to store.athleteId on every query.
  */
 import { applyMeasurement, computeGoalStatus, forecastAtDue, goalDisplayStatus, goalNumber, isGoalDirection, isGoalSide, lastMeasuredOn, pairKey, type GoalMeasurement } from '../../src/engine/goals.ts'
-import { formatGoalSource, goalSource, parseGoalSource, sourceMatches, SOURCE_KINDS } from '../../src/engine/goalSources.ts'
+import { formatGoalSource, goalSource, parseGoalSource, sourceMatches, sourceUnitSupported, SOURCE_KINDS } from '../../src/engine/goalSources.ts'
 import { listProposals } from './proposals.ts'
 import { mcpStamp, writePreview } from '../../src/engine/mcpStamp.ts'
 import { evaluateAutoregRules, type AutoregRule } from '../../src/engine/autoreg.ts'
@@ -99,7 +99,8 @@ function json(value: unknown): string {
  * why, pinned by ref_id to the goal, track or program it touched. The tools
  * take a rationale, and it used to live only on the preview. kind 'note' keeps
  * coach_message's kind check as it is; the Coach log already lists notes, and
- * the goal page reads the ones pinned to the goal or its lane.
+ * the goal page reads the ones pinned to the goal or its lane. Only athletes
+ * with tracks_v1 get them.
  */
 async function recordMove(
   store: ConnectedStore,
@@ -107,6 +108,12 @@ async function recordMove(
   args: Record<string, unknown>,
   refId: string | null,
 ): Promise<void> {
+  // Moves are app chrome (the Coach log, the goal page), so they follow the
+  // flag the app does; the tools themselves stay available to every athlete.
+  const [row] = await store.sql<{ on: boolean | null }[]>`
+    SELECT (flags->'tracks_v1') = 'true'::jsonb AS on FROM athlete WHERE id = ${store.athleteId}
+  `
+  if (row?.on !== true) return
   const why = asString(args.rationale)
   const body = why ? `${what} Why: ${why}` : what
   await store.sql`
@@ -635,6 +642,9 @@ async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) 
   const source = rawSource ? parseGoalSource(rawSource) : null
   if (rawSource && !source) {
     throw new McpUserError(`source_metric must be kind:Exercise with kind one of ${SOURCE_KINDS.join(', ')} (test may omit the exercise), e.g. top_set:Strict Press`)
+  }
+  if (source && asString(args.unit) && !sourceUnitSupported(source.kind, asString(args.unit))) {
+    throw new McpUserError(`A ${source.kind} source can't be stated in "${asString(args.unit)}". Use a unit it converts to, or a test: binding.`)
   }
   if (source) args = { ...args, source_metric: formatGoalSource(source) }
   const diff = [{ op: 'upsert_goal', name, target: asNum(args.target), track: track?.name ?? null, source: source ? formatGoalSource(source) : null }]

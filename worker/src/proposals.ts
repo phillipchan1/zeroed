@@ -118,6 +118,11 @@ export async function listProposals(store: ConnectedStore, status: ProposalRow['
   }
 }
 
+/** applyEdits answers in prose; these openings mean nothing was written. */
+function appliedOk(text: string): boolean {
+  return !/^(Refused|No active|Write failed|Nothing to write)/.test(text)
+}
+
 export type ResolveResult =
   | { ok: true; status: 'applied' | 'declined'; text: string }
   | { ok: false; status: 'stale' | 'not_found' | 'unavailable' | 'refused'; text: string }
@@ -146,25 +151,44 @@ export async function acceptProposal(store: ConnectedStore, proposalId: string):
   if (p.status !== 'pending') {
     return { ok: false, status: p.status === 'stale' ? 'stale' : 'refused', text: `This proposal was already ${p.status}.` }
   }
-  const live = await loadLiveProgram(store)
-  if (!live) return { ok: false, status: 'refused', text: 'No active program to change.' }
-  if (await programFingerprint(live) !== p.program_fingerprint) {
+  // Claim it before writing anything, so an app Accept and an MCP apply racing
+  // each other can't both apply it. Released back to pending if nothing lands.
+  const claimed = await store.sql<{ id: string }[]>`
+    UPDATE coach_proposal SET status = 'applied', resolved_at = NOW()
+    WHERE id = ${p.id} AND athlete_id = ${store.athleteId} AND status = 'pending'
+    RETURNING id
+  `
+  if (!claimed.length) return { ok: false, status: 'refused', text: 'This proposal was already resolved.' }
+  const release = async (status: 'pending' | 'stale') => {
     await store.sql`
-      UPDATE coach_proposal SET status = 'stale', resolved_at = NOW()
+      UPDATE coach_proposal SET status = ${status}, resolved_at = ${status === 'stale' ? new Date().toISOString() : null}
       WHERE id = ${p.id} AND athlete_id = ${store.athleteId}
     `
+  }
+  const live = await loadLiveProgram(store)
+  if (!live) {
+    await release('pending')
+    return { ok: false, status: 'refused', text: 'No active program to change.' }
+  }
+  if (await programFingerprint(live) !== p.program_fingerprint) {
+    await release('stale')
     return {
       ok: false,
       status: 'stale',
       text: 'The program changed after this was proposed, so it was not applied. Ask the coach to look again.',
     }
   }
-  const text = await applyEdits(store, p.edits, { confirm: true, timing: p.timing, request: p.request ?? undefined })
-  if (/^Refused|^No active/.test(text)) return { ok: false, status: 'refused', text }
-  await store.sql`
-    UPDATE coach_proposal SET status = 'applied', resolved_at = NOW()
-    WHERE id = ${p.id} AND athlete_id = ${store.athleteId}
-  `
+  let text: string
+  try {
+    text = await applyEdits(store, p.edits, { confirm: true, timing: p.timing, request: p.request ?? undefined })
+  } catch (e) {
+    await release('pending')
+    throw e
+  }
+  if (!appliedOk(text)) {
+    await release('pending')
+    return { ok: false, status: 'refused', text }
+  }
   // The move, pinned to the goal it serves so the goal page shows it.
   const goalId = (Array.isArray(p.goal_ids) ? p.goal_ids : []).find((g) => UUID_RE.test(g)) ?? null
   const body = p.rationale ? `Accepted: ${p.title} Why: ${p.rationale}` : `Accepted: ${p.title}`

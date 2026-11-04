@@ -273,6 +273,9 @@ ok(!tracksA.includes('Athlete B') && !tracksA.includes('Deadlift'), 'isolation: 
 const tracksB = toolText((await rpc(TOKEN_B, 'tools/call', { name: 'list_tracks', arguments: {} })).body)
 ok(tracksB.includes('General'), 'e2e: B also has a General track')
 
+// Moves follow the app's flag: A has goals on, B does not.
+await sql`UPDATE athlete SET flags = COALESCE(flags, '{}'::jsonb) || '{"tracks_v1": true}'::jsonb WHERE id = ${A}`
+
 const previewTrack = toolText((await rpc(TOKEN_A, 'tools/call', {
   name: 'create_track', arguments: { name: 'Lifting', purpose: 'mains', rationale: 'test' },
 })).body)
@@ -317,6 +320,11 @@ const goalMoves = await sql<{ athlete_id: string; body: string }[]>`
 `
 ok(goalMoves.length === 1 && goalMoves[0].athlete_id === A, 'move: confirmed upsert_goal records a coach note pinned to the goal')
 ok(goalMoves[0]?.body.includes('35 deg'), 'move: the goal note names the target and unit')
+await rpc(TOKEN_B, 'tools/call', {
+  name: 'upsert_goal', arguments: { name: 'B Vertical', metric: 'height', unit: 'in', direction: 'higher', target: 30, confirm: true, rationale: 'b' },
+})
+const [bNotes] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM coach_message WHERE athlete_id = ${B} AND body LIKE 'Set the goal B Vertical%'`
+ok(Number(bNotes?.n) === 0, 'move: an athlete without tracks_v1 gets no coach note')
 
 const measKey = 'iso-hip-ir-l-2026-11-02'
 const meas1 = toolText((await rpc(TOKEN_A, 'tools/call', {
