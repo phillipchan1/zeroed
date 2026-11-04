@@ -18,7 +18,8 @@ import { jsonParam, withSql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { loadLiveProgram, makeStore, type ConnectedStore, type LiveProgram } from './store.ts'
-import { applyPreview } from './sessionOverride.ts'
+import { APP_COACH, applyPreview, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
+import { phaseRoutineSnapshots, routineDelta, withTx, writeChange } from './changeLog.ts'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -129,7 +130,7 @@ export async function listProposals(store: ConnectedStore, status: ProposalRow['
 }
 
 /** applyEdits answers in prose; these openings mean nothing was written. */
-function appliedOk(text: string): boolean {
+export function appliedOk(text: string): boolean {
   return !/^(Refused|No active|Write failed|Nothing to write)/.test(text)
 }
 
@@ -142,11 +143,17 @@ export type ResolveResult =
  * MCP apply_program_edits(proposal_id) both land here. A week-only override
  * proposal applies only with the athlete's own tap (opts.approvalRef, minted
  * by /api/proposals); a coach can't accept one on their behalf.
+ *
+ * With tracks_v1 on (G2) a program-edit proposal also needs an approval_ref
+ * (the athlete's tap, or msg:<id> from a coach passing on their chat yes), must
+ * be under 24 h old like any preview, and its write is logged in change_log in
+ * the same transaction. opts.actor is the coach applying it over MCP; an app
+ * Accept records the proposal's author.
  */
 export async function acceptProposal(
   store: ConnectedStore,
   proposalId: string,
-  opts: { approvalRef?: string } = {},
+  opts: { approvalRef?: string; actor?: OverrideActor } = {},
 ): Promise<ResolveResult> {
   if (!UUID_RE.test(proposalId)) return { ok: false, status: 'not_found', text: 'No such proposal.' }
   let rows: ProposalRow[]
@@ -168,6 +175,34 @@ export async function acceptProposal(
     return { ok: false, status: p.status === 'stale' ? 'stale' : 'refused', text: `This proposal was already ${p.status}.` }
   }
   if (p.kind === 'session_override') return acceptOverrideProposal(store, p, opts.approvalRef)
+  const logged = await tracksV1On(store)
+  let author: OverrideActor = opts.actor ?? APP_COACH
+  if (logged) {
+    if (!opts.approvalRef) {
+      return { ok: false, status: 'refused', text: 'Refused: approval_ref is required (msg:<id> of the message where the athlete said yes), or the athlete accepts it in the app.' }
+    }
+    const [meta] = await store.sql<{ fresh: boolean; source: string }[]>`
+      SELECT (created_at > NOW() - make_interval(hours => ${PREVIEW_TTL_HOURS}::int)) AS fresh, source
+      FROM coach_proposal WHERE id = ${p.id} AND athlete_id = ${store.athleteId}
+    `
+    if (!meta?.fresh) {
+      await store.sql`
+        UPDATE coach_proposal SET status = 'stale', resolved_at = NOW()
+        WHERE id = ${p.id} AND athlete_id = ${store.athleteId} AND status = 'pending'
+      `
+      return { ok: false, status: 'stale', text: `This was proposed more than ${PREVIEW_TTL_HOURS} h ago, so it was not applied. Ask the coach to look again.` }
+    }
+    if (!opts.actor) author = meta.source === 'app' ? APP_COACH : { type: 'mcp', id: 'coach' }
+  }
+  const run = () => applyProgramProposal(store, p, logged ? { approvalRef: opts.approvalRef!, author } : null)
+  return logged ? withTx(store.sql, run) : run()
+}
+
+async function applyProgramProposal(
+  store: ConnectedStore,
+  p: ProposalRow,
+  log: { approvalRef: string; author: OverrideActor } | null,
+): Promise<ResolveResult> {
   // Claim it before writing anything, so an app Accept and an MCP apply racing
   // each other can't both apply it. Released back to pending if nothing lands.
   const claimed = await store.sql<{ id: string }[]>`
@@ -195,6 +230,7 @@ export async function acceptProposal(
       text: 'The program changed after this was proposed, so it was not applied. Ask the coach to look again.',
     }
   }
+  const before = log ? await phaseRoutineSnapshots(store, live.phaseId) : []
   let text: string
   try {
     text = await applyEdits(store, p.edits, { confirm: true, timing: p.timing, request: p.request ?? undefined })
@@ -205,6 +241,29 @@ export async function acceptProposal(
   if (!appliedOk(text)) {
     await release('pending')
     return { ok: false, status: 'refused', text }
+  }
+  if (log) {
+    const [athlete] = await store.sql<{ n: number }[]>`SELECT sessions_per_week AS n FROM athlete WHERE id = ${store.athleteId}`
+    const spw = Number(athlete?.n ?? live.sessionsPerWeek)
+    await writeChange(store, {
+      actor: log.author,
+      tool: 'accept_proposal',
+      targetType: 'program',
+      targetId: live.phaseId,
+      diff: {
+        proposal_id: p.id,
+        title: p.title,
+        timing: p.timing,
+        program_id: live.programId,
+        phase_id: live.phaseId,
+        revision: p.diff,
+        ...routineDelta(before, await phaseRoutineSnapshots(store, live.phaseId)),
+        ...(spw !== live.sessionsPerWeek ? { sessions_per_week: { before: live.sessionsPerWeek, after: spw } } : {}),
+      },
+      rationale: p.rationale,
+      approvalRef: log.approvalRef,
+      previewId: p.preview_id,
+    })
   }
   // The move, pinned to the goal it serves so the goal page shows it.
   const goalId = (Array.isArray(p.goal_ids) ? p.goal_ids : []).find((g) => UUID_RE.test(g)) ?? null

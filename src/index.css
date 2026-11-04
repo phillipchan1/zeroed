@@ -5389,6 +5389,24 @@ textarea.input {
 .proposal__timing { font-size: var(--fs-xs); color: var(--text-dim); }
 .proposal__message { margin-top: 10px; font-size: var(--fs-sm); color: var(--text-dim); line-height: 1.45; }
 .proposal__acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+
+/* tracks_v1: the Changes feed under Program. A record, not a call to act:
+   quiet surface rows, mono who/when like the proposal kicker. Undo is a text
+   tap; the yellow appears only in its confirm. An undone row stays, dimmed. */
+.changes { display: flex; flex-direction: column; gap: 10px; }
+.change { padding: 12px 14px; border-radius: var(--radius-card); border: 1px solid var(--line); background: var(--surface); }
+.change--undone { opacity: 0.6; }
+.change__k { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+.change__who { color: var(--text); font-weight: 600; }
+.change__when { letter-spacing: 0.04em; }
+.change__what { margin-top: 6px; font-size: var(--fs-sm); line-height: 1.45; }
+.change--undone .change__what { text-decoration: line-through; text-decoration-color: var(--text-dim); }
+.change__why { margin-top: 4px; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.45; }
+.change__rule { display: inline-block; margin-left: 6px; padding: 0 6px; border: 1px solid var(--line); border-radius: 999px; font-size: var(--fs-micro); color: var(--text-dim); }
+.change__suggest { margin-top: 6px; font-size: var(--fs-xs); color: var(--pending); }
+.change__message { margin-top: 8px; font-size: var(--fs-xs); color: var(--text-dim); line-height: 1.45; }
+.change__undo { margin-top: 6px; min-height: var(--tap); padding: 0; background: none; border: none; color: var(--text); font-family: var(--font-sans); font-size: var(--fs-sm); font-weight: 600; text-decoration: underline; text-decoration-color: var(--line); text-underline-offset: 3px; cursor: pointer; -webkit-tap-highlight-color: transparent; }
+.change__acts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
 @keyframes proposal-arrive { from { transform: translateX(24px); opacity: 0; } }
 
 .sidebar__goals-read { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }

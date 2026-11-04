@@ -1,8 +1,9 @@
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import { LIFT_MODEL_TOOLS, LIFT_MODEL_TOOL_NAMES, runLiftModelTool } from '../../supabase/functions/_shared/liftModelTools.ts'
-import { rpeHalfStepsOn } from '../../src/engine/liftModel.ts'
-import { applyEdits, liveToDraft, previewEdits, type EditInput } from './edits.ts'
-import { acceptProposal, parkProposal, resolveGoalIds } from './proposals.ts'
+import { parseLiftId, rpeHalfStepsOn } from '../../src/engine/liftModel.ts'
+import { applyEditsToDraft, diffDraft } from '../../supabase/functions/_shared/engine/programDraft.ts'
+import { applyEdits, liveToDraft, previewEdits, revisionPayload, toProgramEdit, type EditInput } from './edits.ts'
+import { acceptProposal, appliedOk, parkProposal, programFingerprint, resolveGoalIds } from './proposals.ts'
 import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import {
   loadAthlete,
@@ -31,6 +32,12 @@ import {
   APP_COACH, runSessionOverrideTool, SESSION_OVERRIDE_TOOLS, SESSION_OVERRIDE_TOOL_NAMES, tracksV1On,
   type OverrideActor,
 } from './sessionOverride.ts'
+import {
+  CHANGE_LOG_TOOLS, CHANGE_LOG_TOOL_NAMES, changeLogMissing, changeLogUnavailable, makeWriteGate, phaseRoutineSnapshots,
+  previewFooter, routineDelta, runChangeLogTool, trainingMaxEntry, writeApprovalProblem, type WriteGate,
+} from './changeLog.ts'
+import { isMcpUserError } from './userError.ts'
+import type { LiveProgram } from './store.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -228,14 +235,121 @@ export function storeForAthlete(sql: Sql, athleteId: string): ConnectedStore {
   return makeStore(sql, athleteId, 'lb')
 }
 
+/** Non-logging writes. With tracks_v1 on, confirm=true needs approval_ref + preview_id and is logged (G2). */
+export const GATED_WRITE_TOOLS = new Set([
+  'apply_program_edits', 'create_track', 'update_track', 'assign_exercise_to_track', 'set_track_progression_rule',
+  'upsert_autoreg_rule', 'upsert_goal', 'update_athlete_target', 'update_program_meta', 'set_training_max',
+])
+/** Standing-approved logging writes: logged as standing:logging. */
+export const LOGGING_TOOLS = new Set(['log_goal_measurement', 'add_workout_note'])
+
+/** A write tool as tracks_v1 athletes' coaches see it: the approval arguments it now needs. */
+function withApprovalArgs(tool: McpTool): McpTool {
+  if (!GATED_WRITE_TOOLS.has(tool.name)) return tool
+  const schema = tool.inputSchema as { properties?: Record<string, unknown> } & Record<string, unknown>
+  return {
+    ...tool,
+    description: `${tool.description} With confirm=true it also needs approval_ref = msg:<id of the message where the athlete said yes> and the preview_id the preview call returned (under 24 h old, diff unchanged)${tool.name === 'apply_program_edits' ? '; a proposal_id stands in for the preview' : ''}. Every write is recorded in the change log.`,
+    inputSchema: {
+      ...schema,
+      properties: {
+        ...schema.properties,
+        preview_id: { type: 'string', description: 'With confirm=true: the preview_id from the preview call.' },
+        approval_ref: { type: 'string', description: 'With confirm=true: msg:<message id> where the athlete approved this diff.' },
+        rule_refs: { type: 'array', items: { type: 'string' }, description: 'Methodology rules this applies, e.g. ["U5"]. U# named in the rationale are picked up too.' },
+      },
+    },
+  }
+}
+
 /**
  * The tools this athlete's coach sees. tracks_v1 adds the week-only override
- * tools; with it off the list is exactly ZEROED_TOOLS.
+ * and change-log tools, and the approval arguments on writes; with it off the
+ * list is exactly ZEROED_TOOLS.
  */
 export async function zeroedToolsFor(sql: Sql, athleteId: string): Promise<McpTool[]> {
   return await tracksV1On(storeForAthlete(sql, athleteId))
-    ? [...ZEROED_TOOLS, ...SESSION_OVERRIDE_TOOLS]
+    ? [...ZEROED_TOOLS.map(withApprovalArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS]
     : ZEROED_TOOLS
+}
+
+/** What preview_program_edits showed and apply_program_edits must still match: the live week and the diff. */
+async function programEditState(live: LiveProgram, edits: EditInput[]) {
+  const base = liveToDraft(live)
+  const { draft } = applyEditsToDraft(base, edits.map(toProgramEdit))
+  return { fingerprint: await programFingerprint(live), revision: revisionPayload(base.sessions, diffDraft(base, draft)) }
+}
+
+/** apply_program_edits(edits) with tracks_v1 on: approved, previewed, written and logged in one transaction. */
+async function applyEditsLogged(store: ConnectedStore, gate: WriteGate, args: Record<string, unknown>, edits: EditInput[]): Promise<string> {
+  const live = await loadLiveProgram(store)
+  if (!live) return 'No active program/phase to edit.'
+  const timing = args.timing === 'next_week' ? 'next_week' : 'now'
+  const state = await programEditState(live, edits)
+  try {
+    return await gate.commit('apply_program_edits', args, state, async () => {
+      const before = await phaseRoutineSnapshots(store, live.phaseId)
+      const text = await applyEdits(store, edits, { confirm: true, timing, request: asString(args.request) })
+      if (!appliedOk(text)) return { result: text, entry: null }
+      const [athlete] = await store.sql<{ n: number }[]>`SELECT sessions_per_week AS n FROM athlete WHERE id = ${store.athleteId}`
+      const spw = Number(athlete?.n ?? live.sessionsPerWeek)
+      return {
+        result: text,
+        entry: {
+          targetType: 'program',
+          targetId: live.phaseId,
+          diff: {
+            timing,
+            program_id: live.programId,
+            phase_id: live.phaseId,
+            revision: state.revision,
+            ...routineDelta(before, await phaseRoutineSnapshots(store, live.phaseId)),
+            ...(spw !== live.sessionsPerWeek ? { sessions_per_week: { before: live.sessionsPerWeek, after: spw } } : {}),
+          },
+          rationale: edits.map((e) => e.rationale).filter((r): r is string => typeof r === 'string' && r.trim() !== '').join(' ') || null,
+        },
+      }
+    })
+  } catch (e) {
+    if (isMcpUserError(e)) return e.message
+    throw e
+  }
+}
+
+/** set_training_max with tracks_v1 on: the prior value is kept so the athlete can undo it. */
+async function trainingMaxLogged(
+  store: ConnectedStore,
+  gate: WriteGate,
+  args: Record<string, unknown>,
+  rpeHalfSteps: boolean,
+): Promise<string> {
+  const run = (save = (lift: Parameters<typeof saveTrainingMax>[1], entry: Parameters<typeof saveTrainingMax>[2]) => saveTrainingMax(store, lift, entry)) =>
+    runLiftModelTool('set_training_max', args, { load: () => loadLiftModelSources(store), saveTrainingMax: save, rpeHalfSteps })
+  const lift = parseLiftId(typeof args.lift === 'string' ? args.lift : null)
+  if (!lift) return run()
+  const state = { lift, training_max: args.training_max ?? null, before: await trainingMaxEntry(store, lift) }
+  if (args.confirm !== true) {
+    const text = await run()
+    return `${text}
+
+${previewFooter(await gate.preview('set_training_max', state, null))}`
+  }
+  try {
+    return await gate.commit('set_training_max', args, state, async () => {
+      let after: unknown
+      let saved = false
+      const text = await run(async (l, entry) => {
+        const out = await saveTrainingMax(store, l, entry)
+        after = out[l] ?? null
+        saved = true
+        return out
+      })
+      return { result: text, entry: saved ? { targetType: 'training_max', targetId: lift, diff: { lift, before: state.before, after } } : null }
+    })
+  } catch (e) {
+    if (isMcpUserError(e)) return e.message
+    throw e
+  }
 }
 
 export async function executeZeroedTool(
@@ -248,10 +362,38 @@ export async function executeZeroedTool(
   // preview and propose, never approve.
   actor: OverrideActor = APP_COACH,
 ): Promise<string> {
+  try {
+    return await runZeroedTool(sql, athleteId, name, args, flags, actor)
+  } catch (e) {
+    // tracks_v1 on before worker/schema/change-log.sql: the write rolled back.
+    if (changeLogMissing(e)) throw new McpUserError(changeLogUnavailable)
+    throw e
+  }
+}
+
+async function runZeroedTool(
+  sql: Sql,
+  athleteId: string,
+  name: string,
+  args: Record<string, unknown>,
+  flags: { rpeHalfSteps?: boolean } | undefined,
+  actor: OverrideActor,
+): Promise<string> {
   const store = storeForAthlete(sql, athleteId)
 
   if (SESSION_OVERRIDE_TOOL_NAMES.has(name)) {
     return runSessionOverrideTool(store, name, args, actor, (refs) => resolveGoalIds(store, refs))
+  }
+
+  if (CHANGE_LOG_TOOL_NAMES.has(name)) return runChangeLogTool(store, name, args, actor)
+
+  // G2: with tracks_v1 on, writes go through the gate (approval, preview, change_log).
+  // Off, gate stays undefined and every path below is exactly as before.
+  const writes = GATED_WRITE_TOOLS.has(name) || LOGGING_TOOLS.has(name) || name === 'preview_program_edits'
+  const gate = writes && await tracksV1On(store) ? makeWriteGate(store, actor) : undefined
+
+  if (name === 'set_training_max' && gate) {
+    return trainingMaxLogged(store, gate, args, flags?.rpeHalfSteps ?? rpeHalfStepsOn())
   }
 
   if (LIFT_MODEL_TOOL_NAMES.has(name)) {
@@ -264,7 +406,7 @@ export async function executeZeroedTool(
 
   if (TRACK_TOOL_NAMES.has(name)) {
     const live = name === 'get_track_progression' ? await loadLiveProgram(store) : null
-    const out = await runTrackTool(store, name, args, live)
+    const out = await runTrackTool(store, name, args, live, gate)
     if (out == null) throw new McpUserError(`Unknown tool: ${name}`)
     return out
   }
@@ -393,7 +535,11 @@ export async function executeZeroedTool(
       const live = await loadLiveProgram(store)
       if (!live) return 'No active program/phase to edit.'
       const preview = previewEdits(live, edits as EditInput[], asString(args.week_start))
-      if (args.propose !== true) return preview.text
+      if (args.propose !== true) {
+        if (!gate) return preview.text
+        const id = await gate.preview('apply_program_edits', await programEditState(live, edits as EditInput[]), null)
+        return `${preview.text}\n\n${previewFooter(id)}`
+      }
       const title = asString(args.title)
       if (!title) throw new McpUserError('title is required with propose=true: one sentence the athlete reads')
       const parked = await parkProposal(store, live, edits as EditInput[], {
@@ -415,9 +561,17 @@ export async function executeZeroedTool(
         return 'Refused: apply_program_edits requires confirm=true. Call preview_program_edits first, then apply with confirm=true.'
       }
       const proposalId = asString(args.proposal_id)
-      if (proposalId) return (await acceptProposal(store, proposalId)).text
+      if (proposalId) {
+        if (!gate) return (await acceptProposal(store, proposalId)).text
+        // The proposal is the preview (fingerprint + 24 h); the coach still
+        // needs the athlete's yes from the chat.
+        const problem = writeApprovalProblem(actor, args.approval_ref)
+        if (problem) return problem
+        return (await acceptProposal(store, proposalId, { approvalRef: String(args.approval_ref).trim(), actor })).text
+      }
       const edits = args.edits
       if (!Array.isArray(edits) || !edits.length) throw new McpUserError('edits or proposal_id is required')
+      if (gate) return applyEditsLogged(store, gate, args, edits as EditInput[])
       const timing = args.timing === 'next_week' ? 'next_week' : 'now'
       return applyEdits(store, edits as EditInput[], {
         confirm: true,

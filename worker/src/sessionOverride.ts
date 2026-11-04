@@ -13,8 +13,8 @@
  *              athlete said yes (msg:<id>). app_coach can never supply one: it
  *              parks a coach_proposal and the athlete accepts it in the app.
  *   clear    → the same preview / apply pair, recorded the same way.
- * Every apply and clear adds a session_override_log row (spec section 6's
- * change_log shape, so G2 can lift it across).
+ * Every apply and clear adds a session_override_log row per override row and,
+ * in the same statement, one change_log row (G2) for the whole write.
  *
  * Tables are hand-applied on Neon (worker/schema/session-override.sql). Until
  * they exist, every function here reads as "no overrides" or "unavailable".
@@ -34,6 +34,7 @@ import type { Env } from './env.ts'
 import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { calendarZone, loadLiveProgram, makeStore, type ConnectedStore } from './store.ts'
 import { McpUserError } from './userError.ts'
+import { ruleRefsFrom } from './changeSummary.ts'
 
 export type ActorType = 'athlete' | 'mcp' | 'app_coach' | 'system'
 
@@ -581,16 +582,23 @@ async function voidIfRevoked(store: ConnectedStore, p: PreviewRow): Promise<bool
     RETURNING id
   `
   if (voided.length) {
+    const why = 'The coach that made this preview no longer has access.'
     await log(store, {
       actor: { type: 'system', id: 'revocation' },
       tool: 'void_preview',
       target: { preview_id: p.preview_id, coach: `mcp:${p.actor_id}` },
       diff: {},
-      rationale: 'The coach that made this preview no longer has access.',
+      rationale: why,
       approvalRef: null,
       previewId: p.preview_id,
       expiresOn: null,
     })
+    // applyPreview only runs with tracks_v1 on, so G2's log is on too.
+    await store.sql`
+      INSERT INTO change_log (athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, preview_id)
+      VALUES (${store.athleteId}, 'system', 'revocation', 'void_preview', 'session_override_preview', ${p.preview_id},
+              ${jsonParam(store.sql, { coach: `mcp:${p.actor_id}` })}, ${why}, ${p.preview_id})
+    `
   }
   return true
 }
@@ -720,6 +728,21 @@ export async function applyPreview(
                ${p.rationale}::text, ${approvalRef}::text, ${p.preview_id}::text, i.expires_on
         FROM ins i JOIN planned x ON x.date = i.date AND x.routine_id = i.routine_id
         RETURNING id
+      ),
+      -- G2: the same write, once, in change_log (a move is one change, two rows).
+      changed AS (
+        INSERT INTO change_log (
+          athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
+          approval_ref, preview_id, expires_on
+        )
+        SELECT ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'apply_session_override',
+               'session_override', (SELECT min(id::text) FROM ins),
+               jsonb_build_object('override_ids', (SELECT jsonb_agg(id::text ORDER BY date, id) FROM ins),
+                                  'sessions', ${jsonParam(store.sql, diff)}),
+               ${p.rationale}::text, ${jsonParam(store.sql, ruleRefsFrom(p.rationale))},
+               ${approvalRef}::text, ${p.preview_id}::text, (SELECT max(expires_on) FROM ins)
+        WHERE EXISTS (SELECT 1 FROM ins)
+        RETURNING id
       )
       SELECT id::text AS id FROM ins ORDER BY date
     `
@@ -751,6 +774,20 @@ export async function applyPreview(
                jsonb_build_object('changes', COALESCE(c.changes, '[]'::jsonb)),
                ${p.rationale}::text, ${approvalRef}::text, ${p.preview_id}::text, v.expires_on
         FROM voided v LEFT JOIN changes c ON c.date = v.date AND c.routine_id = v.routine_id
+        RETURNING id
+      ),
+      changed AS (
+        INSERT INTO change_log (
+          athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
+          approval_ref, preview_id, expires_on
+        )
+        SELECT ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'clear_session_override',
+               'session_override', (SELECT min(id::text) FROM voided),
+               jsonb_build_object('override_ids', (SELECT jsonb_agg(id::text ORDER BY date, id) FROM voided),
+                                  'sessions', ${jsonParam(store.sql, diff)}),
+               ${p.rationale}::text, ${jsonParam(store.sql, ruleRefsFrom(p.rationale))},
+               ${approvalRef}::text, ${p.preview_id}::text, (SELECT max(expires_on) FROM voided)
+        WHERE EXISTS (SELECT 1 FROM voided)
         RETURNING id
       )
       SELECT id::text AS id FROM voided ORDER BY date

@@ -4,7 +4,7 @@ import { History, Lock, Sparkles } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { invalidateCache, useCachedLoader } from '../../lib/cache'
 import { PullToRefresh } from '../../components/PullToRefresh'
-import { cacheKeys } from '../../lib/loopCache'
+import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
 import {
   gatherProgramMap, gatherTrainingLog,
   gatherBlockVolume, activeBlockRetestDate,
@@ -24,6 +24,8 @@ import { CoverageGrid, TrackLabel } from './tracksUi'
 import { daysHitByTrack } from '../../engine/tracks'
 import { weekWindowInZone } from '../../engine/weekDates'
 import { fetchWeekOverrides, overridesByRoutine, weekdayOf, WEEK_ONLY_LABEL } from '../../lib/sessionOverrides'
+import { fetchChanges } from '../../lib/changeLog'
+import { ChangesFeed } from './ChangesFeed'
 
 // Directive → chip tone, matching the recap banner so "the call" reads the same
 // everywhere it appears.
@@ -222,6 +224,11 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
     () => fetchWeekOverrides(week.weekStart, week.weekEnd),
   )
   const overridesBy = overridesByRoutine(weekOverrides)
+  // tracks_v1: every recorded change, newest first, each with its Undo.
+  const { data: changes, refetch: refetchChanges } = useCachedLoader(
+    tracksOn() ? cacheKeys.changes(athleteId) : null,
+    fetchChanges,
+  )
 
   const nextWeek = map?.nextWeek ?? null
   const aheadPhases = (map?.phases ?? []).filter((p) => p.state === 'upcoming')
@@ -270,11 +277,19 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
       || k.startsWith('blockvol:')
       || k.startsWith('rx:')
       || k.startsWith('overrides:')
+      || k.startsWith('changes:')
     ))
     refetchProgram()
     refetchMap()
     refetchLog()
     refetchVolume()
+    if (tracksOn()) refetchChanges()
+  }
+
+  // An undo can move the week, the plan and the feed: refresh all of it.
+  function afterUndo() {
+    invalidateLoopViews()
+    pullRefresh()
   }
 
   return (
@@ -401,6 +416,12 @@ export function ProgramScreen({ athleteId }: { athleteId: string }) {
 
             {/* Everything else folds away. Each row states its own size so you
                 know what's behind it before you open it. */}
+
+            {tracksOn() && changes && (
+              <Disclosure label="Changes" meta={<span className="num">{changes.length}</span>}>
+                <ChangesFeed changes={changes} onUndone={afterUndo} />
+              </Disclosure>
+            )}
 
             {nextWeek && (
               <Disclosure
