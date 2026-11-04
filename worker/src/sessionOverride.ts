@@ -39,6 +39,9 @@ import { McpUserError } from './userError.ts'
 import { ruleRefsFrom } from './changeSummary.ts'
 import { APPROVAL_REF_SHAPE, checkApproval, createApproval, parseApprovalRef } from './approvals.ts'
 import { withTx } from './changeLog.ts'
+import { methodologyVersionFor, resolveMethodology, blockedRegions } from './methodology.ts'
+import { CURRENT_METHODOLOGY } from './methodology/v1.ts'
+import { validateEdit, warningsSection, type PreviewWarning, type WeekSession } from './methodology/validators.ts'
 
 export type ActorType = 'athlete' | 'mcp' | 'app_coach' | 'system'
 
@@ -47,10 +50,26 @@ export interface OverrideActor {
   id: string
 }
 
+/** How a proposal records who parked it (coach_proposal.created_by): mcp:<token id>, app_coach, athlete:<id>. */
+export function actorRef(actor: OverrideActor): string {
+  return actor.type === 'app_coach' ? 'app_coach' : `${actor.type}:${actor.id}`
+}
+
+/** created_by back to an actor; null for rows parked before G3. */
+export function actorFromRef(ref: string | null | undefined): OverrideActor | null {
+  if (!ref) return null
+  if (ref === 'app_coach') return APP_COACH
+  const at = ref.indexOf(':')
+  const type = ref.slice(0, at)
+  if (at < 1 || !['athlete', 'mcp', 'system'].includes(type)) return null
+  return { type: type as OverrideActor['type'], id: ref.slice(at + 1) }
+}
+
 /** The in-app coach. Same tools as any coach, no approval power. */
 export const APP_COACH: OverrideActor = { type: 'app_coach', id: 'app_coach' }
 
-export const PREVIEW_TTL_HOURS = 24
+/** Section 6: from the methodology (v1: 24 h), the same for every athlete. */
+export const PREVIEW_TTL_HOURS = CURRENT_METHODOLOGY.preview_ttl_hours
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -189,6 +208,17 @@ interface CreateRequest {
   routine_id: string
   ops: OverrideInputOp[]
   expires_on: string | null
+  /** G3: rules the coach cited, beyond the U#s in the rationale. Not part of the diff. */
+  rule_refs?: string[]
+}
+
+/** One dated session before and after the planned ops, for the validators (G5). */
+interface PlannedSession {
+  date: string
+  routine_id: string
+  session: string
+  before: ExerciseTemplate[]
+  after: ExerciseTemplate[]
 }
 
 interface PlannedRow {
@@ -238,7 +268,12 @@ function inWindow(date: string, today: string): boolean {
   return d >= -MAX_PAST_DAYS && d <= MAX_FUTURE_DAYS
 }
 
-async function diffRows(cache: PlanCache, rows: PlannedRow[], exclude: Set<string> = new Set()): Promise<DiffRow[] | { error: string }> {
+async function diffRows(
+  cache: PlanCache,
+  rows: PlannedRow[],
+  exclude: Set<string> = new Set(),
+  collect?: PlannedSession[],
+): Promise<DiffRow[] | { error: string }> {
   const out: DiffRow[] = []
   for (const row of rows) {
     const routine = await cache.routine(row.routine_id)
@@ -253,6 +288,7 @@ async function diffRows(cache: PlanCache, rows: PlannedRow[], exclude: Set<strin
       return { error: `${routine.name} on ${shortDateLabel(row.date)}: ${after.errors.slice(before.errors.length).join('; ')}` }
     }
     const changes = diffOverride(before, after)
+    collect?.push({ date: row.date, routine_id: row.routine_id, session: routine.name, before: before.exercises, after: after.exercises })
     out.push({
       date: row.date,
       routine_id: row.routine_id,
@@ -266,7 +302,7 @@ async function diffRows(cache: PlanCache, rows: PlannedRow[], exclude: Set<strin
   return out
 }
 
-async function planCreate(store: ConnectedStore, req: CreateRequest, today: string): Promise<Plan> {
+async function planCreate(store: ConnectedStore, req: CreateRequest, today: string, collect?: PlannedSession[]): Promise<Plan> {
   if (!inWindow(req.date, today)) {
     return { error: `date must be within ${MAX_PAST_DAYS} days back and ${MAX_FUTURE_DAYS} days ahead of today (${today}).` }
   }
@@ -331,7 +367,7 @@ async function planCreate(store: ConnectedStore, req: CreateRequest, today: stri
   }
 
   const planned = [...rows.values()].filter((r) => r.ops.length > 0)
-  const diff = await diffRows(cache, planned)
+  const diff = await diffRows(cache, planned, new Set(), collect)
   if ('error' in diff) return diff
   if (diff.every((d) => d.changes.length === 0)) return { error: 'These ops change nothing on that date.' }
   return { rows: planned, diff }
@@ -415,6 +451,8 @@ export interface PreviewOk {
   preview_id: string
   diff: DiffRow[]
   text: string
+  /** G5: what this change breaks (U8–U10), none of it blocking. */
+  warnings: PreviewWarning[]
 }
 export type PreviewResult = PreviewOk | { ok: false; text: string }
 
@@ -435,13 +473,14 @@ async function storePreview(
   return previewId
 }
 
-function previewText(previewId: string, diff: DiffRow[], kind: 'create' | 'clear'): string {
+function previewText(previewId: string, diff: DiffRow[], kind: 'create' | 'clear', warnings: PreviewWarning[] = []): string {
   return [
     kind === 'create' ? '# Preview: week-only session override' : '# Preview: clear a week-only override',
     'The program template is not touched. Nothing is written until apply.',
     '',
     formatDiff(diff),
     '',
+    ...(warnings.length ? [warningsSection(warnings), ''] : []),
     `preview_id: ${previewId} (valid ${PREVIEW_TTL_HOURS} h, and only while this diff still matches)`,
     'Show the athlete this diff. Once they approve it in the app, list_approvals(preview_id) gives their approval_ref; apply with apply_session_override(preview_id, confirm=true, approval_ref). Or park it for the athlete with propose=true.',
   ].join('\n')
@@ -450,7 +489,7 @@ function previewText(previewId: string, diff: DiffRow[], kind: 'create' | 'clear
 export async function previewCreate(
   store: ConnectedStore,
   actor: OverrideActor,
-  args: { date: unknown; session: unknown; ops: unknown; expires_on?: unknown; rationale?: unknown },
+  args: { date: unknown; session: unknown; ops: unknown; expires_on?: unknown; rationale?: unknown; rule_refs?: unknown; rewrite?: unknown },
 ): Promise<PreviewResult> {
   if (!(await tracksV1On(store))) return { ok: false, text: flagOff }
   if (!isIsoDate(args.date)) return { ok: false, text: 'date must be YYYY-MM-DD.' }
@@ -464,16 +503,22 @@ export async function previewCreate(
     const session = await resolveSession(store, sessionRef)
     if ('error' in session) return { ok: false, text: session.error }
     const today = await athleteToday(store)
+    const refs = ruleRefsFrom(null, args.rule_refs)
     const request: CreateRequest = {
       date: args.date,
       routine_id: session.id,
       ops,
       expires_on: typeof args.expires_on === 'string' ? args.expires_on : null,
+      ...(refs.length ? { rule_refs: refs } : {}),
     }
-    const plan = await planCreate(store, request, today)
+    const sessions: PlannedSession[] = []
+    const plan = await planCreate(store, request, today, sessions)
     if ('error' in plan) return { ok: false, text: `Refused: ${plan.error}` }
+    // G5: the validators, before anything is kept. U13 and red flags refuse.
+    const { warnings, blocked } = await validateOverride(store, sessions, ops, args.rewrite === true)
+    if (blocked) return { ok: false, text: `Refused (${blocked.rule}): ${blocked.message}\n\n${warningsSection(warnings)}` }
     const previewId = await storePreview(store, actor, 'create', request, plan.diff, rationale)
-    return { ok: true, preview_id: previewId, diff: plan.diff, text: previewText(previewId, plan.diff, 'create') }
+    return { ok: true, preview_id: previewId, diff: plan.diff, warnings, text: previewText(previewId, plan.diff, 'create', warnings) }
   } catch (e) {
     if (missingSchema(e)) return { ok: false, text: unavailable }
     throw e
@@ -494,11 +539,48 @@ export async function previewClear(
     const plan = await planClear(store, ids, today)
     if ('error' in plan) return { ok: false, text: `Refused: ${plan.error}` }
     const previewId = await storePreview(store, actor, 'clear', { override_ids: plan.ids }, plan.diff, rationale)
-    return { ok: true, preview_id: previewId, diff: plan.diff, text: previewText(previewId, plan.diff, 'clear') }
+    // Back to the plan: nothing new to warn about.
+    return { ok: true, preview_id: previewId, diff: plan.diff, warnings: [], text: previewText(previewId, plan.diff, 'clear') }
   } catch (e) {
     if (missingSchema(e)) return { ok: false, text: unavailable }
     throw e
   }
+}
+
+/** Mon = 0 … Sun = 6, like routine.intended_dow. */
+function weekdayOf(date: string): number {
+  return (new Date(`${date}T00:00:00Z`).getUTCDay() + 6) % 7
+}
+
+/**
+ * G5 on a week-only change: the live week with the dated sessions before and
+ * after the ops, against this athlete's methodology. A move is a reschedule,
+ * not a rewrite, so only add / swap / drop / adjust count toward U13.
+ */
+async function validateOverride(
+  store: ConnectedStore,
+  sessions: PlannedSession[],
+  ops: OverrideInputOp[],
+  rewrite: boolean,
+): Promise<{ warnings: PreviewWarning[]; blocked: PreviewWarning | null }> {
+  const [live, methodology] = await Promise.all([loadLiveProgram(store), resolveMethodology(store)])
+  const template: WeekSession[] = (live?.sessions ?? []).map((s) => ({ key: s.routineId, name: s.name, dow: s.intendedDow, exercises: s.exercises }))
+  const dated = (side: 'before' | 'after'): WeekSession[] => {
+    const replaced = new Set(sessions.filter((x) => template.some((t) => t.key === x.routine_id && t.dow === weekdayOf(x.date))).map((x) => x.routine_id))
+    return [
+      ...template.filter((t) => !replaced.has(t.key)),
+      ...sessions.map((x) => ({ key: `${x.routine_id}@${x.date}`, name: `${x.session} · ${shortDateLabel(x.date)}`, dow: weekdayOf(x.date), exercises: x[side] })),
+    ]
+  }
+  return validateEdit({
+    before: dated('before'),
+    after: dated('after'),
+    params: methodology.params,
+    changed: ops.filter((o) => o.op !== 'move').length,
+    total: template.reduce((n, s) => n + s.exercises.length, 0),
+    rewrite,
+    blockedRegions: blockedRegions(methodology),
+  })
 }
 
 // ---- apply ---------------------------------------------------------------------------
@@ -592,9 +674,9 @@ async function voidIfRevoked(store: ConnectedStore, p: PreviewRow): Promise<bool
     })
     // applyPreview only runs with tracks_v1 on, so G2's log is on too.
     await store.sql`
-      INSERT INTO change_log (athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, preview_id)
+      INSERT INTO change_log (athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, preview_id, methodology_version)
       VALUES (${store.athleteId}, 'system', 'revocation', 'void_preview', 'session_override_preview', ${p.preview_id},
-              ${jsonParam(store.sql, { coach: `mcp:${p.actor_id}` })}, ${why}, ${p.preview_id})
+              ${jsonParam(store.sql, { coach: `mcp:${p.actor_id}` })}, ${why}, ${p.preview_id}, ${await methodologyVersionFor(store)})
     `
   }
   return true
@@ -674,6 +756,10 @@ export async function applyPreview(
   const approvalRef = approval.approvalRef
   const approvalId = approval.approvalId
   const changeId = crypto.randomUUID()
+  // G3: the rules cited (rationale U#s plus the preview's rule_refs) and the
+  // methodology version this write ran on.
+  const ruleRefs = ruleRefsFrom(p.rationale, asJson<{ rule_refs?: unknown }>(p.request, {}).rule_refs)
+  const methodology = await methodologyVersionFor(store)
 
   // One statement per write: claiming the preview, the override rows, their
   // log rows and consuming the approval (G10, named by the change_log row)
@@ -741,14 +827,15 @@ export async function applyPreview(
         changed AS (
           INSERT INTO change_log (
             id, athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
-            approval_ref, approval_id, preview_id, expires_on
+            approval_ref, approval_id, preview_id, expires_on, methodology_version
           )
           SELECT ${changeId}::uuid, ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'apply_session_override',
                  'session_override', (SELECT min(id::text) FROM ins),
                  jsonb_build_object('override_ids', (SELECT jsonb_agg(id::text ORDER BY date, id) FROM ins),
                                     'sessions', ${jsonParam(store.sql, diff)}),
-                 ${p.rationale}::text, ${jsonParam(store.sql, ruleRefsFrom(p.rationale))},
-                 ${approvalRef}::text, ${approvalId}::uuid, ${p.preview_id}::text, (SELECT max(expires_on) FROM ins)
+                 ${p.rationale}::text, ${jsonParam(store.sql, ruleRefs)},
+                 ${approvalRef}::text, ${approvalId}::uuid, ${p.preview_id}::text, (SELECT max(expires_on) FROM ins),
+                 ${methodology}::text
           WHERE EXISTS (SELECT 1 FROM ins)
           RETURNING id
         ),
@@ -793,14 +880,15 @@ export async function applyPreview(
       changed AS (
         INSERT INTO change_log (
           id, athlete_id, actor_type, actor_id, tool, target_type, target_id, diff, rationale, rule_refs,
-          approval_ref, approval_id, preview_id, expires_on
+          approval_ref, approval_id, preview_id, expires_on, methodology_version
         )
         SELECT ${changeId}::uuid, ${store.athleteId}::uuid, ${author.type}::text, ${author.id}::text, 'clear_session_override',
                'session_override', (SELECT min(id::text) FROM voided),
                jsonb_build_object('override_ids', (SELECT jsonb_agg(id::text ORDER BY date, id) FROM voided),
                                   'sessions', ${jsonParam(store.sql, diff)}),
-               ${p.rationale}::text, ${jsonParam(store.sql, ruleRefsFrom(p.rationale))},
-               ${approvalRef}::text, ${approvalId}::uuid, ${p.preview_id}::text, (SELECT max(expires_on) FROM voided)
+               ${p.rationale}::text, ${jsonParam(store.sql, ruleRefs)},
+               ${approvalRef}::text, ${approvalId}::uuid, ${p.preview_id}::text, (SELECT max(expires_on) FROM voided),
+               ${methodology}::text
         WHERE EXISTS (SELECT 1 FROM voided)
         RETURNING id
       ),
@@ -928,16 +1016,18 @@ export async function listOverrides(
 export async function parkOverrideProposal(
   store: ConnectedStore,
   preview: PreviewOk,
-  opts: { title: string; rationale: string | null; goalIds: string[]; source: 'mcp' | 'app' },
+  opts: { title: string; rationale: string | null; goalIds: string[]; source: 'mcp' | 'app'; actor: OverrideActor },
 ): Promise<{ ok: true; id: string } | { ok: false; text: string }> {
   try {
+    // Only reached with tracks_v1 on, so created_by (G3) is always named.
     const [row] = await store.sql<{ id: string }[]>`
       INSERT INTO coach_proposal (
-        athlete_id, preview_id, title, rationale, goal_ids, edits, timing, request, diff, program_fingerprint, source, kind
+        athlete_id, preview_id, title, rationale, goal_ids, edits, timing, request, diff, program_fingerprint, source, kind, created_by
       ) VALUES (
         ${store.athleteId}, ${preview.preview_id}, ${opts.title}, ${opts.rationale}, ${jsonParam(store.sql, opts.goalIds)},
         ${jsonParam(store.sql, { preview_id: preview.preview_id })}, 'now', ${null},
-        ${jsonParam(store.sql, proposalDiff(preview.diff))}, ${preview.preview_id}, ${opts.source}, 'session_override'
+        ${jsonParam(store.sql, proposalDiff(preview.diff))}, ${preview.preview_id}, ${opts.source}, 'session_override',
+        ${actorRef(opts.actor)}
       )
       RETURNING id
     `
@@ -992,7 +1082,9 @@ export const SESSION_OVERRIDE_TOOLS: McpTool[] = [
         session: { type: 'string', description: 'Routine id or session name.' },
         ops: { type: 'array', items: overrideOpSchema, minItems: 1, maxItems: 12 },
         expires_on: { type: 'string', description: 'YYYY-MM-DD, default the Sunday ending that week; at most 7 days after date.' },
-        rationale: { type: 'string', description: 'Why, in the athlete\'s terms.' },
+        rationale: { type: 'string', description: 'Why, in the athlete\'s terms. Cite the rule (U#).' },
+        rule_refs: { type: 'array', items: { type: 'string' }, description: 'Methodology rules this applies, e.g. ["U5"]. U# named in the rationale are picked up too.' },
+        rewrite: { type: 'boolean', description: 'Changing more than 30% of the week\'s exercises fails the preview (U13) unless this is true.' },
         propose: { type: 'boolean', description: 'Park for the athlete to accept in the app. Required for the in-app coach.' },
         title: { type: 'string', description: 'With propose: one sentence the athlete reads.' },
         goal_ids: { type: 'array', items: { type: 'string' }, description: 'With propose: goals this serves, by id or name.' },
@@ -1059,7 +1151,10 @@ export async function runSessionOverrideTool(
     case 'preview_session_override':
     case 'preview_clear_session_override': {
       const preview = name === 'preview_session_override'
-        ? await previewCreate(store, actor, { date: args.date, session: args.session, ops: args.ops, expires_on: args.expires_on, rationale: args.rationale })
+        ? await previewCreate(store, actor, {
+            date: args.date, session: args.session, ops: args.ops, expires_on: args.expires_on, rationale: args.rationale,
+            rule_refs: args.rule_refs, rewrite: args.rewrite,
+          })
         : await previewClear(store, actor, { override_id: args.override_id, rationale: args.rationale })
       if (!preview.ok) return preview.text
       const propose = args.propose === true
@@ -1076,6 +1171,7 @@ export async function runSessionOverrideTool(
         rationale,
         goalIds: await resolveGoals(args.goal_ids),
         source: actor.type === 'app_coach' ? 'app' : 'mcp',
+        actor,
       })
       if (!parked.ok) return `${preview.text}\n\n${parked.text}`
       return `${preview.text}\n\n## Proposed\nParked for the athlete as proposal ${parked.id}. They accept it in the app; that tap is the approval.`
@@ -1153,8 +1249,8 @@ export async function athleteOverrideAction(store: ConnectedStore, body: Record<
         }),
       }, 200]
     case 'preview': {
-      const p = await previewCreate(store, me, { date: body.date, session: body.session, ops: body.ops, expires_on: body.expires_on, rationale: body.rationale })
-      return [p.ok ? { ok: true, preview_id: p.preview_id, diff: p.diff } : { ok: false, text: p.text }, 200]
+      const p = await previewCreate(store, me, { date: body.date, session: body.session, ops: body.ops, expires_on: body.expires_on, rationale: body.rationale, rewrite: body.rewrite })
+      return [p.ok ? { ok: true, preview_id: p.preview_id, diff: p.diff, warnings: p.warnings } : { ok: false, text: p.text }, 200]
     }
     case 'preview_clear': {
       const p = await previewClear(store, me, { override_id: body.override_id, rationale: body.rationale })

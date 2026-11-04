@@ -2,6 +2,19 @@
 
 ## Unreleased
 
+### Methodology as config (G3), preview validators (G5), proposal created_by (G10 follow-up), tracks_v1
+
+Behind `athlete.flags.tracks_v1`; with it off `/api/session-rx`, previews, proposals and the MCP tool list are byte-for-byte as before, and no new column or table is read or written.
+
+- **One global, versioned ruleset.** `worker/src/methodology/v1.ts` holds U1–U15, the under-18 rules and the 24 h preview expiry as data, version `v1`. Where the engine already had the number (TM 90%, +2.5%/+5% pushes, deload 65% TM @ RPE ≤ 6, 24 h, 30% small-edit cap) the default equals it; the lift model now takes these as optional params and is identical without them. U4 records `e1rm_source: rpe_chart` (what the engine does) rather than Epley.
+- **Per-athlete overrides.** New append-only `methodology_override` (athlete, optional track, path, JSONB value, who, approval, preview, change_log row; superseded once). Effective params = global → athlete → track → under-18 clamp. Paths are a closed, typed, range-checked schema. Under-18 rules only tighten; for a minor nothing loosens; the universal pain cap stays ≤ 3/10; the raised cap (≤ 5/10 if settled next morning) is a per-region opt-in that needs a date of birth showing 18+ and is refused on a red-flagged region; a red flag can be set by a coach and cleared only by the athlete; red flags block loading.
+- **MCP (flag on).** `get_methodology`, `preview_methodology_override`, `apply_methodology_override` (confirm + preview < 24 h with unchanged diff + the athlete's approval, logged in change_log with `rule_refs`). `preview_session_override` takes `rule_refs` and `rewrite`; `preview_program_edits` takes `rewrite`.
+- **Every prescription records its methodology.** Flag on, `/api/session-rx` adds `methodology_version` (`v1`, or `v1+<hash>` with overrides or the under-18 rules) to the response and each prescription, runs the lift model on the resolved params, caps RPE at 8 under 18, and skips exercises that load a red-flagged region. With defaults the numbers and version strings are unchanged. `change_log.methodology_version` is filled on every row.
+- **Preview validators.** Program-edit, week-only override and proposal previews return `warnings: [{ rule, message, target }]` for U8 session order, U9 interference (HIIT count, HIIT the day before heavy legs) and U10 supersets (two heavy compounds, press + triceps, anything + plyo, grip + deadlift, top sets ≥ RPE 9, main-lift rest). Only new violations are reported; unknown exercises never warn. U13 (> 30% of the week's exercises changed without `rewrite=true`; one exercise is always surgical) and red flags fail the preview.
+- **created_by on proposals.** New proposals record `mcp:<token id>` / `app_coach`; approvals of them name that coach. Revoking a coach now also marks its pending proposals stale (`voided_at`) and voids their unconsumed approvals, logged on the `revoke_coach` row. Older rows (NULL) are left alone.
+
+**Deploy:** hand-apply `worker/schema/methodology.sql` on Neon (`supabase/migrations/20261104000005_methodology.sql` on Supabase) after `approval.sql` and BEFORE deploying this Worker for anyone with `tracks_v1` on. Rollback is in the SQL header: drop the flag per athlete (instant), or redeploy the previous Worker; the table and columns can be dropped afterwards.
+
 ### Approval capture (G10, tracks_v1)
 
 Behind `athlete.flags.tracks_v1`; with it off no `approval` row is written, the MCP tool list and schemas are exactly as before, Accept applies as before, and `/api/approvals` answers 404.

@@ -389,6 +389,23 @@ export const HALF_LIFE_DAYS = 21
 export const MAX_AGE_DISCOUNT = 0.10
 export const TM_FRACTION = 0.9
 
+/**
+ * The methodology numbers this file runs on, when a caller passes them
+ * (worker/src/methodology, tracks_v1). Anything left out is the constant it
+ * replaces, so no params at all is exactly today's math.
+ */
+export interface LiftModelParams {
+  /** TRAINING max = this × working max (TM_FRACTION). */
+  tmFraction?: number
+  /** A push on a main lift, in % (PUSH_PCT). */
+  pushPct?: { upper: number; lower: number }
+  /** Deload week: % of TM and the RPE cap (DELOAD_TM_PCT, DELOAD_RPE_CAP). */
+  deloadTmPct?: number
+  deloadRpeCap?: number
+  /** A hard RPE ceiling (the under-18 rules). A target above it is prescribed at it. */
+  maxRpe?: number | null
+}
+
 export function parseRpeHalfStepsFlag(raw: string | undefined | null): boolean {
   const v = String(raw ?? '').trim().toLowerCase().replace(/^['"]+|['"]+$/g, '')
   return v === '1' || v === 'true'
@@ -725,7 +742,12 @@ export interface CallInput {
   last: TopSetWeek | null
   prior: TopSetWeek | null
   pain: string | null
+  /** Push size in %; PUSH_PCT when absent. */
+  pushPct?: { upper: number; lower: number }
 }
+
+/** Upper-body main lifts push 2.5% a week, lower-body 5%. */
+export const PUSH_PCT = { upper: 2.5, lower: 5 } as const
 
 /**
  * Precedence, first match wins:
@@ -755,7 +777,7 @@ export function weeklyCall(c: CallInput): { call: WeeklyCall; deltaPct: number; 
     return { call: 'drop', deltaPct: -5, why: `drop −5%: above target ${t} two weeks running (@${fmtLoad(priorRpe)} ${shortDay(c.prior!.top.date)}, @${fmtLoad(top.rpe)} ${shortDay(top.date)})` }
   }
   if (top.rpe <= c.target && !c.pain) {
-    const up = c.upper ? 2.5 : 5
+    const up = c.upper ? (c.pushPct?.upper ?? PUSH_PCT.upper) : (c.pushPct?.lower ?? PUSH_PCT.lower)
     return { call: 'push', deltaPct: up, why: `push +${up}%: ${at} vs target ${t}, no pain flags` }
   }
   if (c.pain) return { call: 'hold', deltaPct: 0, why: `hold: ${c.pain} — no push until it settles` }
@@ -966,6 +988,8 @@ export interface LiftModelInput {
   rpeHalfSteps?: boolean
   /** True when the matching progression_rule is `manual` — never compute from TM. */
   manual?: boolean
+  /** Methodology numbers; the constants when absent. */
+  params?: LiftModelParams
 }
 
 export interface Recommendation {
@@ -1190,7 +1214,10 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
     if (outranked) notes.push(`working max is the tested single ${fmtSet(anchor)} on ${shortDay(anchor.date)} — higher estimates from before it no longer count`)
   }
 
-  const computedTm = wm ? wm.value * TM_FRACTION : null
+  const tmFraction = input.params?.tmFraction ?? TM_FRACTION
+  const deloadTmPct = input.params?.deloadTmPct ?? DELOAD_TM_PCT
+  const deloadRpeCap = input.params?.deloadRpeCap ?? DELOAD_RPE_CAP
+  const computedTm = wm ? wm.value * tmFraction : null
   const override = input.tmOverride != null && input.tmOverride > 0 ? input.tmOverride : null
   const tm = override ?? computedTm
   const overrideState = override != null
@@ -1255,9 +1282,12 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   const newestTrained = weeks[0] ?? null
   const reps = targetReps(rx?.reps) ?? { lo: newestTrained?.top.reps ?? 5, hi: newestTrained?.top.reps ?? 5 }
   const repCount = Math.min(12, reps.hi)
-  const target = rx?.targetRpe ?? input.defaultTargetRpe ?? 8
+  const asked = rx?.targetRpe ?? input.defaultTargetRpe ?? 8
+  const maxRpe = input.params?.maxRpe ?? null
+  const target = maxRpe != null && asked > maxRpe ? maxRpe : asked
   const setCount = rx?.sets ?? 3
   const why: string[] = []
+  if (target !== asked) why.push(`RPE ${fmtLoad(asked)} asked → ${fmtLoad(target)}: no RPE above ${fmtLoad(target)} under 18`)
 
   // The week the call reads: the newest week the lift was trained before this
   // one. After a missed week that is two back, and the missed-weeks modifier
@@ -1272,7 +1302,7 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
     ? `knee pain ${fmtLoad(kneeToday)}/10 today`
     : painFor(lift, input.pain ?? [], checkins, addDays(weekStart, -7), today)
   // Everything loads off the TRAINING max, so a hand-set TM moves every number.
-  const chartMax = tm != null ? tm / TM_FRACTION : null
+  const chartMax = tm != null ? tm / tmFraction : null
 
   let base: number
   let basis: Recommendation['basis']
@@ -1296,17 +1326,17 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
     call = 'manual'
     why.push('manual rule: no program load written — TM not applied')
   } else if (input.deload && tm != null) {
-    base = tm * DELOAD_TM_PCT / 100
+    base = tm * deloadTmPct / 100
     basis = 'deload'
     call = 'deload'
-    why.push(`deload week: ${DELOAD_TM_PCT}% of TM, RPE ≤ ${DELOAD_RPE_CAP}`)
+    why.push(`deload week: ${deloadTmPct}% of TM, RPE ≤ ${deloadRpeCap}`)
   } else if (programPct != null && tm != null) {
     base = tm * programPct / 100
     basis = 'program_pct'
     call = 'program_pct'
     why.push(`program prescribes ${fmtLoad(programPct)}% of TM`)
   } else {
-    let decision = weeklyCall({ upper, target, last: ref, prior: missedThisWeek ? null : prior, pain })
+    let decision = weeklyCall({ upper, target, last: ref, prior: missedThisWeek ? null : prior, pain, pushPct: input.params?.pushPct })
     // A push reads last week's effort as this week's capacity. After time off
     // it isn't, so the missed-weeks modifier is the only step taken.
     if (missedWeeks >= 1 && decision.call === 'push') {
@@ -1345,7 +1375,7 @@ export function buildLiftModel(input: LiftModelInput): LiftModel {
   }
 
   let load = base * (1 + deltaPct / 100)
-  let rpeCap: number | null = input.deload ? DELOAD_RPE_CAP : null
+  let rpeCap: number | null = input.deload ? deloadRpeCap : null
   let skip = false
   const mods: Modifier[] = []
   const exerciseName = rx?.exercise ?? LIFT_LABEL[lift]
@@ -1542,6 +1572,8 @@ export interface LiftModelSources {
   rpeHalfSteps?: boolean
   /** Live progression_rule rows. A `manual` rule blocks TM math for that lift. */
   progressionRules?: ProgressionRuleRef[]
+  /** Methodology numbers (tracks_v1); the constants when absent. */
+  params?: LiftModelParams
 }
 
 export function modelFromSources(lift: MainLiftId, src: LiftModelSources): LiftModel {
@@ -1578,6 +1610,7 @@ export function modelFromSources(lift: MainLiftId, src: LiftModelSources): LiftM
     noPush: src.noPush ?? null,
     rpeHalfSteps: src.rpeHalfSteps,
     manual: rule?.engine_type === 'manual',
+    ...(src.params ? { params: src.params } : {}),
   })
 }
 

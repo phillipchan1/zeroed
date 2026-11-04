@@ -70,6 +70,11 @@ export interface SessionPrescription {
    * week-only override. The prescription's indexes follow override.exercises.
    */
   override?: SessionOverrideView
+  /**
+   * tracks_v1 only: the methodology version this ran on (worker/src/methodology),
+   * "v1", or "v1+<hash>" with the athlete's overrides or the under-18 rules.
+   */
+  methodology_version?: string
 }
 
 export interface SessionRxInput {

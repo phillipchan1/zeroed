@@ -18,7 +18,7 @@ import { jsonParam, withSql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { loadLiveProgram, makeStore, type ConnectedStore, type LiveProgram } from './store.ts'
-import { APP_COACH, applyPreview, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
+import { actorFromRef, APP_COACH, applyPreview, PREVIEW_TTL_HOURS, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { phaseRoutineSnapshots, routineDelta, withTx, writeChange } from './changeLog.ts'
 import { ApprovalSpent, checkApproval, consumeApproval, createApproval, proposalApprovalState } from './approvals.ts'
 
@@ -82,7 +82,11 @@ export async function parkProposal(
   store: ConnectedStore,
   live: LiveProgram,
   inputs: EditInput[],
-  opts: { title: string; rationale: string | null; goalIds: string[]; timing: 'now' | 'next_week'; request: string | null },
+  opts: {
+    title: string; rationale: string | null; goalIds: string[]; timing: 'now' | 'next_week'; request: string | null
+    /** tracks_v1 (G3): who parked it, as actorRef. Absent with the flag off: the insert is the pre-G3 one. */
+    createdBy?: string | null
+  },
 ): Promise<ParkResult> {
   const base = liveToDraft(live)
   const { draft } = applyEditsToDraft(base, inputs.map(toProgramEdit))
@@ -97,6 +101,20 @@ export async function parkProposal(
       LIMIT 1
     `
     if (existing) return { ok: true, id: existing.id, previewId: id, reused: true }
+    if (opts.createdBy) {
+      const [row] = await store.sql<{ id: string }[]>`
+        INSERT INTO coach_proposal (
+          athlete_id, preview_id, title, rationale, goal_ids, edits, timing, request, diff, program_fingerprint, source, created_by
+        ) VALUES (
+          ${store.athleteId}, ${id}, ${opts.title}, ${opts.rationale}, ${jsonParam(store.sql, opts.goalIds)},
+          ${jsonParam(store.sql, inputs)}, ${opts.timing}, ${opts.request},
+          ${jsonParam(store.sql, revisionPayload(base.sessions, diff))}, ${fingerprint},
+          ${opts.createdBy === 'app_coach' ? 'app' : 'mcp'}, ${opts.createdBy}
+        )
+        RETURNING id
+      `
+      return { ok: true, id: row.id, previewId: id, reused: false }
+    }
     const [row] = await store.sql<{ id: string }[]>`
       INSERT INTO coach_proposal (
         athlete_id, preview_id, title, rationale, goal_ids, edits, timing, request, diff, program_fingerprint, source
@@ -189,9 +207,10 @@ export async function acceptProposal(
     if (!opts.approvalRef) {
       return { ok: false, status: 'refused', text: 'Refused: approval_ref is required (msg:<id> of the message where the athlete said yes), or the athlete accepts it in the app.' }
     }
-    const [meta] = await store.sql<{ fresh: boolean; source: string }[]>`
-      SELECT (created_at > NOW() - make_interval(hours => ${PREVIEW_TTL_HOURS}::int)) AS fresh, source
-      FROM coach_proposal WHERE id = ${p.id} AND athlete_id = ${store.athleteId}
+    const [meta] = await store.sql<{ fresh: boolean; source: string; created_by: string | null }[]>`
+      SELECT (created_at > NOW() - make_interval(hours => ${PREVIEW_TTL_HOURS}::int)) AS fresh, source,
+             to_jsonb(cp) ->> 'created_by' AS created_by
+      FROM coach_proposal cp WHERE id = ${p.id} AND athlete_id = ${store.athleteId}
     `
     if (!meta?.fresh) {
       await store.sql`
@@ -200,7 +219,8 @@ export async function acceptProposal(
       `
       return { ok: false, status: 'stale', text: `This was proposed more than ${PREVIEW_TTL_HOURS} h ago, so it was not applied. Ask the coach to look again.` }
     }
-    if (!opts.actor) author = meta.source === 'app' ? APP_COACH : { type: 'mcp', id: 'coach' }
+    // G3: the coach that parked it, when the row says (rows before G3 don't).
+    if (!opts.actor) author = actorFromRef(meta.created_by) ?? (meta.source === 'app' ? APP_COACH : { type: 'mcp', id: 'coach' })
   }
   const run = () => applyProgramProposal(store, p, logged ? { approvalRef: opts.approvalRef!, author } : null)
   if (!logged) return run()

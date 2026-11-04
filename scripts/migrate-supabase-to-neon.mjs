@@ -1024,6 +1024,7 @@ export const PUBLIC_RESTORE_ORDER = [
   'change_log',
   'change_preview',
   'approval',
+  'methodology_override',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]
