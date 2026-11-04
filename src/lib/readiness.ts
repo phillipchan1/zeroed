@@ -35,7 +35,10 @@ export interface ReadinessToday {
     blocked_regions: string[]
     refer_out: string | null
   }
-  blocked: Array<{ region: string; reason: string | null; since: string }>
+  /** Blocks from the check-in (U7 region status), cleared with clearRegion. */
+  blocked: Array<{ region: string; reason: string | null; since: string; kind?: 'checkin'; also_rule?: boolean }>
+  /** Red flags set in the athlete's rules (methodology), cleared with clearRedFlag. Absent on older Workers. */
+  rule_blocked?: Array<{ region: string; reason: string | null; since: string; kind: 'rule'; also_checkin: boolean }>
   regions: string[]
   red_flags: string[]
 }
@@ -45,9 +48,11 @@ export interface CheckinResult {
   text: string
 }
 
+export type CoachRole = 'read' | 'propose'
+
 export interface CoachAccess {
-  coaches: Array<{ id: string; name: string; last_four: string; share_health: boolean }>
-  reads: Array<{ id: string; created_at: string; who: string; tool: string }>
+  coaches: Array<{ id: string; name: string; last_four: string; share_health: boolean; role?: CoachRole }>
+  reads: Array<{ id: string; created_at: string; who: string; tool: string; refused?: boolean }>
 }
 
 export const RED_FLAG_LABEL: Record<string, string> = {
@@ -119,6 +124,16 @@ export async function clearRegion(region: string): Promise<CheckinResult> {
   }
 }
 
+/** The athlete's own "cleared by a clinician" for a red flag in their rules. Only the athlete can; no coach. */
+export async function clearRedFlag(region: string): Promise<CheckinResult> {
+  try {
+    const out = await post({ action: 'clear_red_flag', region }) as Partial<CheckinResult>
+    return { ok: out?.ok === true, text: String(out?.text ?? '') }
+  } catch {
+    return { ok: false, text: 'Couldn’t reach the server. Nothing changed.' }
+  }
+}
+
 export async function fetchCoachAccess(): Promise<CoachAccess | null> {
   if (!readinessUrl()) return null
   try {
@@ -132,6 +147,16 @@ export async function fetchCoachAccess(): Promise<CoachAccess | null> {
 export async function setCoachHealth(tokenId: string, on: boolean): Promise<CheckinResult> {
   try {
     const out = await post({ action: 'set_coach_health', token_id: tokenId, on }) as Partial<CheckinResult>
+    return { ok: out?.ok === true, text: String(out?.text ?? '') }
+  } catch {
+    return { ok: false, text: 'Couldn’t reach the server. Nothing changed.' }
+  }
+}
+
+/** D3: read (read tools only) or propose. Only the athlete sets it; logged. */
+export async function setCoachRole(tokenId: string, role: CoachRole): Promise<CheckinResult> {
+  try {
+    const out = await post({ action: 'set_coach_role', token_id: tokenId, role }) as Partial<CheckinResult>
     return { ok: out?.ok === true, text: String(out?.text ?? '') }
   } catch {
     return { ok: false, text: 'Couldn’t reach the server. Nothing changed.' }

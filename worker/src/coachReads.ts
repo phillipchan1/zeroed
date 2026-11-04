@@ -55,6 +55,8 @@ export interface CoachReadView {
   who: string
   tool: string
   scope: Record<string, unknown>
+  /** A read-only coach's refused write (coachRoles.ts), logged here with the reads. */
+  refused: boolean
 }
 
 /** This athlete's coach reads, newest first. Empty before readiness.sql. */
@@ -71,13 +73,17 @@ export async function listCoachReads(store: ConnectedStore, limit = 50): Promise
     ORDER BY r.created_at DESC, r.id DESC
     LIMIT ${Math.max(1, Math.min(200, Math.round(limit)))}
   `
-  return rows.map((r) => ({
-    id: r.id,
-    created_at: r.created_at,
-    actor_type: r.actor_type,
-    actor_id: r.actor_id,
-    who: actorLabel(r.actor_type, r.token_name),
-    tool: r.tool,
-    scope: asJson<Record<string, unknown>>(r.scope, {}),
-  }))
+  return rows.map((r) => {
+    const scope = asJson<Record<string, unknown>>(r.scope, {})
+    return {
+      id: r.id,
+      created_at: r.created_at,
+      actor_type: r.actor_type,
+      actor_id: r.actor_id,
+      who: actorLabel(r.actor_type, r.token_name),
+      tool: r.tool,
+      scope,
+      refused: scope.refused === 'role:read',
+    }
+  })
 }

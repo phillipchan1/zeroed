@@ -618,7 +618,10 @@ export function notRevertibleReason(tool: string, diff: unknown): string | null 
     case 'clear_region':
       return 'A cleared region stays cleared. If it hurts again, log it in today\'s check-in.'
     case 'set_coach_health_access':
+    case 'set_coach_role':
       return 'Change it again under Profile → Coach access.'
+    case 'clear_red_flag':
+      return 'A cleared red flag stays cleared. If it flares again, log it in today\'s check-in.'
     case 'log_session_rpe':
       return 'Session effort stays in your log; tap it again on the day to change it.'
     case 'apply_activity_change':

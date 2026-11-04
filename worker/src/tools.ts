@@ -49,6 +49,7 @@ import { READINESS_TOOL_NAMES, READINESS_TOOLS, runReadinessTool } from './readi
 import { runSessionRpeTool, SESSION_RPE_TOOL_NAMES, SESSION_RPE_TOOLS } from './sessionRpe.ts'
 import { isHealthObservation, redactHealthText, seesHealth, statusBlockedRegions } from './regionStatus.ts'
 import { isReadTool, logCoachRead, logsReads } from './coachReads.ts'
+import { refuseByRole } from './coachRoles.ts'
 import { ACTIVITY_TOOL_NAMES, ACTIVITY_TOOLS, coachSchemaMissing, coachUnavailable, coachV1On, runActivityTool } from './activities.ts'
 
 const editExerciseSchema = {
@@ -449,6 +450,12 @@ async function runZeroedTool(
   actor: OverrideActor,
 ): Promise<string> {
   const store = storeForAthlete(sql, athleteId)
+
+  // D3 roles: a read-only coach's previews, applies and writes are refused
+  // (and logged) before anything runs. Propose coaches, app_coach and the
+  // athlete go on as before; every existing token is 'propose'.
+  const refused = await refuseByRole(store, actor, name)
+  if (refused) return refused
 
   // Section 8 / D3, tracks_v1: every coach read is logged before it runs.
   // The athlete's own reads are not. Flag off: nothing is written.

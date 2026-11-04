@@ -9,15 +9,21 @@
  *   clear_region   the athlete marks a blocked region cleared by a clinician.
  *                  Athlete only; their tap is the approval; logged. No coach,
  *                  app_coach included, can ever clear a block.
+ *   clear_red_flag the same for the other kind of block: a red flag set in the
+ *                  athlete's rules (methodology U7.regions.<region>.blocked,
+ *                  G3). Supersedes that override; athlete only; logged. Each
+ *                  clear says whether the other kind still blocks the region.
  *   health toggle  D3: per coach, whether it sees pain and check-in data. On
  *                  by default; the athlete's tap changes it; logged.
+ *   coach role     D3: per coach, read or propose (coachRoles.ts). Default
+ *                  propose; the athlete's tap changes it; logged.
  *
  * MCP (flag on): get_checkins, get_region_status, get_weekly_review. A coach
  * without the health toggle gets a refusal for the first two and a review
  * without pain / check-in sections.
  *
  * Routes, the athlete's own session, 404 with the flag off:
- *   POST /api/readiness   { action: 'today' | 'checkin' | 'clear_region' | 'coach_access' | 'set_coach_health' | 'weekly_review' }
+ *   POST /api/readiness   { action: 'today' | 'checkin' | 'clear_region' | 'clear_red_flag' | 'coach_access' | 'set_coach_health' | 'set_coach_role' | 'weekly_review' }
  *   GET  /api/weekly-review?week=YYYY-MM-DD
  */
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
@@ -28,8 +34,10 @@ import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { ApprovalSpent, consumeApproval, directTapApproval } from './approvals.ts'
 import { STANDING_LOGGING, withTx, writeChange } from './changeLog.ts'
 import { listCoachReads } from './coachReads.ts'
-import { athleteMinor, blockedRegions, resolveMethodology, type Resolved } from './methodology.ts'
-import { PAIN_REGIONS, type PainRegion } from './methodology/v1.ts'
+import { athleteMinor, blockedRegions, loadOverrides, resolveMethodology, type OverrideRow, type Resolved } from './methodology.ts'
+import { CURRENT_METHODOLOGY, PAIN_REGIONS, type PainRegion } from './methodology/v1.ts'
+import { resolveParams } from './methodology/resolve.ts'
+import { isCoachRole, parseRole, type CoachRole } from './coachRoles.ts'
 import {
   addDays, evaluateRegion, isPainRegion, isRedFlag, readinessView, REFER_OUT, RED_FLAGS, regionLabel, u6Flags,
   type PainEntry, type ReadinessFlag, type ReadinessView, type RedFlag, type RegionEval,
@@ -287,8 +295,81 @@ export async function clearRegion(store: ConnectedStore, actor: OverrideActor, r
         ok: true,
         change_id: changeId,
         text: stillFlagged
-          ? `Marked the ${regionLabel(region)} cleared. A red flag is also set on it in your rules (U7.regions.${region}.blocked); it stays blocked until that is cleared too.`
+          ? `Marked the ${regionLabel(region)} cleared. A red flag is also set on it in your rules (U7.regions.${region}.blocked); it stays blocked until you clear that too.`
           : `Marked the ${regionLabel(region)} cleared by a clinician. It can be loaded again.`,
+      }
+    })
+  } catch (e) {
+    if (e instanceof McpUserError) return { ok: false, text: e.message }
+    throw e
+  }
+}
+
+/** The active red flag on a region in the athlete's rules (G3): athlete-scoped, set to true. */
+export function redFlagOverride(overrides: OverrideRow[], region: string): OverrideRow | null {
+  return overrides.find((o) => o.path === `U7.regions.${region}.blocked` && o.track_id == null && o.value === true) ?? null
+}
+
+/**
+ * The athlete marks a red flag in their rules cleared by a clinician: the
+ * override row is superseded (methodology_override allows exactly that), with
+ * the athlete's tap as the approval, logged in change_log. Like clearRegion:
+ * athlete only, never a coach. The minors rules are not touched; a red flag
+ * isn't one of them, and the check-in clear works the same for every age.
+ */
+export async function clearRedFlag(store: ConnectedStore, actor: OverrideActor, regionArg: unknown): Promise<{ ok: boolean; text: string; change_id?: string }> {
+  if (!isAthlete(store, actor)) {
+    return { ok: false, text: 'Refused: only the athlete can mark a red flag cleared by a clinician. A coach can never clear one.' }
+  }
+  if (!(await tracksV1On(store))) return { ok: false, text: 'Check-ins are off for this athlete.' }
+  if (!isPainRegion(regionArg)) return { ok: false, text: 'Refused: unknown region.' }
+  const region = regionArg
+  const path = `U7.regions.${region}.blocked`
+  const [overrides, minor] = await Promise.all([loadOverrides(store), athleteMinor(store)])
+  const flag = redFlagOverride(overrides, region)
+  if (!flag) return { ok: false, text: `There's no red flag on the ${regionLabel(region)} in your rules.` }
+  const after = resolveParams(CURRENT_METHODOLOGY, overrides.filter((o) => o.id !== flag.id), { trackId: null, minor: minor === true })
+  const ruleStill = blockedRegions(after).includes(region)
+  const checkinStill = (await readinessTables(store)) && blocksNow((await loadRegionStatus(store)).find((s) => s.region === region))
+  const changeId = crypto.randomUUID()
+  const diff = {
+    path,
+    region,
+    before: true,
+    after: ruleStill,
+    override_id: flag.id,
+    set_by: flag.created_by,
+    set_at: flag.created_at,
+    cleared_by: `athlete:${store.athleteId}`,
+  }
+  try {
+    return await withTx(store.sql, async () => {
+      const tap = await directTapApproval(store, 'app_editor', `red_flag:${flag.id}`, diff)
+      const done = await store.sql<{ id: string }[]>`
+        UPDATE methodology_override SET superseded_at = NOW()
+        WHERE id = ${flag.id} AND athlete_id = ${store.athleteId} AND superseded_at IS NULL
+        RETURNING id::text AS id
+      `
+      if (!done.length) throw new McpUserError('That red flag changed since you opened it. Try again.')
+      await writeChange(store, {
+        id: changeId,
+        actor,
+        tool: 'clear_red_flag',
+        targetType: 'methodology',
+        targetId: path,
+        diff,
+        rationale: 'Cleared by a clinician.',
+        ruleRefs: ['U7'],
+        approvalRef: tap.ref,
+        approvalId: tap.id,
+      })
+      if (!(await consumeApproval(store, tap.id, changeId))) throw new ApprovalSpent()
+      return {
+        ok: true,
+        change_id: changeId,
+        text: checkinStill
+          ? `Cleared the red flag on the ${regionLabel(region)} in your rules. Your check-in still blocks it; it stays blocked until you mark that cleared too.`
+          : `Cleared the red flag on the ${regionLabel(region)}. It can be loaded again.`,
       }
     })
   } catch (e) {
@@ -304,20 +385,23 @@ export interface CoachAccessView {
   name: string
   last_four: string
   share_health: boolean
+  /** D3: read (read tools only) or propose. */
+  role: CoachRole
   revoked_at: string | null
   last_used_at: string | null
 }
 
 export async function coachAccess(store: ConnectedStore): Promise<CoachAccessView[]> {
   // expires_at exists only on some databases (see mcpToken.ts), so read it through to_jsonb.
-  const rows = await store.sql<{ id: string; name: string; last_four: string; share_health: boolean | null; revoked_at: string | null; last_used_at: string | null }[]>`
+  const rows = await store.sql<{ id: string; name: string; last_four: string; share_health: boolean | null; role: string | null; revoked_at: string | null; last_used_at: string | null }[]>`
     SELECT t.id::text AS id, t.name, t.last_four, COALESCE((to_jsonb(t) ->> 'share_health')::boolean, true) AS share_health,
+           to_jsonb(t) ->> 'role' AS role,
            COALESCE(to_json(t.revoked_at) #>> '{}', CASE WHEN (to_jsonb(t) ->> 'expires_at')::timestamptz <= NOW() THEN to_jsonb(t) ->> 'expires_at' END) AS revoked_at,
            to_json(t.last_used_at) #>> '{}' AS last_used_at
     FROM mcp_token t WHERE t.athlete_id = ${store.athleteId}
     ORDER BY t.created_at DESC
   `
-  return rows.map((r) => ({ ...r, share_health: r.share_health !== false }))
+  return rows.map((r) => ({ ...r, share_health: r.share_health !== false, role: parseRole(r.role) }))
 }
 
 export async function setCoachHealth(
@@ -352,6 +436,74 @@ export async function setCoachHealth(
     })
     if (!(await consumeApproval(store, tap.id, changeId))) throw new ApprovalSpent()
     return { ok: true, change_id: changeId, text: on ? `${coach.name} can see your check-ins and pain.` : `${coach.name} no longer sees your check-ins and pain.` }
+  })
+}
+
+/** True once worker/schema/coach-roles.sql is on this database. */
+async function coachRolesReady(store: ConnectedStore): Promise<boolean> {
+  const [row] = await store.sql<{ ok: boolean }[]>`
+    SELECT EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'mcp_token' AND column_name = 'role'
+    ) AS ok
+  `
+  return row?.ok === true
+}
+
+export const coachRolesUnavailable = 'Coach roles are not set up on this database yet. Nothing changed.'
+
+/**
+ * D3: the athlete sets a coach to read (read tools only) or propose. A logged
+ * athlete write with the athlete's tap as its approval, like the health
+ * toggle. No coach can change a role: there is no tool for it, and /api/data
+ * can't write the column.
+ */
+export async function setCoachRole(
+  store: ConnectedStore,
+  actor: OverrideActor,
+  tokenId: unknown,
+  role: unknown,
+): Promise<{ ok: boolean; text: string; change_id?: string }> {
+  if (!isAthlete(store, actor)) return { ok: false, text: 'Refused: only the athlete decides what a coach can do.' }
+  if (!(await tracksV1On(store))) return { ok: false, text: 'Off for this athlete.' }
+  if (!(await coachRolesReady(store))) return { ok: false, text: coachRolesUnavailable }
+  if (typeof tokenId !== 'string' || !isCoachRole(role)) return { ok: false, text: 'token_id and role (read | propose) are required.' }
+  const coach = (await coachAccess(store)).find((c) => c.id === tokenId && !c.revoked_at)
+  if (!coach) return { ok: false, text: 'No such coach.' }
+  if (coach.role === role) return { ok: true, text: 'Already set.' }
+  const changeId = crypto.randomUUID()
+  const diff = { coach: coach.name, token_id: coach.id, role: { before: coach.role, after: role } }
+  return withTx(store.sql, async () => {
+    const tap = await directTapApproval(store, 'app_editor', `coach_role:${coach.id}:${changeId}`, diff)
+    const done = await store.sql<{ id: string }[]>`
+      UPDATE mcp_token SET role = ${role}
+      WHERE id = ${coach.id} AND athlete_id = ${store.athleteId} AND revoked_at IS NULL
+      RETURNING id::text AS id
+    `
+    if (!done.length) throw new McpUserError('No such coach.')
+    await writeChange(store, {
+      id: changeId,
+      actor,
+      tool: 'set_coach_role',
+      targetType: 'mcp_token',
+      targetId: coach.id,
+      diff,
+      rationale: null,
+      ruleRefs: [],
+      approvalRef: tap.ref,
+      approvalId: tap.id,
+    })
+    if (!(await consumeApproval(store, tap.id, changeId))) throw new ApprovalSpent()
+    return {
+      ok: true,
+      change_id: changeId,
+      text: role === 'read'
+        ? `${coach.name} can now only read. It can't preview or propose changes.`
+        : `${coach.name} can now propose changes. You still approve every one.`,
+    }
+  }).catch((e: unknown) => {
+    if (e instanceof McpUserError) return { ok: false, text: e.message }
+    throw e
   })
 }
 
@@ -449,19 +601,29 @@ export async function athleteReadinessAction(store: ConnectedStore, body: Record
       const today = await athleteToday(store)
       const date = typeof body.date === 'string' && DATE_RE.test(body.date) ? body.date : today
       const methodology = await resolveMethodology(store)
-      const [checkins, pain, ctx, status] = await Promise.all([
+      const [checkins, pain, ctx, status, overrides] = await Promise.all([
         loadCheckins(store, date, date),
         loadPain(store, date, date),
         readinessContextFor(store, date, methodology),
         loadRegionStatus(store),
+        loadOverrides(store),
       ])
+      const flagged = new Set(blockedRegions(methodology))
+      const openRegions = new Set(status.filter(blocksNow).map((s) => s.region))
       return [{
         date,
         available: await readinessTables(store),
         checkin: checkins[0] ?? null,
         pain,
         readiness: ctx.view,
-        blocked: status.filter(blocksNow).map((s) => ({ region: s.region, reason: s.reason, since: s.created_at })),
+        blocked: status.filter(blocksNow).map((s) => ({
+          region: s.region, reason: s.reason, since: s.created_at, kind: 'checkin', also_rule: flagged.has(s.region),
+        })),
+        // The other kind of block: red flags in the athlete's rules (G3), cleared with clear_red_flag.
+        rule_blocked: [...flagged].flatMap((region) => {
+          const o = redFlagOverride(overrides, region)
+          return o ? [{ region, reason: o.rationale, since: o.created_at, kind: 'rule', also_checkin: openRegions.has(region) }] : []
+        }),
         regions: PAIN_REGIONS,
         red_flags: RED_FLAGS,
       }, 200]
@@ -470,10 +632,14 @@ export async function athleteReadinessAction(store: ConnectedStore, body: Record
       return [await saveCheckin(store, me, body), 200]
     case 'clear_region':
       return [await clearRegion(store, me, body.region), 200]
+    case 'clear_red_flag':
+      return [await clearRedFlag(store, me, body.region), 200]
     case 'coach_access':
       return [{ coaches: (await coachAccess(store)).filter((c) => !c.revoked_at), reads: await listCoachReads(store, typeof body.limit === 'number' ? body.limit : 50) }, 200]
     case 'set_coach_health':
       return [await setCoachHealth(store, me, body.token_id, body.on), 200]
+    case 'set_coach_role':
+      return [await setCoachRole(store, me, body.token_id, body.role), 200]
     case 'weekly_review': {
       const out = await computeWeeklyReview(store, { week: body.week, showHealth: true })
       return 'error' in out ? [out, 400] : [out, 200]

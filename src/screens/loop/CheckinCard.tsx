@@ -3,7 +3,7 @@ import { ChevronRight } from 'lucide-react'
 import { Button } from '../../components/ui'
 import { success } from '../../lib/haptics'
 import {
-  clearRegion, RED_FLAG_LABEL, regionLabel, submitCheckin,
+  clearRedFlag, clearRegion, RED_FLAG_LABEL, regionLabel, submitCheckin,
   type PainInput, type ReadinessToday,
 } from '../../lib/readiness'
 
@@ -32,22 +32,37 @@ function summary(t: ReadinessToday): string {
   return bits.length ? bits.join(' · ') : 'sleep, stress, soreness, pain'
 }
 
-function BlockedRow({ region, reason, onCleared }: { region: string; reason: string | null; onCleared: () => void }) {
+// Two kinds of block, each cleared on its own: one set by a check-in (pain
+// over the cap, worse than yesterday, a red flag ticked) and a red flag set in
+// the athlete's rules. Each row says which kind it is and whether the other
+// still blocks the region; only the athlete can clear either.
+function BlockedRow({ region, reason, kind, otherBlocks, onCleared }: {
+  region: string
+  reason: string | null
+  kind: 'checkin' | 'rule'
+  otherBlocks: boolean
+  onCleared: (text: string) => void
+}) {
   const [phase, setPhase] = useState<'idle' | 'confirm' | 'working'>('idle')
   const [message, setMessage] = useState<string | null>(null)
   async function clear() {
     setPhase('working')
-    const res = await clearRegion(region)
+    const res = kind === 'rule' ? await clearRedFlag(region) : await clearRegion(region)
     setPhase('idle')
     setMessage(res.ok ? null : res.text)
     if (res.ok) {
       success()
-      onCleared()
+      onCleared(res.text)
     }
   }
+  const other = kind === 'rule' ? 'Your check-in also blocks it.' : 'A red flag in your rules also blocks it.'
   return (
     <div className="checkin__blocked">
-      <p className="text-sm"><strong>{regionLabel(region)}: no loading.</strong> {reason}</p>
+      <p className="text-sm">
+        <strong>{regionLabel(region)}: no loading</strong>
+        {kind === 'rule' ? ' (red flag in your rules).' : ' (from your check-in).'} {reason}
+      </p>
+      {otherBlocks && <p className="text-xs text-dim">{other} Clear both once a clinician has cleared it.</p>}
       {message && <p className="text-xs text-dim">{message}</p>}
       {phase === 'idle' ? (
         <button type="button" className="checkin__clear" onClick={() => setPhase('confirm')}>A clinician cleared it</button>
@@ -72,6 +87,11 @@ export function CheckinCard({ today, onSaved }: { today: ReadinessToday; onSaved
   const [adding, setAdding] = useState('')
   const [busy, setBusy] = useState(false)
   const [message, setMessage] = useState<string | null>(null)
+  const [clearNote, setClearNote] = useState<string | null>(null)
+  const onCleared = (text: string) => {
+    setClearNote(text || null)
+    onSaved()
+  }
 
   const setField = (key: FieldKey, raw: string, min: number, max: number) => {
     const n = raw === '' ? null : Number(raw)
@@ -112,7 +132,13 @@ export function CheckinCard({ today, onSaved }: { today: ReadinessToday; onSaved
         <ChevronRight size={14} strokeWidth={2} style={{ transform: open ? 'rotate(90deg)' : undefined, color: 'var(--text-dim)' }} />
       </button>
 
-      {today.blocked.map((b) => <BlockedRow key={b.region} region={b.region} reason={b.reason} onCleared={onSaved} />)}
+      {today.blocked.map((b) => (
+        <BlockedRow key={`checkin:${b.region}`} region={b.region} reason={b.reason} kind="checkin" otherBlocks={b.also_rule === true} onCleared={onCleared} />
+      ))}
+      {(today.rule_blocked ?? []).map((b) => (
+        <BlockedRow key={`rule:${b.region}`} region={b.region} reason={b.reason} kind="rule" otherBlocks={b.also_checkin} onCleared={onCleared} />
+      ))}
+      {clearNote && <p className="text-xs text-dim checkin__note">{clearNote}</p>}
       {r.refer_out && <p className="text-xs text-dim checkin__note">{r.refer_out}</p>}
       {r.flags.length > 0 && (
         <p className="text-xs text-dim checkin__note">

@@ -13,7 +13,7 @@ import {
 } from '../../components/ui'
 import { TrainingMaxes } from './TrainingMaxes'
 import { tracksOn } from '../../lib/tracksFlag'
-import { fetchCoachAccess, readLabel, setCoachHealth } from '../../lib/readiness'
+import { fetchCoachAccess, readLabel, setCoachHealth, setCoachRole, type CoachRole } from '../../lib/readiness'
 import { whenLabel } from '../../lib/changeLog'
 
 interface McpTokenRow {
@@ -123,6 +123,16 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     if (mcpBusy) return
     setMcpBusy(true)
     const res = await setCoachHealth(id, on)
+    setMcpBusy(false)
+    if (!res.ok) setMcpError(res.text)
+    refetchCoachAccess()
+  }
+
+  // D3: read (sees what you share, can't propose) or propose (you approve each change).
+  async function changeRole(id: string, role: CoachRole) {
+    if (mcpBusy) return
+    setMcpBusy(true)
+    const res = await setCoachRole(id, role)
     setMcpBusy(false)
     if (!res.ok) setMcpError(res.text)
     refetchCoachAccess()
@@ -389,24 +399,43 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
             <div style={{ marginTop: 16 }}>
               <SectionHeader>Coach access</SectionHeader>
               <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)', lineHeight: 1.45 }}>
-                Coaches read your log and propose changes; only you approve. Check-ins and pain are shared only while the switch is on.
+                Coaches read your log; a coach that can propose also suggests changes, and only you approve them. Read-only coaches can&rsquo;t preview or propose anything. Check-ins and pain are shared only while the switch is on.
               </p>
               {coachAccess.coaches.map((c) => (
-                <label key={c.id} style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 44, fontSize: 'var(--fs-sm)' }}>
-                  <input
-                    type="checkbox"
-                    checked={c.share_health}
-                    disabled={mcpBusy}
-                    onChange={(e) => void toggleHealth(c.id, e.target.checked)}
-                  />
-                  <span>{c.name} sees check-ins and pain</span>
-                </label>
+                <div key={c.id}>
+                  {c.role && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 44, fontSize: 'var(--fs-sm)' }}>
+                      <span style={{ flex: 1 }}>{c.name} can</span>
+                      <select
+                        className="input"
+                        value={c.role}
+                        disabled={mcpBusy}
+                        onChange={(e) => void changeRole(c.id, e.target.value === 'read' ? 'read' : 'propose')}
+                        aria-label={`What ${c.name} can do`}
+                      >
+                        <option value="propose">Read and propose</option>
+                        <option value="read">Read only</option>
+                      </select>
+                    </label>
+                  )}
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 44, fontSize: 'var(--fs-sm)' }}>
+                    <input
+                      type="checkbox"
+                      checked={c.share_health}
+                      disabled={mcpBusy}
+                      onChange={(e) => void toggleHealth(c.id, e.target.checked)}
+                    />
+                    <span>{c.name} sees check-ins and pain</span>
+                  </label>
+                </div>
               ))}
               {coachAccess.reads.length > 0 ? (
                 <ul style={{ margin: '8px 0 0', padding: 0, listStyle: 'none' }}>
                   {coachAccess.reads.map((r) => (
                     <li key={r.id} className="text-dim" style={{ fontSize: 'var(--fs-sm)', lineHeight: 1.6 }}>
-                      {r.who} read {readLabel(r.tool)} · {whenLabel(r.created_at)}
+                      {r.refused
+                        ? <>{r.who} tried to {r.tool.replace(/_/g, ' ')} · refused (read only) · {whenLabel(r.created_at)}</>
+                        : <>{r.who} read {readLabel(r.tool)} · {whenLabel(r.created_at)}</>}
                     </li>
                   ))}
                 </ul>
