@@ -5374,3 +5374,75 @@ textarea.input {
 @keyframes proposal-arrive { from { transform: translateX(24px); opacity: 0; } }
 
 .sidebar__goals-read { font-family: var(--font-mono); font-size: var(--fs-micro); letter-spacing: 0.08em; text-transform: uppercase; color: var(--text-dim); }
+
+/* --- To confirm: an estimate at the target, one test from Zeroed ----------
+   Confirmed's color with pending's dashed edge: the number is there, the proof
+   isn't yet. */
+.goal-status--confirm { color: var(--confirmed); }
+.goal-status--confirm .goal-status__mark { background: none; border: 1.5px dashed currentColor; border-radius: 1px; width: 8px; height: 8px; }
+.goal-bar--confirm .goal-bar__fill { background: transparent; border: 1.5px dashed var(--confirmed); }
+.goal-bar--confirm .goal-bar__target { background: var(--confirmed); }
+.goal-chip--confirm { border-style: dashed; border-color: color-mix(in srgb, var(--confirmed) 50%, transparent); }
+.goal-chip--confirm .goal-chip__val { color: var(--confirmed); }
+.forecast-chart__cone--confirm { fill: color-mix(in srgb, var(--confirmed) 8%, transparent); stroke: var(--confirmed); stroke-dasharray: 3 3; }
+.forecast-chart__fc--confirm { fill: var(--confirmed); }
+.goal-reticle__p--confirm { fill: var(--confirmed); opacity: 0.6; }
+.goal-reticle__label--confirm { fill: var(--confirmed); }
+.goals-aim__count--confirm b { color: var(--confirmed); }
+.goals-act--confirm { border: 1px dashed color-mix(in srgb, var(--confirmed) 55%, transparent); background: color-mix(in srgb, var(--confirmed) 4%, transparent); }
+.goals-act--confirm .goals-act__k, .goals-act--confirm .goals-act__cta { color: var(--confirmed); }
+.road__flag--confirm { border-color: var(--confirmed); border-style: dashed; }
+.goal-line__n--confirm { color: var(--confirmed); }
+
+/* --- Capacity: how sure a goal's number is --------------------------------- */
+.capacity-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  margin: 2px 0 10px;
+  font-size: var(--fs-xs);
+}
+.capacity-line__tier {
+  font-family: var(--font-mono);
+  font-size: var(--fs-micro);
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+.capacity-line--tested .capacity-line__tier { color: var(--confirmed); }
+.capacity-line--estimated .capacity-line__tier { color: var(--text); }
+.capacity-line--inferred .capacity-line__tier { color: var(--text-dim); }
+.capacity-line--stale .capacity-line__tier { color: var(--pending); }
+.goals-target__cap { font-size: var(--fs-micro); font-family: var(--font-mono); letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-dim); }
+
+.test-reason {
+  margin: 10px 0 2px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  font-size: var(--fs-sm);
+  line-height: 1.45;
+  border: 1px dashed rgba(212, 168, 72, 0.5);
+  color: var(--pending);
+}
+.test-reason--confirm { border-color: color-mix(in srgb, var(--confirmed) 50%, transparent); color: var(--confirmed); }
+
+/* --- Weak links: related lifts that stopped agreeing ----------------------- */
+.weak-links { margin-top: 8px; display: flex; flex-direction: column; gap: 10px; }
+.weak-links__h { display: flex; align-items: baseline; justify-content: space-between; font-weight: 600; }
+.weak-link { line-height: 1.5; }
+.weak-link--lead p + p { margin-top: 4px; }
+.weak-links__more summary { cursor: pointer; color: var(--text-dim); }
+.weak-links__more .weak-link { margin-top: 8px; }
+.weak-links__signals { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.weak-link--signal { color: #CFCFCF; }
+
+/* --- Logging conditioning output and skill attempts ------------------------ */
+.set-extra { display: flex; align-items: center; gap: 8px; padding: 2px 0 8px 34px; font-size: var(--fs-xs); color: var(--text-dim); }
+.set-extra .set-row__input { max-width: 84px; }
+.ivl-output { margin-top: 10px; display: flex; flex-direction: column; gap: 8px; }
+.ivl-output__units { display: flex; gap: 6px; }
+.ivl-output__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(64px, 1fr)); gap: 6px; }
+.ivl-output__grid .set-row__input { width: 100%; }
+.ivl-output .chip { border: 0; cursor: pointer; min-height: 24px; padding: 2px 10px; }
+.ivl-output .chip { text-transform: none; letter-spacing: 0.02em; }

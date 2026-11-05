@@ -2,7 +2,12 @@
  * tracks_v1 MCP tools. Writes preview unless confirm=true.
  * SQL is scoped to store.athleteId on every query.
  */
-import { applyMeasurement, computeGoalStatus, forecastAtDue, goalDisplayStatus, goalNumber, isGoalDirection, isGoalSide, lastMeasuredOn, pairKey, type GoalMeasurement } from '../../src/engine/goals.ts'
+import { forecastAtDue, goalNumber, isGoalDirection, isGoalSide, pairKey, type GoalMeasurement } from '../../src/engine/goals.ts'
+import { goalMarks, goalRead, isRollingGoal } from '../../src/engine/capacity.ts'
+import { readTraining, type TrainingRead } from '../../src/engine/signals.ts'
+import { readLoggedExercises, type LoggedWorkoutLike } from '../../src/engine/loggedSets.ts'
+import { localDay } from '../../src/engine/liftModel.ts'
+import type { TrainingSession } from '../../src/engine/weakLinks.ts'
 import { formatGoalSource, goalSource, parseGoalSource, sourceMatches, sourceUnitSupported, SOURCE_KINDS } from '../../src/engine/goalSources.ts'
 import { listProposals } from './proposals.ts'
 import { mcpStamp, writePreview } from '../../src/engine/mcpStamp.ts'
@@ -527,9 +532,9 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
     ORDER BY name
   `
   const measurements = await store.sql<{
-    goal_id: string; measured_on: string; value: number | string; client_key: string | null
+    goal_id: string; measured_on: string; value: number | string; source: string; note: string | null; client_key: string | null
   }[]>`
-    SELECT goal_id, measured_on::text, value, client_key
+    SELECT goal_id, measured_on::text, value, source, note, client_key
     FROM goal_measurement WHERE athlete_id = ${store.athleteId}
     ORDER BY measured_on
   `
@@ -539,7 +544,8 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
     list.push({
       date: m.measured_on,
       value: goalNumber(m.value) ?? 0,
-      source: 'manual',
+      source: m.source,
+      note: m.note,
       client_key: m.client_key,
     })
     historyByGoal.set(m.goal_id, list)
@@ -547,15 +553,20 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
   const today = todayISO(await athleteZone(store))
   let list = rows.map((g) => {
     const history = historyByGoal.get(g.id) ?? []
-    const computed = computeGoalStatus(g, history, today)
-    const last_measured = lastMeasuredOn(history)
+    const read = goalRead(g, history, today)
     return {
       ...g,
-      status: computed,
-      // What the app shows: zeroed / on_course / off_course / needs_test.
-      display: goalDisplayStatus(computed, last_measured, { cadence: g.cadence, today }),
-      forecast: forecastAtDue(g, history),
-      last_measured,
+      // A rolling goal reads where its evidence puts it (engine/capacity.ts).
+      current: read.capacity && isRollingGoal(g, history) ? read.capacity.value : g.current,
+      status: read.computed,
+      // What the app shows: zeroed / confirm / on_course / off_course / needs_test.
+      display: read.display,
+      forecast: read.forecast,
+      last_measured: read.last_measured,
+      // Where the goal is from all its evidence, how sure, and why it wants a test.
+      capacity: read.capacity,
+      test_reason: read.test_reason,
+      passive: read.passive,
       pair: pairKey(g.name),
     }
   })
@@ -564,7 +575,42 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
   return { ...mcpStamp(new Date(), await athleteZone(store)), goals: list }
 }
 
-const DISPLAY_ORDER: Record<string, number> = { off_course: 0, needs_test: 1, on_course: 2, zeroed: 3 }
+/**
+ * The athlete's last 150 days as training sessions, for the weak-link and
+ * cross-domain reads. Same rows and the same pure read the app uses.
+ */
+async function loadTrainingRead(
+  store: ConnectedStore,
+  goals: Array<{ name: string; side: string | null; current: number | null; direction: string }>,
+): Promise<TrainingRead> {
+  const zone = await athleteZone(store)
+  const rows = await store.sql<Array<LoggedWorkoutLike & {
+    performed_at: string; rpe: number | null; session_rpe: number | string | null; duration_mins: number | null
+    readiness: number | null; sleep_hours: number | string | null; bodyweight: number | string | null
+  }>>`
+    SELECT to_json(w.performed_at) #>> '{}' AS performed_at, w.rpe, w.session_rpe, w.duration_mins,
+           w.readiness, w.sleep_hours, w.bodyweight, w.actual_weights, w.exercises_snapshot,
+           json_build_object('exercises', r.exercises) AS routine
+    FROM workout w
+    JOIN routine r ON r.id = w.routine_id
+    JOIN program p ON p.id = r.program_id
+    WHERE p.athlete_id = ${store.athleteId} AND w.performed_at >= NOW() - INTERVAL '150 days'
+    ORDER BY w.performed_at
+    LIMIT 400
+  `
+  const sessions: TrainingSession[] = rows.map((w) => ({
+    date: localDay(w.performed_at, zone),
+    exercises: readLoggedExercises(w).map((e) => ({ name: e.name, sets: e.sets })),
+    session_rpe: goalNumber(w.session_rpe) ?? goalNumber(w.rpe),
+    duration_mins: goalNumber(w.duration_mins),
+    readiness: goalNumber(w.readiness),
+    sleep_hours: goalNumber(w.sleep_hours),
+    bodyweight: goalNumber(w.bodyweight),
+  }))
+  return readTraining(sessions, todayISO(zone), goals)
+}
+
+const DISPLAY_ORDER: Record<string, number> = { off_course: 0, confirm: 1, needs_test: 2, on_course: 3, zeroed: 4 }
 
 /**
  * The goal-first read Claude plans from: every goal as the athlete sees it,
@@ -592,6 +638,11 @@ async function getGoalBrief(store: ConnectedStore) {
       `
     : []
   const proposals = await listProposals(store)
+  let trainingError: string | null = null
+  const training = await loadTrainingRead(store, goals).catch((e: unknown) => {
+    trainingError = e instanceof Error ? e.message : String(e)
+    return null
+  })
   const brief = goals.map((g) => {
     const src = goalSource(g, exerciseNames)
     const trainedBy = src && src.kind !== 'test'
@@ -611,6 +662,8 @@ async function getGoalBrief(store: ConnectedStore) {
       last_measured: g.last_measured,
       cadence: g.cadence,
       forecast: g.forecast,
+      capacity: g.capacity,
+      test_reason: g.test_reason,
       source: src ? { binding: formatGoalSource(src), inferred: src.inferred } : null,
       sessions_this_week: trainedBy,
       recent_moves: moves.filter((m) => m.ref_id === g.id || m.ref_id === g.track_id).slice(0, 3)
@@ -624,7 +677,20 @@ async function getGoalBrief(store: ConnectedStore) {
     pending_proposals: proposals == null
       ? 'unavailable on this database'
       : proposals.map((p) => ({ id: p.id, title: p.title, goal_ids: p.goal_ids, created_at: p.created_at })),
-    next: 'For an off_course goal: preview a change to the lane or sessions that train it, then preview_program_edits with propose=true and goal_ids so the athlete accepts it in the app. A needs_test goal wants a test, not a program change. Give a goal with no source a source_metric (upsert_goal) so logged sets move it.',
+    // Related lifts that stopped agreeing, and side-to-side gaps (engine/weakLinks.ts).
+    weak_links: training?.weak_links ?? [],
+    // Cross-domain hypotheses: interference, fatigue, transfer, engine (engine/signals.ts).
+    signals: training?.signals ?? [],
+    lifts: training?.lifts ?? [],
+    ...(trainingError ? { training_unavailable: trainingError } : {}),
+    next: [
+      'Goals read passively: every rated working set is evidence, and capacity carries a tier (tested, estimated, inferred, stale) and a range.',
+      'For an off_course goal: preview a change to the lane or sessions that train it, then preview_program_edits with propose=true and goal_ids so the athlete accepts it in the app.',
+      'A confirm goal is an estimate at the target: put one confirming set (a top single at RPE 8-9) into the next session that trains it, as a proposal. Never a separate test day.',
+      'A needs_test goal says why in test_reason. For a stale or no_evidence passive goal, make sure a session trains its lift with a rated set. For a manual measurement (mobility, sided), add it as the reading item in a warm-up the program already has (at most one per session).',
+      'weak_links and signals are hypotheses: raise the biggest one in a proposal (an accessory, a swap, a dose change) with its basis, never as fact.',
+      'Give a goal with no source a source_metric (upsert_goal) so logged sets move it. Strength goals read best as e1rm (or relative_e1rm for xBW): those move on every rated working set, where top_set moves only on a heavier set.',
+    ].join(' '),
   }
 }
 
@@ -714,8 +780,9 @@ async function logGoalMeasurement(store: ConnectedStore, args: Record<string, un
   const [goal] = await store.sql<{
     id: string; name: string; metric: string; direction: string; target: number | null; target_range_hi: number | null
     baseline: number | null; current: number | null; best: number | null; due_date: string | null
+    source_metric: string | null
   }[]>`
-    SELECT id, name, metric, direction, target, target_range_hi, baseline, current, best, due_date::text
+    SELECT id, name, metric, direction, target, target_range_hi, baseline, current, best, due_date::text, source_metric
     FROM athlete_goal
     WHERE athlete_id = ${store.athleteId}
       AND (id::text = ${ident} OR lower(name) = ${ident.toLowerCase()} OR name ILIKE ${'%' + ident + '%'})
@@ -735,7 +802,6 @@ async function logGoalMeasurement(store: ConnectedStore, args: Record<string, un
       return { ...mcpStamp(new Date(), await athleteZone(store)), measurement: { id: dup.id, reused: true }, goal_after: goal }
     }
   }
-  const applied = applyMeasurement(goal, { date, value, source: asString(args.source) ?? 'agent' })
   const [row] = await store.sql<{ id: string }[]>`
     INSERT INTO goal_measurement (athlete_id, goal_id, measured_on, value, side, source, note, client_key)
     VALUES (
@@ -745,7 +811,18 @@ async function logGoalMeasurement(store: ConnectedStore, args: Record<string, un
     RETURNING id
   `
   const today = todayISO(await athleteZone(store))
-  const status = computeGoalStatus({ ...goal, current: applied.current, best: applied.best, baseline: applied.baseline }, [], today)
+  // current, best and baseline from every measurement, the way the app recomputes
+  // them after a session: a rolling goal's current is its capacity, not this one value.
+  const historyRows = await store.sql<{ measured_on: string; value: number | string; source: string; note: string | null; client_key: string | null }[]>`
+    SELECT measured_on::text, value, source, note, client_key
+    FROM goal_measurement WHERE athlete_id = ${store.athleteId} AND goal_id = ${goal.id}
+    ORDER BY measured_on
+  `
+  const history: GoalMeasurement[] = historyRows.map((r) => ({
+    date: r.measured_on, value: goalNumber(r.value) ?? 0, source: r.source, note: r.note, client_key: r.client_key,
+  }))
+  const applied = goalMarks(goal, history, today) ?? { current: value, best: value, baseline: goalNumber(goal.baseline) ?? value }
+  const status = goalRead({ ...goal, current: applied.current, best: applied.best, baseline: applied.baseline }, history, today).computed
   await store.sql`
     UPDATE athlete_goal
     SET current = ${applied.current}, best = ${applied.best}, baseline = ${applied.baseline},
@@ -765,8 +842,9 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
   const [goal] = await store.sql<{
     id: string; name: string; metric: string; direction: string; target: number | null; due_date: string | null
     current: number | null; baseline: number | null; best: number | null; target_range_hi: number | null
+    source_metric: string | null; cadence: string | null
   }[]>`
-    SELECT id, name, metric, direction, target, due_date::text, current, baseline, best, target_range_hi
+    SELECT id, name, metric, direction, target, due_date::text, current, baseline, best, target_range_hi, source_metric, cadence
     FROM athlete_goal
     WHERE athlete_id = ${store.athleteId}
       AND (id::text = ${ident} OR lower(name) = ${ident.toLowerCase()} OR name ILIKE ${'%' + ident + '%'})
@@ -795,7 +873,10 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
   const today = todayISO(await athleteZone(store))
   return {
     ...mcpStamp(new Date(), await athleteZone(store)),
-    goal: { ...goal, status: computeGoalStatus(goal, history, today), last_measured: lastMeasuredOn(history) },
+    goal: (() => {
+      const read = goalRead(goal, history, today)
+      return { ...goal, status: read.computed, display: read.display, last_measured: read.last_measured, capacity: read.capacity, test_reason: read.test_reason }
+    })(),
     measurements: history,
     trend: history.length >= 2 ? history[history.length - 1].value - history[0].value : 0,
     // The same forecast the app's status reads: the last three real points.
@@ -924,7 +1005,7 @@ export async function briefTracksAndGoals(store: ConnectedStore, live: LiveProgr
     const listed = await listTracks(store, live?.programId)
     const goals = await getGoals(store, {})
     const tracks = (listed as { tracks?: Array<{ name: string; engine_type?: string | null; days?: number[] }> }).tracks ?? []
-    const goalRows = (goals as { goals?: Array<{ name: string; status: string; current?: number | null; target?: number | null; unit?: string | null }> }).goals ?? []
+    const goalRows = (goals as { goals?: Array<{ name: string; status: string; display?: string; current?: number | null; target?: number | null; unit?: string | null; capacity?: { tier: string } | null; test_reason?: { text: string } | null }> }).goals ?? []
     const trackLines = tracks.length
       ? tracks.map((t) => `- ${t.name}${t.engine_type ? ` · ${t.engine_type}` : ''}${t.days?.length ? ` · days ${t.days.join(',')}` : ''}`)
       : ['- none']
@@ -932,7 +1013,9 @@ export async function briefTracksAndGoals(store: ConnectedStore, live: LiveProgr
       ? goalRows.map((g) => {
           const cur = g.current != null ? `${g.current}${g.unit ?? ''}` : 'pending'
           const tgt = g.target != null ? `${g.target}${g.unit ?? ''}` : '—'
-          return `- ${g.name}: ${cur} → ${tgt} (${g.status})`
+          const how = g.capacity ? `, ${g.capacity.tier}` : ''
+          const why = g.test_reason ? ` — ${g.test_reason.text}` : ''
+          return `- ${g.name}: ${cur} → ${tgt} (${g.display ?? g.status}${how})${why}`
         })
       : ['- none']
     return ['## Tracks', ...trackLines, '', '## Goals', ...goalLines].join('\n')

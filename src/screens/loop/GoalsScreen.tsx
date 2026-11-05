@@ -9,7 +9,10 @@ import { fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/track
 import { progressRatio, GOAL_DISPLAY_LABEL } from '../../engine/goals'
 import { fetchProgramView } from './ProgramScreen'
 import { fetchProfileMeta } from './ProfileScreen'
-import { GoalBar, GoalStatus, goalValue, shortDate } from './goalsUi'
+import { GoalBar, GoalStatus, goalValue, shortDate, WeakLinksCard } from './goalsUi'
+import { CAPACITY_TIER_LABEL } from '../../engine/capacity'
+import { fetchTrainingRead } from '../../lib/trainingRead'
+import type { TrainingRead } from '../../engine/signals'
 import { TrackGlyph } from './tracksUi'
 import { BlockRoad, blockWeeks } from './BlockRoad'
 import { fetchProposals, type CoachProposal } from '../../lib/proposals'
@@ -27,8 +30,8 @@ function perWeek(n: number, unit: string | null): string {
   return `${n > 0 ? '+' : ''}${goalValue(n, unit)} a week`
 }
 
-// Off course first (by due date), then needs a test, then on course, then zeroed.
-const ORDER = { off_course: 0, needs_test: 1, on_course: 2, zeroed: 3 } as const
+// Off course first (by due date), then to confirm, then needs a test, then on course, then zeroed.
+const ORDER = { off_course: 0, confirm: 1, needs_test: 2, on_course: 3, zeroed: 4 } as const
 
 /**
  * GOALS — the aim, and the plan beneath it. The reticle is the goals; the one
@@ -46,6 +49,11 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
   const phase = view?.phase ?? null
   const tracks = useProgramTracks(program?.id)
   const goals = useMemo(() => data ?? [], [data])
+  // Weak links and cross-domain signals, read off the whole log once goals are in.
+  const { data: training } = useCachedLoader<TrainingRead>(
+    data ? cacheKeys.training(athleteId) : null,
+    () => fetchTrainingRead(athleteId, goals),
+  )
   const today = new Date().toLocaleDateString('en-CA')
 
   const axes = useMemo(() => goals
@@ -67,7 +75,7 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
   }, [goals])
 
   const urgent = useMemo(() => goals
-    .filter((g) => g.display === 'off_course' || g.display === 'needs_test')
+    .filter((g) => g.display === 'off_course' || g.display === 'confirm' || g.display === 'needs_test')
     .sort((a, b) => ORDER[a.display] - ORDER[b.display] || (a.due_date ?? '9').localeCompare(b.due_date ?? '9'))[0] ?? null, [goals])
 
   // A change the coach parked for this goal turns the card's ask into "review it".
@@ -105,7 +113,7 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
               <div className="goals-aim fade-rise">
                 <GoalReticle goals={axes} size={250} onOpen={(id) => navigate(`/app/goals/${id}`)} />
                 <p className="goals-aim__read">
-                  {(['zeroed', 'on_course', 'off_course', 'needs_test'] as const)
+                  {(['zeroed', 'confirm', 'on_course', 'off_course', 'needs_test'] as const)
                     .map((d) => ({ d, n: goals.filter((g) => g.display === d).length }))
                     .filter((x) => x.n > 0)
                     .map((x) => (
@@ -126,12 +134,16 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
                   <span className="goals-act__t">
                     {urgent.display === 'off_course'
                       ? `${urgent.name} won’t reach ${goalValue(urgent.target, urgent.unit)}${urgent.due_date ? ` by ${shortDate(urgent.due_date)}` : ''} at this rate.`
-                      : `${urgent.name} needs a test.`}
+                      : urgent.display === 'confirm'
+                        ? `${urgent.name} looks done. One set proves it.`
+                        : `${urgent.name} needs a test.`}
                   </span>
                   <span className="goals-act__s">
                     {urgent.display === 'off_course' && urgent.forecast
                       ? `Forecast ${goalValue(urgent.forecast.value, urgent.unit)}. ${urgent.forecast.neededPerWeek != null ? `Needs ${perWeek(urgent.forecast.neededPerWeek, urgent.unit)}; ${urgent.forecast.perWeek === 0 ? 'the trend is flat' : `trending ${perWeek(urgent.forecast.perWeek, urgent.unit)}`}.` : ''}`
-                      : urgent.last_measured
+                      : urgent.test_reason
+                        ? urgent.test_reason.text
+                        : urgent.last_measured
                         ? `Last tested ${shortDate(urgent.last_measured)}${urgent.cadence ? `, ${urgent.cadence}` : ''}.`
                         : 'Nothing real logged yet, so its status is unproven.'}
                   </span>
@@ -157,6 +169,9 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
                       <GoalBar goal={g} display={g.display} />
                       <div className="goals-target__meta">
                         <GoalStatus display={g.display} />
+                        {g.capacity && g.display !== 'zeroed' && g.capacity.tier !== 'tested' && (
+                          <span className="goals-target__cap">{CAPACITY_TIER_LABEL[g.capacity.tier]}</span>
+                        )}
                         <span className="text-xs text-dim">
                           {g.display === 'zeroed' && g.last_measured ? `Hit ${shortDate(g.last_measured)}`
                             : g.display === 'needs_test' ? (g.last_measured ? `Last ${shortDate(g.last_measured)}` : 'Not measured yet')
@@ -167,6 +182,8 @@ export function GoalsScreen({ athleteId }: { athleteId: string }) {
                   ))}
                 </div>
               ))}
+
+              {training && <WeakLinksCard links={training.weak_links} signals={training.signals} />}
             </>
           )}
 

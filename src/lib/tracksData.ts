@@ -3,10 +3,13 @@ import { cacheKeys } from './loopCache'
 import { supabase } from './supabaseClient'
 import { tracksOn } from './tracksFlag'
 import { tracksV1Enabled } from './flags'
-import { computeGoalStatus, forecastAtDue, goalDisplayStatus, lastMeasuredOn, pairKey, type GoalDisplay, type GoalForecast, type GoalMeasurement } from '../engine/goals'
+import { pairKey, type GoalDisplay, type GoalForecast, type GoalMeasurement, type GoalStatus } from '../engine/goals'
+import { goalMarks, goalRead, isRollingGoal, type GoalCapacity, type TestReason } from '../engine/capacity'
 import type { AutoregRule } from '../engine/autoreg'
+import { fetchTrainingSessions } from './trainingRead'
+import { learnedRatios, liftPoints } from '../engine/weakLinks'
 import {
-  deriveGoalMeasurements, workoutMeasurementKey,
+  deriveGoalMeasurements, goalSource, sourceMatches, workoutMeasurementKey,
   type DerivedMeasurement, type GoalForSource, type LoggedExercise, type SourceUnits,
 } from '../engine/goalSources'
 import { GENERAL_TRACK_SEED, wantsGeneralTrack, type TrackRef } from '../engine/tracks'
@@ -48,9 +51,15 @@ export async function fetchAutoregRules(athleteId: string): Promise<AutoregRule[
 }
 
 export interface GoalView extends AthleteGoalRow {
-  computed: ReturnType<typeof computeGoalStatus>
+  computed: GoalStatus
   display: GoalDisplay
   forecast: GoalForecast | null
+  /** Where the goal is from all its evidence, and how sure (engine/capacity.ts). */
+  capacity: GoalCapacity | null
+  /** Why it wants a test, when it does. */
+  test_reason: TestReason | null
+  /** Logged training moves it. */
+  passive: boolean
   /** The lane this goal sits on, by its track id even when that track is last block's. */
   lane: Pick<TrackRow, 'id' | 'name' | 'icon' | 'sort_order'> | null
   pair: string
@@ -86,17 +95,15 @@ export async function fetchGoalsView(athleteId: string): Promise<GoalView[]> {
   const today = new Date().toLocaleDateString('en-CA')
   return ((goals ?? []) as AthleteGoalRow[]).map((g) => {
     const history = byGoal.get(g.id) ?? []
-    const computed = computeGoalStatus(g, history, today)
-    const last_measured = lastMeasuredOn(history)
+    const read = goalRead(g, history, today)
     return {
       ...g,
-      computed,
-      display: goalDisplayStatus(computed, last_measured, { cadence: g.cadence, today }),
-      forecast: forecastAtDue(g, history),
+      // A rolling goal reads where its evidence puts it, not its last session.
+      current: read.capacity && isRollingGoal(g, history) ? read.capacity.value : g.current,
+      ...read,
       lane: (g.track_id && laneById.get(g.track_id)) || null,
       pair: pairKey(g.name),
       history,
-      last_measured,
     }
   })
 }
@@ -236,18 +243,9 @@ export async function logMeasurement(input: {
     client_key,
   })
   if (error && !/duplicate|unique/i.test(error.message ?? '')) throw error
-  const { data: rows } = await supabase
-    .from('goal_measurement')
-    .select('value')
-    .eq('goal_id', input.goalId)
-    .order('measured_on', { ascending: false })
-    .limit(20)
-  const values = ((rows ?? []) as Array<{ value: number }>).map((r) => Number(r.value))
-  const current = values[0] ?? input.value
-  // A lower-is-better goal (a sprint time, a pain score) is best at its minimum.
-  const best = !values.length ? input.value
-    : input.direction === 'lower' ? Math.min(...values) : Math.max(...values)
-  await supabase.from('athlete_goal').update({ current, best, updated_at: new Date().toISOString() }).eq('id', input.goalId)
+  // The same recompute a session runs: a rolling goal's current is its capacity.
+  const { data: goal } = await supabase.from('athlete_goal').select(GOAL_SOURCE_COLUMNS).eq('id', input.goalId).maybeSingle()
+  if (goal) await refreshGoalMarks(goal as GoalForSource, new Date().toLocaleDateString('en-CA'))
 }
 
 const GOAL_SOURCE_COLUMNS = 'id, name, metric, unit, side, direction, target, target_range_hi, current, best, baseline, source_metric'
@@ -270,18 +268,23 @@ async function tracksOnFor(athleteId: string): Promise<boolean> {
   return tracksV1Enabled(import.meta.env, (data as { flags?: unknown } | null)?.flags, '')
 }
 
-/** current is the latest measurement, best the best one, baseline the first. */
-async function refreshGoalMarks(goal: Pick<GoalForSource, 'id' | 'direction' | 'baseline'>): Promise<void> {
+/**
+ * current is the goal's capacity (the latest mark, for a best kind), best the
+ * best reading, baseline the first (engine/capacity.goalMarks).
+ */
+async function refreshGoalMarks(goal: GoalForSource, today: string): Promise<void> {
   const { data } = await supabase
-    .from('goal_measurement').select('value, measured_on')
-    .eq('goal_id', goal.id).order('measured_on', { ascending: false }).limit(60)
-  const values = ((data ?? []) as Array<{ value: number | string }>).map((r) => Number(r.value)).filter(Number.isFinite)
-  if (!values.length) return
-  const best = goal.direction === 'lower' ? Math.min(...values) : Math.max(...values)
+    .from('goal_measurement').select('value, measured_on, source, note, client_key')
+    .eq('goal_id', goal.id).order('measured_on', { ascending: false }).limit(120)
+  const history: GoalMeasurement[] = ((data ?? []) as Array<{ value: number | string; measured_on: string; source: string; note: string | null; client_key: string | null }>)
+    .map((r) => ({ date: r.measured_on, value: Number(r.value), source: r.source, note: r.note, client_key: r.client_key }))
+    .filter((m) => Number.isFinite(m.value))
+  const marks = goalMarks(goal, history, today)
+  if (!marks) return
   await supabase.from('athlete_goal').update({
-    current: values[0],
-    best,
-    ...(goal.baseline == null ? { baseline: values[values.length - 1] } : {}),
+    current: marks.current,
+    best: marks.best,
+    ...(goal.baseline == null ? { baseline: marks.baseline } : {}),
     updated_at: new Date().toISOString(),
   }).eq('id', goal.id)
 }
@@ -304,13 +307,28 @@ export async function recordSessionGoals(input: {
   exercises: LoggedExercise[]
   units: SourceUnits
   isEdit: boolean
+  /** From the session check-in, storage units. Relative-strength goals need it. */
+  bodyweight?: number | null
+  /** From the session check-in. A low day's dip doesn't move a rolling goal. */
+  readiness?: number | null
 }): Promise<DerivedMeasurement[]> {
   try {
     if (!(await tracksOnFor(input.athleteId))) return []
     const goals = await fetchGoalsForSources(input.athleteId)
-    const gated = deriveGoalMeasurements(input.exercises, goals, input.units)
+    // The athlete's own lift ratios, only when a strength goal's lift isn't in
+    // this session and a related one might stand in for it.
+    const names = input.exercises.map((e) => e.name)
+    const needsRatios = goals.some((g) => {
+      const src = goalSource(g, names)
+      return src?.kind === 'e1rm' && !names.some((n) => sourceMatches(src, n))
+    })
+    const ratios = needsRatios
+      ? await fetchTrainingSessions(input.athleteId).then((s) => learnedRatios(liftPoints(s))).catch(() => null)
+      : null
+    const opts = { bodyweight: input.bodyweight ?? null, readiness: input.readiness ?? null, ratios }
+    const gated = deriveGoalMeasurements(input.exercises, goals, input.units, opts)
     const all = input.isEdit
-      ? deriveGoalMeasurements(input.exercises, goals, input.units, { requireHold: false })
+      ? deriveGoalMeasurements(input.exercises, goals, input.units, { ...opts, requireHold: false })
       : gated
     const { data: ownRows } = await supabase
       .from('goal_measurement').select('id, goal_id, client_key')
@@ -327,7 +345,7 @@ export async function recordSessionGoals(input: {
         // The Worker answers a duplicate insert with success, so a correction
         // has to update the row it already holds.
         await supabase.from('goal_measurement')
-          .update({ value: m.value, measured_on: input.performedOn, note: m.exercise })
+          .update({ value: m.value, measured_on: input.performedOn, note: m.note })
           .eq('id', existing.id)
         own.delete(client_key)
       } else {
@@ -340,7 +358,7 @@ export async function recordSessionGoals(input: {
           side: null,
           source: 'workout_log',
           workout_id: input.workoutId,
-          note: m.exercise,
+          note: m.note,
           client_key,
         })
         if (error && !/duplicate|unique/i.test(error.message ?? '')) continue
@@ -356,9 +374,10 @@ export async function recordSessionGoals(input: {
     }
     for (const id of touched) {
       const goal = goals.find((g) => g.id === id)
-      if (goal) await refreshGoalMarks(goal)
+      if (goal) await refreshGoalMarks(goal, new Date().toLocaleDateString('en-CA'))
     }
     if (touched.size) invalidateCache(cacheKeys.goals(input.athleteId))
+    invalidateCache(cacheKeys.training(input.athleteId))
     return written
   } catch {
     return []

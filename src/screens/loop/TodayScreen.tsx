@@ -1264,7 +1264,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
                 <span className="goal-line__body">
                   <span className="goal-line__k">Goals</span>
                   <span className="goal-line__s">
-                    {(['off_course', 'needs_test', 'on_course', 'zeroed'] as const)
+                    {(['off_course', 'confirm', 'needs_test', 'on_course', 'zeroed'] as const)
                       .map((d) => ({ d, n: (goalList ?? []).filter((g) => g.display === d).length }))
                       .filter((x) => x.n > 0)
                       .map((x, i) => (

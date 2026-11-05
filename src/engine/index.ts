@@ -3866,6 +3866,8 @@ export async function commitSession(p: PendingSession): Promise<CommitResult> {
         exercises: p.exercisesSnapshot.map((ex, i) => ({ name: ex.name, sets: p.actualWeights[String(i)] ?? [] })),
         units: { weight: getStorageWeightUnit(), distance: getDistanceUnit() },
         isEdit: p.editWorkoutId != null,
+        bodyweight: p.checkin?.bodyweight ?? null,
+        readiness: p.checkin?.readiness ?? null,
       })
     }
 

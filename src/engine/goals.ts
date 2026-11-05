@@ -183,11 +183,15 @@ export function computeGoalStatus(
   goal: GoalFields,
   history: GoalMeasurement[],
   today: string,
+  // Whether a tested or strong reading met the target (capacity.goalProven).
+  // An estimate at the target is on track, not hit: Zeroed needs proof.
+  opts: { proven?: boolean } = {},
 ): GoalStatus {
   const current = goalNumber(goal.current)
   const target = goalNumber(goal.target)
   if (meetsTarget(goal.direction, current, target, goal.target_range_hi)) {
-    return 'hit'
+    if (opts.proven !== false) return 'hit'
+    return 'on_track'
   }
   const dueIn = daysUntil(goal.due_date, today)
   const pending = current == null && goalNumber(goal.baseline) == null
@@ -229,13 +233,16 @@ export function cadenceDays(cadence: string | null | undefined): number | null {
  * five-color tokens: zeroed is confirmed, off course is the signal (the thing
  * to act on), needs a test is pending (the number is unproven), on course is
  * plain text. A goal with no real measurement needs a test whatever its seeded
- * numbers say, so that check runs first.
+ * numbers say, so that check runs first. To confirm is an estimate at the
+ * target waiting on one test (capacity.goalRead decides it; this older
+ * function never returns it).
  */
-export const GOAL_DISPLAYS = ['zeroed', 'on_course', 'off_course', 'needs_test'] as const
+export const GOAL_DISPLAYS = ['zeroed', 'confirm', 'on_course', 'off_course', 'needs_test'] as const
 export type GoalDisplay = (typeof GOAL_DISPLAYS)[number]
 
 export const GOAL_DISPLAY_LABEL: Record<GoalDisplay, string> = {
   zeroed: 'Zeroed',
+  confirm: 'To confirm',
   on_course: 'On course',
   off_course: 'Off course',
   needs_test: 'Needs a test',

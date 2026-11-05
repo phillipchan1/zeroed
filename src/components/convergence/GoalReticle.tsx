@@ -75,9 +75,10 @@ export function GoalReticle({ goals, size = 240, labels = true, onOpen, perGoal 
   const counts = shown.reduce<Record<GoalDisplay, number>>((c, g) => {
     c[g.display] += 1
     return c
-  }, { zeroed: 0, on_course: 0, off_course: 0, needs_test: 0 })
+  }, { zeroed: 0, confirm: 0, on_course: 0, off_course: 0, needs_test: 0 })
   const summary = [
     counts.zeroed ? `${counts.zeroed} zeroed` : null,
+    counts.confirm ? `${counts.confirm} to confirm` : null,
     counts.on_course ? `${counts.on_course} on course` : null,
     counts.off_course ? `${counts.off_course} off course` : null,
     counts.needs_test ? `${counts.needs_test} need${counts.needs_test === 1 ? 's' : ''} a test` : null,

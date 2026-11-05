@@ -359,6 +359,8 @@ ok(weekPreview.includes('labeled 2026-11-09') || weekPreview.includes('Preview a
 const goalBrief = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'get_goal_brief', arguments: {} })).body)
 ok(goalBrief.includes('Hip IR L') && goalBrief.includes('"display"') && goalBrief.includes('pending_proposals'), 'brief: goals as the athlete sees them, plus what is waiting')
 ok(!toolText((await rpc(TOKEN_B, 'tools/call', { name: 'get_goal_brief', arguments: {} })).body).includes('Hip IR L'), 'isolation: B brief hides A goals')
+ok(goalBrief.includes('"weak_links"') && goalBrief.includes('"signals"') && !goalBrief.includes('training_unavailable'), `brief: the training read runs, got ${goalBrief.match(/training_unavailable[^\n]*/)?.[0] ?? 'ok'}`)
+ok(goalBrief.includes('"capacity"') && goalBrief.includes('"test_reason"'), 'brief: each goal carries its capacity and test reason')
 
 const pressEdit = { type: 'add_exercise', session_name: 'A day', exercise_name: 'Push Press', sets: 3, reps: '3', load: '105', rationale: 'second press exposure' }
 const proposed = toolText((await rpc(TOKEN_A, 'tools/call', {
