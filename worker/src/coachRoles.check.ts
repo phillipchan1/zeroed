@@ -68,6 +68,9 @@ await harness.query(
   `INSERT INTO mcp_token (id, athlete_id, name, token_hash, last_four) VALUES ($1, $2, 'second opinion', $3, 'aae1')`,
   [TOKEN_R_ID, A, await sha256Hex(PLAIN_R)],
 )
+// Section 11b: no age on file is the under-18 rules. A and B are confirmed
+// adults here; unknown-age and minor behaviour is in ageStatus.check.ts.
+await harness.query(`UPDATE athlete SET adult_confirmed_at = NOW() WHERE id = ANY($1::uuid[])`, [[A, B]])
 
 const call = async (name: string, args: Record<string, unknown>, actor: OverrideActor = coachA, athlete = A): Promise<string> => {
   try {
@@ -288,8 +291,11 @@ await sql`UPDATE athlete SET birth_date = '2012-01-01' WHERE id = ${A}`
 const minorMinors = JSON.stringify((await resolveMethodology(storeA)).minors)
 const flagHip = chp(await call('preview_methodology_override', { path: 'U7.regions.hip.blocked', value: true, rationale: 'Synthetic (U7).' }))
 await call('apply_methodology_override', { preview_id: flagHip, confirm: true, approval_ref: await tap(flagHip) })
-const minorClear = await clearRedFlag(storeA, athleteA, 'hip')
-ok(minorClear.ok && !blockedRegions(await resolveMethodology(storeA)).includes('hip'), 'minor: the athlete clears a clinician-cleared red flag')
+// Section 11b: a minor can't clear it alone (the birth date wins over A's 18+ confirmation).
+const minorAlone = await clearRedFlag(storeA, athleteA, 'hip')
+ok(!minorAlone.ok && /guardian/.test(minorAlone.text) && blockedRegions(await resolveMethodology(storeA)).includes('hip'), 'minor: refused without a guardian confirmation')
+const minorClear = await clearRedFlag(storeA, athleteA, 'hip', { confirmed: true, relationship: 'parent' })
+ok(minorClear.ok && !blockedRegions(await resolveMethodology(storeA)).includes('hip'), 'minor: the athlete clears a clinician-cleared red flag, with a guardian\'s confirmation')
 ok(JSON.stringify((await resolveMethodology(storeA)).minors) === minorMinors && (await resolveMethodology(storeA)).minor === true, 'minor: under-18 rules unchanged')
 ok((await call('preview_methodology_override', { path: 'U7.regions.hip.raised_cap', value: true })).includes('under 18'), 'minor: still no raised cap')
 await sql`UPDATE athlete SET birth_date = NULL WHERE id = ${A}`

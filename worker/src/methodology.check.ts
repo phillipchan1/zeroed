@@ -36,6 +36,9 @@ const TOKEN_B_ID = 'bbbb6666-0000-4000-8000-000000000001'
 
 const harness = await openIsolationHarness()
 const sql = harness.sql
+// Section 11b: no age on file means the under-18 rules. These synthetic
+// athletes are confirmed adults; ageStatus.check.ts covers unknown age.
+await harness.query(`UPDATE athlete SET adult_confirmed_at = NOW()`)
 const storeA = makeStore(sql, A)
 const coachA: OverrideActor = { type: 'mcp', id: TOKEN_A_ID }
 const coachA2: OverrideActor = { type: 'mcp', id: TOKEN_A2_ID }
@@ -195,7 +198,7 @@ ok((await call('preview_methodology_override', { path: 'U5.top_single_rpe', valu
 const minorRx = await rx()
 ok(minorRx.out.methodology_version !== afterTm.out.methodology_version, 'minors: the version records the under-18 rules')
 ok(minorRx.out.prescription.exercises.every((e) => e.rpe == null || e.rpe <= 8), 'minors: no prescribed RPE above 8')
-await sql`UPDATE athlete SET birth_date = NULL WHERE id = ${A}`
+await sql`UPDATE athlete SET birth_date = NULL, adult_confirmed_at = NULL WHERE id = ${A}`
 ok((await call('preview_methodology_override', { path: 'U7.regions.knee.raised_cap', value: true })).includes('date of birth'), 'raised cap: refused while age is unknown')
 await sql`UPDATE athlete SET birth_date = '1990-01-01' WHERE id = ${A}`
 ok(chp(await call('preview_methodology_override', { path: 'U7.regions.knee.raised_cap', value: true })) !== '', 'raised cap: an adult can opt one region in')

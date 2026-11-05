@@ -14,7 +14,9 @@
  *   restore   the target goes back to the row's `before` when it still looks
  *             exactly like the row's `after` (program edits, tracks, goals,
  *             rules, block details, training max, methodology overrides,
- *             activities, coach access, the birth date of an adult).
+ *             activities, coach access, the birth date of an adult, the
+ *             18+ confirmation: undoing it is back to unknown age, which
+ *             only tightens).
  *   retire    a row the change created is hidden, never deleted
  *             (change_tombstone): a track, a goal, an autoreg rule. An added
  *             session is taken out of the week (phase_id cleared), a queued
@@ -26,8 +28,9 @@
  *             a clear is refused: only the clinician clear unblocks.
  *   redo      reverting a revert re-applies the original, through the same
  *             handler and guards.
- *   none      revoking a coach and the system's voided preview: access is
- *             never restored by an undo (invite the coach again).
+ *   none      revoking a coach, the system's voided preview, and the work a
+ *             downgrade to read voided: access is never restored by an undo
+ *             (invite the coach again), and voided previews stay void.
  *
  * Every revert refuses when a later change touched the same target (the
  * preview lists it; undo that first), when the target moved since, when it
@@ -39,14 +42,15 @@
 import { asJson, jsonParam, pgArrayLiteral } from './db.ts'
 import {
   changeLogMissing, changeLogUnavailable, GOAL_FIELDS, goalSnapshot, obj, programMetaSnapshot, Refusal,
-  routineSnapshots, storeChangePreview, trackSnapshot, trainingMaxEntry, UUID_RE, withTx, writeChange,
+  routineSnapshots, storeChangePreview, trackSnapshot, trainingMaxEntry, UUID_RE, voidDowngradedCoachWork, withTx, writeChange,
   type ChangeActor, type RoutineSnap,
 } from './changeLog.ts'
 import { insertProgramRevision } from './edits.ts'
 import { athleteToday, canonicalJson, PREVIEW_TTL_HOURS, tracksV1On } from './sessionOverride.ts'
 import { actorLabel, summarizeChange } from './changeSummary.ts'
 import { ApprovalSpent, consumeApproval, directTapApproval } from './approvals.ts'
-import { athleteMinor, blockedRegions, loadOverrides, resolveMethodology } from './methodology.ts'
+import { blockedRegions, loadOverrides, resolveMethodology } from './methodology.ts'
+import { athleteAge, overrideAgeOf } from './ageStatus.ts'
 import { validateEdit, type PreviewWarning, type WeekSession } from './methodology/validators.ts'
 import { applyOverrideOps, type OverrideOp } from '../../src/engine/sessionOverride.ts'
 import type { ExerciseTemplate } from '../../src/types/database.ts'
@@ -938,7 +942,8 @@ const METHODOLOGY_OVERRIDE: Handler = {
   plan: async (store, d) => {
     const path = String(d.path ?? '')
     const trackId = typeof d.track_id === 'string' ? d.track_id : null
-    const [overrides, minor] = await Promise.all([loadOverrides(store), athleteMinor(store)])
+    const [overrides, age] = await Promise.all([loadOverrides(store), athleteAge(store)])
+    const minor = overrideAgeOf(age.status)
     const cur = overrides.find((o) => o.path === path && (o.track_id ?? null) === trackId) ?? null
     if ((cur?.id ?? null) !== ((d.override_id as string | null | undefined) ?? null)) return stale('that rule')
     let restored: unknown
@@ -951,14 +956,14 @@ const METHODOLOGY_OVERRIDE: Handler = {
     }
     const clear = restored === undefined
     if (clear && !cur) return notRevertible('there is nothing to put back.')
-    const opts = { trackId, minor: minor === true }
+    const opts = { trackId, minor: age.minorRules }
     const now = resolveParams(CURRENT_METHODOLOGY, overrides, opts)
     const withoutThis = resolveParams(CURRENT_METHODOLOGY, withScope(overrides, path, trackId, undefined), opts)
     // Every methodology guard, as the athlete: under-18 rules only tighten, no raised cap for a minor or a red-flagged region.
     const check = checkOverride({ path, value: restored, clear, trackId, now, withoutThis, minor, actorType: 'athlete', exists: cur != null })
     if (!check.ok) return notRevertible(check.text.replace(/^Refused: /, ''))
-    const athleteNow = resolveParams(CURRENT_METHODOLOGY, overrides, { trackId: null, minor: minor === true })
-    const athleteAfter = resolveParams(CURRENT_METHODOLOGY, withScope(overrides, path, trackId, restored), { trackId: null, minor: minor === true })
+    const athleteNow = resolveParams(CURRENT_METHODOLOGY, overrides, { trackId: null, minor: age.minorRules })
+    const athleteAfter = resolveParams(CURRENT_METHODOLOGY, withScope(overrides, path, trackId, restored), { trackId: null, minor: age.minorRules })
     const lifted = blockedRegions(athleteNow).filter((r) => !blockedRegions(athleteAfter).includes(r))
     if (lifted.length) {
       return notRevertible(`it would lift the red flag on the ${lifted.join(', ').replace(/_/g, ' ')}. A red flag only lifts when you mark it cleared by a clinician.`)
@@ -1142,7 +1147,7 @@ const SESSION_RPE: Handler = {
   },
 }
 
-// ---- coach access, birth date -------------------------------------------------------------
+// ---- coach access, birth date, 18+ confirmation -------------------------------------------------------------
 
 function coachAccessHandler(field: 'share_health' | 'role', label: string): Handler {
   return {
@@ -1165,7 +1170,7 @@ function coachAccessHandler(field: 'share_health' | 'role', label: string): Hand
         targetType: 'mcp_token',
         targetId: id,
         diff: { coach: d.coach ?? null, token_id: id, [field]: { before: change.after, after: change.before } },
-        apply: async () => {
+        apply: async (ctx) => {
           const done = field === 'role'
             ? await store.sql<{ id: string }[]>`
                 UPDATE mcp_token SET role = ${String(change.before)}
@@ -1178,6 +1183,11 @@ function coachAccessHandler(field: 'share_health' | 'role', label: string): Hand
                 RETURNING id::text AS id
               `
           if (!done.length) throw staleRefusal('that coach')
+          // Section 11b: back down to read voids the coach's open work, as the athlete's own downgrade does.
+          if (field === 'role' && change.before === 'read' && change.after === 'propose') {
+            const [t] = await store.sql<{ name: string }[]>`SELECT name FROM mcp_token WHERE id = ${id} AND athlete_id = ${store.athleteId}`
+            await voidDowngradedCoachWork(store, { id, name: t?.name ?? String(d.coach ?? '') }, ctx.changeId)
+          }
         },
       }
     },
@@ -1192,7 +1202,7 @@ const BIRTH_DATE: Handler = {
     const now = row?.birth_date ? row.birth_date.slice(0, 10) : null
     if (now !== ((d.after as string | null | undefined) ?? null)) return stale('your birth date')
     // Removing a minor's date would drop their under-18 rules: refused. Recording one only tightens.
-    if (d.before == null && (await athleteMinor(store)) !== false) {
+    if (d.before == null && (await athleteAge(store)).status !== 'adult') {
       return notRevertible('you are under 18, and under-18 rules can only be tightened, never loosened.')
     }
     const before = (d.before as string | null | undefined) ?? null
@@ -1207,6 +1217,43 @@ const BIRTH_DATE: Handler = {
           RETURNING id::text AS id
         `
         if (!done.length) throw staleRefusal('your birth date')
+      },
+    }
+  },
+}
+
+const ADULT_CONFIRMED: Handler = {
+  defined: 'The 18+ confirmation is taken back: with no birth date on file the age is unknown again, so the under-18 rules apply (that only tightens). Redo confirms it again, only while no birth date is on file.',
+  keys: () => ['athlete.adult_confirmed_at'],
+  plan: async (store, d) => {
+    const after = (d.after as string | null | undefined) ?? null
+    const before = (d.before as string | null | undefined) ?? null
+    // Compared as timestamps, not text: an operator's row may be rendered in another time zone.
+    const [row] = await store.sql<{ matches: boolean; birth: boolean }[]>`
+      SELECT (to_jsonb(a) ->> 'adult_confirmed_at')::timestamptz IS NOT DISTINCT FROM ${after}::timestamptz AS matches,
+             (to_jsonb(a) ->> 'birth_date') IS NOT NULL AS birth
+      FROM athlete a WHERE a.id = ${store.athleteId}
+    `
+    if (!row?.matches) return stale('your 18+ confirmation')
+    // Re-confirming (a redo) is the athlete's own tap again; a birth date on file decides instead.
+    if (before != null && row.birth) return notRevertible('your birth date is on file now, and the birth date decides.')
+    return {
+      targetType: 'athlete',
+      targetId: store.athleteId,
+      diff: { field: 'adult_confirmed_at', before: after, after: before },
+      apply: async () => {
+        const done = before == null
+          ? await store.sql<{ id: string }[]>`
+              UPDATE athlete SET adult_confirmed_at = NULL
+              WHERE id = ${store.athleteId} AND adult_confirmed_at = ${after}::timestamptz
+              RETURNING id::text AS id
+            `
+          : await store.sql<{ id: string }[]>`
+              UPDATE athlete SET adult_confirmed_at = ${before}::timestamptz
+              WHERE id = ${store.athleteId} AND adult_confirmed_at IS NULL AND birth_date IS NULL
+              RETURNING id::text AS id
+            `
+        if (!done.length) throw staleRefusal('your 18+ confirmation')
       },
     }
   },
@@ -1535,12 +1582,18 @@ export const REVERT_HANDLERS: Record<string, Handler> = {
   set_coach_health_access: coachAccessHandler('share_health', 'health-data access'),
   set_coach_role: coachAccessHandler('role', 'role'),
   set_birth_date: BIRTH_DATE,
+  confirm_adult: ADULT_CONFIRMED,
   apply_activity_change: ACTIVITY,
   apply_composed_block: COMPOSED_BLOCK,
   revoke_coach: {
     defined: `Not reverted: ${NEVER_ACCESS}`,
     blocked: () => NEVER_ACCESS,
     keys: (_d, row) => [`mcp_token:${String(row.target_id ?? '')}`],
+  },
+  downgrade_coach: {
+    defined: 'Not reverted: previews and proposals voided when the coach was set to read stay void. Setting the coach back to propose lets it preview again.',
+    blocked: () => 'previews and proposals voided when the coach was set to read stay void. Set the coach back to propose and it can preview again.',
+    keys: (_d, row) => [`mcp_token:${String(row.target_id ?? '')}:voided`],
   },
   void_preview: {
     defined: 'Not reverted: a preview voided because its coach lost access stays void. The coach previews again.',

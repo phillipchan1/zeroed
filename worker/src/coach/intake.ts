@@ -13,14 +13,18 @@
  *   6 screens          baselines, logged with log_goal_measurement
  *   7 recovery         sleep, stress, soreness (manual)
  *
- * Under 18 (section 8, D6): a parental-consent step, and the composer runs
- * with the tightened caps (no RPE above 8, lower contacts, no max tests).
+ * Under 18 (section 8, D6), or with no age on file (section 11b): a
+ * parental-consent step, and the composer runs with the tightened caps (no
+ * RPE above 8, lower contacts, no max tests).
  */
 import type { MethodologyParams, MinorsRules, PainRegion } from '../methodology/v1.ts'
 import { PAIN_REGIONS } from '../methodology/v1.ts'
 import { isRedFlag, RED_FLAG_LABEL, RED_FLAGS, type RedFlag } from '../readiness/rules.ts'
 import { isModuleKey, isQuality, MODULES, SCREENS, type ModuleKey, type Quality, type ScreenKey } from './modules.ts'
 import { TRAINING_AGES, type GoalWeight, type Season, type TrainingAge } from './composer.ts'
+import { ageOn, ageStatusFrom, minorRulesFor, type AgeStatus } from '../ageStatus.ts'
+
+export { ageOn }
 
 export interface IntakeGoal {
   name: string
@@ -58,6 +62,11 @@ export interface IntakeScreen {
 export interface ParsedIntake {
   birth_date: string | null
   age: number | null
+  /** Section 11b: unknown (no birth date, no 18+ confirmation) gets the under-18 rules. */
+  age_status: AgeStatus
+  /** The athlete tapped "I'm 18 or older" in this intake (no birth date given). */
+  adult_confirmed: boolean
+  /** The under-18 rules apply: a minor, or an unknown age. */
   minor: boolean
   parental_consent: { guardian_name: string } | null
   goals: IntakeGoal[]
@@ -92,13 +101,6 @@ function validDate(v: string): boolean {
   return DATE_RE.test(v) && !Number.isNaN(Date.parse(`${v}T00:00:00Z`))
 }
 
-/** Whole years from YYYY-MM-DD to `today`. */
-export function ageOn(birthDate: string, today: string): number {
-  const [y, m, d] = birthDate.slice(0, 10).split('-').map(Number)
-  const [ty, tm, td] = today.split('-').map(Number)
-  return ty - y - (tm < m || (tm === m && td < d) ? 1 : 0)
-}
-
 function days(v: unknown): number[] | null {
   const out: number[] = []
   for (const d of arr(v)) {
@@ -111,11 +113,15 @@ function days(v: unknown): number[] | null {
 /**
  * The answers, checked. `birthDateOnFile` wins over an answered birth date:
  * intake records it once and never changes it, so an under-18 athlete can't
- * loosen their own rules by re-entering it.
+ * loosen their own rules by re-entering it. Without a birth date, the
+ * athlete's "I'm 18 or older" (on file, or `adult_confirmed: true` here)
+ * makes them an adult; with neither the age is unknown and the under-18
+ * rules apply, consent included (section 11b). A birth date under 18 wins
+ * over a confirmation (ageStatus.ts).
  */
 export function parseIntake(
   raw: unknown,
-  ctx: { today: string; birthDateOnFile: string | null; params: MethodologyParams; minors: MinorsRules },
+  ctx: { today: string; birthDateOnFile: string | null; adultConfirmedOnFile?: boolean; params: MethodologyParams; minors: MinorsRules },
 ): IntakeOutcome {
   const a = obj(raw)
   const errors: string[] = []
@@ -131,13 +137,21 @@ export function parseIntake(
   }
   const age = birth ? ageOn(birth, ctx.today) : null
   if (age != null && (age < 5 || age > 110)) errors.push('birth_date looks wrong.')
-  const minor = age != null && age < ctx.minors.age_under
+  const adultConfirmed = !birth && ctx.adultConfirmedOnFile !== true && a.adult_confirmed === true
+  const ageStatus = ageStatusFrom({ birthDate: birth, adultConfirmed: ctx.adultConfirmedOnFile === true || adultConfirmed, today: ctx.today, ageUnder: ctx.minors.age_under })
+  const minor = minorRulesFor(ageStatus)
   let consent: ParsedIntake['parental_consent'] = null
   if (minor) {
     const c = obj(a.parental_consent)
     const guardian = text(c.guardian_name, 80)
     if (c.confirmed !== true || !guardian) {
-      return { ok: false, needs_consent: true, errors: [`Under ${ctx.minors.age_under}: a parent or guardian has to agree before we build a plan. Add their name and confirm.`] }
+      return {
+        ok: false,
+        needs_consent: true,
+        errors: [ageStatus === 'unknown'
+          ? `No age on file: add your birth date or confirm you're ${ctx.minors.age_under} or older. Under ${ctx.minors.age_under}, a parent or guardian has to agree before we build a plan.`
+          : `Under ${ctx.minors.age_under}: a parent or guardian has to agree before we build a plan. Add their name and confirm.`],
+      }
     }
     consent = { guardian_name: guardian }
   }
@@ -247,6 +261,8 @@ export function parseIntake(
   const intake: ParsedIntake = {
     birth_date: birth,
     age,
+    age_status: ageStatus,
+    adult_confirmed: adultConfirmed,
     minor,
     parental_consent: consent,
     goals,

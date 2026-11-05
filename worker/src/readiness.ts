@@ -8,7 +8,9 @@
  *                  region's U7 status (region_status), in the same transaction.
  *   clear_region   the athlete marks a blocked region cleared by a clinician.
  *                  Athlete only; their tap is the approval; logged. No coach,
- *                  app_coach included, can ever clear a block.
+ *                  app_coach included, can ever clear a block. Under 18, or
+ *                  with no age on file (section 11b), it also needs a parent
+ *                  or guardian's confirmation, recorded in the row.
  *   clear_red_flag the same for the other kind of block: a red flag set in the
  *                  athlete's rules (methodology U7.regions.<region>.blocked,
  *                  G3). Supersedes that override; athlete only; logged. Each
@@ -23,7 +25,7 @@
  * without pain / check-in sections.
  *
  * Routes, the athlete's own session, 404 with the flag off:
- *   POST /api/readiness   { action: 'today' | 'checkin' | 'clear_region' | 'clear_red_flag' | 'coach_access' | 'set_coach_health' | 'set_coach_role' | 'weekly_review' }
+ *   POST /api/readiness   { action: 'today' | 'checkin' | 'clear_region' | 'clear_red_flag' | 'age' | 'confirm_adult' | 'coach_access' | 'set_coach_health' | 'set_coach_role' | 'weekly_review' }
  *   GET  /api/weekly-review?week=YYYY-MM-DD
  */
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
@@ -32,9 +34,11 @@ import { withSql, type WaitUntil } from './db.ts'
 import type { Env } from './env.ts'
 import { resolveAthleteId, sessionFromRequest } from './data.ts'
 import { ApprovalSpent, consumeApproval, directTapApproval } from './approvals.ts'
-import { STANDING_LOGGING, withTx, writeChange } from './changeLog.ts'
+import { STANDING_LOGGING, voidDowngradedCoachWork, withTx, writeChange } from './changeLog.ts'
 import { listCoachReads } from './coachReads.ts'
-import { athleteMinor, blockedRegions, loadOverrides, resolveMethodology, type OverrideRow, type Resolved } from './methodology.ts'
+import { blockedRegions, loadOverrides, resolveMethodology, type OverrideRow, type Resolved } from './methodology.ts'
+import { athleteAge } from './ageStatus.ts'
+import { ageView, confirmAdult } from './adultConfirmation.ts'
 import { CURRENT_METHODOLOGY, PAIN_REGIONS, type PainRegion } from './methodology/v1.ts'
 import { resolveParams } from './methodology/resolve.ts'
 import { isCoachRole, parseRole, type CoachRole } from './coachRoles.ts'
@@ -59,6 +63,38 @@ const DATE_RE = /^\d{4}-\d{2}-\d{2}$/
 
 function isAthlete(store: ConnectedStore, actor: OverrideActor): boolean {
   return actor.type === 'athlete' && actor.id === store.athleteId
+}
+
+/** What a guardian confirmed, as the change_log row records it. */
+export interface GuardianConfirmation {
+  guardian_confirmed: true
+  confirmed_at: string
+  name: string | null
+  relationship: string | null
+}
+
+const guardianText = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim().slice(0, 80) : null)
+
+/**
+ * Section 11b: a minor, or an athlete whose age isn't on file, can't clear a
+ * block alone. The app's second step ("A parent/guardian confirms a clinician
+ * cleared this") sends `guardian: { confirmed: true, name?, relationship? }`.
+ * Null for an adult (nothing extra asked or recorded, as before); otherwise
+ * the confirmation to record, or the refusal.
+ */
+async function guardianFor(store: ConnectedStore, raw: unknown): Promise<{ ok: true; guardian: GuardianConfirmation | null } | { ok: false; text: string }> {
+  const age = await athleteAge(store)
+  if (!age.minorRules) return { ok: true, guardian: null }
+  const g = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw as Record<string, unknown> : {}
+  if (g.confirmed !== true) {
+    return {
+      ok: false,
+      text: age.status === 'minor'
+        ? 'Refused: under 18, a parent or guardian has to confirm a clinician cleared this. Nothing changed.'
+        : 'Refused: your age isn\'t on file, so the under-18 rules apply: a parent or guardian has to confirm a clinician cleared this (or confirm you\'re 18 or older in Profile). Nothing changed.',
+    }
+  }
+  return { ok: true, guardian: { guardian_confirmed: true, confirmed_at: new Date().toISOString(), name: guardianText(g.name), relationship: guardianText(g.relationship) } }
 }
 
 // ---- the engine's view of a day ------------------------------------------------------
@@ -105,7 +141,7 @@ async function painCalls(store: ConnectedStore, date: string, methodology: Resol
   const todays = pain.filter((x) => x.date === date)
   const earlier = p.temporary_blocks ? pain.filter((x) => x.date < date && x.date >= addDays(date, -days)) : []
   if (!todays.length && !earlier.length) return { today: [], earlier: [] }
-  const adult = (await athleteMinor(store)) === false && !methodology.minor
+  const adult = (await athleteAge(store)).status === 'adult' && !methodology.minor
   const callOf = (report: PainRow): PainCall => ({ report, call: evaluateReport(pain, report, p, adult) })
   return { today: todays.map(callOf), earlier: earlier.map(callOf) }
 }
@@ -318,7 +354,7 @@ export async function saveCheckin(store: ConnectedStore, actor: OverrideActor, b
 
 // ---- clearing a block (athlete only) --------------------------------------------------------
 
-export async function clearRegion(store: ConnectedStore, actor: OverrideActor, regionArg: unknown): Promise<{ ok: boolean; text: string; change_id?: string }> {
+export async function clearRegion(store: ConnectedStore, actor: OverrideActor, regionArg: unknown, guardianArg?: unknown): Promise<{ ok: boolean; text: string; change_id?: string }> {
   if (!isAthlete(store, actor)) {
     return { ok: false, text: 'Refused: only the athlete can mark a region cleared by a clinician. A coach can never clear a block.' }
   }
@@ -328,10 +364,15 @@ export async function clearRegion(store: ConnectedStore, actor: OverrideActor, r
   const region = regionArg
   const status = (await loadRegionStatus(store)).find((s) => s.region === region)
   if (!blocksNow(status)) return { ok: false, text: `The ${regionLabel(region)} isn't blocked.` }
+  const g = await guardianFor(store, guardianArg)
+  if (!g.ok) return g
   const methodology = await resolveMethodology(store)
   const stillFlagged = blockedRegions(methodology).includes(region)
   const changeId = crypto.randomUUID()
-  const diff = { region, status_id: status!.id, blocked_since: status!.created_at, reason: status!.reason, cleared_by: `athlete:${store.athleteId}` }
+  const diff = {
+    region, status_id: status!.id, blocked_since: status!.created_at, reason: status!.reason, cleared_by: `athlete:${store.athleteId}`,
+    ...(g.guardian ? { guardian: g.guardian } : {}),
+  }
   try {
     return await withTx(store.sql, async () => {
       const tap = await directTapApproval(store, 'app_editor', `region:${status!.id}`, diff)
@@ -348,7 +389,7 @@ export async function clearRegion(store: ConnectedStore, actor: OverrideActor, r
         targetType: 'region',
         targetId: region,
         diff,
-        rationale: 'Cleared by a clinician.',
+        rationale: g.guardian ? 'Cleared by a clinician; a parent or guardian confirmed it (under-18 rules).' : 'Cleared by a clinician.',
         ruleRefs: ['U7'],
         approvalRef: tap.ref,
         approvalId: tap.id,
@@ -378,9 +419,10 @@ export function redFlagOverride(overrides: OverrideRow[], region: string): Overr
  * override row is superseded (methodology_override allows exactly that), with
  * the athlete's tap as the approval, logged in change_log. Like clearRegion:
  * athlete only, never a coach. The minors rules are not touched; a red flag
- * isn't one of them, and the check-in clear works the same for every age.
+ * isn't one of them. Like the check-in clear, a minor (or an unknown age)
+ * needs a guardian's confirmation too (section 11b).
  */
-export async function clearRedFlag(store: ConnectedStore, actor: OverrideActor, regionArg: unknown): Promise<{ ok: boolean; text: string; change_id?: string }> {
+export async function clearRedFlag(store: ConnectedStore, actor: OverrideActor, regionArg: unknown, guardianArg?: unknown): Promise<{ ok: boolean; text: string; change_id?: string }> {
   if (!isAthlete(store, actor)) {
     return { ok: false, text: 'Refused: only the athlete can mark a red flag cleared by a clinician. A coach can never clear one.' }
   }
@@ -388,10 +430,12 @@ export async function clearRedFlag(store: ConnectedStore, actor: OverrideActor, 
   if (!isPainRegion(regionArg)) return { ok: false, text: 'Refused: unknown region.' }
   const region = regionArg
   const path = `U7.regions.${region}.blocked`
-  const [overrides, minor] = await Promise.all([loadOverrides(store), athleteMinor(store)])
+  const [overrides, age] = await Promise.all([loadOverrides(store), athleteAge(store)])
   const flag = redFlagOverride(overrides, region)
   if (!flag) return { ok: false, text: `There's no red flag on the ${regionLabel(region)} in your rules.` }
-  const after = resolveParams(CURRENT_METHODOLOGY, overrides.filter((o) => o.id !== flag.id), { trackId: null, minor: minor === true })
+  const g = await guardianFor(store, guardianArg)
+  if (!g.ok) return g
+  const after = resolveParams(CURRENT_METHODOLOGY, overrides.filter((o) => o.id !== flag.id), { trackId: null, minor: age.minorRules })
   const ruleStill = blockedRegions(after).includes(region)
   const checkinStill = (await readinessTables(store)) && blocksNow((await loadRegionStatus(store)).find((s) => s.region === region))
   const changeId = crypto.randomUUID()
@@ -404,6 +448,7 @@ export async function clearRedFlag(store: ConnectedStore, actor: OverrideActor, 
     set_by: flag.created_by,
     set_at: flag.created_at,
     cleared_by: `athlete:${store.athleteId}`,
+    ...(g.guardian ? { guardian: g.guardian } : {}),
   }
   try {
     return await withTx(store.sql, async () => {
@@ -421,7 +466,7 @@ export async function clearRedFlag(store: ConnectedStore, actor: OverrideActor, 
         targetType: 'methodology',
         targetId: path,
         diff,
-        rationale: 'Cleared by a clinician.',
+        rationale: g.guardian ? 'Cleared by a clinician; a parent or guardian confirmed it (under-18 rules).' : 'Cleared by a clinician.',
         ruleRefs: ['U7'],
         approvalRef: tap.ref,
         approvalId: tap.id,
@@ -518,7 +563,9 @@ export const coachRolesUnavailable = 'Coach roles are not set up on this databas
 /**
  * D3: the athlete sets a coach to read (read tools only) or propose. A logged
  * athlete write with the athlete's tap as its approval, like the health
- * toggle. No coach can change a role: there is no tool for it, and /api/data
+ * toggle. Down to read also voids the coach's open previews, parked proposals
+ * and their approvals (section 11b), with a system row like a revoke's; back
+ * to propose revives none of them. No coach can change a role: there is no tool for it, and /api/data
  * can't write the column.
  */
 export async function setCoachRole(
@@ -557,11 +604,14 @@ export async function setCoachRole(
       approvalId: tap.id,
     })
     if (!(await consumeApproval(store, tap.id, changeId))) throw new ApprovalSpent()
+    // Section 11b (D3): down to read voids its open previews and proposals, like a revoke.
+    const work = role === 'read' ? await voidDowngradedCoachWork(store, coach, changeId) : null
+    const n = work ? work.voided_previews.length + (work.voided_proposals?.length ?? 0) : 0
     return {
       ok: true,
       change_id: changeId,
       text: role === 'read'
-        ? `${coach.name} can now only read. It can't preview or propose changes.`
+        ? `${coach.name} can now only read. It can't preview or propose changes.${n ? ` Its open previews and proposals (${n}) were voided.` : ''}`
         : `${coach.name} can now propose changes. You still approve every one.`,
     }
   }).catch((e: unknown) => {
@@ -672,12 +722,13 @@ export async function athleteReadinessAction(store: ConnectedStore, body: Record
       const today = await athleteToday(store)
       const date = typeof body.date === 'string' && DATE_RE.test(body.date) ? body.date : today
       const methodology = await resolveMethodology(store)
-      const [checkins, pain, ctx, status, overrides] = await Promise.all([
+      const [checkins, pain, ctx, status, overrides, age] = await Promise.all([
         loadCheckins(store, date, date),
         loadPain(store, date, date),
         readinessContextFor(store, date, methodology),
         loadRegionStatus(store),
         loadOverrides(store),
+        athleteAge(store),
       ])
       const flagged = new Set(blockedRegions(methodology))
       const openRegions = new Set(status.filter(blocksNow).map((s) => s.region))
@@ -697,6 +748,8 @@ export async function athleteReadinessAction(store: ConnectedStore, body: Record
         }),
         // v1.2: blocks that lapse after the next session. Nothing to clear.
         temporary_blocked: ctx.temporary,
+        // Section 11b: under 18, or no age on file, a clear also needs a parent or guardian's confirmation.
+        guardian_required: age.minorRules,
         regions: PAIN_REGIONS,
         red_flags: RED_FLAGS,
       }, 200]
@@ -704,9 +757,14 @@ export async function athleteReadinessAction(store: ConnectedStore, body: Record
     case 'checkin':
       return [await saveCheckin(store, me, body), 200]
     case 'clear_region':
-      return [await clearRegion(store, me, body.region), 200]
+      return [await clearRegion(store, me, body.region, body.guardian), 200]
     case 'clear_red_flag':
-      return [await clearRedFlag(store, me, body.region), 200]
+      return [await clearRedFlag(store, me, body.region, body.guardian), 200]
+    // Section 11b: the athlete's age status, and their own "I'm 18 or older".
+    case 'age':
+      return [await ageView(store), 200]
+    case 'confirm_adult':
+      return [await confirmAdult(store, me, { source: body.source === 'intake' ? 'intake' : 'profile' }), 200]
     case 'coach_access':
       return [{ coaches: (await coachAccess(store)).filter((c) => !c.revoked_at), reads: await listCoachReads(store, typeof body.limit === 'number' ? body.limit : 50) }, 200]
     case 'set_coach_health':

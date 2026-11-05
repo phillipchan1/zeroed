@@ -396,39 +396,75 @@ export async function voidRevokedCoachPreviews(store: ConnectedStore, wasLive: s
       )
   `
   for (const t of tokens) {
-    const changed = await store.sql<{ preview_id: string }[]>`
-      UPDATE change_preview SET voided_at = NOW()
-      WHERE athlete_id = ${store.athleteId} AND actor_type = 'mcp' AND actor_id = ${t.id}
-        AND used_at IS NULL AND voided_at IS NULL
-      RETURNING preview_id
-    `
-    const overrides = await store.sql<{ preview_id: string }[]>`
-      UPDATE session_override_preview SET voided_at = NOW()
-      WHERE athlete_id = ${store.athleteId} AND actor_type = 'mcp' AND actor_id = ${t.id}
-        AND used_at IS NULL AND voided_at IS NULL
-      RETURNING preview_id
-    `
-    const voided = [...changed, ...overrides].map((r) => r.preview_id).sort()
-    // G3: proposals this coach parked (created_by names it; rows parked
-    // before G3 have none and are left alone) can't be accepted any more.
-    const proposals = await voidCoachProposals(store, t.id)
-    const approvals = await voidCoachApprovals(store, t.id, proposals.flatMap((p) => [p.id, p.preview_id]))
+    const work = await voidCoachOpenWork(store, t.id)
     await writeChange(store, {
       actor: { type: 'system', id: 'revocation' },
       tool: 'revoke_coach',
       targetType: 'mcp_token',
       targetId: t.id,
-      diff: {
-        coach: t.name,
-        voided_previews: voided,
-        ...(proposals.length ? { voided_proposals: proposals.map((p) => p.id).sort() } : {}),
-        ...(approvals.length ? { voided_approvals: approvals } : {}),
-      },
+      diff: { coach: t.name, ...work },
       rationale: 'The athlete revoked this coach.',
       approvalRef: null,
     })
   }
   return tokens.length
+}
+
+export interface VoidedWork {
+  voided_previews: string[]
+  voided_proposals?: string[]
+  voided_approvals?: string[]
+}
+
+/**
+ * Void everything this coach has open: its unused previews (both kinds), the
+ * pending proposals it parked, and every unconsumed approval of either. Shared
+ * by revoke and by a downgrade to read (D3, section 11b). Voided rows stay
+ * voided whatever the coach's access does next.
+ */
+async function voidCoachOpenWork(store: ConnectedStore, tokenId: string): Promise<VoidedWork> {
+  const changed = await store.sql<{ preview_id: string }[]>`
+    UPDATE change_preview SET voided_at = NOW()
+    WHERE athlete_id = ${store.athleteId} AND actor_type = 'mcp' AND actor_id = ${tokenId}
+      AND used_at IS NULL AND voided_at IS NULL
+    RETURNING preview_id
+  `
+  const overrides = await store.sql<{ preview_id: string }[]>`
+    UPDATE session_override_preview SET voided_at = NOW()
+    WHERE athlete_id = ${store.athleteId} AND actor_type = 'mcp' AND actor_id = ${tokenId}
+      AND used_at IS NULL AND voided_at IS NULL
+    RETURNING preview_id
+  `
+  const voided = [...changed, ...overrides].map((r) => r.preview_id).sort()
+  // G3: proposals this coach parked (created_by names it; rows parked
+  // before G3 have none and are left alone) can't be accepted any more.
+  const proposals = await voidCoachProposals(store, tokenId)
+  const approvals = await voidCoachApprovals(store, tokenId, proposals.flatMap((p) => [p.id, p.preview_id]))
+  return {
+    voided_previews: voided,
+    ...(proposals.length ? { voided_proposals: proposals.map((p) => p.id).sort() } : {}),
+    ...(approvals.length ? { voided_approvals: approvals } : {}),
+  }
+}
+
+/**
+ * Section 11b (D3): a coach set from propose to read loses its open work the
+ * way a revoke does — previews, parked proposals and their approvals voided
+ * at once, in the caller's transaction, with one system row like revoke's.
+ * Setting it back to propose revives none of it: the coach previews again.
+ */
+export async function voidDowngradedCoachWork(store: ConnectedStore, token: { id: string; name: string }, roleChangeId: string): Promise<VoidedWork> {
+  const work = await voidCoachOpenWork(store, token.id)
+  await writeChange(store, {
+    actor: { type: 'system', id: 'downgrade' },
+    tool: 'downgrade_coach',
+    targetType: 'mcp_token',
+    targetId: token.id,
+    diff: { coach: token.name, role_change_id: roleChangeId, ...work },
+    rationale: 'The athlete set this coach to read only, so its open previews and proposals were voided.',
+    approvalRef: null,
+  })
+  return work
 }
 
 // ---- reading ----------------------------------------------------------------------

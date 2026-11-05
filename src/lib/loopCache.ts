@@ -50,6 +50,7 @@ export const cacheKeys = {
   // tracks_v1: today's check-in, pain and blocked regions (G4), and who read what.
   readiness:   (athleteId: string) => `readiness:${athleteId}`,
   coachAccess: (athleteId: string) => `coach-access:${athleteId}`,
+  ageStatus: (athleteId: string) => `age-status:${athleteId}`,
   // tracks_v1: the engine's weekly review (G8), this week or a dated one.
   weeklyReview: (athleteId: string, week: string) => `wreview:${athleteId}:${week}`,
   // One finished session as performed — what the preview of a DONE session reads
