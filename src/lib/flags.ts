@@ -80,3 +80,16 @@ export function coachV1Enabled(env: FlagEnv, athleteFlags: unknown, search: stri
   if (devOverride('coach_v1', env, search)) return true
   return readAthleteFlags(athleteFlags).coach_v1 === true
 }
+
+/**
+ * skill_blocks_v1 (spec §12): the skill-block exercise kind, and the guard
+ * that keeps the interval timer to real intervals. Athlete-row only, default
+ * off, independent of tracks_v1 and coach_v1. DEV builds also take
+ * `?flag=skill_blocks_v1`.
+ *
+ *   UPDATE athlete SET flags = flags - 'skill_blocks_v1';
+ */
+export function skillBlocksV1Enabled(env: FlagEnv, athleteFlags: unknown, search: string): boolean {
+  if (devOverride('skill_blocks_v1', env, search)) return true
+  return readAthleteFlags(athleteFlags).skill_blocks_v1 === true
+}

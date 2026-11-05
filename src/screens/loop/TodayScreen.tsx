@@ -13,6 +13,7 @@ import {
 } from '../../engine'
 import { effectiveTrackingType } from '../../engine/exerciseLibrary'
 import { fmtDose, isIntervalBlock, intervalPlanFor, roundsFromLogs, fmtClock, intervalTitle } from '../../engine/intervals'
+import { isSkillBlock } from '../../engine/skillBlock'
 import { primeCueAudio } from '../../lib/intervalCues'
 import { tallySession } from '../../engine/volume'
 import { displayedSessionLoad, fetchProgramRxVersion } from '../../engine/sessionRx'
@@ -31,7 +32,7 @@ import { PullToRefresh } from '../../components/PullToRefresh'
 import { OutsidePlanSheet } from '../../components/OutsidePlanSheet'
 import { OneOffSheet } from '../../components/OneOffSheet'
 import { arcLoadOn } from '../../lib/arcLoad'
-import { tracksOn } from '../../lib/tracksFlag'
+import { skillBlocksOn, tracksOn } from '../../lib/tracksFlag'
 import { useQueuedSessionRpe } from '../../lib/sessionRpe'
 import { fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
 import { goalsTrainedBy } from '../../engine/goalSources'
@@ -287,10 +288,16 @@ function fmtSet(t: TrackingType, s: SetLog, u: UnitContext): string {
   return `${s.weight != null ? `${u.fmt(s.weight)}${u.unit}` : 'BW'}×${s.reps ?? '?'}`
 }
 
+// Read as a block, not straight sets: an interval block, or (skill_blocks_v1)
+// a skill station, whose dose reads "6 makes · ~8 min". Off: intervals only.
+function isDosedBlock(ex: ExerciseTemplate): boolean {
+  return isIntervalBlock(ex, skillBlocksOn()) || (skillBlocksOn() && isSkillBlock(ex))
+}
+
 // What was prescribed, as one string: "3×8 · moderate", or the block an
 // interval prescription describes ("8 × 20s / 40s").
 function fmtPrescribed(ex: ExerciseTemplate): string {
-  if (isIntervalBlock(ex)) return fmtDose(ex)
+  if (isDosedBlock(ex)) return fmtDose(ex, skillBlocksOn())
   return `${ex.sets}×${ex.reps}${ex.load ? ` · ${ex.load}` : ''}`
 }
 
@@ -301,7 +308,7 @@ function fmtPrescribed(ex: ExerciseTemplate): string {
  * its first lift.
  */
 function intervalLed(r: RoutineRow): boolean {
-  const blocks = r.exercises.filter((ex) => isIntervalBlock(ex)).length
+  const blocks = r.exercises.filter((ex) => isIntervalBlock(ex, skillBlocksOn())).length
   if (!blocks) return false
   return r.session_type === 'conditioning' || blocks === r.exercises.length
 }
@@ -331,7 +338,7 @@ function PerformedRow({
   const tone = done.length === 0 ? 'var(--text-dim)' : short ? 'var(--pending)' : 'var(--confirmed)'
   // A block is read in rounds — "8 of 8 rounds · 2:40 of work" — not as the
   // seconds of work each row happens to hold.
-  const plan = intervalPlanFor(ex)
+  const plan = intervalPlanFor(ex, skillBlocksOn())
   const rounds = plan ? roundsFromLogs(plan, logs).reduce((a, b) => a + b, 0) : 0
   const loggedText = plan
     ? `${rounds}/${plan.rounds * plan.sets} rounds · ${fmtClock(rounds * plan.work)} of work`
@@ -512,12 +519,12 @@ function SessionSheet({
                       }}
                     >
                       <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
-                        {isIntervalBlock(ex) ? intervalTitle(ex.name) : ex.name}
+                        {isIntervalBlock(ex, skillBlocksOn()) ? intervalTitle(ex.name) : ex.name}
                         {override?.marks[i] && <span style={{ display: 'block', marginTop: 4 }}><WeekOnlyBadge note={markNote(override, i)} /></span>}
                       </span>
                       <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
-                        {isIntervalBlock(ex)
-                          ? fmtDose(ex)
+                        {isDosedBlock(ex)
+                          ? fmtDose(ex, skillBlocksOn())
                           : <>{ex.sets}×{ex.reps}{target != null ? ` · ${target}${u.unit}` : ex.load ? ` · ${ex.load}` : ''}{ex.target_rpe != null ? ` · RPE ${ex.target_rpe}` : ' · RPE —'}</>}
                       </span>
                     </div>
@@ -536,7 +543,7 @@ function SessionSheet({
                 }}
               >
                 <span className="text-base" style={{ fontWeight: 500, minWidth: 0 }}>
-          {isIntervalBlock(ex) ? intervalTitle(ex.name) : ex.name}
+          {isIntervalBlock(ex, skillBlocksOn()) ? intervalTitle(ex.name) : ex.name}
           {ex.swapped_from && (
             <span className="text-xs text-dim" style={{ display: 'block', fontWeight: 400, marginTop: 2 }}>
               Swapped in for {ex.swapped_from}
@@ -545,8 +552,8 @@ function SessionSheet({
           {override?.marks[i] && <span style={{ display: 'block', marginTop: 4 }}><WeekOnlyBadge note={markNote(override, i)} /></span>}
         </span>
                 <span className="num text-sm text-dim" style={{ whiteSpace: 'nowrap' }}>
-                  {isIntervalBlock(ex)
-                    ? fmtDose(ex)
+                  {isDosedBlock(ex)
+                    ? fmtDose(ex, skillBlocksOn())
                     : <>{ex.sets}×{ex.reps}{target != null ? ` · ${target}${u.unit}` : ex.load ? ` · ${ex.load}` : ''}</>}
                 </span>
               </div>

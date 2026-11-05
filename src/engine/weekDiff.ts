@@ -43,6 +43,10 @@ export function describePrescription(ex: ExerciseTemplate): string {
   const bits = [`${ex.sets}×${ex.reps}`]
   if (ex.load) bits.push(ex.load)
   if (ex.target_rpe != null) bits.push(`RPE ${ex.target_rpe}`)
+  // skill_blocks_v1: only an exercise a coach tagged says so, so every
+  // existing prescription describes exactly as before.
+  if (ex.kind === 'skill') bits.push(ex.window_s ? `skill block ~${ex.window_s}s` : 'skill block')
+  else if (ex.kind === 'interval') bits.push('interval')
   return bits.join(' · ')
 }
 
