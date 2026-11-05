@@ -477,6 +477,15 @@ export interface SetLog {
   // 1 repeats the load next time; 2+ takes 5% off and recomputes the working
   // max (engine/liftModel.ts). Absent on sets logged before it existed.
   missed_reps?: number | null
+  // Conditioning output for the round or set, as the erg shows it, and its
+  // unit ('cal' | 'm' | 'W'). Feeds output and fade goals (engine/evidence.ts).
+  output?: number | null
+  output_unit?: string | null
+  // Average heart rate for the round or set, when a device gives one.
+  avg_hr?: number | null
+  // A skill's tries and successes in the set. Feeds success_rate goals.
+  attempts?: number | null
+  makes?: number | null
 }
 
 // ---- Per-session feedback (the loop's fuel) --------------------------------

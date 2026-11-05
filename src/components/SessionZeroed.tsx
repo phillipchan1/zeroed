@@ -31,6 +31,10 @@ export interface FinishedGoal {
   to: number
   target: number | null
   hit: boolean
+  /** An estimate at the target: one set would prove it. */
+  confirm?: boolean
+  /** How the reading was earned (engine/evidence.ts). */
+  tier?: 'tested' | 'strong' | 'estimate' | 'inferred'
 }
 
 const HOLD_MS = 4000
@@ -135,7 +139,7 @@ export function SessionZeroed({ session, week, onDone }: {
 
       {goals.length > 0 && (
         <div className="zeroed-goals">
-          <p className="eyebrow zeroed-goals__k">Goals moved</p>
+          <p className="eyebrow zeroed-goals__k">What today told us</p>
           {goals.map((g, i) => {
             const moved = g.from == null || g.to !== g.from
             const row = (
@@ -147,7 +151,13 @@ export function SessionZeroed({ session, week, onDone }: {
                     : g.to}
                   {g.target != null && <span className="text-dim"> / {g.target}{g.unit ? ` ${g.unit}` : ''}</span>}
                 </span>
-                <span className="zeroed-goal__tag">{g.hit ? 'Zeroed' : moved ? 'Moved' : 'Held'}</span>
+                <span className="zeroed-goal__tag">
+                  {g.hit ? 'Zeroed'
+                    : g.confirm ? 'Confirm it'
+                      : g.tier === 'estimate' || g.tier === 'strong' ? 'Estimate'
+                        : g.tier === 'inferred' ? 'Inferred'
+                          : moved ? 'Moved' : 'Held'}
+                </span>
               </div>
             )
             return g.hit ? (

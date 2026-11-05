@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Passive progress: every set is evidence, tests are confirmations (tracks_v1)
+
+Plan and reasoning: [`docs/passive-progress-plan.md`](docs/passive-progress-plan.md). Behind `athlete.flags.tracks_v1`, like the rest of goals. No schema change.
+
+- **Strength estimates off the RPE chart.** `e1rm` goals read the RTS reps × RPE chart (`liftModel.e1rmFromSet`) instead of Epley. Sets under RPE 7, over 10 reps, or with a missed rep say nothing and aren't read; a set with no RPE is a floor. Every usable session writes (no more hold-or-beat for rolling kinds), so working sets at RPE 8 keep a goal current without a test day. A low-readiness day (check-in 4 or under) that lands under the goal doesn't move it.
+- **Evidence tiers.** Each session reading is tested (a single @9+, a jump, a measured hold), strong (two heavy sets of 1–3 @8+ within 2%), estimate, or inferred. The tier rides in the measurement's note (`Bench Press — 285×3 @8 · estimate`), readable and parsed back (`engine/evidence.ts`).
+- **Capacity, not latest.** A rolling goal's current is a recency- (half-life 21 days) and tier-weighted read of the last 6 weeks, with a range that widens for weaker evidence and for every week without any (`engine/capacity.ts`). Goal pages show Tested / Estimated / Inferred / Stale and the range; measurements show the set behind each one.
+- **Tests only with a reason.** Needs a test now says why: no evidence yet, no usable sets in 4 weeks (stale), or a manual measurement whose cadence lapsed. Cadence no longer applies to goals sessions feed. New status **To confirm**: an estimate is at the target; Zeroed needs a tested or strong reading. `goalRead` is the one read the app and the Worker share.
+- **New goal kinds.** `relative_e1rm` (÷ session bodyweight; pull-ups and dips add it), `reps_to_failure` (8 @8 is 10), `output` (mean cal / m / W per round), `fade` (last round ÷ first), `success_rate` (makes ÷ attempts, 10+). Sets carry optional `output`, `output_unit`, `avg_hr`, `attempts`, `makes`; interval blocks get an output row per round, and a set row grows a makes/attempts or output line when a goal on that exercise reads it.
+- **Lift families and weak links.** Code-owned ratio priors between related lifts (`engine/liftFamilies.ts`: DB bench ≈ 0.40 of bench per hand, front squat ≈ 0.83 of back squat, …). An e1rm goal whose lift isn't in a session moves from a related one as an inferred reading. After 6 paired weeks the athlete's own ratio (shrunk toward the prior) replaces it. `engine/weakLinks.ts` flags pairs that drifted off the athlete's own ratio (or off the prior before there's history) and L/R goals more than 10% apart, with what it usually means. Goals shows the biggest one.
+- **Cross-domain signals.** `engine/signals.ts` reads interference (conditioning load up 30%+ while the main lifts go flat), fatigue (low-readiness days running under), transfer (squat up, jump flat) and engine (fade improving or worsening), as hypotheses. Nothing changes a status or a load from them.
+- **Claude.** `get_goals` / `get_goal_history` / `get_goal_brief` return `capacity`, `test_reason` and the new `confirm` display; the brief adds `weak_links`, `signals` and latest `lifts`, and says to put confirming sets and mobility checks inside existing sessions as proposals. `log_goal_measurement` recomputes current from all measurements. The finish screen's goal beat reads What today told us, tagged Estimate / Inferred / Confirm it / Zeroed.
+
+**Deploy:** the frontend ships with the build; the Worker needs a deploy for the MCP changes. Nothing to migrate.
+
 ### One-time re-check of v1.1 persistent blocks under v1.2 (Round 3 PR B, section 11b), tracks_v1
 
 An operator-run system job, not a Worker route: nothing in `/api/session-rx`, the MCP tool list, the app or any route changes, with the flag on or off. Only athletes with `tracks_v1` on are read or written. No schema change.

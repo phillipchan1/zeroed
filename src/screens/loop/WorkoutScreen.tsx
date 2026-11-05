@@ -52,7 +52,8 @@ import { isoDateInZone } from '../../engine/weekDates'
 import { fetchSessionRpe, logSessionRpe } from '../../lib/sessionRpe'
 import { queuedTapFor } from '../../lib/sessionRpeQueue'
 import { fetchAutoregRules, fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
-import { deriveGoalMeasurements, goalsTrainedBy } from '../../engine/goalSources'
+import { deriveGoalMeasurements, goalSource, goalsTrainedBy } from '../../engine/goalSources'
+import { normalizeOutputUnit, type OutputUnit } from '../../engine/evidence'
 import { WorkoutGoalChip } from './WorkoutGoalChip'
 import { evaluateAutoregRules } from '../../engine/autoreg'
 import { sessionTrackLayout, type TrackRef } from '../../engine/tracks'
@@ -202,15 +203,26 @@ interface SetRowProps {
   prevText: string | null  // last session's result for this set (desktop column)
   /** Reps attempted and missed — a load-bearing lift only. */
   showMissed: boolean
+  /**
+   * A second line a goal asks for: conditioning output (cal / m / W) for an
+   * output or fade goal, makes and attempts for a success-rate goal.
+   */
+  extra?: SetExtra | null
   onChange: (updated: SetLog) => void
   onComplete: () => void   // fires when a set is newly marked done (→ rest timer)
   onActivate: () => void   // a field here was focused → drives the desktop rail
 }
 
+export interface SetExtra {
+  kind: 'output' | 'makes'
+  /** For output: the unit the goal reads in. */
+  unit?: OutputUnit
+}
+
 function SetRow({
   setNum, log, trackingType, u, best,
   prescribedReps, prescribedDuration, prescribedLoad, carry,
-  prevText, showMissed, onChange, onComplete, onActivate,
+  prevText, showMissed, extra, onChange, onComplete, onActivate,
 }: SetRowProps) {
   const [rpeOpen, setRpeOpen] = useState(false)
   const rpeRef = useRef<HTMLDivElement>(null)
@@ -451,7 +463,29 @@ function SetRow({
     prevPr.current = pr
   }, [pr])
 
+  // What a goal on this exercise asks the set to carry beyond the grid. Typing
+  // here never completes the set; the check does, as everywhere.
+  const extraLine = extra ? (
+    <div className="set-extra">
+      {extra.kind === 'output' ? (
+        <>
+          <span>Output</span>
+          {numInput(log.output, extra.unit ?? 'cal', (n) => commit({ ...logRef.current, output: n, output_unit: n == null ? null : extra.unit ?? 'cal' }), 'decimal', `Set ${setNum} output in ${extra.unit ?? 'cal'}`)}
+          <span>{extra.unit ?? 'cal'}</span>
+        </>
+      ) : (
+        <>
+          <span>Makes</span>
+          {numInput(log.makes, 'made', (n) => commit({ ...logRef.current, makes: n }), 'numeric', `Set ${setNum} makes`)}
+          <span>of</span>
+          {numInput(log.attempts, 'tries', (n) => commit({ ...logRef.current, attempts: n }), 'numeric', `Set ${setNum} attempts`)}
+        </>
+      )}
+    </div>
+  ) : null
+
   return (
+    <>
     <div
       className={`set-row ${gridClass(trackingType)}${log.done ? ' set-row--done' : ''}${pr ? ' set-row--pr' : ''}${prFlash ? ' set-row--pr-flash' : ''}`}
       onAnimationEnd={(e) => { if (e.animationName === 'pr-sweep') setPrFlash(false) }}
@@ -464,6 +498,8 @@ function SetRow({
       {cells}
       {doneBtn}
     </div>
+    {extraLine}
+    </>
   )
 }
 
@@ -1798,6 +1834,15 @@ export function WorkoutScreen({
   for (const t of goalsTrainedBy(goalList ?? [], sessionExercises.map((e) => e.name))) {
     if (!goalByExercise.has(t.exercise)) goalByExercise.set(t.exercise, t.goal)
   }
+  // A goal that reads output or makes asks its exercise's sets for that number.
+  const extraByExercise = new Map<string, SetExtra>()
+  for (const t of goalsTrainedBy(goalList ?? [], sessionExercises.map((e) => e.name))) {
+    const kind = goalSource(t.goal, [t.exercise])?.kind
+    if (kind === 'success_rate') extraByExercise.set(t.exercise, { kind: 'makes' })
+    else if (kind === 'output' || kind === 'fade') {
+      extraByExercise.set(t.exercise, { kind: 'output', unit: normalizeOutputUnit(t.goal.unit) ?? 'cal' })
+    }
+  }
   const goalUnits = { weight: u.storage, distance: u.distance }
   const fired = tracksOn() && (autoregRules?.length ?? 0)
     ? evaluateAutoregRules(autoregRules ?? [], {
@@ -2520,9 +2565,10 @@ export function WorkoutScreen({
       sessionExercises.map((ex, i) => ({ name: ex.name, sets: setLogs[i] ?? [] })),
       goalList ?? [],
       goalUnits,
+      { bodyweight: checkin.bodyweight ?? null, readiness: checkin.readiness ?? null },
     ).map((m) => {
       const g = (goalList ?? []).find((x) => x.id === m.goal_id)
-      return { id: m.goal_id, name: m.name, unit: g?.unit ?? null, from: m.previous, to: m.value, target: g?.target ?? null, hit: m.hit }
+      return { id: m.goal_id, name: m.name, unit: g?.unit ?? null, from: m.previous, to: m.value, target: g?.target ?? null, hit: m.hit, confirm: m.confirm, tier: m.tier }
     })
     return {
       pendingId,
@@ -3080,6 +3126,12 @@ export function WorkoutScreen({
                 <IntervalBlock
                   plan={intervalPlan}
                   logs={logs}
+                  outputUnit={extraByExercise.get(ex.name)?.unit ?? null}
+                  onOutput={(setIdx, value, unit) => handleSetChange(exIdx, setIdx, {
+                    ...(logs[setIdx] ?? { set: setIdx + 1, weight: null, reps: null, rpe: null, done: false }),
+                    output: value,
+                    output_unit: value == null ? null : unit,
+                  })}
                   onStart={() => startIntervals(exIdx)}
                   onAdjust={() => setAdjustIdx(exIdx)}
                 />
@@ -3114,6 +3166,7 @@ export function WorkoutScreen({
                   <SetRow
                     key={setIdx}
                     showMissed={trackingType === 'weight_reps' || trackingType === 'bodyweight_reps'}
+                    extra={extraByExercise.get(ex.name) ?? null}
                     setNum={setIdx + 1}
                     log={log}
                     trackingType={trackingType}

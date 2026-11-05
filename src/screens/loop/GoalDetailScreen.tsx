@@ -5,7 +5,7 @@ import { useCachedLoader, mutateCache } from '../../lib/cache'
 import { cacheKeys } from '../../lib/loopCache'
 import { fetchGoalExtras, fetchGoalsView, logMeasurement, type GoalExtras, type GoalView } from '../../lib/tracksData'
 import { isSeedMeasurement } from '../../engine/goals'
-import { ForecastChart, GoalBar, GoalStatus, goalValue, shortDate } from './goalsUi'
+import { ForecastChart, GoalBar, GoalStatus, goalValue, shortDate, CapacityLine, TestReasonNote } from './goalsUi'
 import { TrackGlyph } from './tracksUi'
 import { PendingProposals } from './ProposalCard'
 
@@ -13,6 +13,14 @@ const SOURCE_LABEL: Record<string, string> = {
   workout_log: 'from a session',
   manual: 'logged here',
   agent: 'from the coach',
+}
+
+/** "285×3 @8 · estimate" for a session's reading, where it came from otherwise. */
+function evidenceLabel(m: { source: string; note?: string | null }): string {
+  const note = String(m.note ?? '')
+  const at = note.indexOf(' — ')
+  if (m.source === 'workout_log' && at !== -1) return note.slice(at + 3)
+  return SOURCE_LABEL[m.source] ?? m.source
 }
 
 /** Today on the phone's own calendar, not UTC: an evening test is still today. */
@@ -31,7 +39,9 @@ function sideLabel(side: string | null | undefined): string {
 /**
  * One goal: where it stands, what it has done, and what the coach changed for
  * it. Tapping a goal used to open a number field; logging is a button here,
- * and the primary one only when the goal needs a test.
+ * and the primary one only when the goal needs a test or a confirming one.
+ * The number is the goal's capacity from all its evidence, with how sure that
+ * is (engine/capacity.ts), and a test is asked for only with its reason.
  */
 export function GoalDetailScreen({ athleteId }: { athleteId: string }) {
   const { goalId } = useParams<{ goalId: string }>()
@@ -96,7 +106,9 @@ export function GoalDetailScreen({ athleteId }: { athleteId: string }) {
                     </span>
                   </div>
                 </div>
+                <CapacityLine capacity={goal.capacity} unit={goal.unit} />
                 <GoalBar goal={goal} display={goal.display} />
+                <TestReasonNote reason={goal.test_reason} display={goal.display} />
                 <ForecastChart
                   history={real.map((h) => ({ date: h.date, value: h.value }))}
                   target={goal.target != null ? Number(goal.target) : null}
@@ -154,7 +166,7 @@ export function GoalDetailScreen({ athleteId }: { athleteId: string }) {
                       <div key={`${m.date}-${m.side ?? ''}-${i}`} className="goal-log-row">
                         <span className="text-sm">
                           {shortDate(m.date)}
-                          <span className="text-dim">{sideLabel(m.side)} · {SOURCE_LABEL[m.source] ?? m.source}</span>
+                          <span className="text-dim">{sideLabel(m.side)} · {evidenceLabel(m)}</span>
                         </span>
                         <span className="num text-sm">{goalValue(m.value, goal.unit)}</span>
                       </div>
@@ -181,7 +193,7 @@ export function GoalDetailScreen({ athleteId }: { athleteId: string }) {
                 )}
               </div>
 
-              <Button variant={goal.display === 'needs_test' ? 'primary' : 'outline'} full onClick={openLog}>
+              <Button variant={goal.display === 'needs_test' || goal.display === 'confirm' ? 'primary' : 'outline'} full onClick={openLog}>
                 Log a measurement
               </Button>
             </>

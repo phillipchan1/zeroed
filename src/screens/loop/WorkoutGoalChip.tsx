@@ -25,7 +25,11 @@ export function WorkoutGoalChip({ goal, exercise, sets, units }: {
   const moved = today != null && (current == null || (lower ? today.value < current : today.value > current))
   const shown = moved ? today.value : current
   const hit = moved ? today.hit : goal.display === 'zeroed'
-  const label = hit ? 'Hit' : moved ? 'New best' : 'Goal'
+  // An estimate past the mark is good news, not a record: say which it is.
+  const label = hit ? 'Hit'
+    : moved && today.confirm ? 'Confirm it'
+      : moved ? (today.tier === 'tested' ? 'New best' : 'Estimate up')
+        : 'Goal'
   const chip = (
     <div
       className={`workout-goal${moved ? ' workout-goal--moved' : ''}${hit ? ' workout-goal--hit' : ''}`}

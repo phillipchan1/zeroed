@@ -1,4 +1,7 @@
 import { GOAL_DISPLAY_LABEL, goalNumber, progressRatio, type GoalDisplay, type GoalFields } from '../../engine/goals'
+import { CAPACITY_TIER_LABEL, type GoalCapacity, type TestReason } from '../../engine/capacity'
+import type { WeakLink } from '../../engine/weakLinks'
+import type { Signal } from '../../engine/signals'
 
 // Each state differs by shape as well as color (dot, diamond, dashed ring,
 // square), so none of them depends on telling green from yellow.
@@ -193,5 +196,76 @@ export function ForecastChart({ history, target, due, forecast, display, unit, d
         />
       ))}
     </svg>
+  )
+}
+
+function rounded(n: number): number {
+  return Math.abs(n) >= 20 ? Math.round(n) : Math.round(n * 10) / 10
+}
+
+/**
+ * How sure the number is: a tier and a range. "Estimated · 296–318 lb ·
+ * Nov 2". A tested number shows no range worth reading, so it shows the date.
+ */
+export function CapacityLine({ capacity, unit }: { capacity: GoalCapacity | null; unit: string | null }) {
+  if (!capacity) return null
+  const range = capacity.tier === 'tested'
+    ? null
+    : `${rounded(capacity.lo)}–${goalValue(rounded(capacity.hi), unit)}`
+  return (
+    <p className={`capacity-line capacity-line--${capacity.tier}`}>
+      <span className="capacity-line__tier">{CAPACITY_TIER_LABEL[capacity.tier]}</span>
+      {range && <span className="num">{range}</span>}
+      <span className="text-dim">{capacity.tier === 'stale' ? `last ${shortDate(capacity.last_evidence)}` : shortDate(capacity.last_evidence)}</span>
+    </p>
+  )
+}
+
+/** Why the goal wants a test, when it does. Silence means the log is answering. */
+export function TestReasonNote({ reason, display }: { reason: TestReason | null; display: GoalDisplay }) {
+  if (!reason) return null
+  return (
+    <p className={`test-reason test-reason--${display}`}>
+      {reason.text}
+    </p>
+  )
+}
+
+/**
+ * The biggest weak link and the cross-domain reads, as plain sentences. Only
+ * the top weak link leads; the rest are a tap away, so the card names one
+ * thing to act on, not a report.
+ */
+export function WeakLinksCard({ links, signals }: { links: WeakLink[]; signals: Signal[] }) {
+  if (!links.length && !signals.length) return null
+  const [lead, ...rest] = links
+  return (
+    <div className="card fade-rise weak-links">
+      <div className="weak-links__h">
+        <span>Weak links</span>
+        <span className="text-xs text-dim">read from your training</span>
+      </div>
+      {lead && (
+        <div className="weak-link weak-link--lead">
+          <p className="text-sm">{lead.text}</p>
+          <p className="text-xs text-dim">
+            {lead.basis === 'own' ? 'Against your own earlier ratio.' : lead.basis === 'prior' ? 'Against the usual ratio; your build can move it.' : 'Side against side.'}
+          </p>
+        </div>
+      )}
+      {rest.length > 0 && (
+        <details className="weak-links__more">
+          <summary className="text-xs">{rest.length} more</summary>
+          {rest.map((l, i) => <p key={i} className="text-sm weak-link">{l.text}</p>)}
+        </details>
+      )}
+      {signals.length > 0 && (
+        <div className="weak-links__signals">
+          {signals.map((s) => (
+            <p key={s.kind} className="text-sm weak-link weak-link--signal" title={s.evidence}>{s.text}</p>
+          ))}
+        </div>
+      )}
+    </div>
   )
 }

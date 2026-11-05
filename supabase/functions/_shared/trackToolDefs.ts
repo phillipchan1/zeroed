@@ -205,7 +205,7 @@ export const TRACK_TOOLS: McpTool[] = [
         cadence: { type: 'string' },
         source_metric: {
           type: 'string',
-          description: 'What logged work moves this goal, as kind:Exercise. Kinds: e1rm (best estimated 1RM), top_set (heaviest completed set), reps, distance (best rep), time (longest hold, or fastest when direction is lower), rounds, test (manual only). Example: top_set:Strict Press. Name the exercise as the program spells it; a session that holds or beats the current value writes a workout_log measurement on its own.',
+          description: 'What logged work moves this goal, as kind:Exercise. Rolling kinds (every usable session writes; current is a recency- and tier-weighted capacity): e1rm (estimated 1RM off the reps x RPE chart; sets under RPE 7 or over 10 reps do not count; an e1rm goal also moves from a related lift such as DB Bench Press for Bench Press, as an inferred reading), relative_e1rm (e1RM / session bodyweight, unit xBW; pull-ups and dips add bodyweight), reps_to_failure (reps + reps left: 8 @8 is 10), output (mean output per round, unit cal, m or W), fade (last round output / first, %), success_rate (makes / attempts, %, 10+ attempts). Best kinds (a session writes when it holds or beats current): top_set (heaviest completed set), reps, distance (best rep), time (longest hold, or fastest when direction is lower), rounds. test is manual only. Example: e1rm:Bench Press. Name the exercise as the program spells it. Zeroed needs proof: a tested or strong reading at the target; an estimate at the target shows as confirm.',
         },
         confirm,
         rationale,

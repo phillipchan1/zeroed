@@ -31,6 +31,8 @@ export const cacheKeys = {
   profile:     (athleteId: string) => `profile:${athleteId}`,
   goals:       (athleteId: string) => `goals:${athleteId}`,
   goalExtras:  (goalId: string)    => `goal-extras:${goalId}`,
+  // Weak links and cross-domain signals read off the whole log (engine/signals.ts).
+  training:    (athleteId: string) => `training:${athleteId}`,
   proposals:   (athleteId: string) => `proposals:${athleteId}`,
   tracks:      (programId: string) => `tracks:${programId}`,
   convergence: (athleteId: string) => `convergence:${athleteId}`,
