@@ -133,7 +133,7 @@ ok(!JSON.stringify(modelOff).includes('e1rmMethod') && !renderLiftModel(modelOff
 ok(renderLiftModel(modelOn).includes('e1RM 350 (Epley)') && renderLiftModel(modelOn).includes('by Epley (U4)'), 'lift model, v1.1: the estimate says Epley')
 
 // ---- pure: methodology v1.1, minors -------------------------------------------------------------
-ok(CURRENT_METHODOLOGY.version === 'v1.2' && METHODOLOGIES.v1 === METHODOLOGY_V1 && METHODOLOGIES['v1.1'] === METHODOLOGY_V1_1, 'versions: v1.2 is current, v1 and v1.1 still resolve')
+ok(CURRENT_METHODOLOGY.version === 'v1.3' && METHODOLOGIES.v1 === METHODOLOGY_V1 && METHODOLOGIES['v1.1'] === METHODOLOGY_V1_1 && METHODOLOGIES['v1.2'] === METHODOLOGY_V1_2, 'versions: v1.3 is current, v1, v1.1 and v1.2 still resolve')
 ok(METHODOLOGY_V1_2.minors.contacts_per_session_max === 60 && METHODOLOGY_V1_2.params.U4.e1rm_without_rpe === 'epley' && JSON.stringify(METHODOLOGY_V1_2.params.U15) === JSON.stringify(METHODOLOGY_V1_1.params.U15), 'v1.2: minors 60, U4 and U15 as v1.1')
 ok(METHODOLOGY_V1.minors.contacts_per_session_max === 80 && METHODOLOGY_V1.params.U4.e1rm_without_rpe === undefined, 'v1 is untouched (80, chart at RPE 10)')
 ok(METHODOLOGY_V1_1.minors.contacts_per_session_max === 60 && METHODOLOGY_V1_1.params.U4.e1rm_without_rpe === 'epley', 'v1.1: minors 60 contacts, U4 Epley fallback')
@@ -187,7 +187,7 @@ const offOn = await offSurfaces(coachOn)
 const offOff = await offSurfaces(coachOff)
 ok(JSON.stringify(offOff) === JSON.stringify(offOn), 'flag off: a coach with health off sees byte-for-byte what one with it on sees')
 ok(!offOn[0].includes('Refused') && !offOn[0].includes('preview_id'), 'flag off: no validators, no kept preview')
-ok(offOn[1].includes('knee pain 6/10') && !/Epley|RPE chart/.test(offOn[1]) && offOn[1].includes('read at RPE 10'), 'flag off: get_lift_model as before (chart at RPE 10, no method)')
+ok(offOn[1].includes('knee pain 6/10') && !/\((Epley|RPE chart)\)|by Epley/.test(offOn[1]) && offOn[1].includes('read at RPE 10'), 'flag off: get_lift_model as before (chart at RPE 10, no method)')
 ok(offOn[2].includes('(e1RM 348)') && offOn[2].includes('no RPE reads as @10') && !/Epley|RPE chart\)/.test(offOn[2].replace('RPE chart; no RPE', '')), 'flag off: search_lifts reads the RPE-less deadlift at RPE 10 (348), no method')
 ok(offOn[3].includes('Pain signal: Synthetic knee ache'), 'flag off: get_workout lists every observation')
 ok(await count('change_log') === 0 && await count('coach_read_log') === 0, 'flag off: nothing written')
@@ -213,9 +213,9 @@ ok((await call('get_lift_model', { lift: 'squat' })).includes('(RPE chart)'), 'U
 const onSearch = await call('search_lifts', { exercise: 'deadlift' })
 ok(onSearch.includes('(e1RM 350, Epley)') && onSearch.includes('Epley when no RPE is logged (U4)'), 'U4 on: search_lifts records the method per estimate')
 const review = JSON.parse(await call('get_weekly_review', {})) as { methodology_version: string; priority_lifts: Array<{ lift: string; e1rm_week_method: string | null; e1rm_prior_method: string | null }> }
-ok(review.methodology_version.startsWith('v1.2') && review.priority_lifts.every((l) => 'e1rm_week_method' in l && 'e1rm_prior_method' in l), 'U4 on: the weekly review records the method beside each e1RM, on v1.2')
+ok(review.methodology_version.startsWith('v1.3') && review.priority_lifts.every((l) => 'e1rm_week_method' in l && 'e1rm_prior_method' in l), 'U4 on: the weekly review records the method beside each e1RM, on v1.3')
 const meth = JSON.parse(await call('get_methodology', {})) as { methodology_version: string; params: { U4: { e1rm_without_rpe: string } }; minors: { contacts_per_session_max: number } }
-ok(meth.methodology_version.startsWith('v1.2') && meth.params.U4.e1rm_without_rpe === 'epley' && meth.minors.contacts_per_session_max === 60, 'get_methodology: v1.2, U4 Epley fallback, minors 60')
+ok(meth.methodology_version.startsWith('v1.3') && meth.params.U4.e1rm_without_rpe === 'epley' && meth.minors.contacts_per_session_max === 60, 'get_methodology: v1.3, U4 Epley fallback, minors 60')
 ok((await call('preview_methodology_override', { path: 'minors.contacts_per_session_max', value: 70 })).includes('only be tightened'), 'MCP: raising the minors ceiling is refused')
 ok(chp(await call('preview_methodology_override', { path: 'minors.contacts_per_session_max', value: 50 })) !== '', 'MCP: lowering it previews')
 

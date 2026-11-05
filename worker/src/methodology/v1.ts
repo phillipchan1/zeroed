@@ -50,12 +50,25 @@
  * tracks_v1 off (instant), or redeploy the v1.1 Worker; there is no schema
  * change to undo.
  *
+ * v1.3 (spec section 11c, S&C review of 11b, Nov 5 2026) is v1.2 plus:
+ *   U7  a temporary block is consumed by the next logged session that loads
+ *       the region, not by any session. Knee, ankle, hip: a session with
+ *       squats, lunges, jumps, cuts or basketball. Other regions: an exercise
+ *       tagged to the region (methodology/classify.ts). No match: the block
+ *       stays until one, or the 14-day lapse (unchanged).
+ *   U15 a rating rising across 3 sessions that never blocks (e.g. 2 → 3 → 4)
+ *       is a weekly-review coach flag. It doesn't refer out or block; rising
+ *       still only makes an existing block persistent (v1.2).
+ *   Nothing stored changes, and under 18 every block still persists.
+ *   Rollback: tracks_v1 off, or redeploy the v1.2 Worker; no schema change.
+ *
  * Numbers are coaching defaults, not medical prescriptions.
  */
 
 export const METHODOLOGY_V1_VERSION = 'v1'
 export const METHODOLOGY_V1_1_VERSION = 'v1.1'
 export const METHODOLOGY_V1_2_VERSION = 'v1.2'
+export const METHODOLOGY_V1_3_VERSION = 'v1.3'
 
 /** Pain regions a cap or a red flag can be set on (U7). */
 export const PAIN_REGIONS = [
@@ -117,6 +130,11 @@ export interface MethodologyParams {
     temporary_blocks?: boolean
     /** v1.2: what makes a block persistent, besides a red flag. */
     persistent_after?: { over_stop_times: number; within_days: number; rising_sessions: number }
+    /**
+     * v1.3: what ends a temporary block. 'region_session': the next logged
+     * session that loads the region. Absent (v1.2): the next logged session.
+     */
+    temporary_ends_on?: 'region_session'
   }
   U8: { order: Array<'warmup' | 'speed' | 'heavy' | 'accessory' | 'conditioning'> }
   U9: { hiit_minutes: Range; hiit_max_per_week: number; conditioning_gap_hours: number; prefer_modalities: string[]; no_hiit_day_before_heavy_lower: true }
@@ -125,7 +143,11 @@ export interface MethodologyParams {
   U12: { maintenance_held_at_rpe: number; max_test_maintenance_lifts: false }
   U13: { small_edit_max_fraction: number }
   U14: { contacts_per_session: Record<ContactLevel, Range> }
-  U15: { compliance_target: number }
+  U15: {
+    compliance_target: number
+    /** v1.3: flag a rating rising across this many sessions that never blocks. Absent (v1–v1.2): no flag. */
+    rising_pain_flag_sessions?: number
+  }
 }
 
 export interface MinorsRules {
@@ -254,12 +276,24 @@ export const METHODOLOGY_V1_2: Methodology = {
   },
 }
 
+/** v1.3 (section 11c): a temporary block ends on the next session that loads its region; the rising-pain coach flag. */
+export const METHODOLOGY_V1_3: Methodology = {
+  ...METHODOLOGY_V1_2,
+  version: METHODOLOGY_V1_3_VERSION,
+  params: {
+    ...METHODOLOGY_V1_2.params,
+    U7: { ...METHODOLOGY_V1_2.params.U7, temporary_ends_on: 'region_session' },
+    U15: { ...METHODOLOGY_V1_2.params.U15, rising_pain_flag_sessions: 3 },
+  },
+}
+
 /** Every version the Worker can still resolve, by version string. */
 export const METHODOLOGIES: Record<string, Methodology> = {
   [METHODOLOGY_V1_VERSION]: METHODOLOGY_V1,
   [METHODOLOGY_V1_1_VERSION]: METHODOLOGY_V1_1,
   [METHODOLOGY_V1_2_VERSION]: METHODOLOGY_V1_2,
+  [METHODOLOGY_V1_3_VERSION]: METHODOLOGY_V1_3,
 }
 
 /** The version new prescriptions run on. */
-export const CURRENT_METHODOLOGY = METHODOLOGY_V1_2
+export const CURRENT_METHODOLOGY = METHODOLOGY_V1_3

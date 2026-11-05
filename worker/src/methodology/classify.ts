@@ -7,6 +7,7 @@
 import type { ExerciseTemplate } from '../../../src/types/database.ts'
 import { resolveCategory, resolvePattern, type MovementPattern } from '../../../src/engine/exerciseLibrary.ts'
 import { isIntervalBlock } from '../../../src/engine/intervals.ts'
+import { readLoggedExercises, resolveLoggedExercises, type LoggedWorkoutLike } from '../../../src/engine/loggedSets.ts'
 import { canonicalLiftId } from '../../../src/engine/liftModel.ts'
 
 export type ExerciseClass =
@@ -109,4 +110,39 @@ export function classify(ex: Pick<ExerciseTemplate, 'name' | 'reps' | 'sets' | '
     }
   }
   return { classes, rank, regions: [...new Set(regions)] }
+}
+
+// ---- what a logged session loads (U7, v1.3) ------------------------------------------------
+
+/** Knee, ankle, hip (section 11c, v1): these load the region, and nothing else does. */
+const LOWER_REGIONS = new Set(['knee', 'ankle', 'hip'])
+const LOWER_NAME = /\b(squats?|lunges?|jumps?|jumping|cuts?|cutting|basketball)\b/
+
+/**
+ * True when a logged session loads `region`, for ending a temporary U7 block
+ * (v1.3). Knee, ankle, hip: an exercise (or the session's name) with squats,
+ * lunges, jumps, cuts or basketball. Any other region: an exercise tagged to
+ * it in the table above. Nothing else counts, so an unplaced region keeps its
+ * block until a tagged match or the 14-day lapse.
+ */
+export function sessionLoadsRegion(session: { name?: string | null; exercises: Array<Pick<ExerciseTemplate, 'name' | 'reps' | 'sets' | 'load'>> }, region: string): boolean {
+  if (LOWER_REGIONS.has(region)) {
+    const lower = (n: string | null | undefined) => LOWER_NAME.test((n ?? '').toLowerCase()) || resolvePattern(n ?? '') === 'jump'
+    return lower(session.name) || session.exercises.some((ex) => lower(ex.name))
+  }
+  return session.exercises.some((ex) => classify(ex).regions.includes(region))
+}
+
+/**
+ * Of `regions`, those a logged workout loads. The session is what was
+ * prescribed when it was logged (the snapshot, else the routine) plus anything
+ * logged by name: the work a block kept it off still counts as the session
+ * that loads the region.
+ */
+export function loggedSessionRegions(w: LoggedWorkoutLike & { name?: string | null }, regions: readonly string[]): string[] {
+  const exercises = [
+    ...resolveLoggedExercises(w),
+    ...readLoggedExercises(w).map((x) => x.exercise ?? { name: x.name, sets: x.sets.length, reps: '', load: '' }),
+  ]
+  return regions.filter((region) => sessionLoadsRegion({ name: w.name, exercises }, region))
 }

@@ -230,7 +230,7 @@ const FIXED: Array<[RegExp, string]> = [
   [/^preview_ttl_hours$|^params\.preview_ttl_hours$/, 'previews expire after 24 h for everyone (section 6)'],
   [/^U8\.order$/, 'session order is the rule the validator checks (U8)'],
   [/^U4\.(e1rm_source|written_load_wins)$/, 'a written load always beats TM math (U4, #49)'],
-  [/^U6\.single_day_(sleep_under_hours|stress_soreness_at)$|^U7\.(worse_next_morning_at|temporary_blocks|persistent_after(\..+)?)$/, 'the readiness and pain thresholds are set by the methodology version (U6, U7, section 11a)'],
+  [/^U6\.single_day_(sleep_under_hours|stress_soreness_at)$|^U7\.(worse_next_morning_at|temporary_blocks|temporary_ends_on|persistent_after(\..+)?)$|^U15\.rising_pain_flag_sessions$/, 'the readiness and pain thresholds are set by the methodology version (U6, U7, U15, sections 11a, 11c)'],
   [/^U4\.e1rm_without_rpe$/, 'how an RPE-less set is estimated is set by the methodology version (U4, section 11)'],
   [/^minors\.(age_under|parental_consent_required|max_testing|raised_pain_cap)$/, 'under-18 rules can only be tightened, and these are already at their strictest (D6)'],
 ]

@@ -19,7 +19,9 @@
  *       next morning           clinician. "Worse the next morning" (v1.2):
  *                              above the day before's rating and ≥ 4.
  *     v1.2: such a block covers that day and the next session, then lapses
- *     (temporary). It is persistent — no loading until the athlete marks it
+ *     (temporary). v1.3: the next session that loads the region (knee, ankle,
+ *     hip: squats, lunges, jumps, cuts, basketball; others: a tagged
+ *     exercise), within 14 days. It is persistent — no loading until the athlete marks it
  *     cleared by a clinician — only on a red flag, > 5 twice within 14 days,
  *     or a rating rising across 3 sessions (with this one a block). Under 18,
  *     and in v1 / v1.1, every block is persistent.
@@ -217,7 +219,8 @@ function blockV12(input: RegionInput): RegionEval | null {
     ? `${name} at ${today.score}/10 (over ${p.stop_above})`
     : `${name} worse the next morning (${yesterday!.score} → ${today.score}/10)`
   if (!p.temporary_blocks) return blocked(`${what}. ${untilCleared}`, 'persistent')
-  return blocked(`${what}. No loading there today or your next session (U7).`, 'temporary')
+  const next = p.temporary_ends_on === 'region_session' ? `your next session that loads the ${name}` : 'your next session'
+  return blocked(`${what}. No loading there today or ${next} (U7).`, 'temporary')
 }
 
 /** The U7 call for one report among `pain` (that region's day before and earlier reports from the same list). */

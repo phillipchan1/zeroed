@@ -40,7 +40,7 @@ function ok(cond: boolean, msg: string) {
 }
 
 // ---- pure: versions ------------------------------------------------------------------------------
-ok(CURRENT_METHODOLOGY === METHODOLOGY_V1_2 && CURRENT_METHODOLOGY.version === 'v1.2', 'versions: v1.2 is current')
+ok(METHODOLOGY_V1_2.version === 'v1.2' && CURRENT_METHODOLOGY.version === 'v1.3', 'versions: v1.2 resolves, v1.3 (section 11c) is current')
 ok(METHODOLOGIES.v1 === METHODOLOGY_V1 && METHODOLOGIES['v1.1'] === METHODOLOGY_V1_1 && METHODOLOGIES['v1.2'] === METHODOLOGY_V1_2, 'versions: v1, v1.1 and v1.2 all resolve')
 ok(!JSON.stringify(METHODOLOGY_V1_1).includes('single_day') && !JSON.stringify(METHODOLOGY_V1_1).includes('persistent_after'), 'versions: v1.1 has none of the v1.2 keys (its rules unchanged)')
 const strip12 = (m: typeof METHODOLOGY_V1_2) => {
@@ -230,10 +230,10 @@ await flag(B, true)
 await sql`UPDATE athlete SET birth_date = ${addDays(T, -30 * 365)}::date WHERE id = ${A}`
 await sql`UPDATE athlete SET birth_date = ${addDays(T, -15 * 365)}::date WHERE id = ${B}`
 const on = (await rx()).out
-ok(on.methodology_version === 'v1.2' && on.prescription.methodology_version === 'v1.2', 'flag on: session-rx and the prescription record v1.2')
-ok((await rx(B, B_DAY)).out.prescription.methodology_version?.startsWith('v1.2+') === true, 'flag on: a minor\'s prescription records v1.2+<under-18>')
+ok(on.methodology_version === 'v1.3' && on.prescription.methodology_version === 'v1.3', 'flag on: session-rx and the prescription record v1.3')
+ok((await rx(B, B_DAY)).out.prescription.methodology_version?.startsWith('v1.3+') === true, 'flag on: a minor\'s prescription records v1.3+<under-18>')
 const review = JSON.parse(await call('get_weekly_review', {})) as { methodology_version: string }
-ok(review.methodology_version === 'v1.2', 'flag on: the weekly review records v1.2')
+ok(review.methodology_version === 'v1.3', 'flag on: the weekly review records v1.3')
 
 // ---- U6, end to end ---------------------------------------------------------------------------------
 await checkin({ sleep_hours: 5.0 })
@@ -270,8 +270,11 @@ ok(status.regions.find((r) => r.region === 'elbow')?.block === 'temporary' && st
 // B logging a session doesn't lapse A's block.
 await workout(B_DAY, addDays(T, -1))
 ok(ex((await rx()).out, 'Dumbbell Row').skip, 'isolation: B\'s session doesn\'t count as A\'s next session')
-// A logs the next session: the block lapses after it.
+// v1.3 (section 11c): A's squat-only session doesn't load the elbow, so the block stays.
 await workout(A_DAY, addDays(T, -1))
+ok(ex((await rx()).out, 'Dumbbell Row').skip, 'U7 v1.3: a session that doesn\'t load the elbow leaves its block')
+// A logs a session that loads it (Dumbbell Row): the block lapses after it.
+await workout(C_DAY, addDays(T, -1))
 const lapsed = (await rx()).out
 ok(!ex(lapsed, 'Dumbbell Row').skip && !(lapsed.prescription.readiness?.blocked_regions ?? []).includes('elbow'), 'U7 > 5 once: lapses after the next session')
 ok((await todayView()).temporary_blocked.length === 0, 'today: nothing temporary once it lapses')

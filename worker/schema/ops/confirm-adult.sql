@@ -23,7 +23,7 @@
 --     system / operator, tool confirm_adult, the same diff shape as the
 --     athlete's own tap (before null → after the timestamp, unknown → adult),
 --     the summary "Adult status confirmed by operator at round-3 cut-over",
---     and the methodology version it ran on (v1.2, the global version; the
+--     and the methodology version it ran on (v1.3, the global version; the
 --     athlete's prescriptions keep stamping their own effective version).
 --
 -- Idempotent: run again, the update matches nothing (already confirmed, or a
@@ -62,7 +62,7 @@ SELECT
   ),
   'Adult status confirmed by operator at round-3 cut-over (no birth date on file; section 11b).',
   '[]'::jsonb,
-  NULL, NULL, 'v1.2'
+  NULL, NULL, 'v1.3'
 FROM confirmed c;
 
 -- What it left: adult_confirmed_at set, birth_date untouched.

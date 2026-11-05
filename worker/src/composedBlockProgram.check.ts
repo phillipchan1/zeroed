@@ -265,7 +265,7 @@ ok((await callErr('apply_composed_block', { preview_id: atomicId, confirm: true,
 const [cb1] = await harness.query<{ id: string; phase_id: string; change_id: string }>(`SELECT id::text AS id, phase_id::text AS phase_id, change_id::text AS change_id FROM composed_block WHERE athlete_id = $1 AND superseded_at IS NULL`, [A])
 const [log1] = await harness.query<{ tool: string; methodology_version: string; approval_ref: string; diff: { modules_version: string; program_phase: { version: string; phase_id: string; routine_ids: string[]; live_week_end_before: string; live_week_end_after: string; rewrite: boolean } } }>(
   `SELECT tool, methodology_version, approval_ref, diff FROM change_log WHERE id::text = $1`, [cb1.change_id])
-ok(log1.tool === 'apply_composed_block' && log1.methodology_version === 'v1.2' && log1.diff.modules_version === 'modules-v1' && log1.approval_ref === atomicRef, 'change_log: one row, methodology + module versions, the approval')
+ok(log1.tool === 'apply_composed_block' && log1.methodology_version === 'v1.3' && log1.diff.modules_version === 'modules-v1' && log1.approval_ref === atomicRef, 'change_log: one row, methodology + module versions, the approval')
 ok(log1.diff.program_phase.version === BLOCK_PROGRAM_VERSION && log1.diff.program_phase.phase_id === cb1.phase_id && log1.diff.program_phase.rewrite === true, 'change_log: the queued phase, the generator version, rewrite=true')
 ok(await count('change_log', `athlete_id = $1 AND tool = 'apply_composed_block'`, [A]) === 1, 'one change_log row for the whole block')
 const phases1 = await phasesOf(PROG_A)
