@@ -2,6 +2,20 @@
 
 ## Unreleased
 
+### One-time re-check of v1.1 persistent blocks under v1.2 (Round 3 PR B, section 11b), tracks_v1
+
+An operator-run system job, not a Worker route: nothing in `/api/session-rx`, the MCP tool list, the app or any route changes, with the flag on or off. Only athletes with `tracks_v1` on are read or written. No schema change.
+
+- **What it re-checks.** Per athlete, each region whose latest `region_status` row is an open block written by a check-in under methodology v1 / v1.1 (or with no version on record). v1.2-stamped blocks and re-blocks the athlete made by undoing a clinician clear are not touched.
+- **The decision (pure, `decide()` in `worker/src/reevalV11Blocks.ts`).** Under 18 or no age on file: kept (v1.1 behaviour). Otherwise the report that set it and every report of that region since are judged by v1.2's own U7 call (`evaluateReport`): a red flag, > 5 twice within 14 days or a rating rising across 3 sessions keeps it persistent. Anything else is lifted: a new `region_status` row (`ok`) supersedes the block, plus one `change_log` row per lift (actor `system`, `job:reeval_v11_blocks`, methodology `v1.2`, before → after, U7). If the v1.2 temporary window (that day and the next logged session, ≤ 14 days) is still open, readiness derives the temporary block from the report as for any v1.2 block; otherwise the region is unblocked. Nothing is deleted or edited.
+- **Undo.** The lift is a normal Changes-feed row: the athlete's undo makes the block persistent again (`apply_block_reeval` revert handler); redoing it is refused, like redoing a clinician clear. A coach without health access sees neither row's content (target `region`).
+- **Idempotent.** Each athlete re-checked gets one `apply_block_reeval_run` marker row (counts only) and is skipped from then on. Each write in the batch re-checks in SQL that the block is still the open latest row, the flag is on, the age inputs and pain reports haven't moved since the plan, and no marker exists; an advisory lock serializes concurrent runs.
+- **Runner.** `scripts/reeval-v11-blocks.mjs`: reads `DATABASE_URL` (never printed), talks to Neon's HTTP SQL endpoint (`POST https://<host>/sql`, batch = one ReadCommitted transaction), dry run by default, `--apply` writes everything in one batch. Output is counts by region and totals only.
+- **Weekly review.** `blockedDuring` ends a block where a later status row superseded it (only this job writes one over an open block).
+- **Checks.** `worker/src/reevalV11Blocks.check.ts` (every criterion kept vs lifted, minors / unknown age never lifted, idempotency, mid-batch failure writes nothing, drift between plan and apply, revert re-persists, output has no health detail, A/B isolation, flag-off athletes untouched, the HTTP request shapes); `reverts.check.ts` covers both new types. Synthetic data only.
+
+**Deploy:** after the Worker with this change is live, run `worker/schema/ops/confirm-adult.sql` first (a known adult with no age on file is otherwise "unknown" and keeps every block), then `node scripts/reeval-v11-blocks.mjs` (dry run), read the counts, then `--apply` once. **Rollback:** per block, the athlete's undo of its change_log row re-persists it. Per athlete, turning `tracks_v1` off turns readiness off entirely (no block of any kind applies, as before). Redeploying the previous Worker is safe (it reads the superseding `ok` row as the region's status, as this one does) but has no undo handler for the new rows, so per-block undo needs this Worker. Nothing to drop: no schema change.
+
 ### Composed blocks write the week's exercises (Round 2 item 6, G6 follow-up), coach_v1
 
 Behind `athlete.flags.coach_v1` (which only counts with `tracks_v1`), still off for everyone. With it off the MCP tool list, every tool, `/api/session-rx`, the app and every route are exactly as before.

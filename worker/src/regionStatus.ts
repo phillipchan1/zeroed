@@ -117,7 +117,12 @@ export function blocksNow(row: Pick<RegionStatusRow, 'status' | 'cleared_at'> | 
   return row?.status === 'blocked' && row.cleared_at == null
 }
 
-/** Regions blocked at any point in [from, to] (dates): set by then, not cleared before it began. */
+/**
+ * Regions blocked at any point in [from, to] (dates): set by then, not cleared
+ * before it began, and not superseded before it began by a later row for the
+ * region (the v1.2 re-check of a v1.1 block, section 11b, is the only writer
+ * of one over an open block).
+ */
 export async function blockedDuring(store: ConnectedStore, from: string, to: string): Promise<string[]> {
   if (!(await readinessTables(store))) return []
   const rows = await store.sql<{ region: string }[]>`
@@ -125,6 +130,11 @@ export async function blockedDuring(store: ConnectedStore, from: string, to: str
     WHERE s.athlete_id = ${store.athleteId} AND s.status = 'blocked'
       AND s.created_at < (${to}::date + 1)
       AND (s.cleared_at IS NULL OR s.cleared_at >= ${from}::date)
+      AND NOT EXISTS (
+        SELECT 1 FROM region_status n
+        WHERE n.athlete_id = s.athlete_id AND n.region = s.region AND n.status <> 'blocked'
+          AND (n.created_at, n.id) > (s.created_at, s.id) AND n.created_at < ${from}::date
+      )
     ORDER BY s.region
   `
   return rows.map((r) => r.region)

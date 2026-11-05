@@ -24,6 +24,7 @@ import { executeDataQuery } from './data.ts'
 import { athleteChangeLogAction } from './changeLogRoute.ts'
 import { listChanges, type ChangeView } from './changeLog.ts'
 import { REVERT_HANDLERS, revertChange } from './reverts.ts'
+import { applyReeval, planReeval, type Executor } from './reevalV11Blocks.ts'
 import { hiddenIds } from './tombstones.ts'
 import { createApproval } from './approvals.ts'
 import { approveAndAccept } from './proposals.ts'
@@ -487,6 +488,49 @@ const dropUndo = await tapRevert(dropRow.id)
 ok(!dropUndo.ok && dropUndo.reason === 'not_revertible' && /blocked/.test(dropUndo.text) && await exercisesOf(ROUTINE_A) === aDayDropped, `safety: an undo never puts work back on a blocked region (${dropUndo.text.slice(0, 80)})`)
 const feedNow = (await listChanges(storeA, { limit: 100 }))!.changes
 ok(feedNow.find((c) => c.id === (reblock?.id ?? ''))?.revertible === false, 'feed: a re-block shows no Revert')
+
+// apply_block_reeval (section 11b): the one-time v1.2 re-check lifts a block stored under v1.1; undoing it makes it persistent again.
+const [elbowReport] = await harness.query<{ id: string }>(
+  `INSERT INTO pain_report (athlete_id, date, region, score, created_at) VALUES ($1, $2::date, 'elbow', 6, NOW() - INTERVAL '20 days') RETURNING id::text AS id`,
+  [A, addDays(today, -20)],
+)
+const [elbowLog] = await harness.query<{ id: string }>(
+  `INSERT INTO change_log (athlete_id, actor_type, actor_id, tool, target_type, diff, approval_ref, methodology_version, created_at)
+   VALUES ($1, 'athlete', $2, 'log_checkin', 'checkin', '{}'::jsonb, 'standing:logging', 'v1.1', NOW() - INTERVAL '20 days') RETURNING id::text AS id`,
+  [A, A],
+)
+await harness.query(
+  `INSERT INTO region_status (athlete_id, region, status, reason, pain_report_id, change_id, created_at)
+   VALUES ($1, 'elbow', 'blocked', 'Synthetic elbow block (U7).', $2, $3, NOW() - INTERVAL '20 days')`,
+  [A, elbowReport.id, elbowLog.id],
+)
+const reevalExec: Executor = {
+  query: (q, p = []) => harness.query(q, p),
+  async transaction(qs) {
+    await harness.exec('BEGIN')
+    try {
+      const res: Array<Record<string, unknown>[]> = []
+      for (const q of qs) res.push(await harness.query(q.query, q.params))
+      await harness.exec('COMMIT')
+      return res
+    } catch (e) {
+      await harness.exec('ROLLBACK')
+      throw e
+    }
+  },
+}
+const reevalPlan = await planReeval(reevalExec)
+ok(reevalPlan.decisions.length === 1 && reevalPlan.decisions[0].kind === 'lifted' && reevalPlan.decisions[0].block.region === 'elbow', 'apply_block_reeval: only the v1.1 elbow block is re-checked (the re-blocked knee is the athlete\'s)')
+ok((await applyReeval(reevalExec, reevalPlan)).lifted === 1, 'apply_block_reeval: lifted')
+const elbowBlocked = async () => blocksNow((await loadRegionStatus(storeA)).find((s) => s.region === 'elbow'))
+ok(!(await elbowBlocked()), 'apply_block_reeval: the elbow no longer needs a clinician clear')
+const liftUndo = await reverted('apply_block_reeval', (await lastLog(A, 'apply_block_reeval')).id)
+ok(await elbowBlocked(), 'apply_block_reeval undo: persistent again')
+const liftRedo = await tapRevert((liftUndo?.id ?? ''))
+ok(!liftRedo.ok && /clinician/.test(liftRedo.text) && await elbowBlocked(), 'safety: redoing the lift is refused; still blocked')
+const runUndo = await tapRevert((await lastLog(A, 'apply_block_reeval_run')).id)
+ok(!runUndo.ok && runUndo.reason === 'not_revertible', 'apply_block_reeval_run: the marker is not revertible')
+exercised.add('apply_block_reeval_run')
 
 // log_session_rpe: a first rating is voided; a second goes back to the first; redo re-applies.
 const rpe1 = await logSessionRpe(storeA, me, { session_id: ROUTINE_A, rating: 6 })

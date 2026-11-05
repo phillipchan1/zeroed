@@ -164,6 +164,12 @@ export function summarizeChange(row: { tool: string; target_type: string; diff: 
       return str(d.summary) ?? (d.after == null ? '18+ confirmation taken back' : 'Confirmed 18 or older')
     case 'clear_region':
       return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} cleared by a clinician${obj(d.guardian).guardian_confirmed === true ? ' (guardian confirmed)' : ''}`)
+    case 'apply_block_reeval': {
+      const temporary = obj(d.after).block === 'temporary'
+      return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} re-checked under v1.2: no clinician clear needed${temporary ? ' (off until next session)' : ''}`)
+    }
+    case 'apply_block_reeval_run':
+      return clip(`Re-checked stored pain blocks under methodology v1.2: ${String(d.kept ?? 0)} kept, ${String(d.lifted ?? 0)} lifted`)
     case 'clear_red_flag':
       return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} red flag cleared by a clinician${obj(d.guardian).guardian_confirmed === true ? ' (guardian confirmed)' : ''}`)
     case 'downgrade_coach':
