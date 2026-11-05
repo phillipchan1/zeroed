@@ -1,0 +1,37 @@
+-- Age status on Neon (section 11b, tracks_v1). Hand-apply, like
+-- coach-roles.sql: no RLS, no GRANT (the Worker scopes every query by
+-- athlete). Mirrors supabase/migrations/20261104000013_age_status.sql.
+--
+-- What changes with tracks_v1 on (Worker, not schema):
+--   - Age status is adult (birth date 18+, or adult_confirmed_at set with no
+--     birth date), minor (birth date under 18; it wins over a confirmation)
+--     or unknown. Unknown gets every under-18 rule. Decided only in
+--     worker/src/ageStatus.ts.
+--   - The athlete can tap "I'm 18 or older" in Intake or Profile: a logged
+--     athlete write (change_log tool confirm_adult), undoable (back to
+--     unknown). Coaches and app_coach can never set it.
+--   - A minor's (or an unknown-age athlete's) red-flag clear needs a parent
+--     or guardian confirmation, recorded in the change_log row.
+--   - Setting a coach from propose to read voids its open previews and
+--     pending proposals, logged like a revoke (change_log downgrade_coach).
+--
+-- Additive and idempotent: one nullable ADD COLUMN IF NOT EXISTS, no default,
+-- so no existing row is rewritten. birth_date, program, phase, routine,
+-- program_revision, change_log rows and athlete.training_max_overrides are
+-- not read or written here.
+--
+-- Cut-over: an athlete already known to be an adult with no birth date on
+-- file would get the under-18 rules once this ships. Run
+-- worker/schema/ops/confirm-adult.sql for them (operator, by hand, after this
+-- file), or have them tap "I'm 18 or older" in Profile.
+--
+-- Rollback:
+--   1. Instant, per athlete: UPDATE public.athlete SET flags = flags - 'tracks_v1';
+--      With the flag off the Worker never reads adult_confirmed_at, an
+--      unknown age gets the adult rules as before, and clears and role
+--      changes behave exactly as today.
+--   2. Or redeploy the previous Worker: it never reads this column.
+--   3. Optional, once nobody needs it: ALTER TABLE public.athlete DROP COLUMN adult_confirmed_at;
+--      (the Worker reads a missing column as "not confirmed").
+
+ALTER TABLE public.athlete ADD COLUMN IF NOT EXISTS adult_confirmed_at TIMESTAMPTZ;

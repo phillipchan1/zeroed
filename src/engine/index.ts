@@ -900,32 +900,11 @@ export async function runCoachChat(
 // key is never involved). Each applier is defensive: bad refs fail soft with a
 // readable error rather than throwing.
 
-/** One-line human summary of a proposed/applied action, for the confirm card. */
-export function describeCoachAction(a: CoachAction): string {
-  switch (a.type) {
-    case 'update_insight': {
-      const bits: string[] = []
-      if (a.set_status) bits.push(`status → ${a.set_status}`)
-      if (a.set_confidence != null) bits.push(`confidence → ${Math.round(a.set_confidence * 100)}%`)
-      if (a.set_priority) bits.push(`priority → ${a.set_priority}`)
-      if (a.set_claim) bits.push(`claim → "${a.set_claim}"`)
-      return `Update read — ${bits.join(', ') || 'no change'}`
-    }
-    case 'update_exercise': {
-      const bits: string[] = []
-      if (a.set_load) bits.push(`load → ${a.set_load}`)
-      if (a.set_sets != null) bits.push(`sets → ${a.set_sets}`)
-      if (a.set_reps) bits.push(`reps → ${a.set_reps}`)
-      if (a.set_cue) bits.push(`cue → "${a.set_cue}"`)
-      if (a.set_target_rpe != null) bits.push(`target → RPE ${a.set_target_rpe}`)
-      return `${a.exercise_name ?? 'Exercise'} (${a.routine_name ?? 'routine'}) — ${bits.join(', ') || 'no change'}`
-    }
-    case 'add_note':
-      return `Coach note — "${a.note ?? ''}"`
-    default:
-      return 'Change'
-  }
-}
+// Describing an action (one line, or structured parts for the confirm card) is
+// pure and lives in coachActions.ts so it can be checked with node.
+import { describeCoachAction } from './coachActions'
+export { describeCoachAction, describeCoachActionParts } from './coachActions'
+export type { CoachActionParts, CoachActionKind } from './coachActions'
 
 export interface AppliedAction {
   ok: boolean
@@ -2507,7 +2486,8 @@ export async function gatherSessionPrescription(
   exercises: ExerciseTemplate[],
   u: UnitContext,
   // Today's check-in. Sleep, readiness and the knees move today's loads.
-  opts: { dayOf?: DayOf | null } = {},
+  // date (tracks_v1): that day's week-only override applies.
+  opts: { dayOf?: DayOf | null; date?: string | null } = {},
 ): Promise<SessionPrescription> {
   return fetchSessionPrescription(athleteId, routineId, exercises, u, opts)
 }

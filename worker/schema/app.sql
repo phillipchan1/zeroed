@@ -532,6 +532,77 @@ CREATE UNIQUE INDEX IF NOT EXISTS coach_proposal_pending_preview_uidx
   ON public.coach_proposal (athlete_id, preview_id)
   WHERE status = 'pending';
 
+-- =============================================================================
+-- SESSION_OVERRIDE (G1, tracks_v1, migration 20261104000002)
+-- Week-only per-date session changes. The template is never written.
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS public.session_override (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id        UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  date              DATE NOT NULL,
+  routine_id        UUID NOT NULL REFERENCES public.routine(id) ON DELETE CASCADE,
+  ops               JSONB NOT NULL DEFAULT '[]'::jsonb,
+  expires_on        DATE NOT NULL,
+  pair_id           UUID,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  actor_type        TEXT NOT NULL CHECK (actor_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  actor_id          TEXT NOT NULL,
+  rationale         TEXT,
+  approval_ref      TEXT NOT NULL,
+  preview_id        TEXT NOT NULL,
+  voided_at         TIMESTAMPTZ,
+  void_approval_ref TEXT,
+  void_preview_id   TEXT,
+  CONSTRAINT session_override_expiry_window
+    CHECK (expires_on >= date AND expires_on <= date + 7)
+);
+CREATE INDEX IF NOT EXISTS session_override_athlete_date_idx
+  ON public.session_override (athlete_id, date, routine_id)
+  WHERE voided_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS public.session_override_preview (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id  UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  preview_id  TEXT NOT NULL UNIQUE,
+  kind        TEXT NOT NULL CHECK (kind IN ('create', 'clear')),
+  request     JSONB NOT NULL,
+  diff        JSONB NOT NULL,
+  actor_type  TEXT NOT NULL CHECK (actor_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  actor_id    TEXT NOT NULL,
+  rationale   TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  used_at     TIMESTAMPTZ,
+  voided_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS session_override_preview_athlete_idx
+  ON public.session_override_preview (athlete_id, created_at DESC);
+
+-- Append-only. Columns are spec section 6's change_log, so G2 can copy rows
+-- across as they are.
+CREATE TABLE IF NOT EXISTS public.session_override_log (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  athlete_id   UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  actor_type   TEXT NOT NULL CHECK (actor_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  actor_id     TEXT NOT NULL,
+  tool         TEXT NOT NULL,
+  target       JSONB NOT NULL DEFAULT '{}'::jsonb,
+  diff         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  rationale    TEXT,
+  rule_refs    JSONB NOT NULL DEFAULT '[]'::jsonb,
+  approval_ref TEXT,
+  preview_id   TEXT,
+  expires_on   DATE,
+  reverted_by  UUID
+);
+CREATE INDEX IF NOT EXISTS session_override_log_athlete_idx
+  ON public.session_override_log (athlete_id, created_at DESC);
+
+-- A coach proposal can now park a session override as well as program edits.
+ALTER TABLE public.coach_proposal
+  ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'program_edits'
+    CHECK (kind IN ('program_edits', 'session_override'));
+
 CREATE OR REPLACE FUNCTION public.tm_override_value(overrides jsonb, lift text)
 RETURNS numeric
 LANGUAGE sql
@@ -545,6 +616,77 @@ AS $$
     ELSE NULL
   END;
 $$;
+
+-- =============================================================================
+-- CHANGE LOG (G2, tracks_v1, migration 20261104000003): append-only audit of
+-- every coach and athlete write, and the previews those writes apply from.
+-- =============================================================================
+
+CREATE TABLE IF NOT EXISTS public.change_log (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  athlete_id   UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  actor_type   TEXT NOT NULL CHECK (actor_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  actor_id     TEXT NOT NULL,
+  tool         TEXT NOT NULL,
+  target_type  TEXT NOT NULL,
+  target_id    TEXT,
+  diff         JSONB NOT NULL DEFAULT '{}'::jsonb,
+  rationale    TEXT,
+  rule_refs    JSONB NOT NULL DEFAULT '[]'::jsonb,
+  approval_ref TEXT,
+  preview_id   TEXT,
+  expires_on   DATE,
+  reverted_by  UUID,
+  revert_of    UUID,
+  CONSTRAINT change_log_not_own_revert CHECK (revert_of IS DISTINCT FROM id AND reverted_by IS DISTINCT FROM id)
+);
+CREATE INDEX IF NOT EXISTS change_log_athlete_idx
+  ON public.change_log (athlete_id, created_at DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS change_log_revert_of_uidx
+  ON public.change_log (revert_of) WHERE revert_of IS NOT NULL;
+
+-- Append-only. UPDATE may only fill reverted_by on a row that has none, and
+-- nothing else on the row may move. DELETE is refused unless the athlete row
+-- itself is gone (ON DELETE CASCADE when an account is deleted).
+CREATE OR REPLACE FUNCTION public.change_log_append_only()
+RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM public.athlete WHERE id = OLD.athlete_id) THEN
+      RAISE EXCEPTION 'change_log is append-only';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF OLD.reverted_by IS NULL AND NEW.reverted_by IS NOT NULL
+     AND (to_jsonb(NEW) - 'reverted_by') = (to_jsonb(OLD) - 'reverted_by') THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'change_log is append-only: only reverted_by may be set, once';
+END
+$fn$;
+
+DROP TRIGGER IF EXISTS change_log_append_only ON public.change_log;
+CREATE TRIGGER change_log_append_only
+  BEFORE UPDATE OR DELETE ON public.change_log
+  FOR EACH ROW EXECUTE FUNCTION public.change_log_append_only();
+
+CREATE TABLE IF NOT EXISTS public.change_preview (
+  id          UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id  UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  preview_id  TEXT NOT NULL UNIQUE,
+  tool        TEXT NOT NULL,
+  target_id   TEXT,
+  diff        JSONB NOT NULL,
+  actor_type  TEXT NOT NULL CHECK (actor_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  actor_id    TEXT NOT NULL,
+  rationale   TEXT,
+  created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  used_at     TIMESTAMPTZ,
+  voided_at   TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS change_preview_athlete_idx
+  ON public.change_preview (athlete_id, created_at DESC);
 
 -- =============================================================================
 -- MCP_TOKEN
@@ -623,3 +765,467 @@ BEGIN
    WHERE id = aid;
 END;
 $$;
+
+-- =============================================================================
+-- APPROVAL (G10, tracks_v1) — mirrors supabase/migrations/20261104000004_approval.sql
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS public.approval (
+  id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id            UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  created_at            TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  preview_id            TEXT NOT NULL,
+  preview_kind          TEXT NOT NULL
+                        CHECK (preview_kind IN ('program_edits', 'session_override', 'revert', 'proposal', 'change', 'app_editor')),
+  diff_hash             TEXT NOT NULL,
+  channel               TEXT NOT NULL CHECK (channel IN ('tap', 'chat')),
+  message_id            UUID,
+  requested_by_type     TEXT NOT NULL CHECK (requested_by_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  requested_by_id       TEXT NOT NULL,
+  consumed_at           TIMESTAMPTZ,
+  consumed_by_change_id UUID,
+  voided_at             TIMESTAMPTZ,
+  CONSTRAINT approval_chat_message CHECK ((channel = 'chat') = (message_id IS NOT NULL)),
+  CONSTRAINT approval_consumed_pair CHECK ((consumed_at IS NULL) = (consumed_by_change_id IS NULL)),
+  CONSTRAINT approval_one_end CHECK (consumed_at IS NULL OR voided_at IS NULL)
+);
+CREATE INDEX IF NOT EXISTS approval_athlete_idx
+  ON public.approval (athlete_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS approval_preview_idx
+  ON public.approval (athlete_id, preview_id);
+CREATE INDEX IF NOT EXISTS approval_requested_by_open_idx
+  ON public.approval (athlete_id, requested_by_type, requested_by_id)
+  WHERE consumed_at IS NULL AND voided_at IS NULL;
+
+CREATE OR REPLACE FUNCTION public.approval_append_only()
+RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM public.athlete WHERE id = OLD.athlete_id) THEN
+      RAISE EXCEPTION 'approval is append-only';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF OLD.consumed_at IS NULL AND OLD.voided_at IS NULL THEN
+    IF NEW.consumed_at IS NOT NULL AND NEW.voided_at IS NULL
+       AND (to_jsonb(NEW) - 'consumed_at' - 'consumed_by_change_id') = (to_jsonb(OLD) - 'consumed_at' - 'consumed_by_change_id') THEN
+      RETURN NEW;
+    END IF;
+    IF NEW.voided_at IS NOT NULL AND NEW.consumed_at IS NULL
+       AND (to_jsonb(NEW) - 'voided_at') = (to_jsonb(OLD) - 'voided_at') THEN
+      RETURN NEW;
+    END IF;
+  END IF;
+  RAISE EXCEPTION 'approval is append-only: it may be consumed or voided, once';
+END
+$fn$;
+
+DROP TRIGGER IF EXISTS approval_append_only ON public.approval;
+CREATE TRIGGER approval_append_only
+  BEFORE UPDATE OR DELETE ON public.approval
+  FOR EACH ROW EXECUTE FUNCTION public.approval_append_only();
+
+-- Which approval row a change_log row's approval_ref resolves to.
+ALTER TABLE public.change_log ADD COLUMN IF NOT EXISTS approval_id UUID;
+
+-- =============================================================================
+-- METHODOLOGY (G3, tracks_v1) — mirrors supabase/migrations/20261104000005_methodology.sql
+-- =============================================================================
+CREATE TABLE IF NOT EXISTS public.methodology_override (
+  id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id          UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  -- NULL: the whole athlete. Set: that track only (paths with scope 'any').
+  track_id            UUID REFERENCES public.track(id) ON DELETE CASCADE,
+  -- The global version it was set against, e.g. 'v1'.
+  methodology_version TEXT NOT NULL,
+  path                TEXT NOT NULL,
+  value               JSONB NOT NULL,
+  rationale           TEXT,
+  rule_refs           JSONB NOT NULL DEFAULT '[]'::jsonb,
+  actor_type          TEXT NOT NULL CHECK (actor_type IN ('athlete', 'mcp', 'app_coach', 'system')),
+  actor_id            TEXT NOT NULL,
+  approval_ref        TEXT NOT NULL,
+  approval_id         UUID,
+  preview_id          TEXT NOT NULL,
+  change_id           UUID NOT NULL,
+  created_at          TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  superseded_at       TIMESTAMPTZ,
+  superseded_by       UUID,
+  CONSTRAINT methodology_override_path CHECK (path ~ '^(U([1-9]|1[0-5])|minors)(\.[a-z0-9_]+)+$')
+);
+CREATE INDEX IF NOT EXISTS methodology_override_athlete_idx
+  ON public.methodology_override (athlete_id, created_at);
+CREATE UNIQUE INDEX IF NOT EXISTS methodology_override_active_uidx
+  ON public.methodology_override (athlete_id, COALESCE(track_id::text, ''), path)
+  WHERE superseded_at IS NULL;
+
+CREATE OR REPLACE FUNCTION public.methodology_override_append_only()
+RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM public.athlete WHERE id = OLD.athlete_id) THEN
+      RAISE EXCEPTION 'methodology_override is append-only';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF OLD.superseded_at IS NULL AND NEW.superseded_at IS NOT NULL
+     AND (to_jsonb(NEW) - 'superseded_at' - 'superseded_by') = (to_jsonb(OLD) - 'superseded_at' - 'superseded_by') THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'methodology_override is append-only: it may be superseded, once';
+END
+$fn$;
+
+DROP TRIGGER IF EXISTS methodology_override_append_only ON public.methodology_override;
+CREATE TRIGGER methodology_override_append_only
+  BEFORE UPDATE OR DELETE ON public.methodology_override
+  FOR EACH ROW EXECUTE FUNCTION public.methodology_override_append_only();
+
+-- The methodology version every change_log row ran on ('v1', or 'v1+<hash>'
+-- with the athlete's overrides in force). NULL on rows written before G3.
+ALTER TABLE public.change_log ADD COLUMN IF NOT EXISTS methodology_version TEXT;
+
+-- Who parked a proposal: mcp:<token id>, app_coach, or athlete:<id>. NULL on
+-- rows parked before G3 (left alone by revocation). voided_at: its coach was
+-- revoked while it was pending (status goes 'stale' at the same time).
+ALTER TABLE public.coach_proposal ADD COLUMN IF NOT EXISTS created_by TEXT;
+ALTER TABLE public.coach_proposal ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ;
+
+-- Under-18 rules (D6) apply when this says the athlete is under 18. NULL:
+-- age unknown — adult rules, and no raised pain cap (D2) until it is known.
+-- Not writable through /api/data.
+ALTER TABLE public.athlete ADD COLUMN IF NOT EXISTS birth_date DATE;
+
+-- =============================================================================
+-- READINESS (G4 + G8, tracks_v1) — mirrors supabase/migrations/20261104000006_readiness.sql
+-- =============================================================================
+-- One row per check-in submission. The latest row for a date is that day's
+-- check-in. Every field is optional; a submission names at least one.
+CREATE TABLE IF NOT EXISTS public.checkin (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id   UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  date         DATE NOT NULL,
+  sleep_hours  NUMERIC(4,2) CHECK (sleep_hours IS NULL OR (sleep_hours >= 0 AND sleep_hours <= 24)),
+  stress       SMALLINT CHECK (stress IS NULL OR stress BETWEEN 1 AND 5),
+  soreness     SMALLINT CHECK (soreness IS NULL OR soreness BETWEEN 1 AND 5),
+  -- The change_log row (standing:logging) this submission wrote.
+  change_id    UUID,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS checkin_athlete_date_idx ON public.checkin (athlete_id, date, created_at);
+
+-- Pain by region, 0–10, with any section 8 red flags. The latest row for a
+-- (date, region) is that day's score.
+CREATE TABLE IF NOT EXISTS public.pain_report (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id   UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  date         DATE NOT NULL,
+  region       TEXT NOT NULL CHECK (region ~ '^[a-z_]+$'),
+  score        SMALLINT NOT NULL CHECK (score BETWEEN 0 AND 10),
+  red_flags    TEXT[] NOT NULL DEFAULT '{}'::text[]
+               CHECK (red_flags <@ ARRAY['swelling', 'locking', 'giving_way', 'numbness_tingling', 'radiating',
+                                         'chest_pain', 'fainting', 'breathlessness', 'acute_injury', 'worsening']::text[]),
+  checkin_id   UUID,
+  change_id    UUID,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS pain_report_athlete_date_idx ON public.pain_report (athlete_id, date, region, created_at);
+
+-- A region's U7 status, one row each time it changes. The latest row is the
+-- current status. A 'blocked' row stays in force until the athlete marks it
+-- cleared by a clinician (cleared_at + cleared_by, set once, athlete only).
+CREATE TABLE IF NOT EXISTS public.region_status (
+  id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id       UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  region           TEXT NOT NULL CHECK (region ~ '^[a-z_]+$'),
+  status           TEXT NOT NULL CHECK (status IN ('ok', 'capped', 'blocked')),
+  reason           TEXT,
+  rule_refs        JSONB NOT NULL DEFAULT '["U7"]'::jsonb,
+  pain_report_id   UUID,
+  change_id        UUID,
+  created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  cleared_at       TIMESTAMPTZ,
+  -- athlete:<id>. Never a coach.
+  cleared_by       TEXT,
+  clear_change_id  UUID,
+  CONSTRAINT region_status_cleared_pair CHECK ((cleared_at IS NULL) = (cleared_by IS NULL)),
+  CONSTRAINT region_status_cleared_blocked CHECK (cleared_at IS NULL OR status = 'blocked'),
+  CONSTRAINT region_status_cleared_by_athlete CHECK (cleared_by IS NULL OR cleared_by LIKE 'athlete:%')
+);
+CREATE INDEX IF NOT EXISTS region_status_athlete_idx ON public.region_status (athlete_id, region, created_at);
+
+-- Every coach read of this athlete's data: an MCP read tool call or an
+-- app_coach read. The athlete's own reads are not logged.
+CREATE TABLE IF NOT EXISTS public.coach_read_log (
+  id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id   UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  actor_type   TEXT NOT NULL CHECK (actor_type IN ('mcp', 'app_coach')),
+  actor_id     TEXT NOT NULL,
+  tool         TEXT NOT NULL,
+  scope        JSONB NOT NULL DEFAULT '{}'::jsonb,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS coach_read_log_athlete_idx ON public.coach_read_log (athlete_id, created_at);
+
+-- Append-only: rows go only with their athlete (ON DELETE CASCADE).
+CREATE OR REPLACE FUNCTION public.readiness_append_only()
+RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM public.athlete WHERE id = OLD.athlete_id) THEN
+      RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF TG_TABLE_NAME = 'region_status' AND OLD.status = 'blocked' AND OLD.cleared_at IS NULL AND NEW.cleared_at IS NOT NULL
+     AND (to_jsonb(NEW) - 'cleared_at' - 'cleared_by' - 'clear_change_id') = (to_jsonb(OLD) - 'cleared_at' - 'cleared_by' - 'clear_change_id') THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
+END
+$fn$;
+
+DROP TRIGGER IF EXISTS checkin_append_only ON public.checkin;
+CREATE TRIGGER checkin_append_only
+  BEFORE UPDATE OR DELETE ON public.checkin
+  FOR EACH ROW EXECUTE FUNCTION public.readiness_append_only();
+DROP TRIGGER IF EXISTS pain_report_append_only ON public.pain_report;
+CREATE TRIGGER pain_report_append_only
+  BEFORE UPDATE OR DELETE ON public.pain_report
+  FOR EACH ROW EXECUTE FUNCTION public.readiness_append_only();
+DROP TRIGGER IF EXISTS region_status_append_only ON public.region_status;
+CREATE TRIGGER region_status_append_only
+  BEFORE UPDATE OR DELETE ON public.region_status
+  FOR EACH ROW EXECUTE FUNCTION public.readiness_append_only();
+DROP TRIGGER IF EXISTS coach_read_log_append_only ON public.coach_read_log;
+CREATE TRIGGER coach_read_log_append_only
+  BEFORE UPDATE OR DELETE ON public.coach_read_log
+  FOR EACH ROW EXECUTE FUNCTION public.readiness_append_only();
+
+-- D3: does this coach see pain and check-in data. On by default for every
+-- coach the athlete invites; only the athlete turns it off (logged). Not
+-- writable through /api/data.
+ALTER TABLE public.mcp_token ADD COLUMN IF NOT EXISTS share_health BOOLEAN NOT NULL DEFAULT true;
+
+-- =============================================================================
+-- SESSION RPE (G9, tracks_v1) — mirrors supabase/migrations/20261104000007_session_rpe.sql
+-- =============================================================================
+-- One row per (athlete, date, session): Foster's session RPE, one CR-10 rating
+-- (0–10) of the whole session. NOT workout.rpe (the mean of the set RPEs) and
+-- never merged into it. A second tap the same day updates the row; each tap
+-- also writes one change_log row (standing:logging) with the before → after.
+-- Session load (AU) = rating × duration_min, when the duration is known.
+CREATE TABLE IF NOT EXISTS public.session_rpe (
+  id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id    UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  -- The athlete's calendar day the session was trained on.
+  date          DATE NOT NULL,
+  -- The session (routine) rated. The logged workout, when known.
+  session_id    UUID NOT NULL REFERENCES public.routine(id) ON DELETE CASCADE,
+  workout_id    UUID REFERENCES public.workout(id) ON DELETE SET NULL,
+  rating        SMALLINT NOT NULL CHECK (rating BETWEEN 0 AND 10),
+  duration_min  SMALLINT CHECK (duration_min IS NULL OR duration_min BETWEEN 1 AND 600),
+  -- The change_log row of the latest tap.
+  change_id     UUID,
+  created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  CONSTRAINT session_rpe_one_per_day UNIQUE (athlete_id, date, session_id)
+);
+CREATE INDEX IF NOT EXISTS session_rpe_athlete_date_idx ON public.session_rpe (athlete_id, date);
+-- Offline queue (migration 20261104000011_session_rpe_queue.sql): the app's id
+-- for the tap the row holds (a retry with it is "already logged") and when that
+-- tap happened (a queued tap older than the row's is acknowledged, not applied).
+ALTER TABLE public.session_rpe ADD COLUMN IF NOT EXISTS client_id UUID;
+ALTER TABLE public.session_rpe ADD COLUMN IF NOT EXISTS tapped_at TIMESTAMPTZ;
+CREATE UNIQUE INDEX IF NOT EXISTS session_rpe_athlete_client_uidx
+  ON public.session_rpe (athlete_id, client_id) WHERE client_id IS NOT NULL;
+
+-- =============================================================================
+-- COACH V1 (G6 + G7, coach_v1) — mirrors supabase/migrations/20261104000008_coach_v1.sql
+-- =============================================================================
+-- One row per sport or activity the athlete does (spec section 4). module_key
+-- names its code-owned module (worker/src/coach/modules.ts, versioned like the
+-- methodology). Written only through preview_activity_change →
+-- apply_activity_change (approval required) or an approved composed block
+-- from intake; never deleted: removing one sets active = false. change_id is
+-- the change_log row of the last write.
+CREATE TABLE IF NOT EXISTS public.activity (
+  id                 UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id         UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  module_key         TEXT NOT NULL CHECK (module_key IN ('court', 'endurance', 'field', 'strength', 'general')),
+  name               TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 60),
+  sessions_per_week  SMALLINT NOT NULL CHECK (sessions_per_week BETWEEN 0 AND 14),
+  season             TEXT NOT NULL DEFAULT 'in' CHECK (season IN ('in', 'off')),
+  -- Days it is on, 0 = Mon … 6 = Sun.
+  days               SMALLINT[] NOT NULL DEFAULT '{}' CHECK (days <@ ARRAY[0, 1, 2, 3, 4, 5, 6]::smallint[]),
+  active             BOOLEAN NOT NULL DEFAULT true,
+  change_id          UUID,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at         TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS activity_athlete_idx ON public.activity (athlete_id, active);
+
+-- The intake answers as submitted (section 5), one row per submission,
+-- append-only. outcome 'stopped': a red flag (or pain above the U7 stop line)
+-- stopped it and nothing was composed; 'previewed': it produced the composed
+-- block preview preview_id. minor + parental_consent record the under-18
+-- consent step. change_id: the check-in (pain, recovery baseline) it logged.
+CREATE TABLE IF NOT EXISTS public.coach_intake (
+  id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id        UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  answers           JSONB NOT NULL,
+  outcome           TEXT NOT NULL CHECK (outcome IN ('stopped', 'previewed')),
+  minor             BOOLEAN NOT NULL DEFAULT false,
+  parental_consent  JSONB,
+  preview_id        TEXT,
+  change_id         UUID,
+  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS coach_intake_athlete_idx ON public.coach_intake (athlete_id, created_at DESC);
+
+-- The block of record (section 4 output): what the composer produced and the
+-- athlete approved, with the methodology and module versions it ran on and
+-- the key of the activities + goals it was composed from (re-compose when
+-- that moves or the block ends). Written only by apply_composed_block, in the
+-- same transaction as its change_log row. A newer block supersedes the old
+-- one; nothing else about a row ever changes.
+CREATE TABLE IF NOT EXISTS public.composed_block (
+  id                   UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id           UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  program_id           UUID REFERENCES public.program(id) ON DELETE SET NULL,
+  start_date           DATE NOT NULL,
+  end_date             DATE NOT NULL,
+  methodology_version  TEXT NOT NULL,
+  modules_version      TEXT NOT NULL,
+  compose_key          TEXT NOT NULL,
+  block                JSONB NOT NULL,
+  request              JSONB NOT NULL DEFAULT '{}'::jsonb,
+  intake_id            UUID,
+  preview_id           TEXT NOT NULL,
+  approval_ref         TEXT NOT NULL,
+  change_id            UUID NOT NULL,
+  actor_type           TEXT NOT NULL,
+  actor_id             TEXT NOT NULL,
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  superseded_at        TIMESTAMPTZ,
+  superseded_by        UUID
+);
+CREATE INDEX IF NOT EXISTS composed_block_athlete_idx ON public.composed_block (athlete_id, created_at DESC);
+-- The pending phase the block queued (its week's sessions, from its start).
+-- Mirrors supabase/migrations/20261104000012_composed_block_program.sql. No
+-- foreign key: composed_block is append-only, so it never gains an ON DELETE
+-- action.
+ALTER TABLE public.composed_block ADD COLUMN IF NOT EXISTS phase_id UUID;
+
+-- Append-only, like readiness_append_only: coach_intake never changes;
+-- composed_block only gains superseded_at / superseded_by, once. Deletes go
+-- through only when the athlete row itself is being deleted (cascade).
+CREATE OR REPLACE FUNCTION public.coach_v1_append_only()
+RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM public.athlete WHERE id = OLD.athlete_id) THEN
+      RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF TG_TABLE_NAME = 'composed_block' AND OLD.superseded_at IS NULL AND NEW.superseded_at IS NOT NULL
+     AND (to_jsonb(NEW) - 'superseded_at' - 'superseded_by') = (to_jsonb(OLD) - 'superseded_at' - 'superseded_by') THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION '% is append-only', TG_TABLE_NAME;
+END
+$fn$;
+
+DROP TRIGGER IF EXISTS coach_intake_append_only ON public.coach_intake;
+CREATE TRIGGER coach_intake_append_only
+  BEFORE UPDATE OR DELETE ON public.coach_intake
+  FOR EACH ROW EXECUTE FUNCTION public.coach_v1_append_only();
+DROP TRIGGER IF EXISTS composed_block_append_only ON public.composed_block;
+CREATE TRIGGER composed_block_append_only
+  BEFORE UPDATE OR DELETE ON public.composed_block
+  FOR EACH ROW EXECUTE FUNCTION public.coach_v1_append_only();
+
+-- A goal's weight for composing (section 4: priority | maintenance) and the
+-- quality it trains. Nullable: null reads as maintenance, quality inferred.
+-- Written only by apply_composed_block. Existing goal rows are not touched.
+ALTER TABLE public.athlete_goal ADD COLUMN IF NOT EXISTS weight TEXT
+  CHECK (weight IS NULL OR weight IN ('priority', 'maintenance'));
+ALTER TABLE public.athlete_goal ADD COLUMN IF NOT EXISTS quality TEXT
+  CHECK (quality IS NULL OR quality IN ('max_strength', 'power', 'aerobic', 'alactic', 'change_of_direction', 'tissue_capacity', 'mobility'));
+
+-- =============================================================================
+-- COACH ROLES (D3, tracks_v1) — mirrors supabase/migrations/20261104000009_coach_roles.sql
+-- =============================================================================
+-- Each coach token is 'read' (read tools only; every preview / apply / write
+-- hidden and refused, refusals logged) or 'propose' (as before). Default
+-- 'propose', so existing tokens keep today's powers. Only the athlete changes
+-- it (logged). Not writable through /api/data.
+ALTER TABLE public.mcp_token ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'propose';
+DO $c$
+BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'mcp_token_role_check') THEN
+    ALTER TABLE public.mcp_token ADD CONSTRAINT mcp_token_role_check CHECK (role IN ('read', 'propose'));
+  END IF;
+END
+$c$;
+
+-- =============================================================================
+-- CHANGE TOMBSTONE (Round 2 item 3, tracks_v1) — mirrors supabase/migrations/20261104000010_change_tombstone.sql
+-- =============================================================================
+-- One row per row a revert hid instead of deleting it: 'void' for a logging
+-- write undone (check-in, pain report, session RPE tap, goal measurement,
+-- workout note), 'retire' for a row a change created (track, goal, autoreg
+-- rule). Readers skip a live tombstone only with tracks_v1 on. Redoing the
+-- revert lifts it, once. Region blocks are never voided. Not in /api/data.
+CREATE TABLE IF NOT EXISTS public.change_tombstone (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id     UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  row_table      TEXT NOT NULL CHECK (row_table IN (
+                   'checkin', 'pain_report', 'session_rpe', 'goal_measurement', 'workout_note',
+                   'track', 'athlete_goal', 'autoreg_rule')),
+  row_id         UUID NOT NULL,
+  row_change_id  UUID,
+  kind           TEXT NOT NULL CHECK (kind IN ('void', 'retire')),
+  change_id      UUID NOT NULL,
+  voids_change_id UUID,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  lifted_at      TIMESTAMPTZ,
+  lifted_by      UUID,
+  CONSTRAINT change_tombstone_lifted_pair CHECK ((lifted_at IS NULL) = (lifted_by IS NULL))
+);
+CREATE INDEX IF NOT EXISTS change_tombstone_athlete_idx
+  ON public.change_tombstone (athlete_id, row_table)
+  WHERE lifted_at IS NULL;
+CREATE INDEX IF NOT EXISTS change_tombstone_change_idx
+  ON public.change_tombstone (athlete_id, change_id);
+CREATE UNIQUE INDEX IF NOT EXISTS change_tombstone_live_uidx
+  ON public.change_tombstone (athlete_id, row_table, row_id)
+  WHERE lifted_at IS NULL;
+CREATE OR REPLACE FUNCTION public.change_tombstone_append_only()
+RETURNS trigger LANGUAGE plpgsql AS $fn$
+BEGIN
+  IF TG_OP = 'DELETE' THEN
+    IF EXISTS (SELECT 1 FROM public.athlete WHERE id = OLD.athlete_id) THEN
+      RAISE EXCEPTION 'change_tombstone is append-only';
+    END IF;
+    RETURN OLD;
+  END IF;
+  IF OLD.lifted_at IS NULL AND NEW.lifted_at IS NOT NULL
+     AND (to_jsonb(NEW) - 'lifted_at' - 'lifted_by') = (to_jsonb(OLD) - 'lifted_at' - 'lifted_by') THEN
+    RETURN NEW;
+  END IF;
+  RAISE EXCEPTION 'change_tombstone is append-only: it may be lifted, once';
+END
+$fn$;
+DROP TRIGGER IF EXISTS change_tombstone_append_only ON public.change_tombstone;
+CREATE TRIGGER change_tombstone_append_only
+  BEFORE UPDATE OR DELETE ON public.change_tombstone
+  FOR EACH ROW EXECUTE FUNCTION public.change_tombstone_append_only();
+
+-- =============================================================================
+-- AGE STATUS (section 11b, tracks_v1) — mirrors supabase/migrations/20261104000013_age_status.sql
+-- =============================================================================
+-- The athlete's own "I'm 18 or older" (Intake or Profile), for an athlete
+-- with no birth date. Without a birth date or this, the age is unknown and
+-- the under-18 rules apply. A birth date always wins. Not in /api/data.
+ALTER TABLE public.athlete ADD COLUMN IF NOT EXISTS adult_confirmed_at TIMESTAMPTZ;

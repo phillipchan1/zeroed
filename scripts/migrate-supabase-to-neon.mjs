@@ -1018,6 +1018,22 @@ export const PUBLIC_RESTORE_ORDER = [
   'goal_measurement',
   'workout_note',
   'coach_proposal',
+  'session_override',
+  'session_override_preview',
+  'session_override_log',
+  'change_log',
+  'change_preview',
+  'approval',
+  'methodology_override',
+  'checkin',
+  'pain_report',
+  'region_status',
+  'coach_read_log',
+  'session_rpe',
+  'activity',
+  'coach_intake',
+  'composed_block',
+  'change_tombstone',
 ]
 
 export const REQUIRED_COUNT_TABLES = [...PUBLIC_RESTORE_ORDER]

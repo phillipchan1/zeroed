@@ -1,9 +1,12 @@
 import type { Sql } from './db.ts'
+import { parseRole, type CoachRole } from './coachRoles.ts'
 
 export interface McpTokenRow {
   id: string
   athlete_id: string
   name: string
+  /** D3: 'read' | 'propose'. 'propose' before worker/schema/coach-roles.sql. */
+  role: CoachRole
 }
 
 const expiresColumn = new WeakMap<object, boolean>()
@@ -77,17 +80,18 @@ export async function resolveMcpToken(sql: Sql, token: string): Promise<McpToken
     name: string
     token_hash: string
     revoked_at: string | Date | null
+    role: string | null
   }[]>`
-    SELECT id, athlete_id, name, token_hash, revoked_at
-    FROM mcp_token
-    WHERE token_hash = ${tokenHash}
+    SELECT t.id, t.athlete_id, t.name, t.token_hash, t.revoked_at, to_jsonb(t) ->> 'role' AS role
+    FROM mcp_token t
+    WHERE t.token_hash = ${tokenHash}
     LIMIT 1
   `
   if (!row) return null
   if (!timingSafeEqualHex(row.token_hash, tokenHash)) return null
   if (row.revoked_at) return null
   if (await tokenExpired(sql, row.id)) return null
-  return { id: row.id, athlete_id: row.athlete_id, name: row.name }
+  return { id: row.id, athlete_id: row.athlete_id, name: row.name, role: parseRole(row.role) }
 }
 
 export async function touchMcpToken(sql: Sql, id: string): Promise<void> {

@@ -1,6 +1,12 @@
 /**
  * tracks_v1 MCP tools. Writes preview unless confirm=true.
  * SQL is scoped to store.athleteId on every query.
+ *
+ * With tracks_v1 on for the athlete the dispatcher passes a WriteGate (G2):
+ * previews are kept, a confirmed write needs approval_ref plus a matching
+ * preview_id under 24 h old (logging writes have standing approval), and each
+ * write adds one change_log row in the same transaction. Without a gate every
+ * tool runs exactly as before.
  */
 import { forecastAtDue, goalNumber, isGoalDirection, isGoalSide, pairKey, type GoalMeasurement } from '../../src/engine/goals.ts'
 import { goalMarks, goalRead, isRollingGoal } from '../../src/engine/capacity.ts'
@@ -15,7 +21,12 @@ import { evaluateAutoregRules, type AutoregRule } from '../../src/engine/autoreg
 import { proposeNextWeek, type PerformedExercise, type ProgressionRule } from '../../src/engine/progression.ts'
 import { daysHitByTrack, findTrack, GENERAL_TRACK_SEED, isEngineType, resolveTrack, suggestTrackName, type TrackRef } from '../../src/engine/tracks.ts'
 import { jsonParam } from './db.ts'
+import {
+  goalSnapshot, previewFooter, programMetaSnapshot, routineDelta, routineSnapshots, trackSnapshot,
+  type Logged, type WriteGate,
+} from './changeLog.ts'
 import type { ConnectedStore, LiveProgram } from './store.ts'
+import { hiddenIds, idList } from './tombstones.ts'
 import { McpUserError } from './userError.ts'
 
 function asString(v: unknown): string | undefined {
@@ -61,10 +72,12 @@ async function activeProgram(store: ConnectedStore, programId?: string): Promise
 }
 
 async function loadTracks(store: ConnectedStore, programId: string): Promise<TrackRef[]> {
+  // A track a revert retired (tracks_v1) is hidden; never deleted.
+  const retired = await hiddenIds(store, 'track')
   return store.sql<TrackRef[]>`
     SELECT id, name, color, icon, sort_order AS "order", purpose
     FROM track
-    WHERE program_id = ${programId}
+    WHERE program_id = ${programId} AND NOT (id::text = ANY(${idList(retired)}::text[]))
     ORDER BY sort_order, name
   `
 }
@@ -95,8 +108,48 @@ async function loadLiveSessions(store: ConnectedStore, programId: string): Promi
   }))
 }
 
+/** A goal's measured state (current, best, baseline, status): what a measurement moves. */
+async function goalStateNow(store: ConnectedStore, goalId: string): Promise<Record<string, unknown> | null> {
+  const [row] = await store.sql<Record<string, unknown>[]>`
+    SELECT current::float8 AS current, best::float8 AS best, baseline::float8 AS baseline, status
+    FROM athlete_goal WHERE id = ${goalId} AND athlete_id = ${store.athleteId}
+  `
+  return row ? { current: row.current ?? null, best: row.best ?? null, baseline: row.baseline ?? null, status: row.status ?? null } : null
+}
+
 function json(value: unknown): string {
   return JSON.stringify(value, null, 2)
+}
+
+/** A gated preview: the same object, carrying the kept preview's id. */
+async function gatedPreview(
+  gate: WriteGate | undefined,
+  tool: string,
+  out: Record<string, unknown>,
+  state: unknown,
+  rationale: string | null,
+): Promise<Record<string, unknown>> {
+  if (!gate) return out
+  const id = await gate.preview(tool, state, rationale)
+  return { ...out, preview_id: id, next: previewFooter(id) }
+}
+
+/** Run a confirmed write: as before without a gate; approved, previewed and logged with one. */
+async function gatedWrite<T>(
+  gate: WriteGate | undefined,
+  tool: string,
+  args: Record<string, unknown>,
+  state: unknown,
+  body: () => Promise<Logged<T>>,
+): Promise<T> {
+  if (!gate) return (await body()).result
+  return gate.commit(tool, args, state, body)
+}
+
+/** A logging write (standing approval): as before without a gate; logged with one. */
+async function loggedWrite<T>(gate: WriteGate | undefined, tool: string, body: () => Promise<Logged<T>>): Promise<T> {
+  if (!gate) return (await body()).result
+  return gate.logging(tool, body)
 }
 
 /**
@@ -136,6 +189,7 @@ export async function runTrackTool(
   name: string,
   args: Record<string, unknown>,
   live: LiveProgram | null,
+  gate?: WriteGate,
 ): Promise<string | null> {
   switch (name) {
     case 'list_tracks':
@@ -143,35 +197,35 @@ export async function runTrackTool(
     case 'get_track':
       return json(await getTrack(store, asString(args.track_id) ?? asString(args.track) ?? asString(args.name)))
     case 'create_track':
-      return json(await createTrack(store, args))
+      return json(await createTrack(store, args, gate))
     case 'update_track':
-      return json(await updateTrack(store, args))
+      return json(await updateTrack(store, args, gate))
     case 'assign_exercise_to_track':
-      return json(await assignExercises(store, args))
+      return json(await assignExercises(store, args, gate))
     case 'get_track_progression':
       return json(await getTrackProgression(store, args, live))
     case 'set_track_progression_rule':
-      return json(await setProgressionRule(store, args))
+      return json(await setProgressionRule(store, args, gate))
     case 'list_autoreg_rules':
       return json(await listAutoregRules(store, args))
     case 'upsert_autoreg_rule':
-      return json(await upsertAutoregRule(store, args))
+      return json(await upsertAutoregRule(store, args, gate))
     case 'get_goals':
       return json(await getGoals(store, args))
     case 'get_goal_brief':
       return json(await getGoalBrief(store))
     case 'upsert_goal':
-      return json(await upsertGoal(store, args))
+      return json(await upsertGoal(store, args, gate))
     case 'log_goal_measurement':
-      return json(await logGoalMeasurement(store, args))
+      return json(await logGoalMeasurement(store, args, gate))
     case 'get_goal_history':
       return json(await getGoalHistory(store, args))
     case 'add_workout_note':
-      return json(await addWorkoutNote(store, args))
+      return json(await addWorkoutNote(store, args, gate))
     case 'update_athlete_target':
-      return json(await updateAthleteTarget(store, args))
+      return json(await updateAthleteTarget(store, args, gate))
     case 'update_program_meta':
-      return json(await updateProgramMeta(store, args))
+      return json(await updateProgramMeta(store, args, gate))
     default:
       return null
   }
@@ -243,7 +297,7 @@ async function getTrack(store: ConnectedStore, idOrName?: string) {
   `
   const autoreg_rules = await store.sql<object[]>`
     SELECT id, scope_type, scope_id, scope_name, signal, op, value, action, action_params, message
-    FROM autoreg_rule WHERE athlete_id = ${store.athleteId}
+    FROM autoreg_rule WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'autoreg_rule'))}::text[]))
   `
   const sessions = await loadLiveSessions(store, program.id)
   const exercises = sessions.flatMap((s) =>
@@ -262,7 +316,7 @@ async function getTrack(store: ConnectedStore, idOrName?: string) {
   const goals = await store.sql<object[]>`
     SELECT id, name, metric, unit, side, target, baseline, current, best, due_date, status
     FROM athlete_goal
-    WHERE athlete_id = ${store.athleteId} AND track_id = ${track.id}
+    WHERE athlete_id = ${store.athleteId} AND track_id = ${track.id} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
     ORDER BY name
   `
   return {
@@ -279,52 +333,61 @@ async function getTrack(store: ConnectedStore, idOrName?: string) {
   }
 }
 
-async function createTrack(store: ConnectedStore, args: Record<string, unknown>) {
+async function createTrack(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const name = asString(args.name)
   if (!name) throw new McpUserError('name is required')
   const program = await activeProgram(store)
   if (!program) throw new McpUserError('No active program.')
   const diff = [{ op: 'create_track', name, purpose: asString(args.purpose) ?? null }]
   if (!asBool(args.confirm)) {
-    return writePreview(diff, [], { rationale: asString(args.rationale) ?? null })
+    const rationale = asString(args.rationale) ?? null
+    return gatedPreview(gate, 'create_track', await writePreview(diff, [], { rationale }), { diff }, rationale)
   }
-  const [existing] = await store.sql<{ id: string }[]>`
-    SELECT id FROM track WHERE program_id = ${program.id} AND lower(name) = ${name.toLowerCase()} LIMIT 1
-  `
-  if (existing) {
-    if (asString(args.client_key)) return getTrack(store, existing.id)
-    throw new McpUserError(`Track "${name}" already exists.`)
-  }
-  await store.sql`
-    INSERT INTO track (program_id, name, color, icon, sort_order, purpose)
-    SELECT ${program.id}, ${GENERAL_TRACK_SEED.name}, ${GENERAL_TRACK_SEED.color},
-           ${GENERAL_TRACK_SEED.icon}, ${GENERAL_TRACK_SEED.sort_order}, ${GENERAL_TRACK_SEED.purpose}
-    WHERE EXISTS (
-      SELECT 1 FROM program
-      WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
-        AND status IS DISTINCT FROM 'external'
-    )
-      AND NOT EXISTS (
-        SELECT 1 FROM track WHERE program_id = ${program.id} AND name = ${GENERAL_TRACK_SEED.name}
+  return gatedWrite(gate, 'create_track', args, { diff }, async () => {
+    const [existing] = await store.sql<{ id: string }[]>`
+      SELECT id FROM track WHERE program_id = ${program.id} AND lower(name) = ${name.toLowerCase()} LIMIT 1
+    `
+    if (existing) {
+      if (gate && (await hiddenIds(store, 'track')).includes(existing.id)) {
+        throw new McpUserError(`Track "${name}" was undone. Pick another name, or the athlete can bring it back from their Changes feed (Program → Changes) where the change that removed it offers Redo.`)
+      }
+      if (asString(args.client_key)) return { result: await getTrack(store, existing.id), entry: null }
+      throw new McpUserError(`Track "${name}" already exists.`)
+    }
+    await store.sql`
+      INSERT INTO track (program_id, name, color, icon, sort_order, purpose)
+      SELECT ${program.id}, ${GENERAL_TRACK_SEED.name}, ${GENERAL_TRACK_SEED.color},
+             ${GENERAL_TRACK_SEED.icon}, ${GENERAL_TRACK_SEED.sort_order}, ${GENERAL_TRACK_SEED.purpose}
+      WHERE EXISTS (
+        SELECT 1 FROM program
+        WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
+          AND status IS DISTINCT FROM 'external'
       )
-  `
-  const [row] = await store.sql<{ id: string }[]>`
-    INSERT INTO track (program_id, name, color, icon, sort_order, purpose, methodology_text, sources, deload_policy, retest_policy)
-    SELECT ${program.id}, ${name}, ${asString(args.color) ?? '#9A9A9A'}, ${asString(args.icon) ?? 'circle'},
-           COALESCE((SELECT MAX(sort_order) + 1 FROM track WHERE program_id = ${program.id}), 1),
-           ${asString(args.purpose) ?? null}, ${asString(args.methodology_text) ?? null},
-           ${jsonParam(store.sql, args.sources ?? [])},
-           ${jsonParam(store.sql, args.deload_policy ?? null)},
-           ${jsonParam(store.sql, args.retest_policy ?? null)}
-    WHERE EXISTS (SELECT 1 FROM program WHERE id = ${program.id} AND athlete_id = ${store.athleteId})
-    RETURNING id
-  `
-  if (!row) throw new McpUserError('Could not create track.')
-  await recordMove(store, `Added the ${name} track.`, args, row.id)
-  return getTrack(store, row.id)
+        AND NOT EXISTS (
+          SELECT 1 FROM track WHERE program_id = ${program.id} AND name = ${GENERAL_TRACK_SEED.name}
+        )
+    `
+    const [row] = await store.sql<{ id: string }[]>`
+      INSERT INTO track (program_id, name, color, icon, sort_order, purpose, methodology_text, sources, deload_policy, retest_policy)
+      SELECT ${program.id}, ${name}, ${asString(args.color) ?? '#9A9A9A'}, ${asString(args.icon) ?? 'circle'},
+             COALESCE((SELECT MAX(sort_order) + 1 FROM track WHERE program_id = ${program.id}), 1),
+             ${asString(args.purpose) ?? null}, ${asString(args.methodology_text) ?? null},
+             ${jsonParam(store.sql, args.sources ?? [])},
+             ${jsonParam(store.sql, args.deload_policy ?? null)},
+             ${jsonParam(store.sql, args.retest_policy ?? null)}
+      WHERE EXISTS (SELECT 1 FROM program WHERE id = ${program.id} AND athlete_id = ${store.athleteId})
+      RETURNING id
+    `
+    if (!row) throw new McpUserError('Could not create track.')
+    await recordMove(store, `Added the ${name} track.`, args, row.id)
+    return {
+      result: await getTrack(store, row.id),
+      entry: { targetType: 'track', targetId: row.id, diff: { track_id: row.id, after: { name, purpose: asString(args.purpose) ?? null, color: asString(args.color) ?? null } } },
+    }
+  })
 }
 
-async function updateTrack(store: ConnectedStore, args: Record<string, unknown>) {
+async function updateTrack(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const program = await activeProgram(store)
   if (!program) throw new McpUserError('No active program.')
   const track = findTrack(await loadTracks(store, program.id), asString(args.track) ?? asString(args.track_id) ?? asString(args.name))
@@ -339,40 +402,51 @@ async function updateTrack(store: ConnectedStore, args: Record<string, unknown>)
   if (args.set_deload_policy !== undefined) patch.deload_policy = args.set_deload_policy
   if (args.set_retest_policy !== undefined) patch.retest_policy = args.set_retest_policy
   const diff = [{ op: 'update_track', track: track.name, set: patch }]
-  if (!asBool(args.confirm)) return writePreview(diff, [], { rationale: asString(args.rationale) ?? null })
+  const state = gate ? { diff, before: await trackSnapshot(store, track.id) } : null
+  if (!asBool(args.confirm)) {
+    const rationale = asString(args.rationale) ?? null
+    return gatedPreview(gate, 'update_track', await writePreview(diff, [], { rationale }), state, rationale)
+  }
   if (Object.keys(patch).length === 0) throw new McpUserError('nothing to change')
-  await store.sql`
-    UPDATE track SET
-      name = COALESCE(${asString(args.set_name) ?? null}, name),
-      color = COALESCE(${asString(args.set_color) ?? null}, color),
-      purpose = COALESCE(${asString(args.set_purpose) ?? null}, purpose),
-      methodology_text = COALESCE(${asString(args.set_methodology_text) ?? null}, methodology_text),
-      sort_order = COALESCE(${asNum(args.set_order)}, sort_order)
-    WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})
-  `
-  if (args.set_sources !== undefined) {
-    await store.sql`UPDATE track SET sources = ${jsonParam(store.sql, args.set_sources)}
-      WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})`
-  }
-  if (args.set_deload_policy !== undefined) {
-    await store.sql`UPDATE track SET deload_policy = ${jsonParam(store.sql, args.set_deload_policy)}
-      WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})`
-  }
-  if (args.set_retest_policy !== undefined) {
-    await store.sql`UPDATE track SET retest_policy = ${jsonParam(store.sql, args.set_retest_policy)}
-      WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})`
-  }
-  await recordMove(store, `Updated the ${track.name} track.`, args, track.id)
-  return getTrack(store, track.id)
+  return gatedWrite(gate, 'update_track', args, state, async () => {
+    await store.sql`
+      UPDATE track SET
+        name = COALESCE(${asString(args.set_name) ?? null}, name),
+        color = COALESCE(${asString(args.set_color) ?? null}, color),
+        purpose = COALESCE(${asString(args.set_purpose) ?? null}, purpose),
+        methodology_text = COALESCE(${asString(args.set_methodology_text) ?? null}, methodology_text),
+        sort_order = COALESCE(${asNum(args.set_order)}, sort_order)
+      WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})
+    `
+    if (args.set_sources !== undefined) {
+      await store.sql`UPDATE track SET sources = ${jsonParam(store.sql, args.set_sources)}
+        WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})`
+    }
+    if (args.set_deload_policy !== undefined) {
+      await store.sql`UPDATE track SET deload_policy = ${jsonParam(store.sql, args.set_deload_policy)}
+        WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})`
+    }
+    if (args.set_retest_policy !== undefined) {
+      await store.sql`UPDATE track SET retest_policy = ${jsonParam(store.sql, args.set_retest_policy)}
+        WHERE id = ${track.id} AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})`
+    }
+    await recordMove(store, `Updated the ${track.name} track.`, args, track.id)
+    return {
+      result: await getTrack(store, track.id),
+      entry: gate
+        ? { targetType: 'track', targetId: track.id, diff: { track_id: track.id, set: patch, before: state?.before ?? null, after: await trackSnapshot(store, track.id) } }
+        : null,
+    }
+  })
 }
 
-async function assignExercises(store: ConnectedStore, args: Record<string, unknown>) {
+async function assignExercises(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const program = await activeProgram(store)
   if (!program) throw new McpUserError('No active program.')
   const tracks = await loadTracks(store, program.id)
   const assignments = Array.isArray(args.assignments) ? args.assignments as Array<Record<string, unknown>> : []
   if (!assignments.length) throw new McpUserError('assignments is required')
-  const planned = []
+  const planned: Array<{ session?: string; exercise?: string; track: string | null; track_id?: string; ok: boolean; reason?: string }> = []
   for (const a of assignments) {
     const session = asString(a.session_name)
     const exercise = asString(a.exercise_name)
@@ -383,32 +457,40 @@ async function assignExercises(store: ConnectedStore, args: Record<string, unkno
     }
     planned.push({ session, exercise, track: track.name, track_id: track.id, ok: true })
   }
-  if (!asBool(args.confirm)) {
-    return writePreview(planned, planned.filter((p) => !p.ok).map((p) => String(p.reason)), { rationale: asString(args.rationale) ?? null })
-  }
   const sessions = await loadLiveSessions(store, program.id)
-  const updated: string[] = []
-  const movedTo = new Set<string>()
-  for (const a of planned) {
-    if (!a.ok || !a.track_id) continue
-    const sess = sessions.find((s) => s.name.toLowerCase().includes(a.session!.toLowerCase()) || a.session!.toLowerCase().includes(s.name.toLowerCase()))
-    if (!sess) continue
-    const next = sess.exercises.map((ex) => {
-      const match = ex.name.toLowerCase().includes(a.exercise!.toLowerCase()) || a.exercise!.toLowerCase().includes(ex.name.toLowerCase())
-      return match ? { ...ex, track_id: a.track_id } : ex
-    })
-    await store.sql`
-      UPDATE routine SET exercises = ${jsonParam(store.sql, next)}
-      WHERE id = ${sess.routineId}
-        AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})
-    `
-    updated.push(`${a.exercise} → ${a.track}`)
-    movedTo.add(a.track_id)
+  const before = gate ? await routineSnapshots(store, sessions.map((s) => s.routineId)) : []
+  const state = gate ? { diff: planned, before } : null
+  if (!asBool(args.confirm)) {
+    const rationale = asString(args.rationale) ?? null
+    return gatedPreview(gate, 'assign_exercise_to_track', await writePreview(planned, planned.filter((p) => !p.ok).map((p) => String(p.reason)), { rationale }), state, rationale)
   }
-  if (updated.length) {
-    await recordMove(store, `Moved ${updated.join(', ')}.`, args, movedTo.size === 1 ? [...movedTo][0] : null)
-  }
-  return { ...mcpStamp(new Date(), await athleteZone(store)), updated }
+  return gatedWrite(gate, 'assign_exercise_to_track', args, state, async () => {
+    const updated: string[] = []
+    const movedTo = new Set<string>()
+    for (const a of planned) {
+      if (!a.ok || !a.track_id) continue
+      const sess = sessions.find((s) => s.name.toLowerCase().includes(a.session!.toLowerCase()) || a.session!.toLowerCase().includes(s.name.toLowerCase()))
+      if (!sess) continue
+      const next = sess.exercises.map((ex) => {
+        const match = ex.name.toLowerCase().includes(a.exercise!.toLowerCase()) || a.exercise!.toLowerCase().includes(ex.name.toLowerCase())
+        return match ? { ...ex, track_id: a.track_id } : ex
+      })
+      await store.sql`
+        UPDATE routine SET exercises = ${jsonParam(store.sql, next)}
+        WHERE id = ${sess.routineId}
+          AND program_id IN (SELECT id FROM program WHERE athlete_id = ${store.athleteId})
+      `
+      updated.push(`${a.exercise} → ${a.track}`)
+      movedTo.add(a.track_id)
+    }
+    if (updated.length) {
+      await recordMove(store, `Moved ${updated.join(', ')}.`, args, movedTo.size === 1 ? [...movedTo][0] : null)
+    }
+    const result = { ...mcpStamp(new Date(), await athleteZone(store)), updated }
+    if (!gate || !updated.length) return { result, entry: null }
+    const delta = routineDelta(before, await routineSnapshots(store, sessions.map((s) => s.routineId)))
+    return { result, entry: { targetType: 'routine', targetId: program.id, diff: { ...delta, timing: 'now', updated } } }
+  })
 }
 
 async function getTrackProgression(store: ConnectedStore, args: Record<string, unknown>, live: LiveProgram | null) {
@@ -452,7 +534,7 @@ async function getTrackProgression(store: ConnectedStore, args: Record<string, u
   }
 }
 
-async function setProgressionRule(store: ConnectedStore, args: Record<string, unknown>) {
+async function setProgressionRule(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const program = await activeProgram(store)
   if (!program) throw new McpUserError('No active program.')
   const track = findTrack(await loadTracks(store, program.id), asString(args.track) ?? asString(args.track_id))
@@ -462,36 +544,48 @@ async function setProgressionRule(store: ConnectedStore, args: Record<string, un
   const params = (args.params && typeof args.params === 'object') ? args.params : {}
   const exercise = asString(args.exercise_name) ?? null
   const diff = [{ op: 'set_track_progression_rule', track: track.name, exercise, engine_type: engine, params }]
-  if (!asBool(args.confirm)) return writePreview(diff, [], { rationale: asString(args.rationale) ?? null })
-  const [row] = await store.sql<{ id: string }[]>`
-    INSERT INTO progression_rule (program_id, track_id, exercise_name, engine_type, params, active_from)
-    SELECT ${program.id}, ${track.id}, ${exercise}, ${engine}, ${jsonParam(store.sql, params)},
-           ${asString(args.active_from) ?? null}
-    WHERE EXISTS (SELECT 1 FROM program WHERE id = ${program.id} AND athlete_id = ${store.athleteId})
-    RETURNING id
-  `
-  if (!row) throw new McpUserError('Could not save rule.')
-  await recordMove(
-    store,
-    `Set ${track.name} to progress by ${engineLabel(engine)}${exercise ? ` for ${exercise}` : ''}.`,
-    args,
-    track.id,
-  )
-  return { ...mcpStamp(new Date(), await athleteZone(store)), rule: { id: row.id, track: track.name, exercise, engine_type: engine, params } }
+  if (!asBool(args.confirm)) {
+    const rationale = asString(args.rationale) ?? null
+    return gatedPreview(gate, 'set_track_progression_rule', await writePreview(diff, [], { rationale }), { diff }, rationale)
+  }
+  return gatedWrite(gate, 'set_track_progression_rule', args, { diff }, async () => {
+    const [row] = await store.sql<{ id: string }[]>`
+      INSERT INTO progression_rule (program_id, track_id, exercise_name, engine_type, params, active_from)
+      SELECT ${program.id}, ${track.id}, ${exercise}, ${engine}, ${jsonParam(store.sql, params)},
+             ${asString(args.active_from) ?? null}
+      WHERE EXISTS (SELECT 1 FROM program WHERE id = ${program.id} AND athlete_id = ${store.athleteId})
+      RETURNING id
+    `
+    if (!row) throw new McpUserError('Could not save rule.')
+    await recordMove(
+      store,
+      `Set ${track.name} to progress by ${engineLabel(engine)}${exercise ? ` for ${exercise}` : ''}.`,
+      args,
+      track.id,
+    )
+    return {
+      result: { ...mcpStamp(new Date(), await athleteZone(store)), rule: { id: row.id, track: track.name, exercise, engine_type: engine, params } },
+      entry: {
+        targetType: 'progression_rule',
+        targetId: row.id,
+        diff: { rule_id: row.id, track_id: track.id, after: { track: track.name, exercise, engine_type: engine, params, active_from: asString(args.active_from) ?? null } },
+      },
+    }
+  })
 }
 
 async function listAutoregRules(store: ConnectedStore, args: Record<string, unknown>) {
   const scope = asString(args.scope_type)
   const rows = await store.sql<object[]>`
     SELECT id, scope_type, scope_id, scope_name, signal, op, value, action, action_params, message, created_at
-    FROM autoreg_rule WHERE athlete_id = ${store.athleteId}
+    FROM autoreg_rule WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'autoreg_rule'))}::text[]))
     ORDER BY created_at
   `
   const filtered = scope ? rows.filter((r) => (r as { scope_type: string }).scope_type === scope) : rows
   return { ...mcpStamp(new Date(), await athleteZone(store)), rules: filtered }
 }
 
-async function upsertAutoregRule(store: ConnectedStore, args: Record<string, unknown>) {
+async function upsertAutoregRule(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const signal = asString(args.signal)
   const op = asString(args.op)
   const action = asString(args.action)
@@ -499,18 +593,26 @@ async function upsertAutoregRule(store: ConnectedStore, args: Record<string, unk
   const scope_type = asString(args.scope_type) ?? 'program'
   if (!signal || !op || !action || !message) throw new McpUserError('signal, op, action, and message are required')
   const diff = [{ op: 'upsert_autoreg_rule', signal, action, message }]
-  if (!asBool(args.confirm)) return writePreview(diff, [], { rationale: asString(args.rationale) ?? null })
-  const [row] = await store.sql<{ id: string }[]>`
-    INSERT INTO autoreg_rule (athlete_id, scope_type, scope_id, scope_name, signal, op, value, action, action_params, message)
-    VALUES (
-      ${store.athleteId}, ${scope_type}, ${asString(args.scope) ?? asString(args.scope_id) ?? null},
-      ${asString(args.scope_name) ?? null}, ${signal}, ${op}, ${asNum(args.value)}, ${action},
-      ${jsonParam(store.sql, args.action_params ?? {})}, ${message}
-    )
-    RETURNING id
-  `
-  await recordMove(store, `Added a rule: ${message}`, args, null)
-  return { ...mcpStamp(new Date(), await athleteZone(store)), rule: { id: row?.id, signal, op, action, message } }
+  if (!asBool(args.confirm)) {
+    const rationale = asString(args.rationale) ?? null
+    return gatedPreview(gate, 'upsert_autoreg_rule', await writePreview(diff, [], { rationale }), { diff }, rationale)
+  }
+  return gatedWrite(gate, 'upsert_autoreg_rule', args, { diff }, async () => {
+    const [row] = await store.sql<{ id: string }[]>`
+      INSERT INTO autoreg_rule (athlete_id, scope_type, scope_id, scope_name, signal, op, value, action, action_params, message)
+      VALUES (
+        ${store.athleteId}, ${scope_type}, ${asString(args.scope) ?? asString(args.scope_id) ?? null},
+        ${asString(args.scope_name) ?? null}, ${signal}, ${op}, ${asNum(args.value)}, ${action},
+        ${jsonParam(store.sql, args.action_params ?? {})}, ${message}
+      )
+      RETURNING id
+    `
+    await recordMove(store, `Added a rule: ${message}`, args, null)
+    return {
+      result: { ...mcpStamp(new Date(), await athleteZone(store)), rule: { id: row?.id, signal, op, action, message } },
+      entry: { targetType: 'autoreg_rule', targetId: row?.id ?? null, diff: { rule_id: row?.id ?? null, after: { scope_type, signal, op, value: asNum(args.value), action, message } } },
+    }
+  })
 }
 
 async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
@@ -528,14 +630,14 @@ async function getGoals(store: ConnectedStore, args: Record<string, unknown>) {
   }[]>`
     SELECT id, name, metric, unit, side, direction, target, target_range_hi, baseline, current, best, due_date::text, status, track_id,
            cadence, source_metric
-    FROM athlete_goal WHERE athlete_id = ${store.athleteId}
+    FROM athlete_goal WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
     ORDER BY name
   `
   const measurements = await store.sql<{
     goal_id: string; measured_on: string; value: number | string; source: string; note: string | null; client_key: string | null
   }[]>`
     SELECT goal_id, measured_on::text, value, source, note, client_key
-    FROM goal_measurement WHERE athlete_id = ${store.athleteId}
+    FROM goal_measurement WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'goal_measurement'))}::text[]))
     ORDER BY measured_on
   `
   const historyByGoal = new Map<string, GoalMeasurement[]>()
@@ -624,7 +726,7 @@ async function getGoalBrief(store: ConnectedStore) {
   const exerciseNames = [...new Set(sessions.flatMap((s) => s.exercises.map((e) => e.name)))]
   const lanes = await store.sql<{ id: string; name: string }[]>`
     SELECT t.id, t.name FROM track t JOIN program p ON p.id = t.program_id
-    WHERE p.athlete_id = ${store.athleteId}
+    WHERE p.athlete_id = ${store.athleteId} AND NOT (t.id::text = ANY(${idList(await hiddenIds(store, 'track'))}::text[]))
   `
   const laneName = new Map(lanes.map((t) => [t.id, t.name]))
   const refs = [...new Set(goals.flatMap((g) => [g.id, g.track_id]).filter((id): id is string => !!id))]
@@ -694,7 +796,7 @@ async function getGoalBrief(store: ConnectedStore) {
   }
 }
 
-async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) {
+async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const name = asString(args.name)
   if (!name) throw new McpUserError('name is required')
   const direction = asString(args.direction) ?? 'higher'
@@ -714,64 +816,87 @@ async function upsertGoal(store: ConnectedStore, args: Record<string, unknown>) 
   }
   if (source) args = { ...args, source_metric: formatGoalSource(source) }
   const diff = [{ op: 'upsert_goal', name, target: asNum(args.target), track: track?.name ?? null, source: source ? formatGoalSource(source) : null }]
-  if (!asBool(args.confirm)) return writePreview(diff, [], { rationale: asString(args.rationale) ?? null })
   const goalId = asString(args.goal_id)
-  if (goalId) {
-    await store.sql`
-      UPDATE athlete_goal SET
-        name = ${name},
-        metric = COALESCE(${asString(args.metric) ?? null}, metric),
-        unit = COALESCE(${asString(args.unit) ?? null}, unit),
-        side = ${side},
-        direction = ${direction},
-        target = COALESCE(${asNum(args.target)}, target),
-        target_range_hi = COALESCE(${asNum(args.target_range_hi)}, target_range_hi),
-        baseline = COALESCE(${asNum(args.baseline)}, baseline),
-        due_date = COALESCE(${asString(args.due_date) ?? null}, due_date),
-        test_protocol = COALESCE(${asString(args.test_protocol) ?? null}, test_protocol),
-        cadence = COALESCE(${asString(args.cadence) ?? null}, cadence),
-        source_metric = COALESCE(${asString(args.source_metric) ?? null}, source_metric),
-        track_id = COALESCE(${track?.id ?? null}, track_id),
+  const before = gate ? await goalSnapshot(store, goalId ? { id: goalId } : { name }) : null
+  const state = gate ? { diff, before } : null
+  if (!asBool(args.confirm)) {
+    const rationale = asString(args.rationale) ?? null
+    return gatedPreview(gate, 'upsert_goal', await writePreview(diff, [], { rationale }), state, rationale)
+  }
+  const logged = async (id: string | null | undefined) => {
+    if (!gate || !id) return null
+    const { id: _id, ...after } = (await goalSnapshot(store, { id })) ?? { id }
+    const was = before ? (({ id: _b, ...rest }) => rest)(before) : null
+    return { targetType: 'athlete_goal', targetId: id, diff: { goal_id: id, before: was, after } }
+  }
+  return gatedWrite(gate, 'upsert_goal', args, state, async () => {
+    if (goalId) {
+      await store.sql`
+        UPDATE athlete_goal SET
+          name = ${name},
+          metric = COALESCE(${asString(args.metric) ?? null}, metric),
+          unit = COALESCE(${asString(args.unit) ?? null}, unit),
+          side = ${side},
+          direction = ${direction},
+          target = COALESCE(${asNum(args.target)}, target),
+          target_range_hi = COALESCE(${asNum(args.target_range_hi)}, target_range_hi),
+          baseline = COALESCE(${asNum(args.baseline)}, baseline),
+          due_date = COALESCE(${asString(args.due_date) ?? null}, due_date),
+          test_protocol = COALESCE(${asString(args.test_protocol) ?? null}, test_protocol),
+          cadence = COALESCE(${asString(args.cadence) ?? null}, cadence),
+          source_metric = COALESCE(${asString(args.source_metric) ?? null}, source_metric),
+          track_id = COALESCE(${track?.id ?? null}, track_id),
+          updated_at = NOW()
+        WHERE id = ${goalId} AND athlete_id = ${store.athleteId}
+      `
+      const [owned] = await store.sql<{ id: string }[]>`
+        SELECT id FROM athlete_goal WHERE id = ${goalId} AND athlete_id = ${store.athleteId} LIMIT 1
+      `
+      if (owned) await recordMove(store, `Updated the goal ${name}.`, args, owned.id)
+      return { result: { ...mcpStamp(new Date(), await athleteZone(store)), goal: { id: goalId, name } }, entry: await logged(owned?.id) }
+    }
+    if (gate) {
+      const retired = await hiddenIds(store, 'athlete_goal')
+      const [taken] = retired.length
+        ? await store.sql<{ id: string }[]>`
+            SELECT id::text AS id FROM athlete_goal
+            WHERE athlete_id = ${store.athleteId} AND name = ${name} AND id::text = ANY(${idList(retired)}::text[])
+          `
+        : []
+      if (taken) throw new McpUserError(`The goal "${name}" was undone. Pick another name, or the athlete can bring it back from their Changes feed (Program → Changes) where the change that removed it offers Redo.`)
+    }
+    const [row] = await store.sql<{ id: string }[]>`
+      INSERT INTO athlete_goal (
+        athlete_id, track_id, name, metric, unit, side, direction,
+        target, target_range_hi, baseline, due_date, test_protocol, cadence, source_metric, status
+      ) VALUES (
+        ${store.athleteId}, ${track?.id ?? null}, ${name}, ${asString(args.metric) ?? name},
+        ${asString(args.unit) ?? null}, ${side}, ${direction}, ${asNum(args.target)},
+        ${asNum(args.target_range_hi)}, ${asNum(args.baseline)}, ${asString(args.due_date) ?? null},
+        ${asString(args.test_protocol) ?? null}, ${asString(args.cadence) ?? null},
+        ${asString(args.source_metric) ?? null}, 'on_track'
+      )
+      ON CONFLICT (athlete_id, name) DO UPDATE SET
+        target = COALESCE(EXCLUDED.target, athlete_goal.target),
         updated_at = NOW()
-      WHERE id = ${goalId} AND athlete_id = ${store.athleteId}
+      RETURNING id
     `
-    const [owned] = await store.sql<{ id: string }[]>`
-      SELECT id FROM athlete_goal WHERE id = ${goalId} AND athlete_id = ${store.athleteId} LIMIT 1
-    `
-    if (owned) await recordMove(store, `Updated the goal ${name}.`, args, owned.id)
-    return { ...mcpStamp(new Date(), await athleteZone(store)), goal: { id: goalId, name } }
-  }
-  const [row] = await store.sql<{ id: string }[]>`
-    INSERT INTO athlete_goal (
-      athlete_id, track_id, name, metric, unit, side, direction,
-      target, target_range_hi, baseline, due_date, test_protocol, cadence, source_metric, status
-    ) VALUES (
-      ${store.athleteId}, ${track?.id ?? null}, ${name}, ${asString(args.metric) ?? name},
-      ${asString(args.unit) ?? null}, ${side}, ${direction}, ${asNum(args.target)},
-      ${asNum(args.target_range_hi)}, ${asNum(args.baseline)}, ${asString(args.due_date) ?? null},
-      ${asString(args.test_protocol) ?? null}, ${asString(args.cadence) ?? null},
-      ${asString(args.source_metric) ?? null}, 'on_track'
-    )
-    ON CONFLICT (athlete_id, name) DO UPDATE SET
-      target = COALESCE(EXCLUDED.target, athlete_goal.target),
-      updated_at = NOW()
-    RETURNING id
-  `
-  if (row) {
-    const target = asNum(args.target)
-    const unit = asString(args.unit)
-    const due = asString(args.due_date)
-    await recordMove(
-      store,
-      `Set the goal ${name}${target != null ? `: ${target}${unit ? ` ${unit}` : ''}` : ''}${due ? ` by ${due}` : ''}.`,
-      args,
-      row.id,
-    )
-  }
-  return { ...mcpStamp(new Date(), await athleteZone(store)), goal: { id: row?.id, name } }
+    if (row) {
+      const target = asNum(args.target)
+      const unit = asString(args.unit)
+      const due = asString(args.due_date)
+      await recordMove(
+        store,
+        `Set the goal ${name}${target != null ? `: ${target}${unit ? ` ${unit}` : ''}` : ''}${due ? ` by ${due}` : ''}.`,
+        args,
+        row.id,
+      )
+    }
+    return { result: { ...mcpStamp(new Date(), await athleteZone(store)), goal: { id: row?.id, name } }, entry: await logged(row?.id) }
+  })
 }
 
-async function logGoalMeasurement(store: ConnectedStore, args: Record<string, unknown>) {
+async function logGoalMeasurement(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const ident = asString(args.goal) ?? asString(args.goal_id) ?? asString(args.name)
   if (!ident) throw new McpUserError('goal is required')
   const value = asNum(args.value)
@@ -786,54 +911,71 @@ async function logGoalMeasurement(store: ConnectedStore, args: Record<string, un
     FROM athlete_goal
     WHERE athlete_id = ${store.athleteId}
       AND (id::text = ${ident} OR lower(name) = ${ident.toLowerCase()} OR name ILIKE ${'%' + ident + '%'})
+      AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
     LIMIT 1
   `
   if (!goal) throw new McpUserError(`No goal "${ident}".`)
   const clientKey = asString(args.client_key)
   const diff = [{ op: 'log_goal_measurement', goal: goal.name, date, value }]
   if (!asBool(args.confirm)) return writePreview(diff)
-  if (clientKey) {
-    const [dup] = await store.sql<{ id: string }[]>`
-      SELECT id FROM goal_measurement
-      WHERE athlete_id = ${store.athleteId} AND client_key = ${clientKey}
-      LIMIT 1
-    `
-    if (dup) {
-      return { ...mcpStamp(new Date(), await athleteZone(store)), measurement: { id: dup.id, reused: true }, goal_after: goal }
+  return loggedWrite<Record<string, unknown>>(gate, 'log_goal_measurement', async () => {
+    if (clientKey) {
+      const [dup] = await store.sql<{ id: string }[]>`
+        SELECT id FROM goal_measurement
+        WHERE athlete_id = ${store.athleteId} AND client_key = ${clientKey}
+        LIMIT 1
+      `
+      if (dup) {
+        return { result: { ...mcpStamp(new Date(), await athleteZone(store)), measurement: { id: dup.id, reused: true }, goal_after: goal }, entry: null }
+      }
     }
-  }
-  const [row] = await store.sql<{ id: string }[]>`
-    INSERT INTO goal_measurement (athlete_id, goal_id, measured_on, value, side, source, note, client_key)
-    VALUES (
-      ${store.athleteId}, ${goal.id}, ${date}, ${value}, ${asString(args.side) ?? null},
-      ${asString(args.source) ?? 'agent'}, ${asString(args.note) ?? null}, ${clientKey ?? null}
-    )
-    RETURNING id
-  `
-  const today = todayISO(await athleteZone(store))
-  // current, best and baseline from every measurement, the way the app recomputes
-  // them after a session: a rolling goal's current is its capacity, not this one value.
-  const historyRows = await store.sql<{ measured_on: string; value: number | string; source: string; note: string | null; client_key: string | null }[]>`
-    SELECT measured_on::text, value, source, note, client_key
-    FROM goal_measurement WHERE athlete_id = ${store.athleteId} AND goal_id = ${goal.id}
-    ORDER BY measured_on
-  `
-  const history: GoalMeasurement[] = historyRows.map((r) => ({
-    date: r.measured_on, value: goalNumber(r.value) ?? 0, source: r.source, note: r.note, client_key: r.client_key,
-  }))
-  const applied = goalMarks(goal, history, today) ?? { current: value, best: value, baseline: goalNumber(goal.baseline) ?? value }
-  const status = goalRead({ ...goal, current: applied.current, best: applied.best, baseline: applied.baseline }, history, today).computed
-  await store.sql`
-    UPDATE athlete_goal
-    SET current = ${applied.current}, best = ${applied.best}, baseline = ${applied.baseline},
-        status = ${status}, updated_at = NOW()
-    WHERE id = ${goal.id} AND athlete_id = ${store.athleteId}
-  `
-  return {
-    ...mcpStamp(new Date(), await athleteZone(store)),
-    measurement: { id: row?.id, date, value, goal: goal.name },
-    goal_after: { ...goal, current: applied.current, best: applied.best, baseline: applied.baseline, status },
-  }
+    // What its undo puts back on the goal (tracks_v1 only).
+    const goalBefore = gate ? await goalStateNow(store, goal.id) : null
+    const [row] = await store.sql<{ id: string }[]>`
+      INSERT INTO goal_measurement (athlete_id, goal_id, measured_on, value, side, source, note, client_key)
+      VALUES (
+        ${store.athleteId}, ${goal.id}, ${date}, ${value}, ${asString(args.side) ?? null},
+        ${asString(args.source) ?? 'agent'}, ${asString(args.note) ?? null}, ${clientKey ?? null}
+      )
+      RETURNING id
+    `
+    const today = todayISO(await athleteZone(store))
+    // current, best and baseline from every measurement, the way the app recomputes
+    // them after a session: a rolling goal's current is its capacity, not this one value.
+    const historyRows = await store.sql<{ measured_on: string; value: number | string; source: string; note: string | null; client_key: string | null }[]>`
+      SELECT measured_on::text, value, source, note, client_key
+      FROM goal_measurement
+      WHERE athlete_id = ${store.athleteId} AND goal_id = ${goal.id}
+        AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'goal_measurement'))}::text[]))
+      ORDER BY measured_on
+    `
+    const history: GoalMeasurement[] = historyRows.map((r) => ({
+      date: r.measured_on, value: goalNumber(r.value) ?? 0, source: r.source, note: r.note, client_key: r.client_key,
+    }))
+    const applied = goalMarks(goal, history, today) ?? { current: value, best: value, baseline: goalNumber(goal.baseline) ?? value }
+    const status = goalRead({ ...goal, current: applied.current, best: applied.best, baseline: applied.baseline }, history, today).computed
+    await store.sql`
+      UPDATE athlete_goal
+      SET current = ${applied.current}, best = ${applied.best}, baseline = ${applied.baseline},
+          status = ${status}, updated_at = NOW()
+      WHERE id = ${goal.id} AND athlete_id = ${store.athleteId}
+    `
+    return {
+      result: {
+        ...mcpStamp(new Date(), await athleteZone(store)),
+        measurement: { id: row?.id, date, value, goal: goal.name },
+        goal_after: { ...goal, current: applied.current, best: applied.best, baseline: applied.baseline, status },
+      },
+      entry: {
+        targetType: 'goal_measurement',
+        targetId: row?.id ?? null,
+        diff: {
+          measurement_id: row?.id ?? null, goal: goal.name, goal_id: goal.id, date, value, side: asString(args.side) ?? null,
+          goal_before: goalBefore, goal_after: gate ? await goalStateNow(store, goal.id) : null,
+        },
+      },
+    }
+  })
 }
 
 async function getGoalHistory(store: ConnectedStore, args: Record<string, unknown>) {
@@ -848,6 +990,7 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
     FROM athlete_goal
     WHERE athlete_id = ${store.athleteId}
       AND (id::text = ${ident} OR lower(name) = ${ident.toLowerCase()} OR name ILIKE ${'%' + ident + '%'})
+      AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'athlete_goal'))}::text[]))
     LIMIT 1
   `
   if (!goal) throw new McpUserError(`No goal "${ident}".`)
@@ -860,6 +1003,7 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
     FROM goal_measurement
     WHERE athlete_id = ${store.athleteId} AND goal_id = ${goal.id}
       AND (${since ?? null}::date IS NULL OR measured_on >= ${since ?? null}::date)
+      AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'goal_measurement'))}::text[]))
     ORDER BY measured_on
   `
   const history: GoalMeasurement[] = rows.map((r) => ({
@@ -885,7 +1029,7 @@ async function getGoalHistory(store: ConnectedStore, args: Record<string, unknow
   }
 }
 
-async function addWorkoutNote(store: ConnectedStore, args: Record<string, unknown>) {
+async function addWorkoutNote(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const text = asString(args.text)
   if (!text) throw new McpUserError('text is required')
   const workoutId = asString(args.workout_id)
@@ -917,33 +1061,47 @@ async function addWorkoutNote(store: ConnectedStore, args: Record<string, unknow
   if (!resolvedWorkout && !sessionId) throw new McpUserError('workout_id or session_name is required')
   const diff = [{ op: 'add_workout_note', workout_id: resolvedWorkout, session_id: sessionId, text }]
   if (!asBool(args.confirm)) return writePreview(diff)
-  if (clientKey) {
-    const [dup] = await store.sql<{ id: string; body: string }[]>`
-      SELECT id, body FROM workout_note
-      WHERE athlete_id = ${store.athleteId} AND client_key = ${clientKey}
-      LIMIT 1
+  return loggedWrite<Record<string, unknown>>(gate, 'add_workout_note', async () => {
+    if (clientKey) {
+      const [dup] = await store.sql<{ id: string; body: string }[]>`
+        SELECT id, body FROM workout_note
+        WHERE athlete_id = ${store.athleteId} AND client_key = ${clientKey}
+        LIMIT 1
+      `
+      if (dup) return { result: { ...mcpStamp(new Date(), await athleteZone(store)), note: { id: dup.id, text: dup.body, reused: true } }, entry: null }
+    }
+    const [row] = await store.sql<{ id: string; created_at: string }[]>`
+      INSERT INTO workout_note (athlete_id, workout_id, session_id, author, body, client_key)
+      VALUES (${store.athleteId}, ${resolvedWorkout}, ${sessionId}, 'coach', ${text}, ${clientKey ?? null})
+      RETURNING id, created_at
     `
-    if (dup) return { ...mcpStamp(new Date(), await athleteZone(store)), note: { id: dup.id, text: dup.body, reused: true } }
-  }
-  const [row] = await store.sql<{ id: string; created_at: string }[]>`
-    INSERT INTO workout_note (athlete_id, workout_id, session_id, author, body, client_key)
-    VALUES (${store.athleteId}, ${resolvedWorkout}, ${sessionId}, 'coach', ${text}, ${clientKey ?? null})
-    RETURNING id, created_at
-  `
-  return { ...mcpStamp(new Date(), await athleteZone(store)), note: { id: row?.id, text, workout_id: resolvedWorkout, session_id: sessionId } }
+    return {
+      result: { ...mcpStamp(new Date(), await athleteZone(store)), note: { id: row?.id, text, workout_id: resolvedWorkout, session_id: sessionId } },
+      entry: { targetType: 'workout_note', targetId: row?.id ?? null, diff: { note_id: row?.id ?? null, text, workout_id: resolvedWorkout, session_id: sessionId } },
+    }
+  })
 }
 
-async function updateAthleteTarget(store: ConnectedStore, args: Record<string, unknown>) {
+async function updateAthleteTarget(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const text = asString(args.text)
   if (!text) throw new McpUserError('text is required')
   const diff = [{ op: 'update_athlete_target', text }]
-  if (!asBool(args.confirm)) return writePreview(diff)
-  await store.sql`UPDATE athlete SET goals = ${text} WHERE id = ${store.athleteId}`
-  await recordMove(store, `Changed your target to: ${text}`, args, null)
-  const [row] = await store.sql<{ id: string; name: string | null; goals: string | null }[]>`
-    SELECT id, name, goals FROM athlete WHERE id = ${store.athleteId}
-  `
-  return { ...mcpStamp(new Date(), await athleteZone(store)), athlete: row }
+  const before = gate
+    ? { goals: (await store.sql<{ goals: string | null }[]>`SELECT goals FROM athlete WHERE id = ${store.athleteId}`)[0]?.goals ?? null }
+    : null
+  const state = gate ? { diff, before } : null
+  if (!asBool(args.confirm)) return gatedPreview(gate, 'update_athlete_target', await writePreview(diff), state, asString(args.rationale) ?? null)
+  return gatedWrite(gate, 'update_athlete_target', args, state, async () => {
+    await store.sql`UPDATE athlete SET goals = ${text} WHERE id = ${store.athleteId}`
+    await recordMove(store, `Changed your target to: ${text}`, args, null)
+    const [row] = await store.sql<{ id: string; name: string | null; goals: string | null }[]>`
+      SELECT id, name, goals FROM athlete WHERE id = ${store.athleteId}
+    `
+    return {
+      result: { ...mcpStamp(new Date(), await athleteZone(store)), athlete: row },
+      entry: { targetType: 'athlete', targetId: store.athleteId, diff: { before, after: { goals: text } } },
+    }
+  })
 }
 
 const PROGRAM_META_LABEL = {
@@ -951,7 +1109,7 @@ const PROGRAM_META_LABEL = {
   deload_week_start: 'deload', retest_start: 'retest', retest_end: 'retest ends',
 } as const
 
-async function updateProgramMeta(store: ConnectedStore, args: Record<string, unknown>) {
+async function updateProgramMeta(store: ConnectedStore, args: Record<string, unknown>, gate?: WriteGate) {
   const program = await activeProgram(store)
   if (!program) throw new McpUserError('No active program.')
   const patch = {
@@ -964,28 +1122,36 @@ async function updateProgramMeta(store: ConnectedStore, args: Record<string, unk
     retest_end: asString(args.retest_end) ?? null,
   }
   const diff = [{ op: 'update_program_meta', ...patch }]
-  if (!asBool(args.confirm)) return writePreview(diff)
-  await store.sql`
-    UPDATE program SET
-      name = COALESCE(${patch.name}, name),
-      block_phase = COALESCE(${patch.block_phase}, block_phase),
-      start_date = COALESCE(${patch.start_date}::date, start_date),
-      end_date = COALESCE(${patch.end_date}::date, end_date),
-      deload_week_start = COALESCE(${patch.deload_week_start}::date, deload_week_start),
-      retest_start = COALESCE(${patch.retest_start}::date, retest_start),
-      retest_end = COALESCE(${patch.retest_end}::date, retest_end)
-    WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
-  `
-  const changed = (Object.entries(patch) as Array<[keyof typeof patch, string | null]>)
-    .filter(([, v]) => v != null)
-    .map(([k, v]) => `${PROGRAM_META_LABEL[k]} ${v}`)
-  if (changed.length) await recordMove(store, `Updated the block: ${changed.join(', ')}.`, args, program.id)
-  const [row] = await store.sql<object[]>`
-    SELECT id, name, block_phase, start_date::text, end_date::text, deload_week_start::text,
-           retest_start::text, retest_end::text, goal, status
-    FROM program WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
-  `
-  return { ...mcpStamp(new Date(), await athleteZone(store)), program: row }
+  const state = gate ? { diff, before: await programMetaSnapshot(store, program.id) } : null
+  if (!asBool(args.confirm)) return gatedPreview(gate, 'update_program_meta', await writePreview(diff), state, asString(args.rationale) ?? null)
+  return gatedWrite(gate, 'update_program_meta', args, state, async () => {
+    await store.sql`
+      UPDATE program SET
+        name = COALESCE(${patch.name}, name),
+        block_phase = COALESCE(${patch.block_phase}, block_phase),
+        start_date = COALESCE(${patch.start_date}::date, start_date),
+        end_date = COALESCE(${patch.end_date}::date, end_date),
+        deload_week_start = COALESCE(${patch.deload_week_start}::date, deload_week_start),
+        retest_start = COALESCE(${patch.retest_start}::date, retest_start),
+        retest_end = COALESCE(${patch.retest_end}::date, retest_end)
+      WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
+    `
+    const changed = (Object.entries(patch) as Array<[keyof typeof patch, string | null]>)
+      .filter(([, v]) => v != null)
+      .map(([k, v]) => `${PROGRAM_META_LABEL[k]} ${v}`)
+    if (changed.length) await recordMove(store, `Updated the block: ${changed.join(', ')}.`, args, program.id)
+    const [row] = await store.sql<object[]>`
+      SELECT id, name, block_phase, start_date::text, end_date::text, deload_week_start::text,
+             retest_start::text, retest_end::text, goal, status
+      FROM program WHERE id = ${program.id} AND athlete_id = ${store.athleteId}
+    `
+    return {
+      result: { ...mcpStamp(new Date(), await athleteZone(store)), program: row },
+      entry: gate
+        ? { targetType: 'program', targetId: program.id, diff: { program_id: program.id, before: state?.before ?? null, after: await programMetaSnapshot(store, program.id) } }
+        : null,
+    }
+  })
 }
 
 export async function firedRulesForSignals(
@@ -995,7 +1161,7 @@ export async function firedRulesForSignals(
 ) {
   const rows = await store.sql<AutoregRule[]>`
     SELECT scope_type, scope_id, scope_name, signal, op, value, action, action_params, message
-    FROM autoreg_rule WHERE athlete_id = ${store.athleteId}
+    FROM autoreg_rule WHERE athlete_id = ${store.athleteId} AND NOT (id::text = ANY(${idList(await hiddenIds(store, 'autoreg_rule'))}::text[]))
   `
   return evaluateAutoregRules(rows, signals, exercises)
 }

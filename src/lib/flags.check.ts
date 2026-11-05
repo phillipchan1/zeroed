@@ -1,5 +1,5 @@
 // Run: node --experimental-strip-types src/lib/flags.check.ts
-import { arcLoadV1Enabled, onboardingAgentV1Enabled, readAthleteFlags, tracksV1Enabled } from './flags.ts'
+import { arcLoadV1Enabled, coachV1Enabled, onboardingAgentV1Enabled, readAthleteFlags, skillBlocksV1Enabled, tracksV1Enabled } from './flags.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -75,6 +75,26 @@ ok(
   tracksV1Enabled({ DEV: true }, null, '?flag=arc_load_v1&flag=tracks_v1') === true,
   'tracks: a second ?flag= is read too',
 )
+
+// ---- coach_v1: athlete row only, and only with tracks_v1 ----------------------
+ok(coachV1Enabled({}, { tracks_v1: true, coach_v1: true }, '') === true, 'coach: both flags on is on')
+ok(coachV1Enabled({}, { coach_v1: true }, '') === false, 'coach: without tracks_v1 it is off')
+
+// skill_blocks_v1: default off, athlete-row only, independent of tracks_v1 / coach_v1.
+ok(skillBlocksV1Enabled({}, null, '') === false, 'skill: off with no flags')
+ok(skillBlocksV1Enabled({}, { tracks_v1: true, coach_v1: true }, '') === false, 'skill: tracks_v1 + coach_v1 do not turn it on')
+ok(skillBlocksV1Enabled({}, { skill_blocks_v1: 'true' }, '') === false, 'skill: only literal true counts')
+ok(skillBlocksV1Enabled({}, { skill_blocks_v1: true }, '') === true, 'skill: the athlete row turns it on')
+ok(skillBlocksV1Enabled({ DEV: false }, null, '?flag=skill_blocks_v1') === false, 'skill: production ignores the query')
+ok(skillBlocksV1Enabled({ DEV: true }, null, '?flag=skill_blocks_v1') === true, 'skill: DEV query override')
+ok(coachV1Enabled({}, { skill_blocks_v1: true }, '') === false && tracksV1Enabled({}, { skill_blocks_v1: true }, '') === false, 'skill on does not turn on coach_v1 or tracks_v1')
+ok(coachV1Enabled({}, { tracks_v1: true }, '') === false, 'coach: tracks_v1 alone is off')
+ok(coachV1Enabled({}, null, '') === false, 'coach: missing row is off')
+ok(coachV1Enabled({}, { tracks_v1: true, coach_v1: 'true' }, '') === false, 'coach: a string "true" is off')
+ok(coachV1Enabled({}, { tracks_v1: true, coach_v1: false }, '') === false, 'coach: false is the rollback')
+ok(coachV1Enabled({ DEV: true }, null, '?flag=tracks_v1&flag=coach_v1') === true, 'coach: DEV query override with tracks_v1')
+ok(coachV1Enabled({ DEV: true }, null, '?flag=coach_v1') === false, 'coach: DEV override alone still needs tracks_v1')
+ok(coachV1Enabled({ DEV: false }, null, '?flag=tracks_v1&flag=coach_v1') === false, 'coach: production ignores the query override')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {

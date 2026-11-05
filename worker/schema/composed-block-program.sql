@@ -1,0 +1,49 @@
+-- Composed blocks write the week's exercises on Neon (Round 2 item 6,
+-- coach_v1). Hand-apply, like coach-v1.sql: no RLS, no GRANT (the Worker
+-- scopes every query by athlete). Mirrors
+-- supabase/migrations/20261104000012_composed_block_program.sql.
+--
+-- Additive and idempotent: one nullable ADD COLUMN IF NOT EXISTS on
+-- composed_block (phase_id: the pending phase the block queued). No default
+-- and no foreign key (composed_block is append-only, so it never gains an ON
+-- DELETE action), so no existing row is rewritten. Does not touch program,
+-- phase, routine, program_revision, change_log, track, progression_rule or
+-- athlete_goal rows, and never athlete.training_max_overrides.
+--
+-- What it enables: apply_composed_block (preview → the athlete's approval →
+-- apply, in one transaction with one change_log row) also writes the block's
+-- week as a new queued block: one pending phase from the block's start, one
+-- routine per training day, exercises with sets, reps and RPE targets from
+-- the engine and no written loads (session-rx computes them from the block's
+-- tracks and rules). The live block ends the day before the new one starts
+-- and keeps running until then; none of its routines are rewritten. A
+-- re-compose before the queued block starts skips it (kept) and queues the
+-- new one; anything else already queued refuses the apply. Reverting the
+-- block (Changes feed) skips its phase, puts the live block's end date back
+-- and re-queues the phase it replaced.
+--
+-- Apply this AFTER coach-v1.sql and change-tombstone.sql. Until it exists,
+-- apply_composed_block works exactly as before (tracks, rules, goal weights
+-- and dates; no sessions) and its preview says the sessions are not written.
+-- With coach_v1 off nothing here is read or written: /api/session-rx, the
+-- MCP tool list and every tool behave exactly as before.
+--
+-- ROLLBACK
+--   1. Instant, per athlete: UPDATE public.athlete SET flags = flags - 'coach_v1' WHERE id = '…';
+--      With the flag off no block is composed or applied. A block already
+--      applied stays, like any approved write: its queued phase still starts
+--      on its date (the app promotes pending phases as it always has). To
+--      take one back before it starts, revert it from the Changes feed
+--      (with the flag on), or by hand:
+--        UPDATE public.phase SET status = 'skipped' WHERE id = '<composed_block.phase_id>' AND status = 'pending';
+--        UPDATE public.phase SET week_end = '<change_log.diff.program_phase.live_week_end_before>'
+--          WHERE id = '<change_log.diff.program_phase.live_phase_id>';
+--      Skipped, not deleted: nothing reads a skipped phase.
+--   2. Code rollback: redeploy the previous Worker. It never names this
+--      column; queued phases a block wrote behave like any queued block.
+--   3. Optional, once nobody needs it:
+--      ALTER TABLE public.composed_block DROP COLUMN phase_id;
+--   Step 3 is safe with the code still deployed: the Worker checks for the
+--   column and applies blocks without sessions when it is gone.
+
+ALTER TABLE public.composed_block ADD COLUMN IF NOT EXISTS phase_id UUID;

@@ -23,9 +23,12 @@ export interface CoachProposal {
   rationale: string | null
   goal_ids: string[]
   timing: 'now' | 'next_week'
-  diff: { sessions?: Array<{ name: string; changes: ProposalChange[] }> } | null
+  /** warnings (tracks_v1, G5): what the engine's validators said about the preview; read with proposalWarnings. */
+  diff: { sessions?: Array<{ name: string; changes: ProposalChange[] }>; warnings?: unknown } | null
   status: 'pending' | 'applied' | 'declined' | 'stale'
   created_at: string
+  /** tracks_v1: a week-only session override rather than a program edit. */
+  kind?: 'session_override'
 }
 
 export interface ProposalResult {

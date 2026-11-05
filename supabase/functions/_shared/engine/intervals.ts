@@ -20,6 +20,7 @@
 // =============================================================================
 
 import type { ExerciseTemplate, SetLog } from './types.ts'
+import { fmtSkillDose, isSkillBlock } from './skillBlock.ts'
 
 export interface IntervalPlan {
   /** Seconds of work in one round. */
@@ -189,11 +190,17 @@ export function soundsLikeIntervals(name: string): boolean {
 /**
  * The block an exercise describes, or null when it isn't one. Pure function of
  * the prescription: the same exercise always gives the same timeline.
+ *
+ * `skill` (skill_blocks_v1, spec §12): a skill block is never a timer, however
+ * its reps read — "6 × 10s / 50s" on a finishing station is advisory time, and
+ * the athlete advances it. Off (the default), exactly as before.
  */
 export function intervalPlanFor(
-  ex: Pick<ExerciseTemplate, 'name' | 'reps' | 'sets'> | null | undefined,
+  ex: (Pick<ExerciseTemplate, 'name' | 'reps' | 'sets'> & Partial<Pick<ExerciseTemplate, 'kind'>>) | null | undefined,
+  skill = false,
 ): IntervalPlan | null {
   if (!ex) return null
+  if (skill && isSkillBlock(ex)) return null
   const p = parseIntervalReps(ex.reps, soundsLikeIntervals(ex.name ?? '')) ?? blockInName(ex.name, ex.reps)
   if (!p) return null
   const sets = clamp(Math.round(Number(ex.sets) || 1), 1, 10)
@@ -257,8 +264,11 @@ export function canonicalBlock(
 }
 
 /** Whether a rep spec, on this movement, is a block rather than straight sets. */
-export function isIntervalBlock(ex: Pick<ExerciseTemplate, 'name' | 'reps' | 'sets'> | null | undefined): boolean {
-  return intervalPlanFor(ex) != null
+export function isIntervalBlock(
+  ex: (Pick<ExerciseTemplate, 'name' | 'reps' | 'sets'> & Partial<Pick<ExerciseTemplate, 'kind'>>) | null | undefined,
+  skill = false,
+): boolean {
+  return intervalPlanFor(ex, skill) != null
 }
 
 // ---- the timeline -----------------------------------------------------------
@@ -445,7 +455,11 @@ export function describePlan(plan: IntervalPlan): string {
  * A prescription as one short string — the interval read when it is a block,
  * "3×8" otherwise. "1×8 × 20s on / 40s off" was the old rendering of a block.
  */
-export function fmtDose(ex: Pick<ExerciseTemplate, 'name' | 'reps' | 'sets'>): string {
+export function fmtDose(
+  ex: Pick<ExerciseTemplate, 'name' | 'reps' | 'sets'> & Partial<Pick<ExerciseTemplate, 'kind' | 'window_s'>>,
+  skill = false,
+): string {
+  if (skill && isSkillBlock(ex)) return fmtSkillDose(ex)
   const plan = intervalPlanFor(ex)
   return plan ? describePlan(plan) : `${ex.sets}×${ex.reps}`
 }

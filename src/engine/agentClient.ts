@@ -15,6 +15,7 @@
 import { supabase } from '../lib/supabaseClient'
 import { agentUrl } from '../lib/api'
 import { getAccessToken } from '../lib/authClient'
+import type { ExerciseKind } from '../types/database'
 
 export type AgentResult<T> =
   | { ok: true; data: T }
@@ -252,6 +253,8 @@ export interface ProgramEditExercise {
   superset_group?: string | null
   rest_s?: number | null
   contacts?: number | null
+  kind?: ExerciseKind | null
+  window_s?: number | null
 }
 
 /**
@@ -284,6 +287,8 @@ export interface ProgramEdit {
   superset_group?: string | null
   rest_s?: number | null
   contacts?: number | null
+  kind?: ExerciseKind | null
+  window_s?: number | null
 }
 
 export interface ProgramEditResult {

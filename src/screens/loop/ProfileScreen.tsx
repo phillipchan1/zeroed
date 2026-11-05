@@ -12,6 +12,9 @@ import {
   PageHeader, SectionHeader, Skeleton, Button, Input, Row, Sheet,
 } from '../../components/ui'
 import { TrainingMaxes } from './TrainingMaxes'
+import { tracksOn } from '../../lib/tracksFlag'
+import { confirmAdult, fetchAgeStatus, fetchCoachAccess, readLabel, setCoachHealth, setCoachRole, type CoachRole } from '../../lib/readiness'
+import { whenLabel } from '../../lib/changeLog'
 
 interface McpTokenRow {
   id: string
@@ -110,6 +113,49 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   const [freshToken, setFreshToken] = useState<{ name: string; token: string } | null>(null)
   const [copied, setCopied] = useState(false)
 
+  // tracks_v1: what each coach may see (D3) and every read they made.
+  const { data: coachAccess, refetch: refetchCoachAccess } = useCachedLoader(
+    tracksOn() ? cacheKeys.coachAccess(athleteId) : null,
+    fetchCoachAccess,
+  )
+
+  // tracks_v1, section 11b: with no birth date on file the age is unknown and
+  // the under-18 rules apply, until the athlete confirms they're 18 or older.
+  const { data: age, refetch: refetchAge } = useCachedLoader(
+    tracksOn() ? cacheKeys.ageStatus(athleteId) : null,
+    fetchAgeStatus,
+  )
+  const [ageBusy, setAgeBusy] = useState(false)
+  const [ageNote, setAgeNote] = useState<string | null>(null)
+
+  async function confirmOver18() {
+    if (ageBusy) return
+    setAgeBusy(true)
+    const res = await confirmAdult('profile')
+    setAgeBusy(false)
+    setAgeNote(res.text || null)
+    refetchAge()
+  }
+
+  async function toggleHealth(id: string, on: boolean) {
+    if (mcpBusy) return
+    setMcpBusy(true)
+    const res = await setCoachHealth(id, on)
+    setMcpBusy(false)
+    if (!res.ok) setMcpError(res.text)
+    refetchCoachAccess()
+  }
+
+  // D3: read (sees what you share, can't propose) or propose (you approve each change).
+  async function changeRole(id: string, role: CoachRole) {
+    if (mcpBusy) return
+    setMcpBusy(true)
+    const res = await setCoachRole(id, role)
+    setMcpBusy(false)
+    if (!res.ok) setMcpError(res.text)
+    refetchCoachAccess()
+  }
+
   const reloadMcpTokens = useCallback(async () => {
     const { data, error } = await supabase
       .from('mcp_token')
@@ -162,6 +208,7 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
         .eq('id', id)
       if (error) throw error
       await reloadMcpTokens()
+      if (tracksOn()) refetchCoachAccess()
     } catch (e) {
       setMcpError(e instanceof Error ? e.message : String(e))
     } finally {
@@ -320,6 +367,25 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
 
         <TrainingMaxes athleteId={athleteId} unit={unit} />
 
+        {tracksOn() && age && (
+          <div className="section">
+            <SectionHeader>Age</SectionHeader>
+            <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)', lineHeight: 1.45 }}>
+              {age.age_status === 'adult'
+                ? 'Adult rules apply.'
+                : age.age_status === 'minor'
+                  ? 'Under-18 rules apply (from your birth date): no RPE above 8, lower jump counts, no max tests.'
+                  : 'No age on file, so the under-18 rules apply: no RPE above 8, lower jump counts, no max tests.'}
+            </p>
+            {age.can_confirm && (
+              <Button variant="outline" full disabled={ageBusy} onClick={() => void confirmOver18()}>
+                {ageBusy ? 'Saving…' : "I'm 18 or older"}
+              </Button>
+            )}
+            {ageNote && <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)' }}>{ageNote}</p>}
+          </div>
+        )}
+
         <div className="section">
           <SectionHeader>Your data</SectionHeader>
           <div style={{ marginTop: 4 }}>
@@ -366,6 +432,55 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
               <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)' }}>No active tokens yet.</p>
             )}
           </div>
+          {tracksOn() && coachAccess && coachAccess.coaches.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <SectionHeader>Coach access</SectionHeader>
+              <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)', lineHeight: 1.45 }}>
+                Coaches read your log; a coach that can propose also suggests changes, and only you approve them. Read-only coaches can&rsquo;t preview or propose anything. Check-ins and pain are shared only while the switch is on.
+              </p>
+              {coachAccess.coaches.map((c) => (
+                <div key={c.id}>
+                  {c.role && (
+                    <label style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 44, fontSize: 'var(--fs-sm)' }}>
+                      <span style={{ flex: 1 }}>{c.name} can</span>
+                      <select
+                        className="input"
+                        value={c.role}
+                        disabled={mcpBusy}
+                        onChange={(e) => void changeRole(c.id, e.target.value === 'read' ? 'read' : 'propose')}
+                        aria-label={`What ${c.name} can do`}
+                      >
+                        <option value="propose">Read and propose</option>
+                        <option value="read">Read only</option>
+                      </select>
+                    </label>
+                  )}
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 44, fontSize: 'var(--fs-sm)' }}>
+                    <input
+                      type="checkbox"
+                      checked={c.share_health}
+                      disabled={mcpBusy}
+                      onChange={(e) => void toggleHealth(c.id, e.target.checked)}
+                    />
+                    <span>{c.name} sees check-ins and pain</span>
+                  </label>
+                </div>
+              ))}
+              {coachAccess.reads.length > 0 ? (
+                <ul style={{ margin: '8px 0 0', padding: 0, listStyle: 'none' }}>
+                  {coachAccess.reads.map((r) => (
+                    <li key={r.id} className="text-dim" style={{ fontSize: 'var(--fs-sm)', lineHeight: 1.6 }}>
+                      {r.refused
+                        ? <>{r.who} tried to {r.tool.replace(/_/g, ' ')} · refused (read only) · {whenLabel(r.created_at)}</>
+                        : <>{r.who} read {readLabel(r.tool)} · {whenLabel(r.created_at)}</>}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)' }}>No coach has read anything yet.</p>
+              )}
+            </div>
+          )}
         </div>
 
         <Button variant="ghost" full onClick={handleSignOut} disabled={signingOut}>

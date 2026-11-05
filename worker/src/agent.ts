@@ -1,4 +1,4 @@
-import { TASKS, type TaskName } from '../../supabase/functions/agent/schemas.ts'
+import { TASKS, type TaskName, type TaskSpec } from '../../supabase/functions/agent/schemas.ts'
 import { sessionUser } from './auth.ts'
 import { AGENT_CORS, json } from './cors.ts'
 import { withSql, type WaitUntil } from './db.ts'
@@ -84,7 +84,20 @@ async function callOpenAI(
   payload: unknown,
   corrective: string | null,
 ): Promise<{ ok: true; data: unknown } | { ok: false; reason: string }> {
-  const spec = TASKS[task]
+  return callOpenAISpec(env, TASKS[task], payload, corrective)
+}
+
+/**
+ * One structured call to the configured model with any task spec. /agent
+ * uses it for its TASKS; the server-side app coach (coach_v1, appCoach.ts)
+ * passes its own spec, so /agent's task list is unchanged.
+ */
+export async function callOpenAISpec(
+  env: Env,
+  spec: Pick<TaskSpec, 'schemaName' | 'system' | 'schema' | 'heavy' | 'effort'>,
+  payload: unknown,
+  corrective: string | null,
+): Promise<{ ok: true; data: unknown } | { ok: false; reason: string }> {
   const model = spec.heavy
     ? (env.OPENAI_MODEL_HEAVY || env.OPENAI_MODEL || 'gpt-5.4-nano')
     : (env.OPENAI_MODEL || 'gpt-5.4-nano')

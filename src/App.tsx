@@ -3,9 +3,10 @@ import { BrowserRouter, Routes, Route, Navigate, Outlet, useLocation } from 'rea
 import { useAuth } from './hooks/useAuth'
 import { useAppState } from './hooks/useAppState'
 import { useArcLoad } from './lib/arcLoad'
-import { tracksOn, useTracksV1 } from './lib/tracksFlag'
+import { coachOn, tracksOn, useTracksV1 } from './lib/tracksFlag'
 import { useDisableShakeToUndo } from './hooks/useDisableShakeToUndo'
 import { useOutboxSync, pendingSessionsRaw } from './lib/workoutOutbox'
+import { useSessionRpeSync } from './lib/sessionRpe'
 import { cacheKeys, useWarmLoopCaches } from './lib/loopCache'
 import { unitContext } from './lib/units'
 import { gatherProgramMap, gatherTrainingLog, gatherWeekPager } from './engine'
@@ -27,6 +28,7 @@ import { ProgramScreen, fetchProgramView } from './screens/loop/ProgramScreen'
 import { ProgramEditScreen } from './screens/loop/ProgramEditScreen'
 import { ProgramJourneyScreen } from './screens/loop/ProgramJourneyScreen'
 import { CoachScreen, fetchCoachView }   from './screens/loop/CoachScreen'
+import { IntakeScreen } from './screens/loop/IntakeScreen'
 import { GoalsScreen } from './screens/loop/GoalsScreen'
 import { GoalDetailScreen } from './screens/loop/GoalDetailScreen'
 import { TrackProgressScreen } from './screens/loop/TrackProgressScreen'
@@ -107,6 +109,9 @@ function AppRoutes() {
 
   // Flush any sessions completed offline once we're back (and on every launch).
   useOutboxSync()
+  // Session-RPE taps that couldn't be sent at the finish (tracks_v1). Nothing is
+  // queued with the flag off, so this sends nothing then.
+  useSessionRpeSync()
 
   // Onboarding owns the athlete until they finish the first session. That's
   // every state before auth, the brief no-athlete beat after sign-in, and every
@@ -163,6 +168,7 @@ function AppRoutes() {
         <Route path="goals" element={tracksOn() ? <GoalsScreen athleteId={athleteId} /> : <Navigate to="program" replace />} />
         <Route path="goals/:goalId" element={tracksOn() ? <GoalDetailScreen athleteId={athleteId} /> : <Navigate to="/app/program" replace />} />
         <Route path="coach"   element={<CoachScreen athleteId={athleteId} />} />
+        {coachOn() && <Route path="coach/intake" element={<IntakeScreen />} />}
         <Route path="history" element={<HistoryScreen athleteId={athleteId} />} />
         <Route path="recap"             element={<RecapScreen athleteId={athleteId} />} />
         <Route path="recap/:reviewId"   element={<RecapScreen athleteId={athleteId} />} />

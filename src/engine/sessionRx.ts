@@ -22,6 +22,8 @@ export interface SessionRxRequest {
   unit?: 'lb' | 'kg'
   storage_unit?: 'lb' | 'kg'
   version_only?: boolean
+  /** tracks_v1: the session's date, so that day's week-only override applies. */
+  date?: string
 }
 
 export interface SessionRxPayload {
@@ -72,7 +74,7 @@ export async function fetchSessionPrescription(
   routineId: string,
   exercises: ExerciseTemplate[],
   u: UnitContext,
-  opts: { dayOf?: DayOf | null } = {},
+  opts: { dayOf?: DayOf | null; date?: string | null } = {},
 ): Promise<SessionPrescription> {
   const parsed = await postSessionRx({
     routine_id: routineId,
@@ -80,6 +82,8 @@ export async function fetchSessionPrescription(
     day_of: opts.dayOf ?? null,
     unit: u.unit,
     storage_unit: u.storage,
+    // Sent only when asked for, so every other caller's request is unchanged.
+    ...(opts.date ? { date: opts.date } : {}),
   }) as SessionRxPayload
   const rx = parsed.prescription
   if (!rx || typeof rx !== 'object') throw new Error('session-rx missing prescription')

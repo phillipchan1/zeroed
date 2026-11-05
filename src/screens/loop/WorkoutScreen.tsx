@@ -46,7 +46,11 @@ import { getMovementDemo, videoSearchUrl } from '../../engine/movementDemos'
 import { MovementDemo } from '../../components/MovementDemo'
 import { SessionEffort } from '../../components/SessionEffort'
 import { arcLoadOn } from '../../lib/arcLoad'
-import { tracksOn } from '../../lib/tracksFlag'
+import { skillBlocksOn, tracksOn } from '../../lib/tracksFlag'
+import { sessionWithOverride, workoutRxDate, WEEK_ONLY_LABEL, type SessionOverrideView } from '../../engine/sessionOverride'
+import { isoDateInZone } from '../../engine/weekDates'
+import { fetchSessionRpe, logSessionRpe } from '../../lib/sessionRpe'
+import { queuedTapFor } from '../../lib/sessionRpeQueue'
 import { fetchAutoregRules, fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
 import { deriveGoalMeasurements, goalSource, goalsTrainedBy } from '../../engine/goalSources'
 import { normalizeOutputUnit, type OutputUnit } from '../../engine/evidence'
@@ -56,6 +60,8 @@ import { sessionTrackLayout, type TrackRef } from '../../engine/tracks'
 import { TrackLabel } from './tracksUi'
 import { IntervalTimer, type IntervalResult } from '../../components/IntervalTimer'
 import { IntervalBlock } from '../../components/IntervalBlock'
+import { SkillBlock } from '../../components/SkillBlock'
+import { isSkillBlock, skillDoneLogs } from '../../engine/skillBlock'
 import { AddToSessionSheet, AdjustIntervalsSheet } from '../../components/AddToSession'
 import { unitContext, convertWeight, type UnitContext } from '../../lib/units'
 import type { FinishedSession } from '../../components/SessionZeroed'
@@ -1128,7 +1134,8 @@ function WorkoutCoachSheet({ athleteId, onClose }: { athleteId: string; onClose:
           onChange={setDraft}
           onSend={() => void send(draft)}
           placeholder={context ? 'What, how, or why…' : 'Loading your read…'}
-          disabled={!context || pending}
+          disabled={!context}
+          sendDisabled={pending}
           ariaLabel="Ask the coach"
           sendLabel="Ask"
         />
@@ -1137,7 +1144,7 @@ function WorkoutCoachSheet({ athleteId, onClose }: { athleteId: string; onClose:
       <div className="coach-chat">
         {context && turns.length === 0 && (
           <div className="coach-msg coach-msg--coach fade-rise">
-            <Markdown className="coach-msg__body" text="What's up? Ask about this lift, this session, or the read behind it." />
+            <Markdown className="coach-msg__body" breaks text="What's up? Ask about this lift, this session, or the read behind it." />
           </div>
         )}
 
@@ -1148,7 +1155,7 @@ function WorkoutCoachSheet({ athleteId, onClose }: { athleteId: string; onClose:
             </div>
           ) : (
             <div key={i} className={`coach-msg coach-msg--coach fade-rise${t.fresh ? ' coach-msg--fresh' : ''}`}>
-              <Markdown className="coach-msg__body" text={t.content} />
+              <Markdown className="coach-msg__body" text={t.content} breaks />
             </div>
           ),
         )}
@@ -1506,6 +1513,32 @@ export function WorkoutScreen({
   // arc_load_v1 is on. Unknown on an edit of a synced session, and null leaves
   // the row's value alone, so an edit never blanks it.
   const [sessionRpe, setSessionRpe] = useState<number | null>(() => seedPending?.sessionRpe ?? null)
+  // tracks_v1: today's week-only override, once /api/session-rx (asked with
+  // today's date) says there is one. The routine below then carries its list.
+  // Always null with the flag off.
+  const [weekOnly, setWeekOnly] = useState<SessionOverrideView | null>(null)
+  const weekOnlyRef = useRef<SessionOverrideView | null>(null)
+  // The prescription cache: today's override has its own key, since its
+  // indexes follow the override's list, not the plan's that Today reads.
+  const rxCacheKey = (id: string) => (weekOnlyRef.current ? cacheKeys.sessionRxOn(id, weekOnlyRef.current.date) : cacheKeys.sessionRx(id))
+  // tracks_v1 (G9): an edit shows the session RPE already logged that day, so
+  // a re-tap changes it (the Worker takes changes on the day, or until 04:00
+  // the next morning). A tap still waiting to sync is the latest one.
+  useEffect(() => {
+    if (!isEdit || !tracksOn() || !routineId || sessionRpe != null) return
+    const queued = queuedTapFor(routineId, performedAt.slice(0, 10))
+    if (queued) {
+      setSessionRpe(queued.rating)
+      return
+    }
+    let live = true
+    void fetchSessionRpe(routineId, performedAt.slice(0, 10)).then((r) => {
+      if (live && r) setSessionRpe((v) => v ?? r.rating)
+    })
+    return () => { live = false }
+    // Once per open; the date and rating at open are the ones that count.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [routineId])
   // Elapsed frozen at the moment "Complete" was tapped — the debrief sheet can
   // sit open for a while, so the committed duration is this, not the live clock.
   const finalElapsedRef = useRef(0)
@@ -1668,6 +1701,8 @@ export function WorkoutScreen({
   // is typing into.
   useEffect(() => {
     if (!routineId || isEdit) return
+    // tracks_v1: today's override is in force; the plan's list isn't today's session.
+    if (weekOnlyRef.current) return
     const snapshot = routines.find((r) => r.id === routineId)
     if (!snapshot) return
     const existing = loadCache<WorkoutBootstrap>(bootKey(snapshot.id))
@@ -1836,7 +1871,7 @@ export function WorkoutScreen({
       .then((next) => {
         if (latestKeyRef.current !== key) return
         setPrescription(next)
-        saveCache(cacheKeys.sessionRx(routineId), next)
+        saveCache(rxCacheKey(routineId), next)
       })
       .catch(() => { /* offline — the stand-in trains without a hint */ })
       .finally(() => { if (prescribingRef.current === key) prescribingRef.current = null })
@@ -1858,7 +1893,7 @@ export function WorkoutScreen({
         .then((next) => {
           if (latestKeyRef.current !== key) return
           setPrescription(next)
-          saveCache(cacheKeys.sessionRx(routineId), next)
+          saveCache(rxCacheKey(routineId), next)
         })
         .catch(() => { /* offline — the numbers on screen stand */ })
     }, 600)
@@ -1907,7 +1942,21 @@ export function WorkoutScreen({
       return
     }
 
-    const r = data as RoutineRow
+    let r = data as RoutineRow
+    // tracks_v1: ask for today's prescription BY DATE, so a week-only override
+    // for today applies, and train its list. Flag off: no date, no request
+    // here, exactly as before. Offline: the template trains.
+    const rxDate = workoutRxDate({ tracksOn: tracksOn(), isEdit, week: targetWeek, today: isoDateInZone(new Date()) })
+    let datedRx: SessionPrescription | null = null
+    if (rxDate && routineId) {
+      try {
+        datedRx = await gatherSessionPrescription((data as unknown as { program: { athlete_id: string } | null }).program?.athlete_id ?? '', routineId, r.exercises as ExerciseTemplate[], u, { dayOf: checkinDayOf(checkinRef.current), date: rxDate })
+      } catch { /* non-fatal */ }
+      const todays = datedRx?.override ?? null
+      weekOnlyRef.current = todays
+      setWeekOnly(todays)
+      r = sessionWithOverride(r, todays)
+    }
     const exs = r.exercises as ExerciseTemplate[]
     const initial = buildTemplate(r)
     const logged = startedLoggingRef.current
@@ -1998,7 +2047,12 @@ export function WorkoutScreen({
     // Prescription hints — best-effort; the session loads regardless. Keep the
     // seeded value if the recompute fails (offline mid-revalidation).
     let nextPresc: SessionPrescription | null = seedRef.current!.boot?.prescription ?? null
-    if (programData && routineId) {
+    if (datedRx && routineId) {
+      // Already prescribed above, for today, on the list being trained.
+      nextPresc = datedRx
+      setPrescription(nextPresc)
+      saveCache(rxCacheKey(routineId), nextPresc)
+    } else if (programData && routineId) {
       try {
         nextPresc = await gatherSessionPrescription(programData.athlete_id, routineId, exs, u, { dayOf: checkinDayOf(checkinRef.current) })
         setPrescription(nextPresc)
@@ -2236,7 +2290,7 @@ export function WorkoutScreen({
   function addToSession(ex: ExerciseTemplate, start = false) {
     const idx = sessionExercises.length
     const entry: ExerciseTemplate = { ...ex, added: true }
-    const plan = intervalPlanFor(entry)
+    const plan = intervalPlanFor(entry, skillBlocksOn())
     startedLoggingRef.current = true
     setSetLogs((prev) => ({
       ...prev,
@@ -2274,8 +2328,30 @@ export function WorkoutScreen({
 
   function startIntervals(exIdx: number) {
     const ex = sessionExercises[exIdx]
-    const plan = intervalPlanFor(ex)
+    const plan = intervalPlanFor(ex, skillBlocksOn())
     if (ex && plan) beginIntervals(exIdx, ex.name, plan)
+  }
+
+  // ---- skill blocks (skill_blocks_v1) -------------------------------------------
+
+  // Done / Next on a station: every row marked done, then on to the next slot.
+  // The athlete's tap is the only thing that advances a skill block.
+  function completeSkill(exIdx: number) {
+    const ex = sessionExercises[exIdx]
+    if (!ex) return
+    startedLoggingRef.current = true
+    setHasStarted(true)
+    setSetLogs((prev) => ({ ...prev, [exIdx]: skillDoneLogs(prev[exIdx] ?? [], ex.sets, newSetLog) }))
+    const next = exIdx + 1 < sessionExercises.length ? exIdx + 1 : null
+    if (next != null) {
+      setActiveExIdx(next)
+      setArrivedIdx(next)
+    }
+  }
+
+  function undoSkill(exIdx: number) {
+    startedLoggingRef.current = true
+    setSetLogs((prev) => ({ ...prev, [exIdx]: (prev[exIdx] ?? []).map((l) => ({ ...l, done: false })) }))
   }
 
   // Rounds land in the grid as they finish, so the draft autosave holds the work
@@ -2312,7 +2388,7 @@ export function WorkoutScreen({
       reps: built.reps,
       tracking_type: 'time',
     }
-    const plan = intervalPlanFor(next)
+    const plan = intervalPlanFor(next, skillBlocksOn())
     startedLoggingRef.current = true
     setFeedback((prev) => {
       const base = prev[exIdx] ?? { name: next.name, felt: null, note: '' }
@@ -2339,7 +2415,7 @@ export function WorkoutScreen({
     if (!goIntervals || autoStartedRef.current || loading || !routine || isEdit) return
     autoStartedRef.current = true
     const idx = sessionExercises.findIndex((ex, i) => {
-      const plan = intervalPlanFor(ex)
+      const plan = intervalPlanFor(ex, skillBlocksOn())
       if (!plan) return false
       return roundsFromLogs(plan, setLogs[i] ?? []).reduce((a, b) => a + b, 0) < plan.rounds * plan.sets
     })
@@ -2477,7 +2553,7 @@ export function WorkoutScreen({
     // An interval block's durations are set by its timer, so "longest ever" is
     // the block's length, not a record — blocks never claim a PR.
     const prLifts = sessionExercises
-      .filter((ex, i) => !intervalPlanFor(ex) && (setLogs[i] ?? []).some((log) => {
+      .filter((ex, i) => !intervalPlanFor(ex, skillBlocksOn()) && (setLogs[i] ?? []).some((log) => {
         const best = ex.swapped_from || ex.added ? bestsByName[ex.name] ?? NO_BEST : bestByExercise[i] ?? NO_BEST
         return isSetLogged(log) && displayPRs(log, best).length > 0
       }))
@@ -2517,7 +2593,7 @@ export function WorkoutScreen({
         name: ex.name,
         felt: fb?.felt ?? null,
         note: fb?.note ?? '',
-        prescribed: `${fmtDose(ex)}${ex.load ? ` ${ex.load}` : ''}${ex.added ? ' (added mid-session)' : ''}`,
+        prescribed: `${fmtDose(ex, skillBlocksOn())}${ex.load ? ` ${ex.load}` : ''}${ex.added ? ' (added mid-session)' : ''}`,
         performed: performedSummary(t, setLogs[i] ?? [], u),
         pushed: fb?.pushed === true,
       }
@@ -2540,6 +2616,18 @@ export function WorkoutScreen({
     const pending = buildPending(debrief)
     enqueueSession(pending)                       // durable before any network
     if (!isEdit) clearDraft(athleteId, routineId!) // the outbox is its home now
+
+    // tracks_v1 (G9): the session-RPE tap goes to its own table, never into the
+    // set RPEs. Queued on the device first, so a tap offline syncs later; the
+    // Worker takes it for the session's own day (until 04:00 the next morning).
+    if (tracksOn() && sessionRpe != null) {
+      void logSessionRpe({
+        session_id: routineId!,
+        rating: sessionRpe,
+        duration_min: pending.durationMins > 0 ? pending.durationMins : null,
+        date: isoDateInZone(pending.performedAt ? new Date(pending.performedAt) : new Date()),
+      })
+    }
 
     // A finished session moves nearly every view: the week strip, the schedule,
     // the training log, the program map, the read the coach works from, the
@@ -2734,6 +2822,7 @@ export function WorkoutScreen({
             <p style={{ fontSize: 'var(--fs-base)', fontWeight: 700, lineHeight: 1.25, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
               {routine.name}
             </p>
+            {weekOnly && <span className="week-only" style={{ marginTop: 2 }}>{WEEK_ONLY_LABEL}</span>}
             <p className="num text-xs text-dim" style={{ marginTop: 2 }}>
               {formatElapsed(elapsed)} · {setsDone}/{setsTotal} sets
               {avgRpeLive !== null ? ` · RPE ${avgRpeLive}` : ''}
@@ -2845,11 +2934,13 @@ export function WorkoutScreen({
           const presOk = names ? names[exIdx] === ex.name : !ex.swapped_from
           // An interval block's dose is its clock: "find a working weight" and a
           // load cap mean nothing to it, so it takes none of the load chips.
-          const intervalPlan = intervalPlanFor(ex)
-          const hint = presOk && !intervalPlan ? prescription?.hints[exIdx] : undefined
+          const intervalPlan = intervalPlanFor(ex, skillBlocksOn())
+          // A skill block (skill_blocks_v1) is quality, not load: no chips either.
+          const skill = skillBlocksOn() && isSkillBlock(ex)
+          const hint = presOk && !intervalPlan && !skill ? prescription?.hints[exIdx] : undefined
           // The cap is the one thing that does carry: the stand-in answers to the
           // same read, so a held slot stays held while its number is pending.
-          const isHeld = !intervalPlan && !!prescription?.held[exIdx]
+          const isHeld = !intervalPlan && !skill && !!prescription?.held[exIdx]
           // A swapped-in or added movement has no history in this slot: it is
           // measured against its own record and its own last session.
           const ownHistory = !!ex.swapped_from || !!ex.added
@@ -3019,12 +3110,19 @@ export function WorkoutScreen({
                     )}
                   </div>
                 )}
-                {presOk && !isPushed && !intervalPlan && <ReasonLines lines={prescription?.reasons?.[exIdx] ?? []} />}
+                {presOk && !isPushed && !intervalPlan && !skill && <ReasonLines lines={prescription?.reasons?.[exIdx] ?? []} />}
               </div>
 
               {/* An interval block runs on its timer, so it shows the block —
                   what it is, every round, one Start — instead of a set grid. */}
-              {intervalPlan ? (
+              {skill ? (
+                <SkillBlock
+                  ex={ex}
+                  logs={logs}
+                  onDone={() => completeSkill(exIdx)}
+                  onUndo={() => undoSkill(exIdx)}
+                />
+              ) : intervalPlan ? (
                 <IntervalBlock
                   plan={intervalPlan}
                   logs={logs}
@@ -3300,7 +3398,7 @@ export function WorkoutScreen({
           }}
           u={u}
           initial={priorDebrief ? { reflection: priorDebrief.reflection, readingAnswer: priorDebrief.readingAnswer } : null}
-          effort={arcLoadOn() ? { value: sessionRpe, onChange: setSessionRpe } : undefined}
+          effort={arcLoadOn() || tracksOn() ? { value: sessionRpe, onChange: setSessionRpe } : undefined}
           onSave={handleDebrief}
           onSkip={handleDebriefSkip}
         />
@@ -3361,10 +3459,10 @@ export function WorkoutScreen({
       )}
 
       {/* Re-dose a block for today */}
-      {adjustIdx != null && exercises[adjustIdx] && intervalPlanFor(exercises[adjustIdx]) && (
+      {adjustIdx != null && exercises[adjustIdx] && intervalPlanFor(exercises[adjustIdx], skillBlocksOn()) && (
         <AdjustIntervalsSheet
           name={exercises[adjustIdx].name}
-          plan={intervalPlanFor(exercises[adjustIdx])!}
+          plan={intervalPlanFor(exercises[adjustIdx], skillBlocksOn())!}
           lockName={!exercises[adjustIdx].added}
           onSave={(ex) => applyDose(adjustIdx, ex)}
           onStart={(ex) => {

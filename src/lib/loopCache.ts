@@ -41,7 +41,20 @@ export const cacheKeys = {
   // The per-routine session prescription on its own — what the Train screen's
   // session sheet reads to show concrete lb/kg targets without the full bootstrap.
   sessionRx:   (routineId: string) => `rx:${routineId}`,
+  // tracks_v1: the same prescription for one dated session with its week-only
+  // override applied. Kept apart from the bootstrap's copy, whose indexes follow
+  // the template.
+  sessionRxOn: (routineId: string, date: string) => `rx:${routineId}@${date}`,
+  overrides:   (athleteId: string, weekStart: string) => `overrides:${athleteId}:${weekStart}`,
+  // tracks_v1: the Changes feed under Program — every recorded write, newest first.
+  changes:     (athleteId: string) => `changes:${athleteId}`,
   rxVersion:   (athleteId: string) => `rxver:${athleteId}`,
+  // tracks_v1: today's check-in, pain and blocked regions (G4), and who read what.
+  readiness:   (athleteId: string) => `readiness:${athleteId}`,
+  coachAccess: (athleteId: string) => `coach-access:${athleteId}`,
+  ageStatus: (athleteId: string) => `age-status:${athleteId}`,
+  // tracks_v1: the engine's weekly review (G8), this week or a dated one.
+  weeklyReview: (athleteId: string, week: string) => `wreview:${athleteId}:${week}`,
   // One finished session as performed — what the preview of a DONE session reads
   // instead of the prescription.
   sessionActuals: (workoutId: string) => `actuals:${workoutId}`,

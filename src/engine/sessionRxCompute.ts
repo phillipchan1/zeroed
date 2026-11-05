@@ -6,6 +6,7 @@ import type {
   ExerciseTemplate, InsightRow, SetLog, WeeklyDirective,
 } from '../types/database.ts'
 import type { UnitContext } from '../lib/units.ts'
+import type { SessionOverrideView } from './sessionOverride.ts'
 import {
   allowsAutoProgress, autoregulateDelta, capIsActive, clearanceTestOf,
   CLEARANCE_SESSIONS, CLEARANCE_TOP_SETS, describeClearanceTest, isLiftHeld,
@@ -64,6 +65,45 @@ export interface SessionPrescription {
   skip?: Record<number, boolean>
   exercises?: ExerciseRx[]
   version?: string
+  /**
+   * tracks_v1 only, and only when the request named a date with an active
+   * week-only override. The prescription's indexes follow override.exercises.
+   */
+  override?: SessionOverrideView
+  /**
+   * tracks_v1 only: the methodology version this ran on (worker/src/methodology),
+   * "v1", or "v1+<hash>" with the athlete's overrides or the under-18 rules.
+   */
+  methodology_version?: string
+  /**
+   * tracks_v1 only, and only when the date has a check-in, a pain report or a
+   * blocked region (G4): the day's readiness flags (U6) and region calls (U7).
+   */
+  readiness?: RxReadiness
+  /** With readiness: every change it made to this session, each with its rule. */
+  adjustments?: RxAdjustment[]
+}
+
+export interface RxReadiness {
+  date: string
+  flags: Array<{ kind: string; message: string; rule_refs: string[] }>
+  level: 'none' | 'trim_accessories' | 'pull_hiit_plyo'
+  regions: Array<{ region: string; status: 'ok' | 'capped' | 'blocked'; score: number; cap: number; reason: string; rule_refs: string[]; refer_out: boolean; block?: 'persistent' | 'temporary' }>
+  blocked_regions: string[]
+  /** Methodology v1.2: the blocked regions that lapse after the next session. Absent when none. */
+  temporary_regions?: string[]
+  /** Set when a region is blocked: see a clinician before loading it (or, only temporary blocks, if it doesn't settle). */
+  refer_out: string | null
+}
+
+export interface RxAdjustment {
+  index: number
+  exercise: string
+  action: 'skip' | 'trim_sets' | 'reduce_load' | 'check_region'
+  reason: string
+  rule_refs: string[]
+  before?: number | null
+  after?: number | null
 }
 
 export interface SessionRxInput {

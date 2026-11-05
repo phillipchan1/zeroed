@@ -89,6 +89,48 @@ export function proposalsUrl(): string | null {
   return `${base}/proposals`
 }
 
+export function sessionOverrideUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/session-override`
+}
+
+export function changeLogUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/change-log`
+}
+
+export function approvalsUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/approvals`
+}
+
+export function readinessUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/readiness`
+}
+
+export function weeklyReviewUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/weekly-review`
+}
+
+export function coachUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/coach`
+}
+
+export function sessionRpeUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/session-rpe`
+}
+
 export function authBaseUrl(): string | null {
   const base = apiBaseUrl()
   if (!base || !isCloudflareApi()) return null

@@ -8,7 +8,8 @@ import { withSql, type Sql, type WaitUntilArg } from './db.ts'
 import type { Env } from './env.ts'
 import { parseRpeHalfStepsFlag } from '../../src/engine/rpeScale.ts'
 import { resolveMcpToken, tokenFrom, touchMcpToken } from './mcpToken.ts'
-import { executeZeroedTool, ZEROED_TOOLS } from './tools.ts'
+import { toolsForRole } from './coachRoles.ts'
+import { executeZeroedTool, zeroedToolsFor } from './tools.ts'
 import { isMcpUserError } from './userError.ts'
 
 /** Only McpUserError messages are shown. DB / runtime errors stay generic. */
@@ -116,14 +117,19 @@ async function serveMcp(req: Request, sql: Sql, env?: Env): Promise<Response> {
   const raw = await req.json().catch(() => null)
   if (containsNul(raw)) return json({ error: 'invalid input' }, 400, MCP_CORS)
   const extra = sessionHeaders(req)
+  const allTools = await zeroedToolsFor(sql, conn.athlete_id)
+  // D3: a read-only coach is never listed a preview, apply or write tool. A
+  // call to one still reaches executeZeroedTool, which refuses it and logs
+  // the attempt, instead of a silent "unknown tool".
+  const listed = toolsForRole(allTools, conn.role)
 
   const run = async (msg: JsonRpcRequest): Promise<JsonRpcResponse | null> => {
-    return await handleMcpMethod(msg, ZEROED_TOOLS, async (name, args) => {
+    return await handleMcpMethod(msg, msg?.method === 'tools/call' ? allTools : listed, async (name, args) => {
       await touchMcpToken(sql, conn.id)
       try {
         return await executeZeroedTool(sql, conn.athlete_id, name, args, {
           rpeHalfSteps: parseRpeHalfStepsFlag(env?.RPE_HALF_STEPS),
-        })
+        }, { type: 'mcp', id: conn.id })
       } catch (err) {
         console.error('[mcp] tool', name, err instanceof Error ? err.message : String(err))
         throw new Error(publicMcpError(err))

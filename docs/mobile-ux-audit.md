@@ -233,6 +233,128 @@ next chat surface inherits all of this instead of re-deriving it.
 
 ---
 
+## The Coach chat (second pass)
+
+The first pass fixed how Coach *types*. This one is how it *holds together*: a
+real phone, a real pending proposal, a real multi-line question, a reply with a
+table in it. Found by driving the screen on an emulated iPhone (touch, notch
+insets, 150% text) rather than reading the code, which is why the worst bugs
+below had survived: on desktop Chromium, with nothing pending, every one of them
+is invisible.
+
+### What was broken
+
+- **A pending proposal took the whole screen.** The Coach screen is locked to the
+  viewport and doesn't scroll as a page. Above the thread sat the proposal card
+  (title, rationale, a full diff, two buttons: ~1,100px), then the header. The
+  chat got what was left: **72px**. A multi-line draft squeezed it to 4px and
+  pushed the composer under the nav. There was nothing to scroll.
+- **The read couldn't be closed.** Opening "The read" put a full-screen
+  `z-index:150` layer over everything, including the header and nav. The CSS that
+  was meant to promote the header into a close bar keyed off
+  `.coach-read-pane.is-open`, a class the JSX never set.
+- **Multi-line questions lost their line breaks.** The athlete's bubble was a
+  `<p>` with no `pre-wrap`; the composer lets a thumb type a second paragraph and
+  the bubble then showed it as one run-on line. Soft breaks in the coach's own
+  replies were joined with a space for the same reason.
+- **Replies could only be prose.** No tables, code, quotes, links or nested
+  lists; a pasted URL or an unbroken token had no wrap rule.
+- **The proposed-changes card was one line of text per change**
+  (`Back Squat (Lower A — Squat pattern) — load → 205 lbs, sets → 4, reps → 5,
+  cue → "…", target → RPE 7`), rendered *after* the suggestion chips and below
+  the fold, and the thread had already scrolled past it.
+- **The thread landed at the end of a long reply.** `scrollIntoView(end)` drops
+  you mid-thought and makes you scroll up to start reading.
+- **Sending dropped the keyboard.** The textarea was `disabled` while a reply was
+  pending; disabling a focused field blurs it. Every send closed the keyboard and
+  needed a tap to start the next line. (Workout's chat and Program edit did the
+  same.)
+- **The proposal diff truncated names** to `Tempo …` (`nowrap` + ellipsis), so an
+  athlete was asked to approve something they couldn't read.
+- **Dead strip above the nav on a notched phone** (the screen ended 34px short of
+  it), and on the same phones **the nav icons were crushed to 0px**: the nav was a
+  flat `68px` tall with the home-indicator inset as padding *inside* it, leaving
+  ~34px for a 24px icon, a label and padding, and flexbox shrank the icon away.
+  `.with-nav` and the original Coach height both assumed 68px **plus** the inset;
+  the nav was the odd one out.
+- The placeholder wrapped to two lines at 320px and at 150% text, which makes an
+  empty one-line field look overflowed (the 390px fix from the first pass didn't
+  hold at narrower widths).
+
+### The screen is now a chat app
+
+One structure at every width: **a fixed header, one scrolling thread, a docked
+composer.** Nothing above the thread may be unbounded.
+
+- **Header** is one line: `Coach` left, `The read · 2 ›` right.
+- **What's waiting on you is a banner**, not a card: *A change is waiting on you*
+  and the title, one line. Tap opens the full diff in a `Sheet` that scrolls on its
+  own. (Desktop keeps the stacked cards in the left column.)
+- **The read is a full-screen layer with its own close bar** (and Escape), focus
+  moving in and back out.
+- **Thread scroll policy** (`useThreadScroll`): your message and apply reports land
+  at the bottom; a reply that fits (with the card and chips that belong to it)
+  lands at the bottom; **one that doesn't lands on its first line**. A
+  *Jump to latest* button appears once you've scrolled away, and says *Review
+  changes* when what's waiting down there is something to approve. It scrolls the
+  thread's own box, never the page. Reduced motion is honoured.
+- **Keyboard up** (field focused): the nav, the banner and the reticle step aside
+  so the thread keeps its room; the composer's cap is `min(176px, 34dvh)`. The
+  textarea is no longer disabled while a reply is pending. Only sending is, so
+  the keyboard stays up and you can write your next line while the coach answers.
+  Tapping send doesn't take focus.
+- **Desktop:** the conversation is a sticky column; the composer no longer scrolls
+  away from a long thread.
+
+### Everything the chat renders back
+
+- **Markdown** is a pure parser (`lib/markdown.ts`, 64 checks) rendered by
+  `Markdown`: paragraphs, headings, nested bullet/numbered lists, quotes, fenced
+  code, rules, **tables**, `**bold**` / `*italic*` / `` `code` `` / **links**.
+  `breaks` keeps single newlines in chat; documents keep standard Markdown. Links
+  are `http(s)`/`mailto` only. Code and tables scroll inside their own box; cells
+  wrap at spaces, never mid-word; everything else wraps anywhere. The coach's
+  bubble gets the full measure, and the athlete's is `pre-wrap` at full text
+  strength (dim grey on black was unreadable at three lines).
+- **Proposed changes** (`ProposedChangesCard`) are rows: an icon, *what*, *where*
+  (the routine), the numbers as chips (`Load 205 lbs`, `Sets 4`, `Target RPE 7`),
+  the one long field (a cue, a rewritten claim, a note) as a clamped quote with
+  *Show more*, then *why*. Three rows show and the rest sit behind *Show N more*.
+  It follows the reply it belongs to, before the chips. Structured by
+  `describeCoachActionParts` (20 checks); the one-line `describeCoachAction`
+  remains for the apply report.
+- **What an apply did** is a row per change, ✓ or ✗ with the reason, not a
+  paragraph.
+- **Proposal diff rows** wrap: the name on top, the numbers under it.
+- **Copy** under each reply (32px icon in a 44px hit area).
+- **First visit** shows a bubble-shaped skeleton in the thread, and an offline
+  first visit says so instead of leaving a disabled field.
+- Messages are memoised and the draft lives in its own component, so typing no
+  longer re-parses the thread on each keystroke.
+
+Workout's ask-the-coach sheet, Program edit and the one-off sheet render through
+the same primitives and pick up the Markdown, wrapping and keyboard fixes.
+
+### Verified, and what wasn't
+
+Driven on an emulated phone (touch, `hover:none`) at 320 / 390 / 430px, 100% and
+150% text, with iPhone safe-area insets injected, and a deliberately hostile reply
+(heading, nested lists, table, code, quote, a 150-character URL, a 120-character
+unbroken token) plus a pending proposal: no horizontally overflowing element in any
+state; the composer is never under the nav; the thread is never smaller than the
+room there is. `npm run check:layout` passes (3 widths × 3 font scales × 7
+screens), as do `tsc`, lint, `npm run check` and the build.
+
+**Not verified: a physical iPhone's keyboard.** Playwright can't raise one, so the
+keyboard-up layout is tested by the focus state it keys off, not by a real
+resized viewport. The Capacitor shell has no Keyboard plugin, and as far as I know
+WKWebView then lifts the page rather than resizing it; the composer sits at the
+bottom of a screen that is exactly viewport-high, which is what that behaviour
+needs, but that is reasoning, not observation. It is the one thing worth a quick
+look on a device.
+
+---
+
 ## Bugs found and fixed along the way
 
 - **Strength baselines were hard-coded to kg** while the app defaults to `lb`, so

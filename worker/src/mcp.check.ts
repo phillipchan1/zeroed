@@ -13,6 +13,8 @@ import { ZEROED_TOOLS } from './tools.ts'
 import { LIFT_MODEL_TOOLS } from '../../supabase/functions/_shared/liftModelTools.ts'
 import { TRACK_TOOLS } from '../../supabase/functions/_shared/trackToolDefs.ts'
 import { McpUserError } from './userError.ts'
+import { createApproval } from './approvals.ts'
+import { makeStore } from './store.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -280,11 +282,19 @@ const previewTrack = toolText((await rpc(TOKEN_A, 'tools/call', {
   name: 'create_track', arguments: { name: 'Lifting', purpose: 'mains', rationale: 'test' },
 })).body)
 ok(previewTrack.includes('preview_id') && previewTrack.includes('diff'), 'e2e: create_track without confirm previews')
+// tracks_v1 (G2): a confirmed write carries the preview it applies and the athlete's yes.
+const keptPreview = (text: string) => /"preview_id": "(chp_[0-9a-f]+)"/.exec(text)?.[1] ?? /preview_id: (chp_[0-9a-f]+)/.exec(text)?.[1] ?? ''
+/** The athlete approves in the app (G10): a tap, or with messageId their chat yes. */
+async function athleteApproves(previewId: string, messageId?: string): Promise<string> {
+  const r = await createApproval(makeStore(sql, A), { type: 'athlete', id: A }, { preview_id: previewId, message_id: messageId })
+  return r.ok ? r.approval_ref : `refused: ${r.text}`
+}
+ok(keptPreview(previewTrack) !== '', 'e2e: with tracks_v1 the preview is kept (chp_ id)')
 const [trackCountBefore] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM track WHERE program_id = ${PROG_A}`
 ok(Number(trackCountBefore?.n) === 1, 'e2e: preview create_track writes nothing')
 
 const createdTrack = toolText((await rpc(TOKEN_A, 'tools/call', {
-  name: 'create_track', arguments: { name: 'Lifting', purpose: 'mains', confirm: true, rationale: 'test', athlete_id: B },
+  name: 'create_track', arguments: { name: 'Lifting', purpose: 'mains', confirm: true, rationale: 'test', athlete_id: B, preview_id: keptPreview(previewTrack), approval_ref: await athleteApproves(keptPreview(previewTrack)) },
 })).body)
 ok(createdTrack.includes('Lifting'), 'e2e: create_track with confirm writes')
 const [aTracks] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM track WHERE program_id = ${PROG_A}`
@@ -310,7 +320,7 @@ const goalPreview = toolText((await rpc(TOKEN_A, 'tools/call', {
 ok(goalPreview.includes('preview_id') && goalPreview.includes('"utc"') && goalPreview.includes('local_date'), 'e2e: upsert_goal preview stamps utc + local_date')
 
 const goalSaved = toolText((await rpc(TOKEN_A, 'tools/call', {
-  name: 'upsert_goal', arguments: { name: 'Hip IR L', metric: 'hip_ir', unit: 'deg', side: 'L', direction: 'higher', target: 35, confirm: true },
+  name: 'upsert_goal', arguments: { name: 'Hip IR L', metric: 'hip_ir', unit: 'deg', side: 'L', direction: 'higher', target: 35, confirm: true, preview_id: keptPreview(goalPreview), approval_ref: await athleteApproves(keptPreview(goalPreview)) },
 })).body)
 ok(goalSaved.includes('Hip IR L'), 'e2e: upsert_goal confirm writes')
 const goalMoves = await sql<{ athlete_id: string; body: string }[]>`
@@ -388,7 +398,18 @@ ok(await pressCount() === 0, 'propose: parking writes nothing to the program')
 
 const bAccept = toolText((await rpc(TOKEN_B, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: prop!.id } })).body)
 ok(bAccept.includes('No such proposal'), 'isolation: B cannot apply A proposal')
-const accepted = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: prop!.id } })).body)
+const unapproved = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: prop!.id } })).body)
+ok(unapproved.includes('approval_ref is required') && await pressCount() === 0, 'accept: with tracks_v1 a coach needs the athlete\'s yes (approval_ref)')
+// The athlete says yes in the coach chat; the app records it as their approval.
+const [yesMsg] = await sql<{ id: string }[]>`
+  INSERT INTO coach_message (athlete_id, role, kind, body, created_at)
+  VALUES (${A}, 'athlete', 'chat', 'Yes, add the push press.', NOW() + INTERVAL '1 second') RETURNING id::text AS id
+`
+const chatRef = await athleteApproves(prop!.id, yesMsg.id)
+ok(chatRef.startsWith('msg:'), `accept: the athlete's chat yes is an approval (${chatRef.slice(0, 60)})`)
+const approvalsListed = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'list_approvals', arguments: { preview_id: prop!.id } })).body)
+ok(approvalsListed.includes(chatRef) && approvalsListed.includes('"open"'), 'accept: list_approvals shows the coach the athlete\'s approval')
+const accepted = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: prop!.id, approval_ref: chatRef } })).body)
 ok(!/^Refused/.test(accepted) && await pressCount() === 1, 'accept: applies exactly the stored edit')
 const [applied] = await sql<{ status: string }[]>`SELECT status FROM coach_proposal WHERE id = ${prop!.id}`
 ok(applied?.status === 'applied', 'accept: the proposal is marked applied')
@@ -396,7 +417,7 @@ const [acceptNote] = await sql<{ ref_id: string | null }[]>`
   SELECT ref_id::text FROM coach_message WHERE athlete_id = ${A} AND body LIKE 'Accepted: Add a push press.%'
 `
 ok(acceptNote?.ref_id === (prop!.goal_ids as string[])[0], 'accept: the move is pinned to the goal it serves')
-const twice = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: prop!.id } })).body)
+const twice = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: prop!.id, approval_ref: chatRef } })).body)
 ok(twice.includes('already applied') && await pressCount() === 1, 'accept: a second accept changes nothing')
 
 toolText((await rpc(TOKEN_A, 'tools/call', {
@@ -404,11 +425,14 @@ toolText((await rpc(TOKEN_A, 'tools/call', {
   arguments: { propose: true, title: 'Add a landmine press.', edits: [{ ...pressEdit, exercise_name: 'Landmine Press' }] },
 })).body)
 const [stale] = await sql<{ id: string }[]>`SELECT id FROM coach_proposal WHERE status = 'pending' AND athlete_id = ${A} ORDER BY created_at DESC LIMIT 1`
+const staleRef = await athleteApproves(stale!.id)
+const faceEdits = [{ ...pressEdit, exercise_name: 'Face Pull', reps: '15', load: null }]
+const facePreview = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'preview_program_edits', arguments: { edits: faceEdits } })).body)
 await rpc(TOKEN_A, 'tools/call', {
   name: 'apply_program_edits',
-  arguments: { confirm: true, edits: [{ ...pressEdit, exercise_name: 'Face Pull', reps: '15', load: null }] },
+  arguments: { confirm: true, edits: faceEdits, preview_id: keptPreview(facePreview), approval_ref: await athleteApproves(keptPreview(facePreview)) },
 })
-const staleText = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: stale!.id } })).body)
+const staleText = toolText((await rpc(TOKEN_A, 'tools/call', { name: 'apply_program_edits', arguments: { confirm: true, proposal_id: stale!.id, approval_ref: staleRef } })).body)
 const [staleRow] = await sql<{ status: string }[]>`SELECT status FROM coach_proposal WHERE id = ${stale!.id}`
 ok(staleText.includes('changed after') && staleRow?.status === 'stale', 'accept: refuses when the program changed since the preview')
 
