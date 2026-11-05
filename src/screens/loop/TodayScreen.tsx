@@ -1431,7 +1431,11 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
                     <CloudUpload size={13} strokeWidth={1.75} />
                     <span>{outbox.pending} saved on this device, syncing</span>
                   </p>
-                ) : tracksOn() && rpeQueued > 0 ? (
+                ) : null}
+                {/* Session effort (tracks_v1) is its own line, shown alongside
+                    any workout upload note: offline, a finished session queues
+                    both, and the effort tap must still say it will sync. */}
+                {tracksOn() && rpeQueued > 0 ? (
                   <p className="ring-card__note">
                     <CloudUpload size={13} strokeWidth={1.75} />
                     <span>Session effort saved on this device, will sync</span>
