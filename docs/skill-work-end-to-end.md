@@ -1,6 +1,6 @@
 # Skill work, end to end — product/UX spec
 
-Status: product design, ready for engineering. Not production code.
+Status: product design, all product calls decided (§7), ready for engineering. Not production code.
 Scope: everything behind `skill_blocks_v1` (spec §12, zeroed#73 / PR #74, TestFlight 0.1.241 / 243). `coach_v1` stays off.
 Source of the two breaks: Phil's real basketball skill session (finishing → "Play Strong inside the arc" → suicides). This is not a simulated walk.
 
@@ -370,16 +370,26 @@ Flag on unless stated otherwise.
 - Don't change how real intervals start, beep, auto-advance, or log.
 - Don't fix this by adding "Play Strong" or "arc" to `SKILL_NAME`.
 - Don't make makes/attempts required, and don't open a modal to collect them.
-- Don't write production app code or GitHub patches from this doc without the open calls below being made.
+- Don't write production app code or GitHub patches from this doc; it is the product spec engineering builds from.
 - Don't turn on `coach_v1`.
 
 ---
 
-## 7. Open calls for Phil (each with a recommended default)
+## 7. Decisions (made — no open calls remain)
 
-1. **Session type:** should the writer start emitting `session_type: 'skill'` for skill-led days? *Default: yes. It's the cheapest strong anchor and costs no migration (free text today).*
-2. **Writer contract:** must the program-writing agent tag `kind` on every exercise in any session that holds a station or interval? *Default: yes, starting now. Inference stays as the net for existing programs.*
-3. **Makes vs attempts:** should it ship in this pass, as the optional tap-the-numeral tally? *Default: yes, optional, makes-only by default with the miss chip available.*
-4. **Conditioning guard list:** should the short conditioning-word list (sprint, suicide, shuttle, gasser, 17s, bike, row, ski, assault bike, rope, burpee, carry) be accepted as the guard? *Default: yes. Review it once per new sport, not per drill.*
-5. **Athlete override:** should "Run as station / sets / timer" in Details ship with this, or wait? *Default: ship it. It turns every future miss into one tap instead of a TestFlight.*
-6. **Modality skins:** should all six ship at once, or `court` + `general` first? *Default: `court`, `rtp`, and `general` first (Phil's real usage). `throw`, `strike`, and `gym` follow on the same primitive.*
+Each was an open call in the first draft. All are now decided; engineering can start.
+
+1. **Session type — decided: yes.** The writer emits `session_type: 'skill'` for skill-led days and keeps `conditioning` only for interval-led days. Free text today, so no migration. Mixed days are typed `skill` (the station is what the athlete meets first).
+2. **Writer contract — decided: yes, starting now.** The program-writing agent sets `kind` on every exercise in any session that holds a station or an interval, and sets `modality` on every station. Inference (§3.3 rules 4–8) stays as the safety net for existing and hand-written programs; it is not the plan.
+3. **Makes vs attempts — decided: ships in this pass, optional.** Tap the numeral for a make, long-press to take one back, a small miss chip for attempts. Nothing is required; Done / Next alone is always a complete log. Stored as optional `made` / `attempts` on the station's existing set rows — no new table.
+4. **Conditioning guard list — decided: accepted as written** (sprint, suicide, shuttle, gasser, 17s, bike, row, ski, assault / air bike, rope, burpee, carry). It is reviewed once when a new sport is onboarded, never per drill. Drill names are never added to any list.
+5. **Athlete override — decided: ships with this.** "Run as station / Run as sets / Run on timer" in Details, scoped to the session, stored on session feedback like `swap` / `adjusted`. The program is not rewritten. Overrides are logged so repeated overrides of the same exercise can later inform the writer.
+6. **Modality skins — decided: `court`, `rtp` and `general` ship first.** These cover Phil's real usage. `throw`, `strike` and `gym` follow on the same primitive with no behavior change; until then they render as `general`.
+
+Also settled in the body of this spec (restated so nothing reads as open):
+
+- **No "Start stations" CTA.** Only interval-led days say Start intervals; everything else says Start session →.
+- **Any station in a session means it does not start on the timer**, whatever `session_type` says.
+- **`?go=intervals`** starts a timer only on an interval-led day whose first not-done exercise is an interval; otherwise it is dropped.
+- **Session RPE** is asked once at the finish under existing health-data rules; no per-station RPE in this pass.
+- **Everything stays behind `skill_blocks_v1`**; flag off is today's behavior. `coach_v1` stays off.
