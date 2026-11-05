@@ -20,7 +20,11 @@ export interface ExerciseTemplate {
   superset_group?: string
   rest_s?: number
   contacts?: number
+  kind?: ExerciseKind      // skill_blocks_v1 — see src/types/database.ts
+  window_s?: number        // skill block's suggested window, display only
 }
+
+export type ExerciseKind = 'skill' | 'interval'
 
 export interface SetLog {
   set: number
@@ -45,6 +49,8 @@ export interface ProgramEditExercise {
   superset_group?: string | null
   rest_s?: number | null
   contacts?: number | null
+  kind?: ExerciseKind | null
+  window_s?: number | null
 }
 
 export interface ProgramEdit {
@@ -72,4 +78,6 @@ export interface ProgramEdit {
   superset_group?: string | null
   rest_s?: number | null
   contacts?: number | null
+  kind?: ExerciseKind | null
+  window_s?: number | null
 }

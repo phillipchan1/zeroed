@@ -43,12 +43,16 @@ export interface EditInput {
     superset_group?: string | null
     rest_s?: number | null
     contacts?: number | null
+    kind?: 'skill' | 'interval' | null
+    window_s?: number | null
   }>
   track?: string | null
   track_id?: string | null
   superset_group?: string | null
   rest_s?: number | null
   contacts?: number | null
+  kind?: 'skill' | 'interval' | null
+  window_s?: number | null
 }
 
 export function toProgramEdit(e: EditInput): ProgramEdit {
@@ -81,12 +85,17 @@ export function toProgramEdit(e: EditInput): ProgramEdit {
       superset_group: x.superset_group ?? null,
       rest_s: x.rest_s ?? null,
       contacts: x.contacts ?? null,
+      // skill_blocks_v1: present only when the flag let them in (skillBlocks.ts).
+      ...(x.kind != null ? { kind: x.kind } : {}),
+      ...(x.window_s != null ? { window_s: x.window_s } : {}),
     })),
     track: e.track ?? null,
     track_id: e.track_id ?? null,
     superset_group: e.superset_group ?? null,
     rest_s: e.rest_s ?? null,
     contacts: e.contacts ?? null,
+    ...(e.kind != null ? { kind: e.kind } : {}),
+    ...(e.window_s != null ? { window_s: e.window_s } : {}),
   }
 }
 

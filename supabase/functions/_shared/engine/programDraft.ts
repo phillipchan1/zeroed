@@ -22,7 +22,7 @@ import {
   type SessionDiff,
 } from './weekDiff.ts'
 import type { ProgramEdit } from './types.ts'
-import type { ExerciseTemplate } from './types.ts'
+import type { ExerciseKind, ExerciseTemplate } from './types.ts'
 
 // ---- the working draft ------------------------------------------------------
 
@@ -204,6 +204,8 @@ function applyTrackFields(
     superset_group?: string | null
     rest_s?: number | null
     contacts?: number | null
+    kind?: ExerciseKind | null
+    window_s?: number | null
   },
 ): boolean {
   let touched = false
@@ -217,6 +219,16 @@ function applyTrackFields(
   }
   if (e.contacts != null && Number.isFinite(Number(e.contacts))) {
     ex.contacts = Math.max(0, Math.round(Number(e.contacts)))
+    touched = true
+  }
+  // skill_blocks_v1: only ever present when the flag let them through (the
+  // Worker strips them otherwise), so an edit without them reads as before.
+  if (e.kind === 'skill' || e.kind === 'interval') {
+    ex.kind = e.kind
+    touched = true
+  }
+  if (e.window_s != null && Number.isFinite(Number(e.window_s))) {
+    ex.window_s = Math.max(0, Math.min(7200, Math.round(Number(e.window_s))))
     touched = true
   }
   return touched
@@ -238,6 +250,8 @@ export function summarizeEdit(e: ProgramEdit): string {
       if (e.superset_group) bits.push(e.superset_group)
       if (e.rest_s != null) bits.push(`${e.rest_s}s rest`)
       if (e.contacts != null) bits.push(`${e.contacts} contacts`)
+      if (e.kind) bits.push(e.kind === 'skill' ? 'skill block' : 'interval')
+      if (e.window_s != null) bits.push(`~${e.window_s}s window`)
       return `Retune ${e.exercise_name ?? 'a lift'} in ${e.session_name ?? 'a session'}${bits.length ? ` → ${bits.join(' · ')}` : ''}`
     }
     case 'remove_exercise':

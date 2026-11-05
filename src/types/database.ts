@@ -443,7 +443,17 @@ export interface ExerciseTemplate {
   superset_group?: string
   rest_s?: number
   contacts?: number
+  // skill_blocks_v1 (spec §12; no migration — it lives in the exercises JSON).
+  // 'skill': a station whose target is quality (makes, possessions, per side),
+  // advanced by the athlete's Done / Next, never by a clock; rest_s is then a
+  // suggestion shown as copy. 'interval': conditioning on the interval timer,
+  // whatever the name says. Unset reads as before. Ignored with the flag off.
+  kind?: ExerciseKind
+  // Suggested window for a skill block, in seconds. Display only.
+  window_s?: number
 }
+
+export type ExerciseKind = 'skill' | 'interval'
 
 // Three taps on a session the plan didn't write. Read later by the tissue
 // budgets (docs/one-athlete-one-arc.md §2.3); booleans until those need more.

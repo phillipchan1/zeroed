@@ -52,6 +52,7 @@ import { isHealthObservation, redactHealthText, seesHealth, statusBlockedRegions
 import { isReadTool, logCoachRead, logsReads } from './coachReads.ts'
 import { refuseByRole } from './coachRoles.ts'
 import { ACTIVITY_TOOL_NAMES, ACTIVITY_TOOLS, coachSchemaMissing, coachUnavailable, coachV1On, runActivityTool } from './activities.ts'
+import { skillBlocksV1On, skillEditsFor, withSkillArgs } from './skillBlocks.ts'
 
 const editExerciseSchema = {
   type: 'object',
@@ -302,6 +303,12 @@ function withValidatorArgs(tool: McpTool): McpTool {
  */
 export async function zeroedToolsFor(sql: Sql, athleteId: string): Promise<McpTool[]> {
   const store = storeForAthlete(sql, athleteId)
+  const list = await baseToolsFor(store)
+  // skill_blocks_v1 (on its own flag): kind / window_s on the edit tools. Off, the list as above.
+  return await skillBlocksV1On(store) ? list.map(withSkillArgs) : list
+}
+
+async function baseToolsFor(store: ConnectedStore): Promise<McpTool[]> {
   if (!(await tracksV1On(store))) return ZEROED_TOOLS
   const tracks = [...ZEROED_TOOLS.map(withApprovalArgs).map(withValidatorArgs), ...SESSION_OVERRIDE_TOOLS, ...CHANGE_LOG_TOOLS, ...APPROVAL_TOOLS, ...METHODOLOGY_TOOLS, ...READINESS_TOOLS, ...SESSION_RPE_TOOLS]
   return await coachV1On(store) ? [...tracks, ...ACTIVITY_TOOLS] : tracks
@@ -639,8 +646,9 @@ async function runZeroedTool(
     case 'get_coach_notes':
       return renderNotes(await loadNotes(store, asInt(args.limit) ?? 12))
     case 'preview_program_edits': {
-      const edits = args.edits
-      if (!Array.isArray(edits) || !edits.length) throw new McpUserError('edits is required')
+      if (!Array.isArray(args.edits) || !args.edits.length) throw new McpUserError('edits is required')
+      // skill_blocks_v1 off: kind / window_s dropped, as unknown keys always were.
+      const edits = skillEditsFor(args.edits, await skillBlocksV1On(store))
       const live = await loadLiveProgram(store)
       if (!live) return 'No active program/phase to edit.'
       const preview = previewEdits(live, edits as EditInput[], asString(args.week_start))
@@ -688,8 +696,8 @@ async function runZeroedTool(
         if (problem) return problem
         return (await acceptProposal(store, proposalId, { approvalRef: String(args.approval_ref).trim(), actor })).text
       }
-      const edits = args.edits
-      if (!Array.isArray(edits) || !edits.length) throw new McpUserError('edits or proposal_id is required')
+      if (!Array.isArray(args.edits) || !args.edits.length) throw new McpUserError('edits or proposal_id is required')
+      const edits = skillEditsFor(args.edits, await skillBlocksV1On(store))
       if (gate) return applyEditsLogged(store, gate, args, edits as EditInput[])
       const timing = args.timing === 'next_week' ? 'next_week' : 'now'
       return applyEdits(store, edits as EditInput[], {
