@@ -2466,11 +2466,11 @@ textarea.input {
   color: var(--text);
   font-family: var(--font-sans);
   line-height: 1.4;
-  /* 15px — deliberately below the 16px floor that stops iOS Safari zooming the
-     page on focus. A draft you can see all of is worth more here than avoiding
-     that zoom, and the installed app (Capacitor / standalone PWA) doesn't do it
-     at all. Nothing else on the app's type scale goes below this. */
-  font-size: var(--fs-sm);
+  /* 16px is the floor: iOS zooms the page when a field under it is focused, and
+     the installed app (Capacitor WKWebView) does it too. The zoom persists across
+     tabs and leaves everything clipped off-frame, so this was never a trade worth
+     making for a few more characters per line. Keep every form control at 16px+. */
+  font-size: var(--fs-base);
 }
 .coach-input textarea:focus {
   outline: none;

@@ -79,7 +79,7 @@ export function HookQuestionScreen({
           onChange={(e) => setValue(e.target.value)}
           rows={3}
           autoFocus
-          style={{ fontSize: 15, lineHeight: 1.5 }}
+          style={{ lineHeight: 1.5 }}
         />
 
         <div

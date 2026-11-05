@@ -3354,7 +3354,7 @@ export function WorkoutScreen({
                 onChange={(e) => setPerformedAt(e.target.value || toDateInput(new Date()))}
                 style={{
                   background: 'transparent', border: '1px solid var(--line)', borderRadius: 8,
-                  color: 'var(--text)', padding: '6px 10px', fontSize: 'var(--fs-xs)',
+                  color: 'var(--text)', padding: '6px 10px', fontSize: 'var(--fs-base)',
                 }}
               />
             </label>

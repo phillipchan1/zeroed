@@ -2,7 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <!-- maximum-scale=1 / user-scalable=no: this is a phone app, not a document.
+         Without it the iOS webview can be zoomed (a focused field under 16px, a
+         double-tap, a stray pinch) and the zoom sticks across every tab, clipping
+         the screen and pushing the nav out of reach. Capacitor's WKWebView honors
+         it; iOS Safari ignores user-scalable for accessibility, so the web PWA
+         still pinch-zooms. Keep form controls at 16px+ regardless. -->
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#0A0A0A" />
     <meta name="description" content="Zeroed — close the loop on every set." />
 
