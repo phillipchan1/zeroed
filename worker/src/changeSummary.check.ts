@@ -33,6 +33,9 @@ eq(summarizeChange({
 eq(summarizeChange({ tool: 'update_track', target_type: 'track', diff: { before: { name: 'Speed', purpose: 'a' }, after: { name: 'Speed', purpose: 'b' } } }), 'Updated the Speed track: purpose', 'summary: track fields that changed')
 eq(summarizeChange({ tool: 'revert_change', target_type: 'track', diff: { undid: 'Updated the Speed track: purpose' } }), 'Undid: Updated the Speed track: purpose', 'summary: an undo names what it undid')
 eq(summarizeChange({ tool: 'revert_change', target_type: 'track', diff: { undid: 'Updated the Speed track: purpose', direction: 'redo' } }), 'Redid: Updated the Speed track: purpose', 'summary: a redo names what it re-applied')
+eq(summarizeChange({ tool: 'apply_block_reeval', target_type: 'region', diff: { region: 'low_back', after: { status: 'ok', block: 'temporary' } } }), 'Low back re-checked under v1.2: no clinician clear needed (off until next session)', 'summary: the v1.2 re-check, still temporary')
+eq(summarizeChange({ tool: 'apply_block_reeval', target_type: 'region', diff: { region: 'knee', after: { status: 'ok', block: null } } }), 'Knee re-checked under v1.2: no clinician clear needed', 'summary: the v1.2 re-check, unblocked')
+eq(summarizeChange({ tool: 'apply_block_reeval_run', target_type: 'region', diff: { kept: 2, lifted: 1 } }), 'Re-checked stored pain blocks under methodology v1.2: 2 kept, 1 lifted', 'summary: the re-check marker')
 eq(summarizeChange({ tool: 'add_workout_note', target_type: 'workout_note', diff: { text: 'x'.repeat(200) } }).length, 90, 'summary: clipped to one line')
 
 console.log(`${checks} checks, ${fails.length} failed`)

@@ -42,11 +42,13 @@
  * Stored data under v1.2 (readiness.ts): nothing is rewritten. A temporary
  * block is derived from the pain report (no region_status row); a persistent
  * one writes a 'blocked' row as before. A 'blocked' row stored under v1.1
- * (e.g. a single 6/10) is not re-judged: rows don't record the version or
- * the history behind them, and a block the athlete was told needs a
- * clinician should not silently lift on deploy. It stays until the athlete
- * marks it cleared, as it always did. Rollback: tracks_v1 off (instant), or
- * redeploy the v1.1 Worker; there is no schema change to undo.
+ * (e.g. a single 6/10) is not re-judged on deploy or at read time: it stays
+ * until the athlete marks it cleared, as it always did. Section 11b: the
+ * operator re-checks those once, under v1.2, with the logged system job
+ * (reevalV11Blocks.ts, scripts/reeval-v11-blocks.mjs); a block v1.2 wouldn't
+ * keep persistent drops to temporary there, never silently. Rollback:
+ * tracks_v1 off (instant), or redeploy the v1.1 Worker; there is no schema
+ * change to undo.
  *
  * Numbers are coaching defaults, not medical prescriptions.
  */

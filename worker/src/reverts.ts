@@ -24,13 +24,15 @@
  *   void      a logging write is tombstoned, never deleted (check-in, pain
  *             reports, session RPE when there was none before, measurement,
  *             note). Append-only tables stay append-only.
- *   safety    clearing a block or a red flag reverts by blocking again. Redoing
- *             a clear is refused: only the clinician clear unblocks.
+ *   safety    clearing a block or a red flag reverts by blocking again, and so
+ *             does the v1.2 re-check's lift of a v1.1 block (section 11b).
+ *             Redoing either is refused: only the clinician clear unblocks.
  *   redo      reverting a revert re-applies the original, through the same
  *             handler and guards.
- *   none      revoking a coach, the system's voided preview, and the work a
- *             downgrade to read voided: access is never restored by an undo
- *             (invite the coach again), and voided previews stay void.
+ *   none      revoking a coach, the system's voided preview, the re-check's
+ *             run marker, and the work a downgrade to read voided: access is
+ *             never restored by an undo (invite the coach again), and voided
+ *             previews stay void.
  *
  * Every revert refuses when a later change touched the same target (the
  * preview lists it; undo that first), when the target moved since, when it
@@ -1037,6 +1039,42 @@ const CLEAR_REGION: Handler = {
   },
 }
 
+/**
+ * The one-time v1.2 re-check (section 11b, reevalV11Blocks.ts) lifted a block
+ * stored under v1.1. Undoing it makes the block persistent again: a new
+ * 'blocked' row with the original reason and report. Redo is refused, like a
+ * clinician clear's: only the clinician clear unblocks.
+ */
+const BLOCK_REEVAL: Handler = {
+  defined: 'The block is persistent again (safety first): no loading there until a clinician clears it. Redoing the re-check is refused: only the clinician clear lifts a block.',
+  blocked: (_d, dir) => (dir === 'redo' ? SAFETY_REDO : null),
+  keys: (d, row) => [`region:${String(d.region ?? row.target_id ?? '')}`],
+  plan: async (store, d, ctx) => {
+    const region = String(d.region ?? '')
+    if (!(await readinessTables(store))) return unavailable
+    if (!/^[a-z_]+$/.test(region)) return notRevertible('this row names no region.')
+    if (blocksNow((await loadRegionStatus(store)).find((s) => s.region === region))) {
+      return { ok: false, reason: 'stale', text: 'Can\'t undo: that region is already blocked again.' }
+    }
+    const before = obj(d.before)
+    const reason = str(before.reason) ?? 'Blocked again: the athlete undid the v1.2 re-check (U7).'
+    const report = typeof d.pain_report_id === 'string' && UUID_RE.test(d.pain_report_id) ? d.pain_report_id : null
+    return {
+      targetType: 'region',
+      targetId: region,
+      diff: { region, reeval_change_id: ctx.row.id, lifted_status_id: d.new_status_id ?? null, reblocked: true },
+      apply: async ({ changeId }) => {
+        const [row] = await store.sql<{ id: string }[]>`
+          INSERT INTO region_status (athlete_id, region, status, reason, pain_report_id, change_id)
+          VALUES (${store.athleteId}, ${region}, 'blocked', ${reason}, ${report}, ${changeId})
+          RETURNING id::text AS id
+        `
+        return { status_id: row.id }
+      },
+    }
+  },
+}
+
 // ---- logging: check-ins and session RPE ---------------------------------------------------
 
 const CHECKIN: Handler = {
@@ -1577,6 +1615,12 @@ export const REVERT_HANDLERS: Record<string, Handler> = {
   apply_methodology_override: METHODOLOGY_OVERRIDE,
   clear_red_flag: CLEAR_RED_FLAG,
   clear_region: CLEAR_REGION,
+  apply_block_reeval: BLOCK_REEVAL,
+  apply_block_reeval_run: {
+    defined: 'Not reverted: the record that the one-time v1.2 re-check ran. Each block it lifted has its own row; undo that one to make the block persistent again.',
+    blocked: () => 'this only records that the one-time v1.2 re-check ran. Undo the row for a lifted block instead.',
+    keys: (_d, row) => [`job:${row.id}`],
+  },
   log_checkin: CHECKIN,
   log_session_rpe: SESSION_RPE,
   set_coach_health_access: coachAccessHandler('share_health', 'health-data access'),
