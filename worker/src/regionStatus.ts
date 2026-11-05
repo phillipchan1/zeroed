@@ -7,10 +7,12 @@
  * ("no check-ins, nothing blocked"), so prescriptions run as before.
  */
 import { mcpStamp } from '../../src/engine/mcpStamp.ts'
+import type { ExerciseTemplate, SetLog } from '../../src/types/database.ts'
 import { asJson } from './db.ts'
 import { calendarZone, type ConnectedStore } from './store.ts'
 import { hiddenIds, idList } from './tombstones.ts'
 import type { OverrideActor } from './sessionOverride.ts'
+import { loggedSessionRegions } from './methodology/classify.ts'
 import { isPainRegion, isRedFlag, type CheckinDay, type PainEntry, type RegionState } from './readiness/rules.ts'
 
 /** True once worker/schema/readiness.sql is on this database. Checked, not caught (callers run in transactions). */
@@ -158,6 +160,45 @@ export async function workoutDates(store: ConnectedStore, from: string, to: stri
   `
   const dates = rows.map((r) => mcpStamp(new Date(r.performed_at), zone).local_date).filter((d) => d >= from && d <= to)
   return [...new Set(dates)].sort()
+}
+
+/** One logged session's local date and the pain regions it loads (U7, v1.3). */
+export interface RegionSession {
+  date: string
+  regions: string[]
+}
+
+/**
+ * The athlete's logged sessions in [from, to] (local dates), oldest first,
+ * each with which of `regions` it loads (methodology/classify.ts). v1.3: a
+ * temporary block ends on the first of these after its day that loads its region.
+ */
+export async function regionSessions(store: ConnectedStore, from: string, to: string, regions: string[]): Promise<RegionSession[]> {
+  if (!regions.length) return []
+  const [tz] = await store.sql<{ time_zone: string | null }[]>`SELECT time_zone FROM athlete WHERE id = ${store.athleteId}`
+  const zone = calendarZone(tz?.time_zone)
+  const rows = await store.sql<{ performed_at: string; name: string | null; actual_weights: unknown; exercises_snapshot: unknown; r_exercises: unknown }[]>`
+    SELECT to_json(w.performed_at) #>> '{}' AS performed_at, r.name, w.actual_weights, w.exercises_snapshot, r.exercises AS r_exercises
+    FROM workout w
+    JOIN routine r ON r.id = w.routine_id
+    JOIN program p ON p.id = r.program_id
+    WHERE p.athlete_id = ${store.athleteId}
+      AND w.performed_at >= (${from}::date - 1) AND w.performed_at < (${to}::date + 2)
+    ORDER BY w.performed_at
+  `
+  return rows.flatMap((r) => {
+    const date = mcpStamp(new Date(r.performed_at), zone).local_date
+    if (date < from || date > to) return []
+    return [{
+      date,
+      regions: loggedSessionRegions({
+        name: r.name,
+        actual_weights: asJson<Record<string, SetLog[]> | null>(r.actual_weights, null),
+        exercises_snapshot: asJson<ExerciseTemplate[] | null>(r.exercises_snapshot, null),
+        routine: { exercises: asJson<ExerciseTemplate[] | null>(r.r_exercises, null) },
+      }, regions),
+    }]
+  })
 }
 
 /** Regions with an open block (U7), sorted. Empty before readiness.sql. */

@@ -50,9 +50,11 @@
  * production one (Neon's HTTP SQL endpoint, the only way to reach prod).
  */
 import { mcpStamp } from '../../src/engine/mcpStamp.ts'
+import type { ExerciseTemplate, SetLog } from '../../src/types/database.ts'
 import { ageStatusFrom, type AgeStatus } from './ageStatus.ts'
-import { pgArrayLiteral } from './db.ts'
-import { METHODOLOGY_V1_2, type MethodologyParams } from './methodology/v1.ts'
+import { asJson, pgArrayLiteral } from './db.ts'
+import { loggedSessionRegions } from './methodology/classify.ts'
+import { METHODOLOGY_V1_2, PAIN_REGIONS, type MethodologyParams } from './methodology/v1.ts'
 import { addDays, daysBetween, evaluateReport, isPainRegion, isRedFlag, type PainEntry } from './readiness/rules.ts'
 import { calendarZone } from './store.ts'
 
@@ -187,7 +189,8 @@ export interface ReevalInputs {
   athletes: AthleteInput[]
   pain: PainInput[]
   /** Each athlete's logged workout times (ISO), recent ones. */
-  workouts: Array<{ athlete_id: string; performed_at: string }>
+  /** loads: the pain regions the session loads (v1.3). Absent: unknown, any session counts (v1.2). */
+  workouts: Array<{ athlete_id: string; performed_at: string; loads?: string[] }>
 }
 
 const s = (v: unknown): string | null => (v == null ? null : String(v))
@@ -268,13 +271,23 @@ export async function loadInputs(exec: Executor): Promise<ReevalInputs> {
   }))
   // The temporary window is at most 14 days; a little more covers time zones.
   const workouts = (await exec.query(`
-    SELECT p.athlete_id::text AS athlete_id, to_json(w.performed_at) #>> '{}' AS performed_at
+    SELECT p.athlete_id::text AS athlete_id, to_json(w.performed_at) #>> '{}' AS performed_at,
+           r.name, w.actual_weights, w.exercises_snapshot, r.exercises AS r_exercises
     FROM workout w
     JOIN routine r ON r.id = w.routine_id
     JOIN program p ON p.id = r.program_id
     WHERE p.athlete_id::text = ANY($1::text[]) AND w.performed_at >= NOW() - INTERVAL '20 days'
     ORDER BY p.athlete_id, w.performed_at
-  `, [idParam])).map((r) => ({ athlete_id: String(r.athlete_id), performed_at: String(r.performed_at) }))
+  `, [idParam])).map((r) => ({
+    athlete_id: String(r.athlete_id),
+    performed_at: String(r.performed_at),
+    loads: loggedSessionRegions({
+      name: r.name == null ? null : String(r.name),
+      actual_weights: asJson<Record<string, SetLog[]> | null>(r.actual_weights, null),
+      exercises_snapshot: asJson<ExerciseTemplate[] | null>(r.exercises_snapshot, null),
+      routine: { exercises: asJson<ExerciseTemplate[] | null>(r.r_exercises, null) },
+    }, PAIN_REGIONS),
+  }))
   return { ready: true, as_of: asOf, blocks, athletes, pain, workouts }
 }
 
@@ -392,9 +405,10 @@ export function decide(inputs: ReevalInputs, opts: DecideOpts = {}): ReevalPlan 
     }
     const temporary = calls.filter((c) => c.call.status === 'blocked' && c.call.block === 'temporary').pop() ?? null
     const sessions = inputs.workouts
-      .filter((w) => w.athlete_id === block.athlete_id)
+      .filter((w) => w.athlete_id === block.athlete_id && (w.loads == null || w.loads.includes(block.region)))
       .map((w) => mcpStamp(new Date(w.performed_at), zone).local_date)
-    // As readiness.ts reads it: that day, then until a session is logged on a later day, within 14 days.
+    // As readiness.ts reads it: that day, then until a session that loads the
+    // region (v1.3) is logged on a later day, within 14 days.
     const open = temporary != null && daysBetween(temporary.report.date, today) <= window
       && (temporary.report.date === today || !sessions.some((d) => d > temporary.report.date && d <= addDays(today, -1)))
     decisions.push({
@@ -430,7 +444,7 @@ export async function planReeval(exec: Executor, opts: DecideOpts = {}): Promise
 
 const RATIONALE = 'Re-checked once under methodology v1.2 (section 11b): this block meets none of v1.2\'s persistence criteria '
   + '(a red flag, over 5/10 twice within 14 days, a rating rising across 3 sessions), so it no longer needs a clinician clear. '
-  + 'It drops to a temporary block: that day and the next session (U7).'
+  + 'It drops to a temporary block: that day and the next session that loads it (U7).'
 const RUN_RATIONALE = 'One-time re-check of the pain blocks stored under methodology v1.1, under v1.2 (section 11b). '
   + 'Blocks v1.2 keeps persistent stay until a clinician clears them; under 18 or with no age on file every block stays (U7).'
 
@@ -453,7 +467,7 @@ export function applyStatements(plan: ReevalPlan): SqlQuery[] {
         pain_report_id: b.pain_report_id,
         before: { status: 'blocked', block: 'persistent', reason: b.reason, since: b.created_at, methodology_version: b.methodology_version },
         after: d.after === 'temporary'
-          ? { status: 'ok', block: 'temporary', lapses: 'after the next session', since: d.report?.date ?? null, reason: d.call }
+          ? { status: 'ok', block: 'temporary', lapses: 'after the next session that loads it', since: d.report?.date ?? null, reason: d.call }
           : { status: 'ok', block: null },
       }
       // Guarded: still the open latest row, flag on, age inputs and pain reports as planned, no marker yet.

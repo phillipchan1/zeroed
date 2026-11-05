@@ -20,6 +20,10 @@
  * Pain and check-in sections are health data (D3): a coach the athlete hasn't
  * shared it with gets them as null, and a why line that doesn't name them.
  *
+ * Coach flags (v1.3, section 11c): a pain rating rising across 3 sessions
+ * that never blocks (e.g. 2 → 3 → 4, none over 5) is shown to the coach. It
+ * doesn't move the call, refer out, or block; health data, so only with it.
+ *
  * Session load (G9): Σ session RPE × minutes this week against the mean of the
  * 4 weeks before (Foster). Additive: it informs, it doesn't move the call. It
  * comes from the athlete's session-RPE taps, so it is health data too.
@@ -31,7 +35,7 @@ import { mcpStamp } from '../../src/engine/mcpStamp.ts'
 import { topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import { resolveMethodology, blockedRegions } from './methodology.ts'
 import { athleteAge } from './ageStatus.ts'
-import { addDays, evaluateReport, u6Flags, type CheckinDay } from './readiness/rules.ts'
+import { addDays, daysBetween, evaluateReport, regionLabel, u6Flags, type CheckinDay, type PainEntry } from './readiness/rules.ts'
 import { blockedDuring, loadCheckins, loadPain } from './regionStatus.ts'
 import { athleteToday } from './sessionOverride.ts'
 import { sessionLoadForWeek, type SessionLoadView } from './sessionRpe.ts'
@@ -68,6 +72,17 @@ export interface PainTrend {
   trend: 'better' | 'same' | 'worse' | 'new'
 }
 
+/** v1.3 (U15): something the coach should see that the rules don't act on. */
+export interface CoachFlag {
+  kind: 'rising_pain'
+  region: string
+  /** The sessions' ratings, oldest first, and their dates. */
+  scores: number[]
+  dates: string[]
+  text: string
+  rule_refs: string[]
+}
+
 export interface WeeklyReviewView {
   week_start: string
   week_end: string
@@ -81,6 +96,8 @@ export interface WeeklyReviewView {
   /** G9: session RPE × minutes. null when this coach can't see health data. */
   session_load: SessionLoadView | null
   health_hidden?: true
+  /** v1.3: present when the methodology has coach flags and this coach sees health data. */
+  coach_flags?: CoachFlag[]
   call: WeeklyCall
   rule_refs: string[]
   why: string
@@ -119,6 +136,42 @@ export function weeklyCall(input: CallInput): { call: WeeklyCall; reasons: Reaso
     call: 'progress',
     reasons: [{ text: `${ok}${up.length ? `, ${up.join(' and ')} trending up` : ''}, nothing flagged`, refs: ['U5', 'U15'], health: false }],
   }
+}
+
+/**
+ * v1.3 (section 11c, pure): per region, the latest run of `sessions` reports
+ * (latest per date, within `withinDays`) ending this week that rises every
+ * session without any of them blocking. A run that blocks is the U7 rules'
+ * to handle (rising makes that block persistent); this is only for the
+ * coach to see.
+ */
+export function risingPainFlags(
+  pain: PainEntry[],
+  week: { from: string; to: string },
+  opts: { sessions: number; withinDays: number; blocks: (report: PainEntry) => boolean },
+): CoachFlag[] {
+  const out: CoachFlag[] = []
+  for (const region of [...new Set(pain.map((p) => p.region))].sort()) {
+    const reports = pain.filter((p) => p.region === region).sort((a, b) => a.date.localeCompare(b.date))
+    for (let i = reports.length - 1; i >= opts.sessions - 1; i--) {
+      const last = reports[i]
+      if (last.date < week.from || last.date > week.to) continue
+      const run = reports.slice(i - opts.sessions + 1, i + 1)
+      if (daysBetween(run[0].date, last.date) > opts.withinDays) continue
+      if (!run.every((r, j) => j === 0 || r.score > run[j - 1].score) || run.some(opts.blocks)) continue
+      const scores = run.map((r) => r.score)
+      out.push({
+        kind: 'rising_pain',
+        region,
+        scores,
+        dates: run.map((r) => r.date),
+        text: `${regionLabel(region)} pain rising ${opts.sessions} sessions running (${scores.join(' → ')}/10), never over the block. Worth asking about; the plan doesn't change for it (U15, U7).`,
+        rule_refs: ['U15', 'U7'],
+      })
+      break
+    }
+  }
+  return out
 }
 
 function mondayOf(date: string): string {
@@ -241,13 +294,16 @@ export async function computeWeeklyReview(
 
   // ---- health ----
   const temporaryOn = params.U7.temporary_blocks === true
+  // v1.3: the rising-pain coach flag (minors too: it only shows the coach more).
+  const risingFlagOn = params.U15.rising_pain_flag_sessions != null && params.U7.persistent_after != null
+  const lookback = temporaryOn || risingFlagOn
   const [checkins, painAll, statusBlocked, sessionLoad, age] = await Promise.all([
     loadCheckins(store, addDays(monday, -2), sunday),
     // v1.2: 14 days before the week too, for the persistence criteria (U7).
-    loadPain(store, addDays(monday, temporaryOn ? -(params.U7.persistent_after?.within_days ?? 7) : -7), sunday),
+    loadPain(store, addDays(monday, lookback ? -(params.U7.persistent_after?.within_days ?? 7) : -7), sunday),
     blockedDuring(store, monday, sunday),
     opts.showHealth ? sessionLoadForWeek(store, monday) : null,
-    temporaryOn ? athleteAge(store) : null,
+    lookback ? athleteAge(store) : null,
   ])
   const pain = painAll.filter((p) => p.date >= addDays(monday, -7))
   const days: CheckinDay[] = checkins
@@ -266,9 +322,12 @@ export async function computeWeeklyReview(
   })
   // v1.2: a temporary block (that day and the next session) writes no
   // region_status row; a report this week that set one counts as blocked.
-  const temporaryBlocked = temporaryOn
-    ? painAll.filter((p) => inWeek(p.date)).filter((p) => evaluateReport(painAll, p, params.U7, age?.status === 'adult' && !methodology.minor).status === 'blocked').map((p) => p.region)
-    : []
+  const adult = age?.status === 'adult' && !methodology.minor
+  const blocks = (p: PainEntry) => evaluateReport(painAll, p, params.U7, adult).status === 'blocked'
+  const temporaryBlocked = temporaryOn ? painAll.filter((p) => inWeek(p.date)).filter(blocks).map((p) => p.region) : []
+  const coachFlags = risingFlagOn && opts.showHealth
+    ? risingPainFlags(painAll, { from: monday, to: sunday }, { sessions: params.U15.rising_pain_flag_sessions!, withinDays: params.U7.persistent_after!.within_days, blocks })
+    : null
   // Red flags in the athlete's rules are current state: they count for this week and later.
   const blocked = [...new Set([...statusBlocked, ...temporaryBlocked, ...(sunday >= today ? blockedRegions(methodology) : [])])].sort()
   const painRegions = [...new Set([...blocked, ...painTrend.filter((p) => p.max > cap).map((p) => p.region)])].sort()
@@ -298,6 +357,7 @@ export async function computeWeeklyReview(
       : null,
     session_load: sessionLoad,
     ...(opts.showHealth ? {} : { health_hidden: true as const }),
+    ...(coachFlags ? { coach_flags: coachFlags } : {}),
     call,
     rule_refs: refs.sort((a, b) => Number(a.slice(1)) - Number(b.slice(1))),
     why: `${label}: ${whyParts.join('; ')}.`,
@@ -306,7 +366,7 @@ export async function computeWeeklyReview(
 
 export const WEEKLY_REVIEW_TOOL: McpTool = {
   name: 'get_weekly_review',
-  description: 'The engine\'s weekly review (U15) for one week: compliance (planned vs logged sessions, target ≥ 80%), each priority lift\'s e1RM trend, whether maintenance lifts held (U12), the pain trend, check-in averages and session load (session RPE × minutes against the 4 weeks before; when the athlete shares health data with you), and the call — progress, hold or deload — with rule_refs and one line of why. Read-only. Propose any change it suggests through the usual preview → approval → apply.',
+  description: 'The engine\'s weekly review (U15) for one week: compliance (planned vs logged sessions, target ≥ 80%), each priority lift\'s e1RM trend, whether maintenance lifts held (U12), the pain trend, check-in averages, session load (session RPE × minutes against the 4 weeks before) and coach_flags (e.g. a pain rating rising 3 sessions without blocking; flag only, nothing blocked or referred) when the athlete shares health data with you, and the call — progress, hold or deload — with rule_refs and one line of why. Read-only. Propose any change it suggests through the usual preview → approval → apply.',
   inputSchema: {
     type: 'object',
     properties: {

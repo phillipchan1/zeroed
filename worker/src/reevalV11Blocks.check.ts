@@ -92,6 +92,10 @@ ok(lifted(scenario([{ ago: 0, score: 6 }], 0, { workouts: [0] })) === 'temporary
 ok(lifted(scenario([{ ago: 3, score: 6 }], 0)) === 'temporary', 'single > 5, no session since: temporary')
 ok(lifted(scenario([{ ago: 3, score: 6 }], 0, { workouts: [1] })) === 'unblocked', 'single > 5, a session logged since: unblocked')
 ok(lifted(scenario([{ ago: 3, score: 6 }], 0, { workouts: [3] })) === 'temporary', 'single > 5, a session the same day only: still temporary')
+// v1.3 (section 11c): only a session that loads the region ends the window, as readiness reads it.
+const withLoads = (loads: string[]) => { const s = scenario([{ ago: 3, score: 6 }], 0, { workouts: [1] }); s.workouts = s.workouts.map((w) => ({ ...w, loads })); return s }
+ok(lifted(withLoads(['shoulder', 'elbow'])) === 'temporary', 'v1.3: an upper-body session since a knee > 5 leaves it temporary')
+ok(lifted(withLoads(['knee'])) === 'unblocked', 'v1.3: a session since that loads the knee: unblocked')
 ok(lifted(scenario([{ ago: 14, score: 6 }], 0)) === 'temporary' && lifted(scenario([{ ago: 15, score: 6 }], 0)) === 'unblocked', 'single > 5: the 14-day window is inclusive, then unblocked')
 // Worse the next morning (v1.1's 4 → 5): v1.2 blocks it too, temporarily.
 ok(lifted(scenario([{ ago: 3, score: 4 }, { ago: 2, score: 5 }], 1)) === 'temporary', 'worse the next morning 4 → 5: lifted to temporary')
@@ -243,8 +247,8 @@ await storedBlock(A, 'foot', [{ ago: 3, score: 6 }], 0, { tool: 'revert_change' 
 await painRow(A, 'groin', 6, 7) // A's groin 7: would make B's groin "> 5 twice" if the athletes mixed
 await harness.query(
   `INSERT INTO workout (routine_id, performed_at, rpe, duration_mins, actual_weights, exercises_snapshot)
-   VALUES ($1, $2::timestamptz, 7, 40, '{}'::jsonb, '[]'::jsonb)`, [A_DAY, `${addDays(T, -1)}T19:00:00Z`],
-) // A's session: lapses A's low back, and must not lapse B's groin
+   VALUES ($1, $2::timestamptz, 7, 40, '{}'::jsonb, '[{"name":"Deadlift","sets":3,"reps":"5","load":"heavy"}]'::jsonb)`, [A_DAY, `${addDays(T, -1)}T19:00:00Z`],
+) // A's session loads the low back (v1.3): lapses A's low back, and must not lapse B's groin
 await storedBlock(B, 'groin', [{ ago: 2, score: 6 }], 0) // B (adult by confirmation): lifted, still temporary
 await storedBlock(C, 'knee', [{ ago: 2, score: 6 }], 0) //  under 18: kept
 await storedBlock(U, 'knee', [{ ago: 2, score: 6 }], 0) //  no age on file: kept
@@ -312,7 +316,8 @@ const todayOf = async (aid: string) => (await athleteReadinessAction(makeStore(s
 const aNow = await statusBlockedRegions(storeA)
 ok(aNow.join() === 'ankle,foot,hamstring,hip,shoulder,wrist', `engine: A's kept blocks stay, the lifted ones are gone (${aNow.join()})`)
 const aToday = await todayOf(A)
-ok(aToday.temporary_blocked.map((t) => t.region).join() === 'knee' && !aToday.blocked.some((b) => ['knee', 'low_back', 'elbow', 'neck'].includes(b.region)), 'engine: A\'s knee is temporary (today), low back / elbow / neck unblocked')
+// v1.3: A's groin 7 (the isolation row) stays temporary too: a deadlift session doesn't load the groin.
+ok(aToday.temporary_blocked.map((t) => t.region).join() === 'groin,knee' && !aToday.blocked.some((b) => ['knee', 'low_back', 'elbow', 'neck'].includes(b.region)), 'engine: A\'s knee is temporary (today), low back / elbow / neck unblocked')
 const bToday = await todayOf(B)
 ok(bToday.temporary_blocked.map((t) => t.region).join() === 'groin' && (await statusBlockedRegions(makeStore(sql, B))).length === 0, 'isolation: B\'s groin is temporary — A\'s pain and A\'s session never counted for B')
 ok((await statusBlockedRegions(makeStore(sql, C))).join() === 'knee' && (await statusBlockedRegions(makeStore(sql, U))).join() === 'knee', 'age: the minor\'s and the unknown-age athlete\'s blocks stay')

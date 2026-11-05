@@ -47,7 +47,7 @@ import {
   type PainEntry, type ReadinessFlag, type ReadinessView, type RedFlag, type RegionEval,
 } from './readiness/rules.ts'
 import {
-  blocksNow, loadCheckins, loadPain, loadRegionStatus, readinessTables, seesHealth, workoutDates,
+  blocksNow, loadCheckins, loadPain, loadRegionStatus, readinessTables, regionSessions, seesHealth, workoutDates,
   type PainRow, type RegionStatusRow,
 } from './regionStatus.ts'
 
@@ -156,16 +156,23 @@ const after = (a: string | null | undefined, b: string) => a != null && Date.par
 /**
  * v1.2: temporary blocks in force on `date` — set by a report that day, or by
  * one on an earlier day with no session logged since (that day and the next
- * session). A clinician clear after the report lifts it too.
+ * session). v1.3 (section 11c): only a session that loads the region ends it,
+ * so an upper-body day leaves a knee block in place. Either way it lapses
+ * after 14 days. A clinician clear after the report lifts it too.
  */
-async function temporaryBlocks(store: ConnectedStore, date: string, calls: { today: PainCall[]; earlier: PainCall[] }, status: RegionStatusRow[]): Promise<TemporaryBlock[]> {
+async function temporaryBlocks(store: ConnectedStore, date: string, calls: { today: PainCall[]; earlier: PainCall[] }, status: RegionStatusRow[], p: Resolved['params']['U7']): Promise<TemporaryBlock[]> {
   const temp = (c: PainCall) => c.call.status === 'blocked' && c.call.block === 'temporary'
     && !after(status.find((s) => s.region === c.report.region)?.cleared_at, c.report.created_at)
   const earlier = calls.earlier.filter(temp)
-  const sessions = earlier.length ? await workoutDates(store, earlier.map((c) => c.report.date).sort()[0], addDays(date, -1)) : []
+  const from = earlier.map((c) => c.report.date).sort()[0]
+  const byRegion = p.temporary_ends_on === 'region_session'
+  const sessions = !earlier.length ? []
+    : byRegion ? await regionSessions(store, from, addDays(date, -1), [...new Set(earlier.map((c) => c.report.region))])
+    : (await workoutDates(store, from, addDays(date, -1))).map((d) => ({ date: d, regions: null }))
+  const ends = (c: PainCall) => sessions.some((x) => x.date > c.report.date && (x.regions == null || x.regions.includes(c.report.region)))
   const out = new Map<string, TemporaryBlock>()
   for (const c of [...earlier, ...calls.today.filter(temp)]) {
-    if (c.report.date < date && sessions.some((d) => d > c.report.date)) continue
+    if (c.report.date < date && ends(c)) continue
     out.set(c.report.region, { region: c.report.region, since: c.report.date, reason: c.call.reason })
   }
   return [...out.values()].sort((a, b) => a.region.localeCompare(b.region))
@@ -186,7 +193,7 @@ export async function readinessContextFor(store: ConnectedStore, date: string, m
       ? { ...c, status: 'ok', refer_out: false, reason: `${regionLabel(c.region)} was cleared by a clinician after this report (U7).` }
       : c
   })
-  const temporary = methodology.params.U7.temporary_blocks ? await temporaryBlocks(store, date, calls, status) : []
+  const temporary = methodology.params.U7.temporary_blocks ? await temporaryBlocks(store, date, calls, status, methodology.params.U7) : []
   const persistent = [...new Set([
     ...blockedRegions(methodology), ...open,
     ...regions.filter((r) => r.status === 'blocked' && r.block !== 'temporary').map((r) => r.region),
