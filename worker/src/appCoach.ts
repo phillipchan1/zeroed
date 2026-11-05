@@ -37,6 +37,8 @@ import { ApprovalSpent, consumeApproval, createApproval, directTapApproval } fro
 import { withTx, writeChange } from './changeLog.ts'
 import { acceptProposal } from './proposals.ts'
 import { resolveMethodology } from './methodology.ts'
+import { athleteAge } from './ageStatus.ts'
+import { ageView, confirmAdult } from './adultConfirmation.ts'
 import { saveCheckin } from './readiness.ts'
 import { REFER_OUT, RED_FLAGS } from './readiness/rules.ts'
 import { PAIN_REGIONS } from './methodology/v1.ts'
@@ -386,15 +388,15 @@ function blockRequestFrom(intake: ParsedIntake, existing: Awaited<ReturnType<typ
 
 export async function runIntake(store: ConnectedStore, answers: unknown): Promise<IntakeResult> {
   const me: OverrideActor = { type: 'athlete', id: store.athleteId }
-  const [today, methodology, [row]] = await Promise.all([
-    athleteToday(store),
-    resolveMethodology(store),
-    store.sql<{ birth_date: string | null }[]>`SELECT birth_date::text AS birth_date FROM athlete WHERE id = ${store.athleteId}`,
-  ])
-  const parsed = parseIntake(answers, { today, birthDateOnFile: row?.birth_date ?? null, params: methodology.params, minors: methodology.minors })
+  const [today, methodology, age] = await Promise.all([athleteToday(store), resolveMethodology(store), athleteAge(store)])
+  const parsed = parseIntake(answers, {
+    today, birthDateOnFile: age.birthDate, adultConfirmedOnFile: age.adultConfirmedAt != null, params: methodology.params, minors: methodology.minors,
+  })
   if (!parsed.ok) return { ok: false, errors: parsed.errors, needs_consent: parsed.needs_consent === true }
   const intake = parsed.intake
-  if (!row?.birth_date && intake.birth_date) await recordBirthDate(store, intake.birth_date, intake.minor)
+  if (!age.birthDate && intake.birth_date) await recordBirthDate(store, intake.birth_date, intake.minor)
+  // Section 11b: "I'm 18 or older" tapped in intake, with no birth date. The same logged athlete write as Profile's.
+  else if (!age.birthDate && intake.adult_confirmed) await confirmAdult(store, me, { source: 'intake' })
 
   // Pain and the recovery baseline are a check-in: standing approval, and a
   // red flag (or pain above the stop line) blocks the region (U7) on the spot
@@ -468,15 +470,17 @@ export async function athleteCoachAction(
         const [activities, block, recompose, intake, chat, methodology] = await Promise.all([
           loadActivities(store), currentBlock(store), recomposeDue(store), lastIntake(store), chatHistory(store, 30), resolveMethodology(store),
         ])
-        const [a] = await store.sql<{ birth_date: string | null }[]>`SELECT birth_date::text AS birth_date FROM athlete WHERE id = ${store.athleteId}`
+        const age = await ageView(store)
         return [{
           ok: true,
           activities,
           block: block ? { id: block.id, methodology_version: block.methodology_version, modules_version: block.modules_version, ...blockSummary(block.block) } : null,
           recompose,
           intake: intake ? { id: intake.id, outcome: intake.outcome, created_at: intake.created_at } : null,
-          birth_date_on_file: !!a?.birth_date,
+          birth_date_on_file: age.birth_date_on_file,
           minor: methodology.minor,
+          age_status: age.age_status,
+          can_confirm_adult: age.can_confirm,
           chat,
           // What the intake form asks about, from the server's config.
           modules: moduleCatalog(),

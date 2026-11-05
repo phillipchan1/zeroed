@@ -12,13 +12,13 @@
  *                                transaction. app_coach never applies.
  *
  * Table and columns are hand-applied on Neon (worker/schema/methodology.sql).
- * Until they exist every read here is "no overrides, age unknown" and the
+ * Until they exist every read here is "no overrides" and the
  * version is the global one. With the flag off nothing here is called.
  */
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import type { NoRpeE1rm } from '../../src/engine/liftModel.ts'
 import { asJson, jsonParam } from './db.ts'
-import { athleteToday, tracksV1On, type OverrideActor } from './sessionOverride.ts'
+import { tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { authorizeWrite, commitAuthorized, previewFooter, storeChangePreview, type ChangeActor } from './changeLog.ts'
 import { ruleRefsFrom } from './changeSummary.ts'
 import { CURRENT_METHODOLOGY } from './methodology/v1.ts'
@@ -26,6 +26,7 @@ import {
   blockedRegions, checkOverride, engineParams, OVERRIDE_PATHS, resolveParams,
   type OverrideRecord, type Resolved,
 } from './methodology/resolve.ts'
+import { athleteAge, overrideAgeOf } from './ageStatus.ts'
 import { seesHealth } from './regionStatus.ts'
 import type { ConnectedStore } from './store.ts'
 import { McpUserError } from './userError.ts'
@@ -48,20 +49,6 @@ export function methodologyMissing(e: unknown): boolean {
 }
 
 // ---- reads ------------------------------------------------------------------------------------
-
-/** True under 18, false 18+, null when no date of birth is on file. */
-export async function athleteMinor(store: ConnectedStore): Promise<boolean | null> {
-  const [row] = await store.sql<{ birth_date: string | null }[]>`
-    SELECT to_jsonb(a) ->> 'birth_date' AS birth_date FROM athlete a WHERE a.id = ${store.athleteId}
-  `
-  const dob = row?.birth_date ?? null
-  if (!dob || !/^\d{4}-\d{2}-\d{2}/.test(dob)) return null
-  const today = await athleteToday(store)
-  const [y, m, d] = dob.slice(0, 10).split('-').map(Number)
-  const [ty, tm, td] = today.split('-').map(Number)
-  const age = ty - y - (tm < m || (tm === m && td < d) ? 1 : 0)
-  return age < CURRENT_METHODOLOGY.minors.age_under
-}
 
 export interface OverrideRow extends OverrideRecord {
   track: string | null
@@ -113,8 +100,8 @@ export async function loadOverrides(store: ConnectedStore): Promise<OverrideRow[
 
 /** Effective methodology for this athlete (and optionally one track). */
 export async function resolveMethodology(store: ConnectedStore, opts: { trackId?: string | null } = {}): Promise<Resolved> {
-  const [overrides, minor] = await Promise.all([loadOverrides(store), athleteMinor(store)])
-  return resolveParams(CURRENT_METHODOLOGY, overrides, { trackId: opts.trackId ?? null, minor: minor === true })
+  const [overrides, age] = await Promise.all([loadOverrides(store), athleteAge(store)])
+  return resolveParams(CURRENT_METHODOLOGY, overrides, { trackId: opts.trackId ?? null, minor: age.minorRules })
 }
 
 /**
@@ -170,10 +157,10 @@ async function planOverride(
   req: OverrideRequest,
   author: ChangeActor['type'],
 ): Promise<{ ok: true; state: OverrideState; track: string | null } | { ok: false; text: string }> {
-  const [overrides, minor] = await Promise.all([loadOverrides(store), athleteMinor(store)])
+  const [overrides, age] = await Promise.all([loadOverrides(store), athleteAge(store)])
   const sameScope = (o: OverrideRecord) => o.path === req.path && (o.track_id ?? null) === req.track_id
   const existing = overrides.find(sameScope) ?? null
-  const opts = { trackId: req.track_id, minor: minor === true }
+  const opts = { trackId: req.track_id, minor: age.minorRules }
   const now = resolveParams(CURRENT_METHODOLOGY, overrides, opts)
   const withoutThis = resolveParams(CURRENT_METHODOLOGY, overrides.filter((o) => !sameScope(o)), opts)
   const check = checkOverride({
@@ -183,7 +170,7 @@ async function planOverride(
     trackId: req.track_id,
     now,
     withoutThis,
-    minor,
+    minor: overrideAgeOf(age.status),
     actorType: author,
     exists: existing != null,
   })
@@ -217,7 +204,7 @@ export const METHODOLOGY_TOOLS: McpTool[] = [
   },
   {
     name: 'preview_methodology_override',
-    description: 'Preview changing ONE methodology param for this athlete (or one track): e.g. path "U5.top_single_rpe" value [8, 8.5], "U4.tm_fraction" 0.88, "U7.regions.knee.blocked" true, or clear=true to go back to the default. Unknown paths and out-of-range values are refused; under-18 rules only tighten; a raised pain cap (U7.regions.<region>.raised_cap) is never allowed for a minor and never on a red-flagged region. Writes nothing; returns preview_id + diff. Apply with apply_methodology_override after the athlete approves.',
+    description: 'Preview changing ONE methodology param for this athlete (or one track): e.g. path "U5.top_single_rpe" value [8, 8.5], "U4.tm_fraction" 0.88, "U7.regions.knee.blocked" true, or clear=true to go back to the default. Unknown paths and out-of-range values are refused; under-18 rules only tighten; a raised pain cap (U7.regions.<region>.raised_cap) is never allowed for a minor (or an athlete whose age is not on file) and never on a red-flagged region. Writes nothing; returns preview_id + diff. Apply with apply_methodology_override after the athlete approves.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -269,14 +256,17 @@ async function getMethodology(store: ConnectedStore, args: Record<string, unknow
     if (!t) return `No track "${args.track}" on this athlete.`
     trackId = t.id
   }
-  const [resolved, overrides, minor] = await Promise.all([resolveMethodology(store, { trackId }), loadOverrides(store), athleteMinor(store)])
+  const [resolved, overrides, age] = await Promise.all([resolveMethodology(store, { trackId }), loadOverrides(store), athleteAge(store)])
   // D3: without health access, no per-region pain rules and no red-flagged regions.
   const params = health ? resolved.params : { ...resolved.params, U7: { ...resolved.params.U7, regions: {} } }
   const shown = health ? overrides : overrides.filter((o) => !isHealthPath(o.path))
   return json({
     methodology_version: resolved.version,
     base_version: resolved.base_version,
-    under_18: minor,
+    under_18: overrideAgeOf(age.status),
+    // Section 11b: an unknown age gets every under-18 rule until a birth date or an 18+ confirmation is on file.
+    age_status: age.status,
+    under_18_rules: resolved.minor,
     track_id: trackId,
     params,
     minors: resolved.minors,

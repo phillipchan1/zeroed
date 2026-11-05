@@ -41,6 +41,9 @@ const TOKEN_B_ID = 'bbbb6666-0000-4000-8000-000000000001'
 
 const harness = await openIsolationHarness()
 const sql = harness.sql
+// Section 11b: no age on file means the under-18 rules. These synthetic
+// athletes are confirmed adults; ageStatus.check.ts covers unknown age.
+await harness.query(`UPDATE athlete SET adult_confirmed_at = NOW()`)
 const storeA = makeStore(sql, A)
 const storeB = makeStore(sql, B)
 const coachA: OverrideActor = { type: 'mcp', id: TOKEN_A_ID }
@@ -50,7 +53,7 @@ const athleteA: OverrideActor = { type: 'athlete', id: A }
 // Two more synthetic athletes: C (under 18) and D (red flag at intake).
 for (const [id, user, name] of [[C, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'Athlete C'], [D, 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', 'Athlete D']]) {
   await harness.query(`INSERT INTO auth.users (id, email) VALUES ($1, $2)`, [user, `${name.slice(-1).toLowerCase()}@example.com`])
-  await harness.query(`INSERT INTO athlete (id, auth_user_id, name, training_age, sessions_per_week) VALUES ($1, $2, $3, 2, 3)`, [id, user, name])
+  await harness.query(`INSERT INTO athlete (id, auth_user_id, name, training_age, sessions_per_week, adult_confirmed_at) VALUES ($1, $2, $3, 2, 3, NOW())`, [id, user, name])
 }
 const storeC = makeStore(sql, C)
 const storeD = makeStore(sql, D)

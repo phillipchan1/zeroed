@@ -29,7 +29,8 @@ import { canonicalLiftId, estimateE1rm, type E1rmMethod } from '../../src/engine
 import { readLoggedExercises } from '../../src/engine/loggedSets.ts'
 import { mcpStamp } from '../../src/engine/mcpStamp.ts'
 import { topWorkingSet } from '../../supabase/functions/_shared/zeroedFormat.ts'
-import { athleteMinor, resolveMethodology, blockedRegions } from './methodology.ts'
+import { resolveMethodology, blockedRegions } from './methodology.ts'
+import { athleteAge } from './ageStatus.ts'
 import { addDays, evaluateReport, u6Flags, type CheckinDay } from './readiness/rules.ts'
 import { blockedDuring, loadCheckins, loadPain } from './regionStatus.ts'
 import { athleteToday } from './sessionOverride.ts'
@@ -240,13 +241,13 @@ export async function computeWeeklyReview(
 
   // ---- health ----
   const temporaryOn = params.U7.temporary_blocks === true
-  const [checkins, painAll, statusBlocked, sessionLoad, minor] = await Promise.all([
+  const [checkins, painAll, statusBlocked, sessionLoad, age] = await Promise.all([
     loadCheckins(store, addDays(monday, -2), sunday),
     // v1.2: 14 days before the week too, for the persistence criteria (U7).
     loadPain(store, addDays(monday, temporaryOn ? -(params.U7.persistent_after?.within_days ?? 7) : -7), sunday),
     blockedDuring(store, monday, sunday),
     opts.showHealth ? sessionLoadForWeek(store, monday) : null,
-    temporaryOn ? athleteMinor(store) : null,
+    temporaryOn ? athleteAge(store) : null,
   ])
   const pain = painAll.filter((p) => p.date >= addDays(monday, -7))
   const days: CheckinDay[] = checkins
@@ -266,7 +267,7 @@ export async function computeWeeklyReview(
   // v1.2: a temporary block (that day and the next session) writes no
   // region_status row; a report this week that set one counts as blocked.
   const temporaryBlocked = temporaryOn
-    ? painAll.filter((p) => inWeek(p.date)).filter((p) => evaluateReport(painAll, p, params.U7, minor === false && !methodology.minor).status === 'blocked').map((p) => p.region)
+    ? painAll.filter((p) => inWeek(p.date)).filter((p) => evaluateReport(painAll, p, params.U7, age?.status === 'adult' && !methodology.minor).status === 'blocked').map((p) => p.region)
     : []
   // Red flags in the athlete's rules are current state: they count for this week and later.
   const blocked = [...new Set([...statusBlocked, ...temporaryBlocked, ...(sunday >= today ? blockedRegions(methodology) : [])])].sort()

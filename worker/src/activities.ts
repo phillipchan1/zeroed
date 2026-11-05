@@ -47,7 +47,8 @@ import {
   authorizeWrite, commitAuthorized, makeWriteGate, previewFooter, programMetaSnapshot, storeChangePreview, type ChangeActor,
 } from './changeLog.ts'
 import { ruleRefsFrom } from './changeSummary.ts'
-import { athleteMinor, blockedRegions, resolveMethodology } from './methodology.ts'
+import { blockedRegions, resolveMethodology } from './methodology.ts'
+import { athleteAge } from './ageStatus.ts'
 import { seesHealth, statusBlockedRegions } from './regionStatus.ts'
 import { athleteToday, canonicalJson, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { runTrackTool } from './trackTools.ts'
@@ -63,7 +64,6 @@ import {
   COMPOSER_V1, isModuleKey, isQuality, moduleCatalog, moduleForSport, MODULES, MODULES_V1_VERSION, QUALITY_LABEL, SCREENS,
   type ModuleKey, type Quality, type ScreenKey,
 } from './coach/modules.ts'
-import { ageOn } from './coach/intake.ts'
 import { BLOCK_PROGRAM_VERSION, blockSessions, sessionLines, type BlockSession, type HeldExercise } from './coach/blockProgram.ts'
 import { PAIN_REGIONS, type MethodologyParams, type PainRegion } from './methodology/v1.ts'
 import { forViewer, validateEdit, warningsSection, type ValidateResult } from './methodology/validators.ts'
@@ -406,12 +406,12 @@ export interface Composed {
 
 /** Everything the composer reads for this athlete, plus what the request adds. Same request + same rows → same input. */
 export async function composeFor(store: ConnectedStore, req: BlockRequest): Promise<Composed> {
-  const [acts, goals, methodology, statusBlocked, today, intake, block, minor] = await Promise.all([
+  const [acts, goals, methodology, statusBlocked, today, intake, block, age] = await Promise.all([
     loadActivities(store), loadGoals(store), resolveMethodology(store), statusBlockedRegions(store),
-    athleteToday(store), lastIntake(store), currentBlock(store), athleteMinor(store),
+    athleteToday(store), lastIntake(store), currentBlock(store), athleteAge(store),
   ])
-  const [athlete] = await store.sql<{ training_age: number | null; sessions_per_week: number | null; birth_date: string | null }[]>`
-    SELECT training_age, sessions_per_week, birth_date::text AS birth_date FROM athlete WHERE id = ${store.athleteId}
+  const [athlete] = await store.sql<{ training_age: number | null; sessions_per_week: number | null }[]>`
+    SELECT training_age, sessions_per_week FROM athlete WHERE id = ${store.athleteId}
   `
   const prior = obj(intake?.answers)
   const start = req.start ?? mondayOnOrAfter(today)
@@ -457,8 +457,9 @@ export async function composeFor(store: ConnectedStore, req: BlockRequest): Prom
     goals: composeGoals,
     schedule,
     training_age: trainingAge,
-    minor: minor === true || methodology.minor,
-    age: athlete?.birth_date ? ageOn(athlete.birth_date, today) : null,
+    // Section 11b: minor or unknown age, the under-18 rules (ageStatus.ts).
+    minor: age.minorRules || methodology.minor,
+    age: age.years,
     injuries,
     blocked_regions: [...new Set([...blockedRegions(methodology), ...statusBlocked])].sort(),
     logged_sessions_per_week: await loggedPerWeek(store, activities, start),

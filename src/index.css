@@ -4234,6 +4234,7 @@ textarea.input {
   cursor: pointer;
 }
 .checkin__acts { display: flex; gap: 8px; margin-top: 12px; }
+.checkin__guardian { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; }
 
 .lift-reason { margin-top: 8px; }
 .lift-reason p { color: var(--text); line-height: 1.45; }

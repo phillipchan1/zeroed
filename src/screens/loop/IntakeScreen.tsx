@@ -64,6 +64,7 @@ export function IntakeScreen() {
   const [equipment, setEquipment] = useState('')
   const [trainingAge, setTrainingAge] = useState<TrainingAge>('1to3')
   const [birthDate, setBirthDate] = useState('')
+  const [adultConfirmed, setAdultConfirmed] = useState(false)
   const [guardian, setGuardian] = useState('')
   const [consent, setConsent] = useState(false)
   const [history, setHistory] = useState<string[]>([])
@@ -79,8 +80,16 @@ export function IntakeScreen() {
     void fetchCoachState().then((s) => { setState(s); setLoading(false) })
   }, [])
 
+  // A display hint only: the Worker decides age status (worker/src/ageStatus.ts)
+  // and refuses an intake that needs consent without it. A birth date wins;
+  // without one, "I'm 18 or older" makes an adult; with neither the age is
+  // unknown and the under-18 rules apply (section 11b).
   const age = ageFrom(birthDate)
-  const minor = state?.minor === true || (age != null && age < 18)
+  const minor = state?.birth_date_on_file
+    ? state.minor === true
+    : age != null
+      ? age < 18
+      : !(adultConfirmed || state?.age_status === 'adult' || (state?.age_status == null && state?.minor === false))
   // Screens: the union across the chosen activities, from the server's modules.
   const screenList = useMemo(() => {
     const seen = new Map<string, { key: string; name: string; unit: string; sided: boolean }>()
@@ -95,6 +104,7 @@ export function IntakeScreen() {
     setSending(true)
     const answers = {
       ...(state!.birth_date_on_file ? {} : { birth_date: birthDate || undefined }),
+      ...(!state!.birth_date_on_file && !birthDate && adultConfirmed ? { adult_confirmed: true } : {}),
       ...(minor ? { parental_consent: { guardian_name: guardian, confirmed: consent } } : {}),
       goals: goals.filter((g) => g.name.trim()).map((g) => ({
         name: g.name, test: g.test || null, current: num(g.current), target: num(g.target), unit: g.unit || null,
@@ -144,12 +154,20 @@ export function IntakeScreen() {
           <section>
             <SectionHeader>Birth date</SectionHeader>
             <Input type="date" value={birthDate} onChange={(e) => setBirthDate(e.target.value)} aria-label="Birth date" />
+            {!birthDate && state.can_confirm_adult === true && (
+              <label className="text-sm" style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <input type="checkbox" checked={adultConfirmed} onChange={(e) => setAdultConfirmed(e.target.checked)} /> Or: I&rsquo;m 18 or older
+              </label>
+            )}
+            {!birthDate && !adultConfirmed && state.age_status !== 'adult' && (
+              <p className="text-xs text-dim" style={{ marginTop: 6 }}>With no age on file, the under-18 rules apply.</p>
+            )}
           </section>
         )}
         {minor && (
           <section className="card">
             <SectionHeader>Parent or guardian</SectionHeader>
-            <p className="text-xs text-dim" style={{ marginBottom: 8 }}>Under 18: a parent or guardian agrees first. Plans stay conservative: no RPE above 8, fewer jumps, no max tests.</p>
+            <p className="text-xs text-dim" style={{ marginBottom: 8 }}>Under 18 (or no age on file): a parent or guardian agrees first. Plans stay conservative: no RPE above 8, fewer jumps, no max tests.</p>
             <Input placeholder="Their name" value={guardian} onChange={(e) => setGuardian(e.target.value)} />
             <label className="text-sm" style={{ display: 'flex', gap: 8, marginTop: 8 }}>
               <input type="checkbox" checked={consent} onChange={(e) => setConsent(e.target.checked)} /> They agree to this training plan.

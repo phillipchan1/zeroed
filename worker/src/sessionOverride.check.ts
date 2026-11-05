@@ -43,6 +43,9 @@ const TOKEN_B = 'zeroed-mcp-token-override-b-bbbbbbb'
 
 const harness = await openIsolationHarness()
 const sql = harness.sql
+// Section 11b: no age on file means the under-18 rules. These synthetic
+// athletes are confirmed adults; ageStatus.check.ts covers unknown age.
+await harness.query(`UPDATE athlete SET adult_confirmed_at = NOW()`)
 const env = {} as Env
 const storeA = makeStore(sql, A)
 // A well-formed approval_ref that resolves to no approval row.

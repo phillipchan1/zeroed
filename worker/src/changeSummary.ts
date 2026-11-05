@@ -160,10 +160,14 @@ export function summarizeChange(row: { tool: string; target_type: string; diff: 
     }
     case 'set_birth_date':
       return 'Birth date recorded at intake'
+    case 'confirm_adult':
+      return str(d.summary) ?? (d.after == null ? '18+ confirmation taken back' : 'Confirmed 18 or older')
     case 'clear_region':
-      return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} cleared by a clinician`)
+      return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} cleared by a clinician${obj(d.guardian).guardian_confirmed === true ? ' (guardian confirmed)' : ''}`)
     case 'clear_red_flag':
-      return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} red flag cleared by a clinician`)
+      return clip(`${(str(d.region) ?? 'Region').replace(/_/g, ' ').replace(/^\w/, (c) => c.toUpperCase())} red flag cleared by a clinician${obj(d.guardian).guardian_confirmed === true ? ' (guardian confirmed)' : ''}`)
+    case 'downgrade_coach':
+      return clip(`${str(d.coach) ?? 'A coach'} set to read: voided ${arr(d.voided_previews).length} open preview${arr(d.voided_previews).length === 1 ? '' : 's'}${arr(d.voided_proposals).length ? ` and ${arr(d.voided_proposals).length} proposal${arr(d.voided_proposals).length === 1 ? '' : 's'}` : ''}`)
     case 'set_coach_role':
       return clip(`${str(d.coach) ?? 'A coach'} can ${obj(d.role).after === 'read' ? 'only read now' : 'now propose changes'}`)
     case 'set_coach_health_access': {

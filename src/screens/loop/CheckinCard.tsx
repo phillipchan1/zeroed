@@ -38,19 +38,32 @@ function summary(t: ReadinessToday): string {
 // and whether the other still blocks the region; only the athlete can clear
 // either. A one-off over 5, or worse the next morning, only blocks today and
 // the next session (methodology v1.2): shown, with nothing to clear.
-function BlockedRow({ region, reason, kind, otherBlocks, onCleared }: {
+//
+// Under 18, or with no age on file (section 11b), a clear takes a second
+// step: a parent or guardian confirms a clinician cleared it (the checkbox is
+// required; name and relationship are optional). The Worker refuses the clear
+// without it and records it in the change.
+function BlockedRow({ region, reason, kind, otherBlocks, guardianRequired, onCleared }: {
   region: string
   reason: string | null
   kind: 'checkin' | 'rule'
   otherBlocks: boolean
+  guardianRequired: boolean
   onCleared: (text: string) => void
 }) {
-  const [phase, setPhase] = useState<'idle' | 'confirm' | 'working'>('idle')
+  const [phase, setPhase] = useState<'idle' | 'confirm' | 'guardian' | 'working'>('idle')
   const [message, setMessage] = useState<string | null>(null)
+  const [guardianOk, setGuardianOk] = useState(false)
+  const [guardianName, setGuardianName] = useState('')
+  const [relationship, setRelationship] = useState('')
   async function clear() {
     setPhase('working')
-    const res = kind === 'rule' ? await clearRedFlag(region) : await clearRegion(region)
+    const guardian = guardianRequired
+      ? { confirmed: guardianOk, name: guardianName.trim() || undefined, relationship: relationship.trim() || undefined }
+      : undefined
+    const res = kind === 'rule' ? await clearRedFlag(region, guardian) : await clearRegion(region, guardian)
     setPhase('idle')
+    setGuardianOk(false)
     setMessage(res.ok ? null : res.text)
     if (res.ok) {
       success()
@@ -66,12 +79,34 @@ function BlockedRow({ region, reason, kind, otherBlocks, onCleared }: {
       </p>
       {otherBlocks && <p className="text-xs text-dim">{other} Clear both once a clinician has cleared it.</p>}
       {message && <p className="text-xs text-dim">{message}</p>}
-      {phase === 'idle' ? (
+      {phase === 'idle' && (
         <button type="button" className="checkin__clear" onClick={() => setPhase('confirm')}>A clinician cleared it</button>
-      ) : (
+      )}
+      {phase === 'confirm' && (
         <div className="checkin__acts">
-          <Button variant="primary" disabled={phase === 'working'} onClick={() => void clear()}>Yes, cleared</Button>
-          <Button variant="outline" disabled={phase === 'working'} onClick={() => setPhase('idle')}>Not yet</Button>
+          <Button variant="primary" onClick={() => (guardianRequired ? setPhase('guardian') : void clear())}>Yes, cleared</Button>
+          <Button variant="outline" onClick={() => setPhase('idle')}>Not yet</Button>
+        </div>
+      )}
+      {(phase === 'guardian' || (phase === 'working' && guardianRequired)) && (
+        <div className="checkin__guardian">
+          <p className="text-xs text-dim">Under 18 (or no age on file), a parent or guardian has to confirm this too.</p>
+          <label className="text-sm">
+            <input type="checkbox" checked={guardianOk} onChange={(e) => setGuardianOk(e.target.checked)} />{' '}
+            A parent/guardian confirms a clinician cleared this
+          </label>
+          <input className="input" placeholder="Their name (optional)" value={guardianName} onChange={(e) => setGuardianName(e.target.value)} aria-label="Parent or guardian name" />
+          <input className="input" placeholder="Relationship (optional)" value={relationship} onChange={(e) => setRelationship(e.target.value)} aria-label="Relationship" />
+          <div className="checkin__acts">
+            <Button variant="primary" disabled={!guardianOk || phase === 'working'} onClick={() => void clear()}>Confirm clear</Button>
+            <Button variant="outline" disabled={phase === 'working'} onClick={() => setPhase('idle')}>Not yet</Button>
+          </div>
+        </div>
+      )}
+      {phase === 'working' && !guardianRequired && (
+        <div className="checkin__acts">
+          <Button variant="primary" disabled>Yes, cleared</Button>
+          <Button variant="outline" disabled>Not yet</Button>
         </div>
       )}
     </div>
@@ -135,10 +170,10 @@ export function CheckinCard({ today, onSaved }: { today: ReadinessToday; onSaved
       </button>
 
       {today.blocked.map((b) => (
-        <BlockedRow key={`checkin:${b.region}`} region={b.region} reason={b.reason} kind="checkin" otherBlocks={b.also_rule === true} onCleared={onCleared} />
+        <BlockedRow key={`checkin:${b.region}`} region={b.region} reason={b.reason} kind="checkin" otherBlocks={b.also_rule === true} guardianRequired={today.guardian_required === true} onCleared={onCleared} />
       ))}
       {(today.rule_blocked ?? []).map((b) => (
-        <BlockedRow key={`rule:${b.region}`} region={b.region} reason={b.reason} kind="rule" otherBlocks={b.also_checkin} onCleared={onCleared} />
+        <BlockedRow key={`rule:${b.region}`} region={b.region} reason={b.reason} kind="rule" otherBlocks={b.also_checkin} guardianRequired={today.guardian_required === true} onCleared={onCleared} />
       ))}
       {(today.temporary_blocked ?? []).map((b) => (
         <div key={`temp:${b.region}`} className="checkin__blocked">

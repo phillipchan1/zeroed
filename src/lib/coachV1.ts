@@ -78,7 +78,12 @@ export interface CoachState {
   recompose: 'no_block' | 'block_boundary' | 'inputs_changed' | null
   intake: { id: string; outcome: string; created_at: string } | null
   birth_date_on_file: boolean
+  /** The under-18 rules apply: under 18, or no age on file (section 11b). */
   minor: boolean
+  /** Section 11b. Absent on older Workers. */
+  age_status?: 'adult' | 'minor' | 'unknown'
+  /** The athlete can tap "I'm 18 or older" (no birth date, not confirmed). */
+  can_confirm_adult?: boolean
   chat: ChatMessage[]
   modules: Array<{ key: ModuleKey; label: string; examples: string[]; screens: Array<{ key: string; name: string; unit: string; sided: boolean }> }>
   regions: string[]

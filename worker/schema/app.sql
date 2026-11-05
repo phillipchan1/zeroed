@@ -1221,3 +1221,11 @@ DROP TRIGGER IF EXISTS change_tombstone_append_only ON public.change_tombstone;
 CREATE TRIGGER change_tombstone_append_only
   BEFORE UPDATE OR DELETE ON public.change_tombstone
   FOR EACH ROW EXECUTE FUNCTION public.change_tombstone_append_only();
+
+-- =============================================================================
+-- AGE STATUS (section 11b, tracks_v1) — mirrors supabase/migrations/20261104000013_age_status.sql
+-- =============================================================================
+-- The athlete's own "I'm 18 or older" (Intake or Profile), for an athlete
+-- with no birth date. Without a birth date or this, the age is unknown and
+-- the under-18 rules apply. A birth date always wins. Not in /api/data.
+ALTER TABLE public.athlete ADD COLUMN IF NOT EXISTS adult_confirmed_at TIMESTAMPTZ;

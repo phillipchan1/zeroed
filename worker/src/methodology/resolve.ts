@@ -5,12 +5,13 @@
  *   effective = global version  →  athlete overrides (track_id null)
  *                               →  that track's overrides (track_id = X)
  *                               →  the under-18 clamp, last, for a minor
+ *                                  (or an unknown age: ageStatus.ts)
  *
  * Guards (D2, D6, section 8):
  *   - Paths are a closed schema; anything else is refused, as is a value of
  *     the wrong type or out of range.
  *   - The under-18 rules (minors.*) can only be tightened, for anyone; for an
- *     athlete under 18 no override may loosen any rule that has a stricter
+ *     athlete under 18, or whose age is unknown (section 11b), no override may loosen any rule that has a stricter
  *     direction, and the clamp still applies on top.
  *   - The universal pain cap is 3/10 at most. The raised cap (≤ 5/10 if it
  *     settles by the next morning) is a per-region opt-in, never for a minor
@@ -301,7 +302,11 @@ export interface OverrideCheckInput {
   /** Effective at the target scope now, and with this path's own override taken out. */
   now: Resolved
   withoutThis: Resolved
-  /** True under 18, false 18+, null when the athlete's age isn't known. */
+  /**
+   * True under 18, false 18+, null when the athlete's age isn't known
+   * (ageStatus.ts overrideAgeOf). Unknown is refused everything a minor is
+   * (section 11b).
+   */
   minor: boolean | null
   /** Who proposed it (the preview's author). */
   actorType: 'athlete' | 'mcp' | 'app_coach' | 'system'
@@ -347,7 +352,7 @@ export function checkOverride(input: OverrideCheckInput): OverrideCheck {
   const region = /^U7\.regions\.([a-z_]+)\.(raised_cap|blocked)$/.exec(path)
   if (region && region[2] === 'raised_cap' && after === true) {
     if (input.minor === true) return { ok: false, text: 'Refused: a raised pain cap is never allowed for an athlete under 18 (D2).' }
-    if (input.minor == null) return { ok: false, text: 'Refused: a raised pain cap needs the athlete\'s date of birth on file showing 18+; it is never allowed for a minor (D2).' }
+    if (input.minor == null) return { ok: false, text: 'Refused: a raised pain cap needs the athlete\'s date of birth on file showing 18+, or their own 18+ confirmation; it is never allowed for a minor (D2).' }
     if (input.now.params.U7.regions[region[1] as keyof typeof input.now.params.U7.regions]?.blocked === true) {
       return { ok: false, text: `Refused: ${region[1]} has a red flag. Red flags always block loading there; no cap can be raised until a clinician clears it.` }
     }
@@ -356,9 +361,12 @@ export function checkOverride(input: OverrideCheckInput): OverrideCheck {
   if (spec.rule === 'minors' && looser) {
     return { ok: false, text: `Refused: under-18 rules can only be tightened, never loosened (D6). ${path} is ${JSON.stringify(before)}.` }
   }
-  // An athlete under 18: nothing loosens.
+  // An athlete under 18: nothing loosens. Nor with no age on file (section 11b: we don't assume adult).
   if (input.minor === true && looser) {
     return { ok: false, text: `Refused: this athlete is under 18; their rules can only be tightened (D6). ${path} is ${JSON.stringify(before)}.` }
+  }
+  if (input.minor == null && looser) {
+    return { ok: false, text: `Refused: this athlete's age isn't on file, so the under-18 rules apply and can only be tightened (D6, section 11b). ${path} is ${JSON.stringify(before)}.` }
   }
   if (region && region[2] === 'blocked' && after !== true && input.actorType !== 'athlete') {
     return { ok: false, text: `Refused: only the athlete can clear a red flag on ${region[1]}, once a clinician has cleared it (section 8). A coach can only set one.` }

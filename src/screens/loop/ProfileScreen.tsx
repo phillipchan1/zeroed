@@ -13,7 +13,7 @@ import {
 } from '../../components/ui'
 import { TrainingMaxes } from './TrainingMaxes'
 import { tracksOn } from '../../lib/tracksFlag'
-import { fetchCoachAccess, readLabel, setCoachHealth, setCoachRole, type CoachRole } from '../../lib/readiness'
+import { confirmAdult, fetchAgeStatus, fetchCoachAccess, readLabel, setCoachHealth, setCoachRole, type CoachRole } from '../../lib/readiness'
 import { whenLabel } from '../../lib/changeLog'
 
 interface McpTokenRow {
@@ -118,6 +118,24 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     tracksOn() ? cacheKeys.coachAccess(athleteId) : null,
     fetchCoachAccess,
   )
+
+  // tracks_v1, section 11b: with no birth date on file the age is unknown and
+  // the under-18 rules apply, until the athlete confirms they're 18 or older.
+  const { data: age, refetch: refetchAge } = useCachedLoader(
+    tracksOn() ? cacheKeys.ageStatus(athleteId) : null,
+    fetchAgeStatus,
+  )
+  const [ageBusy, setAgeBusy] = useState(false)
+  const [ageNote, setAgeNote] = useState<string | null>(null)
+
+  async function confirmOver18() {
+    if (ageBusy) return
+    setAgeBusy(true)
+    const res = await confirmAdult('profile')
+    setAgeBusy(false)
+    setAgeNote(res.text || null)
+    refetchAge()
+  }
 
   async function toggleHealth(id: string, on: boolean) {
     if (mcpBusy) return
@@ -348,6 +366,25 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
         </div>
 
         <TrainingMaxes athleteId={athleteId} unit={unit} />
+
+        {tracksOn() && age && (
+          <div className="section">
+            <SectionHeader>Age</SectionHeader>
+            <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)', lineHeight: 1.45 }}>
+              {age.age_status === 'adult'
+                ? 'Adult rules apply.'
+                : age.age_status === 'minor'
+                  ? 'Under-18 rules apply (from your birth date): no RPE above 8, lower jump counts, no max tests.'
+                  : 'No age on file, so the under-18 rules apply: no RPE above 8, lower jump counts, no max tests.'}
+            </p>
+            {age.can_confirm && (
+              <Button variant="outline" full disabled={ageBusy} onClick={() => void confirmOver18()}>
+                {ageBusy ? 'Saving…' : "I'm 18 or older"}
+              </Button>
+            )}
+            {ageNote && <p className="text-dim" style={{ marginTop: 8, fontSize: 'var(--fs-sm)' }}>{ageNote}</p>}
+          </div>
+        )}
 
         <div className="section">
           <SectionHeader>Your data</SectionHeader>

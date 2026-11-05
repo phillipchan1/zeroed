@@ -43,8 +43,27 @@ export interface ReadinessToday {
   rule_blocked?: Array<{ region: string; reason: string | null; since: string; kind: 'rule'; also_checkin: boolean }>
   /** v1.2: pain blocks that lapse after the next session; nothing to clear. Absent on older Workers. */
   temporary_blocked?: Array<{ region: string; reason: string; since: string }>
+  /** Section 11b: under 18 or no age on file, a clear also needs a parent or guardian's confirmation. Absent on older Workers. */
+  guardian_required?: boolean
   regions: string[]
   red_flags: string[]
+}
+
+/** A parent or guardian's confirmation that a clinician cleared a block (section 11b). */
+export interface GuardianInput {
+  confirmed: boolean
+  name?: string
+  relationship?: string
+}
+
+export type AgeStatus = 'adult' | 'minor' | 'unknown'
+
+export interface AgeView {
+  age_status: AgeStatus
+  under_18_rules: boolean
+  birth_date_on_file: boolean
+  adult_confirmed_at: string | null
+  can_confirm: boolean
 }
 
 export interface CheckinResult {
@@ -119,9 +138,9 @@ export async function submitCheckin(input: CheckinInput): Promise<CheckinResult>
 }
 
 /** The athlete's own "cleared by a clinician". Only the athlete can; no coach. */
-export async function clearRegion(region: string): Promise<CheckinResult> {
+export async function clearRegion(region: string, guardian?: GuardianInput): Promise<CheckinResult> {
   try {
-    const out = await post({ action: 'clear_region', region }) as Partial<CheckinResult>
+    const out = await post({ action: 'clear_region', region, ...(guardian ? { guardian } : {}) }) as Partial<CheckinResult>
     return { ok: out?.ok === true, text: String(out?.text ?? '') }
   } catch {
     return { ok: false, text: 'Couldn’t reach the server. Nothing changed.' }
@@ -129,9 +148,9 @@ export async function clearRegion(region: string): Promise<CheckinResult> {
 }
 
 /** The athlete's own "cleared by a clinician" for a red flag in their rules. Only the athlete can; no coach. */
-export async function clearRedFlag(region: string): Promise<CheckinResult> {
+export async function clearRedFlag(region: string, guardian?: GuardianInput): Promise<CheckinResult> {
   try {
-    const out = await post({ action: 'clear_red_flag', region }) as Partial<CheckinResult>
+    const out = await post({ action: 'clear_red_flag', region, ...(guardian ? { guardian } : {}) }) as Partial<CheckinResult>
     return { ok: out?.ok === true, text: String(out?.text ?? '') }
   } catch {
     return { ok: false, text: 'Couldn’t reach the server. Nothing changed.' }
@@ -161,6 +180,27 @@ export async function setCoachHealth(tokenId: string, on: boolean): Promise<Chec
 export async function setCoachRole(tokenId: string, role: CoachRole): Promise<CheckinResult> {
   try {
     const out = await post({ action: 'set_coach_role', token_id: tokenId, role }) as Partial<CheckinResult>
+    return { ok: out?.ok === true, text: String(out?.text ?? '') }
+  } catch {
+    return { ok: false, text: 'Couldn’t reach the server. Nothing changed.' }
+  }
+}
+
+/** Section 11b: the athlete's age status (adult, minor, unknown). Null on any failure. */
+export async function fetchAgeStatus(): Promise<AgeView | null> {
+  if (!readinessUrl()) return null
+  try {
+    const out = await post({ action: 'age' }) as AgeView | null
+    return out && typeof out.age_status === 'string' ? out : null
+  } catch {
+    return null
+  }
+}
+
+/** The athlete's own "I'm 18 or older" (no birth date on file). Logged; undoable in Changes. */
+export async function confirmAdult(source: 'profile' | 'intake' = 'profile'): Promise<CheckinResult> {
+  try {
+    const out = await post({ action: 'confirm_adult', source }) as Partial<CheckinResult>
     return { ok: out?.ok === true, text: String(out?.text ?? '') }
   } catch {
     return { ok: false, text: 'Couldn’t reach the server. Nothing changed.' }

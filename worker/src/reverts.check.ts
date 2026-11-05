@@ -18,6 +18,8 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { openIsolationHarness } from './isolationDb.ts'
+import { athleteAge } from './ageStatus.ts'
+import { confirmAdult } from './adultConfirmation.ts'
 import { executeDataQuery } from './data.ts'
 import { athleteChangeLogAction } from './changeLogRoute.ts'
 import { listChanges, type ChangeView } from './changeLog.ts'
@@ -124,6 +126,9 @@ const TOKEN_ROLE_ID = 'abab7777-0000-4000-8000-0000000000aa'
 
 const harness = await openIsolationHarness()
 const sql = harness.sql
+// Section 11b: no age on file means the under-18 rules. These synthetic
+// athletes are confirmed adults; ageStatus.check.ts covers unknown age.
+await harness.query(`UPDATE athlete SET adult_confirmed_at = NOW()`)
 const storeA = makeStore(sql, A)
 const storeB = makeStore(sql, B)
 const coachA: OverrideActor = { type: 'mcp', id: TOKEN_A_ID }
@@ -143,7 +148,7 @@ await harness.query(
 await harness.query(`INSERT INTO mcp_token (id, athlete_id, name, token_hash, last_four) VALUES ($1, $2, 'role-coach', 'hash-role', 'role')`, [TOKEN_ROLE_ID, A])
 for (const [id, user, name] of [[C, 'cccccccc-cccc-4ccc-8ccc-cccccccccccc', 'Athlete C'], [K, 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee', 'Athlete K']]) {
   await harness.query(`INSERT INTO auth.users (id, email) VALUES ($1, $2)`, [user, `${name.slice(-1).toLowerCase()}@example.com`])
-  await harness.query(`INSERT INTO athlete (id, auth_user_id, name, training_age, sessions_per_week) VALUES ($1, $2, $3, 2, 3)`, [id, user, name])
+  await harness.query(`INSERT INTO athlete (id, auth_user_id, name, training_age, sessions_per_week, adult_confirmed_at) VALUES ($1, $2, $3, 2, 3, NOW())`, [id, user, name])
 }
 const storeC = makeStore(sql, C)
 const storeK = makeStore(sql, K)
@@ -518,6 +523,21 @@ const healthOf = async () => (await harness.query<{ s: boolean }>('SELECT share_
 ok((await setCoachHealth(storeA, me, TOKEN_ROLE_ID, false)).ok && !(await healthOf()), 'set_coach_health_access: off')
 await reverted('set_coach_health_access', (await lastLog(A, 'set_coach_health_access')).id)
 ok(await healthOf(), 'health access undo: on again')
+
+// downgrade_coach (section 11b): the work a downgrade to read voided stays void.
+const downgrade = await lastLog(A, 'downgrade_coach')
+ok(downgrade?.target_id === TOKEN_ROLE_ID && Array.isArray(downgrade.diff.voided_previews), 'downgrade_coach: the system row a downgrade to read wrote')
+const downgradeUndo = await tapRevert(downgrade.id)
+ok(!downgradeUndo.ok && downgradeUndo.reason === 'not_revertible' && /stay void/.test(downgradeUndo.text), 'downgrade_coach: voided previews stay void under an undo')
+exercised.add('downgrade_coach')
+
+// confirm_adult (section 11b): undo is back to unknown age (the under-18 rules); redo confirms again.
+await harness.query('UPDATE athlete SET adult_confirmed_at = NULL WHERE id = $1', [A])
+ok((await confirmAdult(storeA, me)).ok && (await athleteAge(storeA)).status === 'adult', 'confirm_adult: the athlete confirms 18+')
+const adultUndo = await reverted('confirm_adult', (await lastLog(A, 'confirm_adult')).id)
+ok((await athleteAge(storeA)).status === 'unknown' && (await resolveMethodology(storeA)).minor === true, 'confirm_adult undo: unknown age, the under-18 rules')
+await reverted('confirm_adult redo', (adultUndo?.id ?? ''))
+ok((await athleteAge(storeA)).status === 'adult', 'confirm_adult redo: adult again')
 
 // revoke_coach / void_preview: defined as never reverted.
 await executeDataQuery(sql, { userId: USER_A, athleteId: A }, { table: 'mcp_token', op: 'update', values: { revoked_at: new Date().toISOString() }, filters: [{ column: 'id', op: 'eq', value: TOKEN_ROLE_ID }] })
