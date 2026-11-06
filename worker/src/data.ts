@@ -107,6 +107,9 @@ const COLUMNS: Record<string, Set<string>> = {
   insight: new Set([
     'id', 'athlete_id', 'source_id', 'claim', 'category', 'priority', 'confidence',
     'status', 'evidence', 'source', 'program_impact', 'generated_at', 'resolved_at',
+    // Kept by insight_track_movement_trg (migration 20260528000003) — named by
+    // the loop reticle's select (MonitorReticle).
+    'updated_at', 'prev_status',
   ]),
   insight_draft: new Set([
     'id', 'athlete_id', 'source_id', 'claim', 'category', 'priority', 'confidence',

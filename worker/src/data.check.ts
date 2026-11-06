@@ -31,6 +31,7 @@ import {
 } from '../../scripts/migrate-users.lib.mjs'
 import {
   bindOwner,
+  executeDataQuery,
   ownerPredicate,
   parseSelectList,
   SESSION_LOOKUP_SQL,
@@ -403,6 +404,33 @@ ok(authClientSrc.includes("res.headers.get('set-auth-token')"), 'auth client cap
 ok(authClientSrc.includes("if (!token || !token.includes('.'))"), 'auth client refuses unsigned bearers')
 ok(!/return data\?\.session\?\.token/.test(authClientSrc), 'auth client does not send the raw session token')
 ok(authClientSrc.includes('return persistedSignedBearer()'), 'auth client sends the persisted signed bearer')
+
+// The loop reticle names trigger-kept insight columns on every loop load. Run its
+// exact select through the allow-list (stub sql, no DB) so an unregistered column
+// fails here instead of as a 400 on Profile/Today.
+const reticleSrc = readFileSync(join(here, '../../src/components/convergence/MonitorReticle.tsx'), 'utf8')
+const reticleColumns = /from\('insight'\)\s*\.select\('([^']+)'\)/.exec(reticleSrc)?.[1]
+ok(reticleColumns?.includes('prev_status') === true, 'reticle select found and names prev_status')
+const issued: string[] = []
+const stubSql = {
+  unsafe: async (text: string) => { issued.push(text); return [] },
+} as unknown as Parameters<typeof executeDataQuery>[0]
+const reticle = await executeDataQuery(stubSql, { userId: 'u', athleteId: '11111111-1111-1111-1111-111111111111' }, {
+  table: 'insight',
+  op: 'select',
+  columns: reticleColumns,
+  filters: [{ column: 'athlete_id', op: 'eq', value: '11111111-1111-1111-1111-111111111111' }],
+})
+ok(reticle.error == null, `reticle select: insight columns are allowed (${reticle.error?.message ?? 'ok'})`)
+ok(issued.some((t) => t.includes('insight.prev_status') && t.includes('insight.updated_at')), 'reticle select: prev_status and updated_at reach SQL')
+const unlisted = await executeDataQuery(stubSql, { userId: 'u', athleteId: '11111111-1111-1111-1111-111111111111' }, {
+  table: 'insight',
+  op: 'select',
+  columns: 'status, xmin',
+})
+ok(unlisted.error?.message === 'unknown column insight.xmin', 'insight allow-list still rejects unlisted columns')
+const appSql = readFileSync(join(here, '../schema/app.sql'), 'utf8')
+ok(appSql.includes('NEW.prev_status := OLD.status'), 'app.sql keeps the trigger that maintains insight.prev_status')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {
