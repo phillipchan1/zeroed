@@ -158,8 +158,14 @@ for (const e of corpus) {
   ok(same(intervalPlanFor(e), intervalPlanFor(e, false)), `flag off: "${e.name}" plan identical`)
   eq(fmtDose(e, false), fmtDose(e), `flag off: "${e.name}" dose identical`)
 }
-// Straight sets are straight sets either way.
-for (const e of [ex('Back Squat', '5', 3), ex('Bulgarian Split Squat', '10/10', 3), ex('Plank', '30s', 3)]) {
+// Straight sets are straight sets either way. Per-side counting is how
+// unilateral reps are written, not a skill target: these log reps.
+for (const e of [
+  ex('Back Squat', '5', 3), ex('Bulgarian Split Squat', '10/10', 3), ex('Plank', '30s', 3),
+  ex('Lateral Bounce', '8/side', 3), ex('Cossack Squat', '5 per side', 3),
+  ex('Lateral Bounce', '3 × 6 each leg', 1), ex('Single-arm DB Row', '10 each arm', 3),
+  ex('Side Plank', '30s/side', 3),
+]) {
   ok(intervalPlanFor(e, true) == null && !isSkillBlock(e), `straight sets: "${e.name}" untouched`)
 }
 

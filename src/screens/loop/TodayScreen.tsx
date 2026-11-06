@@ -253,16 +253,6 @@ function markRecapSeen(id: string): void {
   } catch { /* non-fatal */ }
 }
 
-// Athlete swiped back to "This week" after we auto-opened next week's preview.
-function weekPreviewDismissed(weekEnding: string): boolean {
-  try { return localStorage.getItem(`zeroed:week-preview-dismiss:${weekEnding}`) === '1' }
-  catch { return false }
-}
-function dismissWeekPreview(weekEnding: string): void {
-  try { localStorage.setItem(`zeroed:week-preview-dismiss:${weekEnding}`, '1') }
-  catch { /* non-fatal */ }
-}
-
 // ---- one session row in the week list -------------------------------------
 
 type SessionState =
@@ -766,6 +756,65 @@ function PagerBoundary({ boundary }: { boundary: NonNullable<WeekPagerData['boun
   )
 }
 
+/**
+ * Where the week stands once the plan is fully logged. Two states, each with
+ * exactly one primary move:
+ *   complete — every session is in; the call for next week hasn't been made.
+ *              Primary: make it now (it's the payoff). Monday does it anyway.
+ *   closed   — the call is made. Primary: look at next week. Recap is a link.
+ */
+function WeekEndCard({
+  state, done, planned, closing, canPreview, onSetNextWeek, onInjury, onRecap, onPreview,
+}: {
+  state: 'complete' | 'closed'
+  done: number
+  planned: number
+  closing: boolean
+  canPreview: boolean
+  onSetNextWeek: () => void
+  onInjury: () => void
+  onRecap: () => void
+  onPreview: () => void
+}) {
+  const closed = state === 'closed'
+  return (
+    <div className="card fade-rise" style={{ marginBottom: 24 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <Flag size={18} strokeWidth={1.75} style={{ color: 'var(--confirmed)', flexShrink: 0 }} />
+        <p className="text-lg" style={{ fontWeight: 700 }}>
+          {closed ? 'Week closed · next week is set' : 'Week complete'}
+        </p>
+      </div>
+      <p className="text-sm text-dim" style={{ marginTop: 6, lineHeight: 1.45 }}>
+        {closed
+          ? 'The coach read the week and made the call. You can still log extra work here.'
+          : `All ${done} of ${planned} sessions are in. Nothing left to do this week — next, the coach reads it and sets next week's load. Do it now, or it happens automatically Monday.`}
+      </p>
+      <div style={{ marginTop: 14 }}>
+        {closed ? (
+          <>
+            {canPreview && (
+              <Button variant="primary" full onClick={onPreview}>Preview next week →</Button>
+            )}
+            <Button variant={canPreview ? 'ghost' : 'primary'} full style={canPreview ? { marginTop: 6 } : undefined} onClick={onRecap}>
+              See the recap
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button variant="primary" full disabled={closing} onClick={onSetNextWeek}>
+              {closing ? 'Reading your week…' : 'Set next week →'}
+            </Button>
+            <Button variant="ghost" full disabled={closing} style={{ marginTop: 6 }} onClick={onInjury}>
+              Injured or taking time off?
+            </Button>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // "I'm done with the week" — the end-of-week close-out. Crunches the week now
 // (instead of waiting for the Mon rollover), sets next week's call, and writes
 // the coach's note. The injury path forces a recovery back-off.
@@ -781,8 +830,10 @@ function CloseWeekSheet({
 }) {
   return (
     <Sheet
-      title="Close out the week"
-      subtitle="The coach reads the week, sets next week's load, and leaves a note. You can still log more after."
+      title={doneCount >= planned ? 'Set next week' : 'End the week early'}
+      subtitle={doneCount >= planned
+        ? "The coach reads the week, sets next week's load, and leaves a note."
+        : "The coach reads what you've logged, sets next week's load, and leaves a note. Sessions you skip just count as missed."}
       // Once the crunch is running, closing would strand a write in flight —
       // the × is dropped along with backdrop dismissal, not just the latter.
       onClose={onClose}
@@ -791,7 +842,7 @@ function CloseWeekSheet({
       actions={
         <>
           <Button variant="primary" full disabled={closing} onClick={onConfirm}>
-            {closing ? 'Crunching…' : 'Crunch my week →'}
+            {closing ? 'Reading your week…' : 'Set next week →'}
           </Button>
           <Button variant="ghost" full disabled={closing} style={{ marginTop: 6 }} onClick={onInjury}>
             Injured / taking time off
@@ -1151,15 +1202,21 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
   const weekLoggedOut = thisWeekDone >= plannedThisWeek
   const canPreviewNextWeek = (pager?.future?.length ?? 0) > 0 || !!pager?.upcoming
 
-  // Finished the week (or closed it) → land on next week's preview unless they
-  // explicitly swiped back to this week.
-  useEffect(() => {
-    if (loading || !canPreviewNextWeek) return
-    if (!weekLoggedOut && !weekClosed) return
-    if (weekPreviewDismissed(currentWeekEnding)) return
-    if (weekOffset !== 0) return
-    setWeekOffset(1)
-  }, [loading, canPreviewNextWeek, weekLoggedOut, weekClosed, currentWeekEnding, weekOffset])
+  // END OF WEEK — what's automated and what's the athlete's call.
+  //
+  //   Automated: the week counts as done the moment the last planned session is
+  //   logged (the ring locks, the finish moment says "Week zeroed"); and if the
+  //   athlete never closes it, the Sunday→Monday rollover crunches it for them.
+  //   The athlete's call: WHEN to crunch (now, for the payoff, or let Monday do
+  //   it), the injury back-off, and whether to look ahead at next week.
+  //
+  // So nothing moves on its own. Train used to flip to next week's preview the
+  // moment the week filled, while the bottom of this week still asked "Done
+  // with the week?" — the screen had jumped ahead and called the week unfinished
+  // in the same breath. Now this week stays put and says plainly where it
+  // stands, with next week one labelled tap away.
+  const weekEndState: 'open' | 'complete' | 'closed' =
+    weekClosed ? 'closed' : weekLoggedOut ? 'complete' : 'open'
 
   async function handleCloseWeek(injury: boolean) {
     if (closing) return
@@ -1313,10 +1370,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
             type="button" aria-label="Previous week"
             className="pager__btn"
             disabled={wOffset <= minWeekOffset}
-            onClick={() => {
-              if (wOffset === 1 && (weekLoggedOut || weekClosed)) dismissWeekPreview(currentWeekEnding)
-              setWeekOffset(wOffset - 1)
-            }}
+            onClick={() => setWeekOffset(wOffset - 1)}
           >
             <ChevronLeft size={22} strokeWidth={2} />
           </button>
@@ -1451,6 +1505,22 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
               </div>
             )}
 
+            {/* The week is done (or closed): say so, and put the next step
+                right under the ring that just locked. */}
+            {!loading && wOffset === 0 && routines.length > 0 && weekEndState !== 'open' && (
+              <WeekEndCard
+                state={weekEndState}
+                done={thisWeekDone}
+                planned={plannedThisWeek}
+                closing={closing}
+                canPreview={canPreviewNextWeek}
+                onSetNextWeek={() => void handleCloseWeek(false)}
+                onInjury={() => setShowCloseSheet(true)}
+                onRecap={() => latestReview && navigate(`/app/recap/${latestReview.id}`)}
+                onPreview={() => setWeekOffset(1)}
+              />
+            )}
+
             {/* Sessions */}
             {loading && liveList.length === 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
@@ -1549,25 +1619,17 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
               </button>
             )}
 
-            {/* End-of-week close-out. */}
-            {!loading && !viewingUpcoming && routines.length > 0 && (
-              weekClosed ? (
-                <Banner
-                  tone="good"
-                  icon={<Flag size={20} strokeWidth={1.75} style={{ color: 'var(--confirmed)' }} />}
-                  title="Week closed"
-                  sub="View the recap"
-                  onClick={() => latestReview && navigate(`/app/recap/${latestReview.id}`)}
-                />
-              ) : (
-                <Banner
-                  tone="quiet"
-                  icon={<Flag size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
-                  title="Done with the week?"
-                  sub="Crunch the numbers and set next week."
-                  onClick={() => setShowCloseSheet(true)}
-                />
-              )
+            {/* Ending the week early is the only close-out that needs asking
+                for: sessions are still on the list, so it's a choice, not a
+                chore. A finished week gets the card above instead. */}
+            {!loading && wOffset === 0 && routines.length > 0 && weekEndState === 'open' && (
+              <Banner
+                tone="quiet"
+                icon={<Flag size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
+                title="Ending the week early?"
+                sub="Set next week from what you've logged. Otherwise it happens Monday."
+                onClick={() => setShowCloseSheet(true)}
+              />
             )}
           </>
         ) : atBoundary && boundary ? (
@@ -1640,7 +1702,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
 
       {showCloseSheet && (
         <CloseWeekSheet
-          doneCount={doneCount}
+          doneCount={thisWeekDone}
           planned={plannedThisWeek}
           closing={closing}
           onClose={() => setShowCloseSheet(false)}

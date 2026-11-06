@@ -20,9 +20,18 @@ import type { ExerciseTemplate } from './types.ts'
 
 export type SkillFields = Pick<ExerciseTemplate, 'name' | 'reps' | 'sets'> & Partial<Pick<ExerciseTemplate, 'kind' | 'window_s' | 'rest_s' | 'cue'>>
 
-// The target is a count of quality, not a clock: "6 makes", "8 possessions",
-// "4/side", "5 per side", "3 each hand".
-const QUALITY_TARGET = /\b(makes?|made|possessions?)\b|\/\s*(side|leg|arm|hand)\b|\b(per|each|a)\s+(side|leg|arm|hand)\b/
+// The target is a count of quality, not a clock: "6 makes", "8 possessions".
+const QUALITY_TARGET = /\b(makes?|made|possessions?)\b/
+
+// Per-side language ("4/side", "5 per side", "3 each hand"). On its own this is
+// just how unilateral work is counted — Cossack Squat 5/side, Lateral Bounce
+// 8 each leg are reps to log, not stations. It only reads as a skill target
+// when it sits on work/rest clock syntax ("4/side 10s on / 20s off"), where the
+// question is skill-vs-interval and the per-side count says the count is boss.
+const PER_SIDE = /\/\s*(side|leg|arm|hand)\b|\b(per|each|a)\s+(side|leg|arm|hand)\b/
+// Work/rest syntax only — "10s on / 20s off", "10s / 50s" — not a hold
+// time like "30s/side".
+const CLOCK = /\b(on|off)\b|\d\s*(s|sec|secs|seconds?|min|mins|minutes?)\s*\/\s*\d/
 
 // A name that says skill or technique work. Narrow on purpose: a station a
 // coach would run for quality, never a conditioning piece.
@@ -45,6 +54,7 @@ export function isSkillBlock(ex: SkillFields | null | undefined): boolean {
   const reps = String(ex.reps ?? '').toLowerCase()
   if (EXPLICIT_INTERVAL.test(name) || EXPLICIT_INTERVAL.test(reps)) return false
   if (QUALITY_TARGET.test(reps) || QUALITY_TARGET.test(name)) return true
+  if ((PER_SIDE.test(reps) || PER_SIDE.test(name)) && CLOCK.test(reps)) return true
   return SKILL_NAME.test(name)
 }
 

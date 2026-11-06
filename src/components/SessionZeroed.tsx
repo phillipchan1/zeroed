@@ -178,6 +178,11 @@ export function SessionZeroed({ session, week, onDone }: {
           {week.done} of {week.planned} this week · every session in
         </p>
       )}
+      {week && (
+        <p className="text-sm text-dim" style={{ marginTop: 6, textAlign: 'center' }}>
+          Next: set next week&apos;s load on Train
+        </p>
+      )}
 
       <p className="eyebrow zeroed-moment__hint">Tap to continue</p>
     </div>
