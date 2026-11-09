@@ -871,9 +871,22 @@ async function resetOrientation(sql: Sql, athleteId: string): Promise<DataResult
   await runSql(sql, `DELETE FROM insight_draft WHERE ${bindOwner('insight_draft', athleteId).text}`, [athleteId])
   await runSql(sql, `DELETE FROM diagnostic WHERE ${bindOwner('diagnostic', athleteId).text}`, [athleteId])
   await runSql(sql, `DELETE FROM athlete_profile WHERE ${bindOwner('athlete_profile', athleteId).text}`, [athleteId])
+  // starter-pack columns (worker/schema/starter-pack.sql) may be missing on an
+  // older Neon. Checked first, like coach_proposal above, so the UPDATE never
+  // fails after the DELETEs have run.
+  const starterCols = await runSql<{ c: string }>(
+    sql,
+    `SELECT column_name::text AS c FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'athlete' AND column_name IN ('starter_pack', 'starter_pack_settings', 'onboarding_answers')`,
+    [],
+  )
+  const present = new Set(starterCols.map((r) => r.c))
+  const starterClears = (['starter_pack', 'starter_pack_settings', 'onboarding_answers'] as const)
+    .filter((c) => present.has(c))
+    .map((c) => `, ${c} = NULL`)
+    .join('')
   await runSql(
     sql,
-    `UPDATE athlete SET onboarding_step = 'hook', obstacle = NULL, arena_type = NULL, arena_raw = NULL, limiter_choice = NULL, starter_pack = NULL, starter_pack_settings = NULL, onboarding_answers = NULL WHERE ${bindOwner('athlete', athleteId).text}`,
+    `UPDATE athlete SET onboarding_step = 'hook', obstacle = NULL, arena_type = NULL, arena_raw = NULL, limiter_choice = NULL${starterClears} WHERE ${bindOwner('athlete', athleteId).text}`,
     [athleteId],
   )
   return { data: null, error: null, count: null, status: 200 }
