@@ -506,7 +506,8 @@ async function runZeroedTool(
   const gate = writes && await tracksV1On(store) ? makeWriteGate(store, actor) : undefined
 
   if (name === 'set_training_max' && gate) {
-    return trainingMaxLogged(store, gate, args, flags?.rpeHalfSteps ?? rpeHalfStepsOn())  }
+    return trainingMaxLogged(store, gate, args, flags?.rpeHalfSteps ?? rpeHalfStepsOn())
+  }
 
   if (LIFT_MODEL_TOOL_NAMES.has(name)) {
     const out = await runLiftModelTool(name, args, {
