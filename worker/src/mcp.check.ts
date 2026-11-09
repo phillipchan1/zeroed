@@ -617,11 +617,11 @@ ok(cProg?.n === '1', 'e2e: C has one active program')
 const [bProg] = await sql<{ goal: string | null }[]>`SELECT goal FROM program WHERE athlete_id = ${B} AND status = 'active'`
 ok(bProg?.goal === 'B program', 'isolation: start cannot replace B via athlete_id')
 
-const again = toolText((await rpcOn(TOKEN_C, 'tools/call', {
+const startAgain = toolText((await rpcOn(TOKEN_C, 'tools/call', {
   name: 'start_starter_pack',
   arguments: { pack: 'layoff', confirm: true },
 })).body)
-ok(again.includes('Already started') || again.includes('Idempotent'), 'e2e: start_starter_pack is idempotent')
+ok(startAgain.includes('Already started') || startAgain.includes('Idempotent'), 'e2e: start_starter_pack is idempotent')
 const [cProg2] = await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM program WHERE athlete_id = ${C}`
 ok(cProg2?.n === '1', 'e2e: idempotent start does not insert a second program')
 
