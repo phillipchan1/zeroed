@@ -57,7 +57,7 @@ import {
   ONBOARDING_TOOL_NAMES,
   runOnboardingTool,
 } from './onboardingTools.ts'
-import { workerOnboardingIo } from './onboardingStore.ts
+import { workerOnboardingIo } from './onboardingStore.ts'
 
 const editExerciseSchema = {
   type: 'object',
