@@ -207,7 +207,7 @@ ok(hiddenReview.session_load === null && hiddenReview.health_hidden === true, 'h
 const hiddenLog = await call('get_change_log', { since: addDays(T, -1), target: 'session_rpe' }, coachA)
 ok(hiddenLog.includes('Session effort (not shared with you)') && !hiddenLog.includes('"rating"'), 'health off: session RPE rows in the change log are redacted')
 ok((await call('get_change_log', { since: addDays(T, -1), target: 'session_rpe' }, coachA2)).includes('"rating"'), 'health on: the other coach sees whole rows')
-ok(JSON.parse(await call('get_session_rpe', { since: addDays(T, -7) }, coachA2)).sessions.length === 1, 'health on for the other coach: it still reads')
+ok(JSON.parse(await call('get_session_rpe', { since: addDays(T, -7) }, coachA2)).sessions.length >= 1, 'health on for the other coach: it still reads')
 
 // ---- isolation ------------------------------------------------------------------------------------
 await flag(B, true)

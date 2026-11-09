@@ -26,6 +26,8 @@ export interface Env {
   ALLOWED_EMAILS?: string
   /** `1` / `true` enables half-step RPE and the #35 working-max rule. Default off. */
   RPE_HALF_STEPS?: string
+  /** `1` enables agent-led onboarding connector tools. Default off. Never set in wrangler. */
+  ONBOARDING_AGENT_V1?: string
 }
 
 export function databaseUrl(env: Env): string | null {
