@@ -691,6 +691,9 @@ ok((await sql<{ n: string }[]>`SELECT count(*)::text AS n FROM athlete WHERE id 
 ok((await sql<{ starter_pack: string | null }[]>`SELECT starter_pack FROM athlete WHERE id = ${A}`)[0]?.starter_pack === 'get_strong', 'account-delete: A pack is untouched')
 ok((await sql<{ onboarding_answers: unknown }[]>`SELECT onboarding_answers FROM athlete WHERE id = ${B}`)[0]?.onboarding_answers == null, 'account-delete: B answers stay null')
 
+// Restore tracks_v1 on A so later worker checks that share this DB (sessionRpe etc.) still see it.
+await sql`UPDATE athlete SET flags = COALESCE(flags, '{}'::jsonb) || '{"tracks_v1": true}'::jsonb WHERE id = ${A}`
+
 await harness.close()
 
 console.log(`${checks} checks, ${fails.length} failed (${harness.backend})`)
