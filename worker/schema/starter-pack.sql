@@ -3,9 +3,13 @@
 -- onboarding_agent_v1 is off.
 --
 -- Fresh Neon installs get these from worker/schema/app.sql. Apply this file
--- by hand on an existing Neon that already ran an older app.sql snapshot.
+-- by hand only on an existing Neon that already ran an older app.sql snapshot
+-- and is missing the columns. It is additive only (columns, CHECK, comments)
+-- and safe to re-run. It deliberately does NOT replace
+-- reset_athlete_orientation(): the Worker resets through data.ts
+-- resetOrientation, which clears these columns when they exist.
 -- Isolation tests replay the same ALTER from
--- supabase/migrations/20261027000002_starter_pack.sql onto throwaway Postgres.
+-- supabase/migrations/20261109000001_starter_pack.sql onto throwaway Postgres.
 
 ALTER TABLE public.athlete
   ADD COLUMN IF NOT EXISTS starter_pack TEXT,
@@ -41,52 +45,3 @@ COMMENT ON COLUMN public.athlete.starter_pack_settings IS
 
 COMMENT ON COLUMN public.athlete.onboarding_answers IS
   'Onboarding answers envelope {"v":1,...} (goal, days, minutes, equipment, lifts, pain, style). Separate from starter_pack_settings.';
-
-CREATE OR REPLACE FUNCTION public.reset_athlete_orientation()
-RETURNS void
-LANGUAGE plpgsql
-SET search_path = public
-AS $$
-DECLARE
-  aid UUID;
-  uid TEXT;
-BEGIN
-  uid := NULLIF(current_setting('app.current_auth_user_id', true), '');
-  IF uid IS NOT NULL THEN
-    SELECT id INTO aid FROM public.athlete WHERE auth_user_id::text = uid LIMIT 1;
-  END IF;
-  IF aid IS NULL THEN
-    RAISE EXCEPTION 'No athlete for the current user';
-  END IF;
-
-  DELETE FROM public.session_observation so
-   USING public.workout w, public.routine r, public.program p
-   WHERE so.workout_id = w.id
-     AND w.routine_id  = r.id
-     AND r.program_id  = p.id
-     AND p.athlete_id  = aid;
-
-  DELETE FROM public.workout w
-   USING public.routine r, public.program p
-   WHERE w.routine_id = r.id
-     AND r.program_id = p.id
-     AND p.athlete_id = aid;
-
-  DELETE FROM public.program WHERE athlete_id = aid;
-  DELETE FROM public.insight       WHERE athlete_id = aid;
-  DELETE FROM public.insight_draft WHERE athlete_id = aid;
-  DELETE FROM public.diagnostic      WHERE athlete_id = aid;
-  DELETE FROM public.athlete_profile WHERE athlete_id = aid;
-
-  UPDATE public.athlete
-     SET onboarding_step         = 'hook',
-         obstacle                = NULL,
-         arena_type              = NULL,
-         arena_raw               = NULL,
-         limiter_choice          = NULL,
-         starter_pack            = NULL,
-         starter_pack_settings   = NULL,
-         onboarding_answers      = NULL
-   WHERE id = aid;
-END;
-$$;
