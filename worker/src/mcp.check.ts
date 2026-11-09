@@ -19,7 +19,7 @@ import {
   ONBOARDING_TOOLS,
   listedZeroedTools,
   onboardingAgentV1On,
-} from './onboardingTools.ts
+} from './onboardingTools.ts'
 import { McpUserError } from './userError.ts'
 import { createApproval } from './approvals.ts'
 import { makeStore } from './store.ts'
