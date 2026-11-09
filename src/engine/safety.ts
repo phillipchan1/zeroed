@@ -13,7 +13,7 @@
  * NOTE on units: `trainingAge` is in YEARS (the app's slider is 0–25).
  */
 
-import type { ProgramDesignResult, ProgramExercise } from './agentClient'
+import type { ProgramDesignResult, ProgramExercise } from './programDesignTypes.ts'
 
 export class SafetyRejection extends Error {
   constructor(message: string) {

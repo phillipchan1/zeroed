@@ -53,6 +53,11 @@ import { isReadTool, logCoachRead, logsReads } from './coachReads.ts'
 import { refuseByRole } from './coachRoles.ts'
 import { ACTIVITY_TOOL_NAMES, ACTIVITY_TOOLS, coachSchemaMissing, coachUnavailable, coachV1On, runActivityTool } from './activities.ts'
 import { skillBlocksV1On, skillEditsFor, withSkillArgs } from './skillBlocks.ts'
+import {
+  ONBOARDING_TOOL_NAMES,
+  runOnboardingTool,
+} from './onboardingTools.ts'
+import { workerOnboardingIo } from './onboardingStore.ts
 
 const editExerciseSchema = {
   type: 'object',
@@ -430,7 +435,7 @@ export async function executeZeroedTool(
   athleteId: string,
   name: string,
   args: Record<string, unknown>,
-  flags?: { rpeHalfSteps?: boolean },
+  flags?: { rpeHalfSteps?: boolean; onboardingAgentV1?: boolean },
   // Who is calling. A caller that doesn't say gets app_coach's powers: it can
   // preview and propose, never approve.
   actor: OverrideActor = APP_COACH,
@@ -455,7 +460,7 @@ async function runZeroedTool(
   athleteId: string,
   name: string,
   args: Record<string, unknown>,
-  flags: { rpeHalfSteps?: boolean } | undefined,
+  flags: { rpeHalfSteps?: boolean; onboardingAgentV1?: boolean } | undefined,
   actor: OverrideActor,
 ): Promise<string> {
   const store = storeForAthlete(sql, athleteId)
@@ -465,6 +470,12 @@ async function runZeroedTool(
   // athlete go on as before; every existing token is 'propose'.
   const refused = await refuseByRole(store, actor, name)
   if (refused) return refused
+
+
+  if (ONBOARDING_TOOL_NAMES.has(name)) {
+    if (!flags?.onboardingAgentV1) throw new McpUserError(`Unknown tool: ${name}`)
+    return runOnboardingTool(name, args, workerOnboardingIo(sql, athleteId))
+  }
 
   // Section 8 / D3, tracks_v1: every coach read is logged before it runs.
   // The athlete's own reads are not. Flag off: nothing is written.
@@ -495,8 +506,7 @@ async function runZeroedTool(
   const gate = writes && await tracksV1On(store) ? makeWriteGate(store, actor) : undefined
 
   if (name === 'set_training_max' && gate) {
-    return trainingMaxLogged(store, gate, args, flags?.rpeHalfSteps ?? rpeHalfStepsOn())
-  }
+    return trainingMaxLogged(store, gate, args, flags?.rpeHalfSteps ?? rpeHalfStepsOn())  }
 
   if (LIFT_MODEL_TOOL_NAMES.has(name)) {
     const out = await runLiftModelTool(name, args, {

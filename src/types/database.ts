@@ -78,6 +78,12 @@ export interface AthleteRow {
   // The athlete's training calendar (IANA zone). Written by the client from the
   // device while arc_load_v1 is on; servers read it, null means Los Angeles.
   time_zone?: string | null
+  // Pack id + settings. Null until a pack is started. Ignored when the
+  // onboarding_agent_v1 flag is off.
+  starter_pack?: string | null
+  starter_pack_settings?: Record<string, unknown> | null
+  // Envelope {"v":1,...}. Separate from starter_pack_settings. Validated on read/write.
+  onboarding_answers?: Record<string, unknown> | null
 }
 
 export interface DiagnosticRow {

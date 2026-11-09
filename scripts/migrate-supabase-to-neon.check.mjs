@@ -1346,11 +1346,26 @@ eq(Number(athletes.rows[0]?.n ?? 0), 1, 'preview seed inserts one synthetic athl
 
 ok(/reset_athlete_orientation/.test(appSql), 'app.sql defines reset_athlete_orientation')
 ok(/do not re-add request\.jwt\.claim\.sub/.test(appSql), 'app.sql documents when the JWT fallback must stay gone')
+ok(/starter_pack TEXT/.test(appSql) && /starter_pack_settings JSONB/.test(appSql) && /onboarding_answers JSONB/.test(appSql), 'app.sql has the three nullable starter-pack columns')
+ok(/athlete_onboarding_step_check/.test(appSql), 'app.sql keeps the onboarding_step CHECK')
+const starterPackSql = readFileSync(join(root, 'worker/schema/starter-pack.sql'), 'utf8')
+ok(/ADD COLUMN IF NOT EXISTS starter_pack/.test(starterPackSql), 'starter-pack.sql is additive for existing Neon')
+ok(/onboarding_step CHECK is untouched/.test(starterPackSql), 'starter-pack.sql does not rewrite onboarding_step CHECK')
+await db.query(`UPDATE public.athlete SET starter_pack = 'get_strong', starter_pack_settings = '{"sport":"x"}'::jsonb, onboarding_answers = '{"v":1,"goal":"get_strong"}'::jsonb WHERE id = '11111111-1111-4111-8111-111111111111'`)
 await db.query(`SELECT set_config('app.current_auth_user_id', 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', false)`)
 await db.query(`SELECT public.reset_athlete_orientation()`)
-const afterReset = await db.query(`SELECT onboarding_step, obstacle FROM public.athlete WHERE id = '11111111-1111-4111-8111-111111111111'`)
+const afterReset = await db.query(`SELECT onboarding_step, obstacle, starter_pack, starter_pack_settings, onboarding_answers FROM public.athlete WHERE id = '11111111-1111-4111-8111-111111111111'`)
 eq(afterReset.rows[0]?.onboarding_step, 'hook', 'reset_athlete_orientation returns the athlete to hook')
+eq(afterReset.rows[0]?.starter_pack, null, 'reset_athlete_orientation clears starter_pack')
+eq(afterReset.rows[0]?.starter_pack_settings, null, 'reset_athlete_orientation clears starter_pack_settings')
+eq(afterReset.rows[0]?.onboarding_answers, null, 'reset_athlete_orientation clears onboarding_answers')
 eq(Number((await db.query(`SELECT COUNT(*)::int AS n FROM public.workout`)).rows[0]?.n ?? -1), 0, 'reset_athlete_orientation clears workouts')
+
+await db.query(`INSERT INTO auth.users (id, email) VALUES ('bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'wipe@zeroed.invalid')`)
+await db.query(`INSERT INTO public.athlete (id, auth_user_id, name, starter_pack, starter_pack_settings, onboarding_answers) VALUES ('22222222-2222-4222-8222-222222222222', 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', 'Wipe Me', 'layoff', '{"season":"off"}'::jsonb, '{"v":1,"pain":"knee"}'::jsonb)`)
+await db.query(`DELETE FROM auth.users WHERE id = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb'`)
+eq(Number((await db.query(`SELECT COUNT(*)::int AS n FROM public.athlete WHERE id = '22222222-2222-4222-8222-222222222222'`)).rows[0]?.n ?? -1), 0, 'deleting the auth user cascades the athlete row and new columns')
+eq(Number((await db.query(`SELECT COUNT(*)::int AS n FROM public.athlete WHERE id = '11111111-1111-4111-8111-111111111111'`)).rows[0]?.n ?? -1), 1, 'account-delete leaves the preview athlete')
 
 const TZ_HASH_SQL = `SELECT md5(COALESCE(string_agg(md5(to_jsonb(t)::text), ',' ORDER BY t.id), '')) AS h FROM tz_hash_probe t`
 await db.exec(`CREATE TABLE tz_hash_probe (id int PRIMARY KEY, ts timestamptz NOT NULL)`)
