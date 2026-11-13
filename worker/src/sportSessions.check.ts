@@ -7,7 +7,10 @@
 //              list_workouts read exactly as before for the same fixtures
 //              (pre-existing session_rpe taps and check-in pain only).
 //   validation required fields, minutes 1–600, session RPE 1–10, YYYY-MM-DD,
-//              no future day, 7 inclusive days back, idempotent client_key.
+//              no future day, nothing before this training week's Monday
+//              (Monday through today, athlete's zone; midnight PT edges at
+//              fixed instants, MCP log / update and the app route),
+//              idempotent client_key.
 //   planned    the first log against a planned card that day closes it; a
 //              second the same day is external and never touches session_rpe.
 //   volume     two same-day basketball logs (25 and 30 min) are both in
@@ -27,6 +30,8 @@
 //              pain superseded or voided so U7 re-reads; deleting the log that
 //              closed a card re-opens it unless another log is linked to it.
 // coach_v1 is never turned on. Synthetic athletes A and B; synthetic numbers.
+// The clock is pinned to Sunday 15 Nov 2026, noon in Los Angeles (it still
+// ticks), so the whole Monday–Sunday week is loggable whatever the box's date.
 // Run: node --experimental-strip-types worker/src/sportSessions.check.ts
 
 import { openIsolationHarness } from './isolationDb.ts'
@@ -45,7 +50,7 @@ import { executeDataQuery } from './data.ts'
 import { PAIN_REGIONS } from './methodology/v1.ts'
 import { RED_FLAGS } from './readiness/rules.ts'
 import {
-  athleteSportSessionAction, noonInZone, SPORT_HEALTH_REFUSED, SPORT_SESSION_TOOLS,
+  athleteSportSessionAction, noonInZone, runSportSessionTool, SPORT_HEALTH_REFUSED, SPORT_SESSION_TOOLS,
 } from './sportSessions.ts'
 import { SPORT_PAIN_REGIONS, SPORT_RED_FLAGS } from '../../src/engine/sportLog.ts'
 import type { ComposeActivity } from './coach/composer.ts'
@@ -70,6 +75,23 @@ const TOKEN_READ = 'aaaa1313-0000-4000-8000-0000000000a1'
 const TOKEN_NOHEALTH = 'aaaa1313-0000-4000-8000-0000000000a2'
 const TOKEN_B = 'bbbb6666-0000-4000-8000-000000000001'
 
+// A log may be dated from this training week's Monday through today, and the
+// fixtures go back up to six days, so "now" is a Sunday evening in LA.
+const RealDate = Date
+const PINNED_AT = RealDate.parse('2026-11-15T20:00:00Z') // Sunday 15 Nov, 12:00 PST
+const shift = PINNED_AT - RealDate.now()
+class PinnedDate extends RealDate {
+  constructor(...args: unknown[]) {
+    if (args.length === 0) super(RealDate.now() + shift)
+    else super(...(args as [number, number]))
+  }
+
+  static now(): number {
+    return RealDate.now() + shift
+  }
+}
+globalThis.Date = PinnedDate as DateConstructor
+
 const harness = await openIsolationHarness()
 const sql = harness.sql
 const storeA = makeStore(sql, A)
@@ -83,6 +105,7 @@ const athleteA: OverrideActor = { type: 'athlete', id: A }
 
 const T = await athleteToday(storeA)
 const M = addDays(T, -((new Date(`${T}T00:00:00Z`).getUTCDay() + 6) % 7))
+ok(T === '2026-11-15' && M === '2026-11-09', `pinned clock: today is Sunday 15 Nov in LA, its week began Monday 9 Nov (${T}, ${M})`)
 
 const q = <R extends Record<string, unknown>>(text: string, params: unknown[] = []) => harness.query<R>(text, params)
 const count = async (text: string, params: unknown[] = []) => Number((await q<{ n: number }>(text, params))[0]?.n ?? 0)
@@ -189,7 +212,7 @@ await refused({ date: undefined }, /date is required/, 'validation: date require
 await refused({ date: '11/13/2026' }, /YYYY-MM-DD/, 'validation: date format')
 await refused({ date: '2026-02-30' }, /YYYY-MM-DD/, 'validation: impossible date')
 await refused({ date: addDays(T, 1) }, /future/, 'validation: a future day is refused')
-await refused({ date: addDays(T, -7) }, /6 days before/, 'validation: 8 days back is refused (window is 7 inclusive days)')
+await refused({ date: addDays(M, -1) }, /training week: Monday 2026-11-09/, 'validation: the day before this training week\'s Monday is refused')
 await refused({ duration_min: undefined }, /duration_min is required/, 'validation: duration required')
 await refused({ duration_min: 0 }, /1–600/, 'validation: 0 minutes refused')
 await refused({ duration_min: 601 }, /1–600/, 'validation: 601 minutes refused')
@@ -210,7 +233,8 @@ const edge = async (args: Record<string, unknown>, msg: string) => {
   const p = parse(await call('log_session', { ...good, ...args }))
   ok(typeof p.preview_id === 'string', msg)
 }
-await edge({ date: addDays(T, -6) }, 'validation: 6 days back (the 7th inclusive day) is fine')
+await edge({ date: M }, 'validation: this training week\'s Monday is fine')
+await edge({ date: T }, 'validation: today is fine')
 await edge({ duration_min: 1 }, 'validation: 1 minute is fine')
 await edge({ duration_min: 600 }, 'validation: 600 minutes is fine')
 await edge({ session_rpe: 1 }, 'validation: session RPE 1 is fine')
@@ -348,7 +372,7 @@ ok(futureOwn.ok === false && /future/.test(futureOwn.text), 'app route: a future
 const upPrev = parse(await call('update_session', { workout_id: firstId, duration_min: 35 }))
 ok(typeof upPrev.preview_id === 'string' && (await q<{ d: number }>(`SELECT duration_mins AS d FROM workout WHERE id = $1`, [firstId]))[0]?.d === 25, 'update: preview without confirm changes nothing')
 for (const [args, why] of [
-  [{ duration_min: 0 }, /1–600/], [{ session_rpe: 11 }, /1–10/], [{ date: addDays(T, 1) }, /future/], [{ date: addDays(T, -8) }, /6 days before/],
+  [{ duration_min: 0 }, /1–600/], [{ session_rpe: 11 }, /1–10/], [{ date: addDays(T, 1) }, /future/], [{ date: addDays(M, -1) }, /training week/],
   [{ activity: '' }, /activity is required/], [{ session_rpe: null }, /can't be cleared/], [{}, /nothing to change/],
 ] as Array<[Record<string, unknown>, RegExp]>) {
   const out = await call('update_session', { workout_id: firstId, ...args, confirm: true })
@@ -406,6 +430,49 @@ await q(`INSERT INTO workout (routine_id, performed_at, duration_mins, actual_we
          VALUES ($1, $2::timestamptz, 10, '{}'::jsonb, '[{"name":"Hip Airplane","sets":2,"reps":"5/side"}]'::jsonb)`, [THU, noonInZone(D5, 'America/Los_Angeles')])
 const afterPrimer = parse(await call('log_session', { activity: 'Basketball', date: D5, duration_min: 25, session_rpe: 6, session_id: THU, client_key: 'd5-1', confirm: true }))
 ok(afterPrimer.closed_planned === false, 'a log on a day the card is already logged (primer done) goes external, never a second fill')
+
+// ---- the window is this training week, Monday through today, in LA (fixed instants) -------------------
+const FRI_NOON = new Date('2026-11-13T20:00:00Z') // Friday 13 Nov, 12:00 PST
+const SUN_LATE = new Date('2026-11-16T07:30:00Z') // Sunday 15 Nov, 23:30 PST (Monday in UTC)
+const MON_EARLY = new Date('2026-11-16T08:30:00Z') // Monday 16 Nov, 00:30 PST
+const logAt = async (now: Date, date: string) => runSportSessionTool(storeA, 'log_session', { ...good, date, client_key: `wk-${date}` }, coachA, now)
+const accepts = async (now: Date, date: string, msg: string) => ok(typeof parse(await logAt(now, date)).preview_id === 'string', msg)
+const refuses = async (now: Date, date: string, why: RegExp, msg: string) => {
+  const out = await logAt(now, date)
+  ok(out.startsWith('Refused') && why.test(out), `${msg} (${out.slice(0, 90)})`)
+}
+const windowBefore = await count(`SELECT count(*)::int AS n FROM workout`)
+await accepts(FRI_NOON, '2026-11-09', 'window (MCP log, Friday): Monday the week began is fine')
+await accepts(FRI_NOON, '2026-11-13', 'window (MCP log, Friday): today is fine')
+await refuses(FRI_NOON, '2026-11-08', /training week: Monday 2026-11-09/, 'window (MCP log, Friday): the Sunday before is refused')
+await refuses(FRI_NOON, '2026-11-14', /future/, 'window (MCP log, Friday): Saturday of the same week is the future, refused')
+await refuses(FRI_NOON, '2026-11-15', /future/, 'window (MCP log, Friday): Sunday of the same week is the future, refused')
+await accepts(SUN_LATE, '2026-11-15', 'midnight (MCP log): Sunday 23:30 PT is still Sunday')
+await accepts(SUN_LATE, '2026-11-09', 'midnight (MCP log): Sunday 23:30 PT is still the week of Monday 9 Nov')
+await refuses(SUN_LATE, '2026-11-16', /future/, 'midnight (MCP log): at Sunday 23:30 PT, Monday (UTC\'s date) is the future')
+await accepts(MON_EARLY, '2026-11-16', 'midnight (MCP log): Monday 00:30 PT is Monday')
+await refuses(MON_EARLY, '2026-11-15', /training week: Monday 2026-11-16/, 'midnight (MCP log): at Monday 00:30 PT the Sunday just gone is before the week start')
+// update can move a log's date: same window.
+const moveAt = async (now: Date, date: string) => runSportSessionTool(storeA, 'update_session', { workout_id: secondId, date }, coachA, now)
+ok(typeof parse(await moveAt(FRI_NOON, '2026-11-09')).preview_id === 'string', 'window (MCP update, Friday): moving to Monday the week began is fine')
+ok(/^Refused.*training week/.test(await moveAt(FRI_NOON, '2026-11-08')), 'window (MCP update, Friday): moving to the Sunday before is refused')
+ok(/^Refused.*future/.test(await moveAt(FRI_NOON, '2026-11-14')), 'window (MCP update, Friday): moving to Saturday of the same week is refused')
+ok(typeof parse(await moveAt(SUN_LATE, '2026-11-09')).preview_id === 'string' && /^Refused.*future/.test(await moveAt(SUN_LATE, '2026-11-16')), 'midnight (MCP update): Sunday 23:30 PT is still the week of Monday 9 Nov; Monday 16 is the future')
+ok(/^Refused.*training week/.test(await moveAt(MON_EARLY, '2026-11-15')), 'midnight (MCP update): Monday 00:30 PT, moving to the Sunday just gone is refused')
+ok(await count(`SELECT count(*)::int AS n FROM workout`) === windowBefore, 'window: previews and refusals wrote nothing')
+// The app route, with the queued log's own clock.
+const route = async (now: Date, body: Record<string, unknown>) => (await athleteSportSessionAction(storeA, { action: 'log', activity: 'Run', duration_min: 30, session_rpe: 4, ...body }, now))[0] as { ok: boolean; text: string }
+const rFri = await route(FRI_NOON, { client_key: 'wk-r1', date: '2026-11-08', logged_at: FRI_NOON.toISOString() })
+ok(rFri.ok === false && /training week/.test(rFri.text), 'window (app route, Friday): the Sunday before is refused')
+const rSat = await route(FRI_NOON, { client_key: 'wk-r2', date: '2026-11-14', logged_at: FRI_NOON.toISOString() })
+ok(rSat.ok === false && /future/.test(rSat.text), 'window (app route, Friday): Saturday of the same week is refused')
+const rCarried = await route(MON_EARLY, { client_key: 'wk-r3', date: '2026-11-15', logged_at: SUN_LATE.toISOString() })
+ok(rCarried.ok === false && /training week: Monday 2026-11-16/.test(rCarried.text), 'midnight (app route): queued Sunday 23:30 PT, synced Monday 00:30 PT — Sunday is last week, refused')
+ok(await count(`SELECT count(*)::int AS n FROM workout`) === windowBefore, 'window (app route): refusals wrote nothing')
+const rMon = await route(MON_EARLY, { client_key: 'wk-r4', date: '2026-11-16', logged_at: new Date('2026-11-16T08:10:00Z').toISOString() })
+ok(rMon.ok === true, 'midnight (app route): queued Monday 00:10 PT, synced 00:30 PT — Monday is fine')
+const rMonday = await route(new Date(), { client_key: 'wk-r5', date: M, logged_at: new Date().toISOString() })
+ok(rMonday.ok === true, 'window (app route, Sunday): Monday the week began is fine')
 
 // ---- flag OFF again: the tools, route and volume are as before ----------------------------------------
 await setFlag(A, 'log_session_v1', false)

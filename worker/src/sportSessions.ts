@@ -43,7 +43,7 @@
 import type { McpTool } from '../../supabase/functions/_shared/mcpProtocol.ts'
 import { mcpStamp, writePreview } from '../../src/engine/mcpStamp.ts'
 import {
-  parseSportLog, sessionLoadAu, sportSnapshot, SPORT_KIND, SPORT_PAIN_REGIONS, SPORT_RED_FLAGS,
+  loggableWeekStart, parseSportLog, sessionLoadAu, sportSnapshot, SPORT_KIND, SPORT_PAIN_REGIONS, SPORT_RED_FLAGS,
   type SportLogFields, type SportPain,
 } from '../../src/engine/sportLog.ts'
 import { beginAuthCors, json } from './cors.ts'
@@ -68,8 +68,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const OUTSIDE_PLAN = 'Outside the plan'
 /** How far ahead of the server a device's clock may run. */
 const CLOCK_SKEW_MS = 5 * 60 * 1000
-/** A queued log's own clock is trusted back this far (the backdate window), no further. */
-const QUEUE_TRUST_MS = 7 * 24 * 60 * 60 * 1000
 
 export async function logSessionV1On(store: ConnectedStore): Promise<boolean> {
   const [row] = await store.sql<{ on: boolean | null }[]>`
@@ -343,13 +341,17 @@ function u7Text(out: PainOutcome | null): string {
   return notes.length ? ` ${notes.join(' ')}` : ''
 }
 
-/** The day the window is judged at: now, or a queued log's own clock within bounds (app route only). */
-function judgedAt(loggedAt: unknown, now: Date): Date | string {
+/**
+ * The day the window is judged at: now, or a queued log's own clock if it was
+ * queued in the current training week (app route only). A log queued last week
+ * is judged now, so its date still has to be in this week.
+ */
+function judgedAt(loggedAt: unknown, now: Date, zone: string): Date | string {
   if (loggedAt == null || loggedAt === '') return now
   const at = typeof loggedAt === 'string' ? new Date(loggedAt) : new Date(NaN)
   if (Number.isNaN(at.getTime())) return 'logged_at must be an ISO timestamp.'
   if (at.getTime() > now.getTime() + CLOCK_SKEW_MS) return 'logged_at is in the future.'
-  if (at.getTime() < now.getTime() - QUEUE_TRUST_MS) return now
+  if (mcpStamp(at, zone).local_date < loggableWeekStart(mcpStamp(now, zone).local_date)) return now
   return at < now ? at : now
 }
 
@@ -359,7 +361,7 @@ interface WriteOpts {
   confirm: boolean
   /** MCP log_session requires client_key (idempotent retries). */
   requireClientKey: boolean
-  /** The app's queued log: judge the date window at this time (bounded). */
+  /** The app's queued log: judge the date window at its queued time (this training week only). */
   trustLoggedAt?: boolean
 }
 
@@ -373,7 +375,7 @@ export async function logSportSession(store: ConnectedStore, actor: OverrideActo
   if (!health && (hasArg(args, 'session_rpe') || (Array.isArray(args.pain) && args.pain.length > 0))) return refuse(SPORT_HEALTH_REFUSED)
   const now = opts.now ?? new Date()
   const zone = await zoneOf(store)
-  const at = opts.trustLoggedAt ? judgedAt(args.logged_at, now) : now
+  const at = opts.trustLoggedAt ? judgedAt(args.logged_at, now, zone) : now
   if (typeof at === 'string') return refuse(at)
   const todayNow = mcpStamp(now, zone).local_date
   const today = mcpStamp(at, zone).local_date
@@ -635,7 +637,7 @@ const painItem = {
 
 const fields = {
   activity: { type: 'string', description: 'What it was, free text: Basketball, Run, Ride, Class, Match, or anything else. Used for U7 (basketball loads knee, ankle, hip) and conditioning volume.' },
-  date: { type: 'string', description: 'YYYY-MM-DD, the athlete\'s calendar date. Today or up to 6 days back (7 inclusive days); never a future day.' },
+  date: { type: 'string', description: 'YYYY-MM-DD, the athlete\'s calendar date, in the current training week: from this week\'s Monday through today (athlete\'s time zone). Never a future day, never before this week\'s Monday.' },
   duration_min: { type: 'integer', minimum: 1, maximum: 600, description: 'Whole minutes, 1–600.' },
   session_rpe: { type: 'integer', minimum: 1, maximum: 10, description: 'How hard the whole session was, 1–10 (CR-10). Health data: required, unless the athlete hasn\'t shared health data with you — then leave it out.' },
   pain: { type: 'array', items: painItem, description: 'Pain by region (the check-in\'s regions and red flags). Each is a pain report for that date, judged by U7. Health data: only if the athlete shares it with you.' },

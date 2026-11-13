@@ -18,6 +18,7 @@
 // =============================================================================
 
 import type { ExerciseTemplate, SetLog } from '../types/database.ts'
+import { isoDate, startOfWeekMonday } from './weekDates.ts'
 
 export const SPORT_KIND = 'sport_conditioning'
 
@@ -25,9 +26,6 @@ export const SPORT_KIND = 'sport_conditioning'
 export const SPORT_STARTERS = ['Basketball', 'Run', 'Ride', 'Class', 'Match', 'Other'] as const
 
 export const SPORT_MINUTE_CHOICES = [25, 30, 45, 60, 90] as const
-
-/** How far back a log may be dated: today and the 6 days before (7 inclusive days). */
-export const BACKDATE_DAYS = 7
 
 export const MAX_SPORT_MINUTES = 600
 const MAX_ACTIVITY = 40
@@ -70,9 +68,19 @@ export function addDaysIso(date: string, n: number): string {
   return d.toISOString().slice(0, 10)
 }
 
-/** The dates a log may carry, newest first: today and the 6 days before. */
+/**
+ * The Monday the current training week began, for `today` (the athlete's
+ * calendar date, already in their zone). weekDates.ts decides where a week
+ * begins; this only reads it, so no clock and no zone here.
+ */
+export function loggableWeekStart(today: string): string {
+  return isoDate(startOfWeekMonday(new Date(`${today}T12:00:00`)))
+}
+
+/** The dates a log may carry, newest first: today back to this training week's Monday. */
 export function loggableDates(today: string): string[] {
-  return Array.from({ length: BACKDATE_DAYS }, (_, i) => addDaysIso(today, -i))
+  const start = loggableWeekStart(today)
+  return Array.from({ length: 7 }, (_, i) => addDaysIso(today, -i)).filter((d) => d >= start)
 }
 
 /** Why this date can't carry a log, or null. */
@@ -82,7 +90,8 @@ export function dateProblem(date: unknown, today: string): string | null {
     return 'date must be YYYY-MM-DD.'
   }
   if (date > today) return 'a session can\'t be logged for a future day.'
-  if (date < addDaysIso(today, -(BACKDATE_DAYS - 1))) return `a session can only be logged for today or the ${BACKDATE_DAYS - 1} days before.`
+  const start = loggableWeekStart(today)
+  if (date < start) return `a session can only be logged for this training week: Monday ${start} through today.`
   return null
 }
 
@@ -141,7 +150,8 @@ export type ParsedSportLog = { ok: true; value: Partial<SportLogFields> } | { ok
 /**
  * A new log (partial false: activity, date, duration and — with requireRpe —
  * session RPE are required) or an edit (partial true: only the fields given
- * are checked and returned). `today` is the athlete's calendar date.
+ * are checked and returned). `today` is the athlete's calendar date; a date
+ * must fall in its training week, Monday through today.
  */
 export function parseSportLog(raw: Record<string, unknown>, today: string, opts: { partial?: boolean; requireRpe?: boolean } = {}): ParsedSportLog {
   const partial = opts.partial === true

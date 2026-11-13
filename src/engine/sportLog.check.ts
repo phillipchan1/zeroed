@@ -8,9 +8,10 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
-  addSessionVisible, BACKDATE_DAYS, dateProblem, isSportCard, loggableDates, logThisSessionVisible, outsidePlanEntryVisible,
+  addSessionVisible, dateProblem, isSportCard, loggableDates, loggableWeekStart, logThisSessionVisible, outsidePlanEntryVisible,
   parseSportLog, sessionLoadAu, sportSummary, SPORT_STARTERS,
 } from './sportLog.ts'
+import { isoDateInZone, weekWindowInZone } from './weekDates.ts'
 import { buildSportLogPending, sportLogBody } from './sportLogPending.ts'
 
 const fails: string[] = []
@@ -27,12 +28,30 @@ const TODAY = '2026-11-13'
 
 // ---- the rules -------------------------------------------------------------------
 ok(JSON.stringify(SPORT_STARTERS) === JSON.stringify(['Basketball', 'Run', 'Ride', 'Class', 'Match', 'Other']), 'starters: Basketball, Run, Ride, Class, Match, Other')
-ok(BACKDATE_DAYS === 7, 'backdate window: 7 inclusive days')
-const dates = loggableDates(TODAY)
-ok(dates.length === 7 && dates[0] === TODAY && dates[6] === '2026-11-07', 'loggable dates: today and the 6 days before')
-ok(dateProblem('2026-11-07', TODAY) === null, 'date: the 7th inclusive day is fine')
-ok(/6 days before/.test(dateProblem('2026-11-06', TODAY) ?? ''), 'date: the 8th day back is refused')
-ok(/future/.test(dateProblem('2026-11-14', TODAY) ?? ''), 'date: tomorrow is refused')
+// The window is the current training week (weekDates.ts: Monday → Sunday), Monday through today.
+// TODAY is Friday 2026-11-13; its week began Monday 2026-11-09.
+ok(loggableWeekStart(TODAY) === '2026-11-09', 'week start: Friday 13 Nov is in the week of Monday 9 Nov')
+ok(JSON.stringify(loggableDates(TODAY)) === JSON.stringify(['2026-11-13', '2026-11-12', '2026-11-11', '2026-11-10', '2026-11-09']), 'loggable dates: today back to this week\'s Monday, newest first')
+ok(dateProblem('2026-11-09', TODAY) === null, 'date: the Monday the week began is fine')
+ok(dateProblem(TODAY, TODAY) === null, 'date: today is fine')
+ok(/training week: Monday 2026-11-09/.test(dateProblem('2026-11-08', TODAY) ?? ''), 'date: the Sunday before the week began is refused')
+ok(/future/.test(dateProblem('2026-11-14', TODAY) ?? ''), 'date: tomorrow (Saturday, same week) is refused')
+ok(/future/.test(dateProblem('2026-11-15', TODAY) ?? ''), 'date: Sunday of this week, still ahead, is refused')
+ok(JSON.stringify(loggableDates('2026-11-09')) === JSON.stringify(['2026-11-09']) && dateProblem('2026-11-08', '2026-11-09') != null, 'Monday: only Monday; yesterday is last week')
+ok(loggableDates('2026-11-15').length === 7 && loggableDates('2026-11-15')[6] === '2026-11-09', 'Sunday: the whole week, Monday through Sunday')
+ok(loggableWeekStart('2026-03-09') === '2026-03-09' && loggableWeekStart('2026-03-08') === '2026-03-02', 'week start across the March DST change')
+ok(!parseSportLog({ activity: 'Run', date: '2026-11-08', duration_min: 30, session_rpe: 5 }, TODAY).ok, 'parse: a date before the week began is refused')
+ok(!parseSportLog({ date: '2026-11-08' }, TODAY, { partial: true }).ok && parseSportLog({ date: '2026-11-09' }, TODAY, { partial: true }).ok, 'parse (edit): moving a date out of the week is refused; to Monday is fine')
+// Midnight in Phil's zone, at fixed instants: the calendar date and week are Los Angeles's, not UTC's.
+const LA = 'America/Los_Angeles'
+const sunLate = new Date('2026-11-16T07:30:00Z') // Sunday 15 Nov, 23:30 PST (already Monday in UTC)
+const monEarly = new Date('2026-11-16T08:30:00Z') // Monday 16 Nov, 00:30 PST
+const sunToday = isoDateInZone(sunLate, LA)
+const monToday = isoDateInZone(monEarly, LA)
+ok(sunToday === '2026-11-15' && loggableWeekStart(sunToday) === weekWindowInZone(sunLate, LA).weekStart && loggableWeekStart(sunToday) === '2026-11-09', 'Sunday 23:30 PT is still Sunday, in the week of Monday 9 Nov')
+ok(dateProblem('2026-11-15', sunToday) === null && dateProblem('2026-11-09', sunToday) === null && dateProblem('2026-11-16', sunToday) != null, 'Sunday 23:30 PT: Sunday and that Monday are fine; UTC\'s Monday is the future')
+ok(monToday === '2026-11-16' && loggableWeekStart(monToday) === weekWindowInZone(monEarly, LA).weekStart && loggableWeekStart(monToday) === '2026-11-16', 'Monday 00:30 PT starts the next week')
+ok(dateProblem('2026-11-16', monToday) === null && /training week/.test(dateProblem('2026-11-15', monToday) ?? ''), 'Monday 00:30 PT: the Sunday just gone is before the week start, refused')
 ok(/YYYY-MM-DD/.test(dateProblem('2026-11-31', TODAY) ?? '') && /YYYY-MM-DD/.test(dateProblem('13/11/2026', TODAY) ?? ''), 'date: bad dates refused')
 const full = { activity: 'basketball', date: TODAY, duration_min: 25, session_rpe: 6 }
 const okParse = parseSportLog(full, TODAY)
