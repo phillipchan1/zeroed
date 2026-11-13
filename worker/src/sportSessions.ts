@@ -663,7 +663,7 @@ export const SPORT_SESSION_TOOLS: McpTool[] = [
   },
   {
     name: 'update_session',
-    description: 'Change a logged sport / conditioning session: activity, date (inside the 7-day window), minutes, session RPE, pain (the list replaces the old one; [] clears it), notes. Session load and U7 re-read it. Preview unless confirm=true. Logging: standing approval.',
+    description: 'Change a logged sport / conditioning session: activity, date (inside the current training week, Monday through today), minutes, session RPE, pain (the list replaces the old one; [] clears it), notes. Session load and U7 re-read it. Preview unless confirm=true. Logging: standing approval.',
     inputSchema: {
       type: 'object',
       properties: {
