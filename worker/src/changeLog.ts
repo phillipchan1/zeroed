@@ -864,7 +864,7 @@ export const CHANGE_LOG_TOOLS: McpTool[] = [
 export const CHANGE_LOG_TOOL_NAMES = new Set(CHANGE_LOG_TOOLS.map((t) => t.name))
 
 /** change_log target types that carry health data (G4, G9, D3). */
-const HEALTH_TARGETS = new Set(['checkin', 'region', 'session_rpe'])
+const HEALTH_TARGETS = new Set(['checkin', 'region', 'session_rpe', 'sport_session'])
 
 /** A per-region pain rule (U7.regions.<region>.*): which region is capped or red-flagged is health data too. */
 const healthRuleRow = (c: { target_type: string; target_id: string | null }) =>
@@ -899,6 +899,7 @@ export async function runChangeLogTool(store: ConnectedStore, name: string, args
           ? {
               ...c, target_id: null, diff: { hidden: true }, rationale: null, rule_refs: [],
               summary: c.target_type === 'session_rpe' ? 'Session effort (not shared with you)'
+                : c.target_type === 'sport_session' ? 'Sport / conditioning log (effort and pain not shared with you)'
                 : healthRuleRow(c) ? 'Pain rule for a region (not shared with you)'
                   : 'Health check-in (not shared with you)',
             }

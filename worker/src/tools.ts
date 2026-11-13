@@ -48,11 +48,15 @@ import { forViewer, validateEdit, warningsSection, type ValidateResult } from '.
 import { actorRef } from './sessionOverride.ts'
 import { READINESS_TOOL_NAMES, READINESS_TOOLS, runReadinessTool } from './readiness.ts'
 import { runSessionRpeTool, SESSION_RPE_TOOL_NAMES, SESSION_RPE_TOOLS } from './sessionRpe.ts'
-import { isHealthObservation, redactHealthText, seesHealth, statusBlockedRegions } from './regionStatus.ts'
+import { isHealthObservation, readinessTables, redactHealthText, seesHealth, statusBlockedRegions } from './regionStatus.ts'
 import { isReadTool, logCoachRead, logsReads } from './coachReads.ts'
 import { refuseByRole } from './coachRoles.ts'
 import { ACTIVITY_TOOL_NAMES, ACTIVITY_TOOLS, coachSchemaMissing, coachUnavailable, coachV1On, runActivityTool } from './activities.ts'
 import { skillBlocksV1On, skillEditsFor, withSkillArgs } from './skillBlocks.ts'
+import {
+  loadSportLogs, logSessionV1On, runSportSessionTool, sportLine, sportSchemaReady, SPORT_SESSION_TOOL_NAMES, SPORT_SESSION_TOOLS,
+  type SportLogRow,
+} from './sportSessions.ts'
 import {
   ONBOARDING_TOOL_NAMES,
   runOnboardingTool,
@@ -260,8 +264,8 @@ export const GATED_WRITE_TOOLS = new Set([
   'apply_program_edits', 'create_track', 'update_track', 'assign_exercise_to_track', 'set_track_progression_rule',
   'upsert_autoreg_rule', 'upsert_goal', 'update_athlete_target', 'update_program_meta', 'set_training_max',
 ])
-/** Standing-approved logging writes: logged as standing:logging. */
-export const LOGGING_TOOLS = new Set(['log_goal_measurement', 'add_workout_note'])
+/** Standing-approved logging writes: logged as standing:logging. log_session / update_session / delete_session are listed only with log_session_v1. */
+export const LOGGING_TOOLS = new Set(['log_goal_measurement', 'add_workout_note', 'log_session', 'update_session', 'delete_session'])
 
 /** A write tool as tracks_v1 athletes' coaches see it: the approval arguments it now needs. */
 function withApprovalArgs(tool: McpTool): McpTool {
@@ -310,7 +314,30 @@ export async function zeroedToolsFor(sql: Sql, athleteId: string): Promise<McpTo
   const store = storeForAthlete(sql, athleteId)
   const list = await baseToolsFor(store)
   // skill_blocks_v1 (on its own flag): kind / window_s on the edit tools. Off, the list as above.
-  return await skillBlocksV1On(store) ? list.map(withSkillArgs) : list
+  const skilled = await skillBlocksV1On(store) ? list.map(withSkillArgs) : list
+  // log_session_v1 (on its own flag, not tracks_v1 or coach_v1): the three logging tools. Off, the list as above.
+  return await logSessionV1On(store) ? [...skilled, ...SPORT_SESSION_TOOLS] : skilled
+}
+
+/**
+ * Whether this caller sees a sport log's session RPE and pain (section 11:
+ * health data, behind the toggle and read logging). The athlete and app_coach
+ * do; a coach only with the health toggle on, and only once the read is
+ * logged — already done above with tracks_v1 on, logged here otherwise. No
+ * coach_read_log table to log it in: not shown.
+ */
+async function sportHealthFor(store: ConnectedStore, actor: OverrideActor, name: string, args: Record<string, unknown>): Promise<boolean> {
+  if (!(await seesHealth(store, actor))) return false
+  if (!logsReads(actor) || await tracksV1On(store)) return true
+  if (!(await readinessTables(store))) return false
+  await logCoachRead(store, actor, name, args)
+  return true
+}
+
+/** log_session_v1: these workouts' sport logs, by id. Empty with the flag off (nothing read). */
+async function sportLogsFor(store: ConnectedStore, ids: string[], includeVoided = false): Promise<Map<string, SportLogRow>> {
+  if (!ids.length || !(await logSessionV1On(store)) || !(await sportSchemaReady(store))) return new Map()
+  return new Map((await loadSportLogs(store, { ids, includeVoided })).map((r) => [r.workout_id, r]))
 }
 
 async function baseToolsFor(store: ConnectedStore): Promise<McpTool[]> {
@@ -487,6 +514,9 @@ async function runZeroedTool(
 
   if (SESSION_RPE_TOOL_NAMES.has(name)) return runSessionRpeTool(store, name, args, actor)
 
+  // log_session_v1: unknown tools otherwise. A read coach never gets here (refused above).
+  if (SPORT_SESSION_TOOL_NAMES.has(name)) return runSportSessionTool(store, name, args, actor)
+
   if (SESSION_OVERRIDE_TOOL_NAMES.has(name)) {
     return runSessionOverrideTool(store, name, args, actor, (refs) => resolveGoalIds(store, refs))
   }
@@ -621,13 +651,22 @@ async function runZeroedTool(
         exercise: asString(args.exercise),
       })
       if (!rows.length) return 'No workouts matched.'
-      return rows.map((w) => formatLoggedWorkout(w, store.unit)).join('\n\n')
+      // log_session_v1: a sport log reads with its activity, minutes, load, pain and planned link.
+      const sport = await sportLogsFor(store, rows.map((w) => w.id))
+      const health = sport.size ? await sportHealthFor(store, actor, name, args) : false
+      return rows.map((w) => {
+        const text = formatLoggedWorkout(w, store.unit)
+        const s = sport.get(w.id)
+        return s ? `${text}\n${sportLine(s, health)}` : text
+      }).join('\n\n')
     }
     case 'get_workout': {
       const workoutId = asString(args.workout_id)
       if (!workoutId) throw new McpUserError('workout_id is required')
       const row = await loadWorkout(store, workoutId)
       if (!row) return `No workout ${workoutId} on this athlete.`
+      const sport = (await sportLogsFor(store, [workoutId], true)).get(workoutId)
+      if (sport?.voided) return `Workout ${workoutId} was a sport log that has been deleted.`
       // D3 (tracks_v1): pain observations are health data.
       const hidden = await hidesHealth(store, actor)
       const shown = hidden ? row.observations.filter((o) => !isHealthObservation(o.category)) : row.observations
@@ -645,7 +684,8 @@ async function runZeroedTool(
       const noteLines = notes.length
         ? ['', '## Workout notes', ...notes.map((n) => `- ${n.author}: ${n.body}`)]
         : []
-      return [formatLoggedWorkout(row.workout, store.unit), ...obs, ...noteLines].join('\n')
+      const sportLines = sport ? [sportLine(sport, await sportHealthFor(store, actor, name, args))] : []
+      return [formatLoggedWorkout(row.workout, store.unit), ...sportLines, ...obs, ...noteLines].join('\n')
     }
     case 'search_lifts': {
       const exercise = asString(args.exercise)

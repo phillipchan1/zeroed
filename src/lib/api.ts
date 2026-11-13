@@ -131,6 +131,13 @@ export function sessionRpeUrl(): string | null {
   return `${base}/session-rpe`
 }
 
+/** log_session_v1: the athlete's sport / conditioning logs (Worker only). */
+export function sportSessionUrl(): string | null {
+  const base = apiBaseUrl()
+  if (!base || !isCloudflareApi()) return null
+  return `${base}/sport-session`
+}
+
 export function authBaseUrl(): string | null {
   const base = apiBaseUrl()
   if (!base || !isCloudflareApi()) return null

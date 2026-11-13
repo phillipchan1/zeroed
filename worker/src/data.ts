@@ -892,6 +892,16 @@ async function resetOrientation(sql: Sql, athleteId: string): Promise<DataResult
   return { data: null, error: null, count: null, status: 200 }
 }
 
+/** This athlete's voided sport logs (log_session_v1). Read through to_jsonb: empty before log-session-v1.sql. */
+async function voidedWorkoutIds(sql: Sql, athleteId: string): Promise<string[]> {
+  const rows = await runSql<{ id: string }>(
+    sql,
+    `SELECT w.id::text AS id FROM workout w WHERE w.athlete_id = $1 AND (to_jsonb(w) ->> 'voided_at') IS NOT NULL`,
+    [athleteId],
+  )
+  return rows.map((r) => r.id)
+}
+
 export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQuery): Promise<DataResult> {
   try {
     if (query.op === 'rpc') {
@@ -912,9 +922,12 @@ export async function executeDataQuery(sql: Sql, ctx: DataContext, query: DataQu
       for (const filter of query.filters ?? []) walkFilterPath(table, filter.column, joins)
       const where = whereClause(table, ctx.athleteId, ctx.userId, query.filters ?? [], joins, 1)
       // tracks_v1: a row a revert retired or voided reads as gone (it is kept). Nothing hidden: unchanged.
-      const hidden = ctx.athleteId && DATA_ROUTE_TOMB_TABLES.has(table)
+      const hidden: string[] = ctx.athleteId && DATA_ROUTE_TOMB_TABLES.has(table)
         ? await hiddenIdsFor(sql, ctx.athleteId, table as TombTable)
         : []
+      // log_session_v1: a deleted sport log is voided, never deleted; the app reads it as gone,
+      // so a planned card it closed re-opens. No voided row (flag never on): unchanged.
+      if (ctx.athleteId && table === 'workout') hidden.push(...await voidedWorkoutIds(sql, ctx.athleteId))
       if (hidden.length) {
         where.text += `${where.text ? ' AND' : 'WHERE'} NOT (${table}.id::text = ANY($${where.params.length + 1}::text[]))`
         where.params.push(idList(hidden))

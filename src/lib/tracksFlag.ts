@@ -5,7 +5,7 @@
 // arc_load_v1, turning this on does not move the week.
 
 import { useMemo } from 'react'
-import { coachV1Enabled, skillBlocksV1Enabled, tracksV1Enabled } from './flags'
+import { coachV1Enabled, logSessionV1Enabled, skillBlocksV1Enabled, tracksV1Enabled } from './flags'
 import type { AthleteRow } from '../types/database'
 
 const DEV_FLAGS_KEY = 'zeroed.dev_flags'
@@ -13,6 +13,7 @@ const DEV_FLAGS_KEY = 'zeroed.dev_flags'
 let on = false
 let coach = false
 let skill = false
+let logSession = false
 
 function devSearch(): string {
   if (!import.meta.env.DEV) return ''
@@ -40,11 +41,16 @@ export function skillBlocksOn(): boolean {
   return skill
 }
 
+/** log_session_v1 (spec section 13), on its own: Add session, Log this session, sport logs in History. Read during render. */
+export function logSessionOn(): boolean {
+  return logSession
+}
+
 /**
  * Resolve the flag from the athlete row before the screens under the shell
  * render. Missing column / null / non-true all read as off. coach_v1 is
- * resolved alongside it (it only counts with tracks_v1), and so is
- * skill_blocks_v1 (which doesn't need it).
+ * resolved alongside it (it only counts with tracks_v1), and so are
+ * skill_blocks_v1 and log_session_v1 (which don't need it).
  */
 export function useTracksV1(athlete: Pick<AthleteRow, 'flags'> | null): boolean {
   const flags = athlete?.flags
@@ -53,6 +59,7 @@ export function useTracksV1(athlete: Pick<AthleteRow, 'flags'> | null): boolean 
     on = tracksV1Enabled(import.meta.env, flags, search)
     coach = coachV1Enabled(import.meta.env, flags, search)
     skill = skillBlocksV1Enabled(import.meta.env, flags, search)
+    logSession = logSessionV1Enabled(import.meta.env, flags, search)
     return on
   }, [flags])
 }

@@ -270,6 +270,48 @@ function parseCheckin(body: Record<string, unknown>, today: string): ParsedCheck
   return { date, sleep_hours: sleep, stress, soreness, pain }
 }
 
+/** What a set of new pain reports did to U7: the calls, the region status moves, any temporary blocks. */
+export interface PainOutcome {
+  calls: RegionEval[]
+  moves: Array<{ region: string; from: string; to: string; reason: string }>
+  temporary: Array<{ region: string; reason: string }>
+}
+
+/**
+ * U7 for pain reports just written on `date` (painIds: region → the new row),
+ * against the day before, in the caller's transaction: each region's
+ * region_status moves (with the report and change that moved it), and the
+ * temporary blocks (v1.2) the reports set, which write no row. The check-in
+ * and a sport log (sportSessions.ts) both come through here.
+ */
+export async function applyPainReports(
+  store: ConnectedStore, date: string, anyPain: boolean, painIds: Map<string, string>, methodology: Resolved, changeId: string,
+): Promise<PainOutcome> {
+  const calls = anyPain ? await regionCalls(store, date, methodology) : []
+  const current = new Map((await loadRegionStatus(store)).map((s) => [s.region, s]))
+  const moves: PainOutcome['moves'] = []
+  // v1.2: a temporary block (that day and the next session) is derived from
+  // the report itself, so it writes no region_status row; it lapses on its own.
+  const temporary: PainOutcome['temporary'] = []
+  for (const c of calls.filter((x) => painIds.has(x.region))) {
+    const now = current.get(c.region)
+    // A block stays until the athlete clears it; a low score doesn't lift it.
+    if (blocksNow(now)) continue
+    if (c.status === 'blocked' && c.block === 'temporary') {
+      temporary.push({ region: c.region, reason: c.reason })
+      continue
+    }
+    const from = now && !(now.status === 'blocked' && now.cleared_at) ? now.status : 'ok'
+    if (from === c.status) continue
+    await store.sql`
+      INSERT INTO region_status (athlete_id, region, status, reason, pain_report_id, change_id)
+      VALUES (${store.athleteId}, ${c.region}, ${c.status}, ${c.reason}, ${painIds.get(c.region)!}, ${changeId})
+    `
+    moves.push({ region: c.region, from, to: c.status, reason: c.reason })
+  }
+  return { calls, moves, temporary }
+}
+
 /** The athlete's check-in: logged under standing approval, with any region status it moves. */
 export async function saveCheckin(store: ConnectedStore, actor: OverrideActor, body: Record<string, unknown>): Promise<CheckinResult> {
   if (!isAthlete(store, actor)) return { ok: false, text: 'Refused: only the athlete logs their own check-in.' }
@@ -301,28 +343,7 @@ export async function saveCheckin(store: ConnectedStore, actor: OverrideActor, b
       painIds.set(p.region, row.id)
     }
     // U7 for each region reported, against the day before.
-    const calls = parsed.pain.length ? await regionCalls(store, parsed.date, methodology) : []
-    const current = new Map((await loadRegionStatus(store)).map((s) => [s.region, s]))
-    const moves: Array<{ region: string; from: string; to: string; reason: string }> = []
-    // v1.2: a temporary block (that day and the next session) is derived from
-    // the report itself, so it writes no region_status row; it lapses on its own.
-    const temporary: Array<{ region: string; reason: string }> = []
-    for (const c of calls.filter((x) => painIds.has(x.region))) {
-      const now = current.get(c.region)
-      // A block stays until the athlete clears it; a low score doesn't lift it.
-      if (blocksNow(now)) continue
-      if (c.status === 'blocked' && c.block === 'temporary') {
-        temporary.push({ region: c.region, reason: c.reason })
-        continue
-      }
-      const from = now && !(now.status === 'blocked' && now.cleared_at) ? now.status : 'ok'
-      if (from === c.status) continue
-      await store.sql`
-        INSERT INTO region_status (athlete_id, region, status, reason, pain_report_id, change_id)
-        VALUES (${store.athleteId}, ${c.region}, ${c.status}, ${c.reason}, ${painIds.get(c.region)!}, ${changeId})
-      `
-      moves.push({ region: c.region, from, to: c.status, reason: c.reason })
-    }
+    const { calls, moves, temporary } = await applyPainReports(store, parsed.date, parsed.pain.length > 0, painIds, methodology, changeId)
     await writeChange(store, {
       id: changeId,
       actor,

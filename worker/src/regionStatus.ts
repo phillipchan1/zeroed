@@ -72,6 +72,14 @@ export async function loadPain(store: ConnectedStore, from: string, to: string):
     FROM pain_report p
     WHERE p.athlete_id = ${store.athleteId} AND p.date >= ${from}::date AND p.date <= ${to}::date
       AND NOT (p.id::text = ANY(${idList(voided)}::text[]))
+      -- log_session_v1: a sport log's pain counts while the log stands and is
+      -- its latest pain (an edit supersedes it). Read through to_jsonb so this
+      -- is a no-op before log-session-v1.sql; a check-in's report has no log.
+      AND NOT EXISTS (
+        SELECT 1 FROM workout w
+        WHERE w.id::text = (to_jsonb(p) ->> 'workout_id')
+          AND ((to_jsonb(w) ->> 'voided_at') IS NOT NULL OR (to_jsonb(w) ->> 'pain_change_id') IS DISTINCT FROM p.change_id::text)
+      )
     ORDER BY p.date, p.region, p.created_at DESC, p.id DESC
   `
   return rows.flatMap((r) => {
@@ -157,6 +165,7 @@ export async function workoutDates(store: ConnectedStore, from: string, to: stri
     JOIN program p ON p.id = r.program_id
     WHERE p.athlete_id = ${store.athleteId}
       AND w.performed_at >= (${from}::date - 1) AND w.performed_at < (${to}::date + 2)
+      AND (to_jsonb(w) ->> 'voided_at') IS NULL
   `
   const dates = rows.map((r) => mcpStamp(new Date(r.performed_at), zone).local_date).filter((d) => d >= from && d <= to)
   return [...new Set(dates)].sort()
@@ -184,6 +193,7 @@ export async function regionSessions(store: ConnectedStore, from: string, to: st
     JOIN program p ON p.id = r.program_id
     WHERE p.athlete_id = ${store.athleteId}
       AND w.performed_at >= (${from}::date - 1) AND w.performed_at < (${to}::date + 2)
+      AND (to_jsonb(w) ->> 'voided_at') IS NULL
     ORDER BY w.performed_at
   `
   return rows.flatMap((r) => {

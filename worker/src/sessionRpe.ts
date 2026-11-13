@@ -42,6 +42,7 @@ import { seesHealth } from './regionStatus.ts'
 import { athleteToday, tracksV1On, type OverrideActor } from './sessionOverride.ts'
 import { calendarZone, loadWorkouts, makeStore, type ConnectedStore } from './store.ts'
 import { hiddenIds, idList } from './tombstones.ts'
+import { sportLoadRows } from './sportSessions.ts'
 import { McpUserError } from './userError.ts'
 
 export const sessionRpeUnavailable = 'Session RPE is not set up on this database yet. Nothing was written.'
@@ -309,13 +310,27 @@ export interface SessionLoadView {
 
 const round1 = (n: number) => Math.round(n * 10) / 10
 
-/** Session load for the week [monday, monday + 6] against the 4 weeks before (Foster). */
+/** What the weekly sum reads of a tap or a sport log. */
+type LoadRow = Pick<SessionRpeRow, 'date' | 'rating' | 'load' | 'workout_id'>
+
+/**
+ * Session load for the week [monday, monday + 6] against the 4 weeks before (Foster).
+ * log_session_v1: every sport / conditioning log in the window (session RPE ×
+ * minutes, planned or external, two same-day games both) adds to the session_rpe
+ * taps; a tap already tied to one of those logs isn't counted twice. Flag off:
+ * exactly the taps, as before.
+ */
 export async function sessionLoadForWeek(store: ConnectedStore, monday: string): Promise<SessionLoadView> {
   const sunday = addDays(monday, 6)
-  const rows = await loadSessionRpe(store, addDays(monday, -28), sunday)
+  const taps: LoadRow[] = await loadSessionRpe(store, addDays(monday, -28), sunday)
+  const sport = await sportLoadRows(store, addDays(monday, -28), sunday)
+  const sportIds = new Set(sport.map((x) => x.workout_id))
+  const rows: LoadRow[] = sport.length
+    ? [...taps.filter((r) => !r.workout_id || !sportIds.has(r.workout_id)), ...sport.map((x) => ({ date: x.date, rating: x.rating, load: x.load, workout_id: x.workout_id }))]
+    : taps
   const week = rows.filter((r) => r.date >= monday)
   const prior = rows.filter((r) => r.date < monday)
-  const sum = (xs: SessionRpeRow[]) => xs.reduce((a, r) => a + (r.load ?? 0), 0)
+  const sum = (xs: LoadRow[]) => xs.reduce((a, r) => a + (r.load ?? 0), 0)
   const loadAu = sum(week)
   const usual = prior.length ? round1(sum(prior) / 4) : null
   return {

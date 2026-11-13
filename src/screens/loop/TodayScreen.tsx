@@ -18,7 +18,7 @@ import { primeCueAudio } from '../../lib/intervalCues'
 import { tallySession } from '../../engine/volume'
 import { displayedSessionLoad, fetchProgramRxVersion } from '../../engine/sessionRx'
 import { unitContext, type UnitContext } from '../../lib/units'
-import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag, Play, Plus, MessageSquarePlus } from 'lucide-react'
+import { ChevronLeft, ChevronRight, Lock, Sparkles, Activity, CloudUpload, CloudAlert, Flag, Play, Plus, MessageSquarePlus, Dumbbell } from 'lucide-react'
 import { loadDraftStarts } from '../../lib/workoutDraft'
 import { seedWorkoutBootstrap, workoutBootKey, type WorkoutBootstrap } from '../../lib/workoutBoot'
 import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
@@ -30,9 +30,11 @@ import { setIntendedDay, orderByPlannedDay, DAY_LABELS as PLAN_DAYS } from '../.
 import { Button, SectionHeader, Skeleton, Ring, Chip, Sheet, Banner, LockOn, Row } from '../../components/ui'
 import { PullToRefresh } from '../../components/PullToRefresh'
 import { OutsidePlanSheet } from '../../components/OutsidePlanSheet'
+import { SportSessionSheet } from '../../components/SportSessionSheet'
+import { addSessionVisible, logThisSessionVisible, outsidePlanEntryVisible } from '../../engine/sportLog'
 import { OneOffSheet } from '../../components/OneOffSheet'
 import { arcLoadOn } from '../../lib/arcLoad'
-import { skillBlocksOn, tracksOn } from '../../lib/tracksFlag'
+import { logSessionOn, skillBlocksOn, tracksOn } from '../../lib/tracksFlag'
 import { useQueuedSessionRpe } from '../../lib/sessionRpe'
 import { fetchGoalsView, useProgramTracks, type GoalView } from '../../lib/tracksData'
 import { goalsTrainedBy } from '../../engine/goalSources'
@@ -392,7 +394,7 @@ function markNote(view: SessionOverrideView, i: number): string | null {
 
 function SessionSheet({
   routine, state, targets, actuals, u, plannedDow, onPlanDay, onClose, onStart, onStartIntervals, onEdit, onLogAgain, tracks = [],
-  override = null,
+  override = null, onLogSession,
 }: {
   routine: RoutineRow
   state: SessionState
@@ -413,6 +415,8 @@ function SessionSheet({
   onStartIntervals: () => void
   onEdit: () => void
   onLogAgain: () => void
+  /** log_session_v1, a conditioning / sport card: log it as a session (duration, effort, pain) instead of its sets. */
+  onLogSession?: () => void
 }) {
   const exercises = override ? override.exercises : routine.exercises
   const chip = STATE_CHIP[state.kind]
@@ -424,7 +428,10 @@ function SessionSheet({
     : 0
   const plannedSets = exercises.reduce((n, ex) => n + ex.sets, 0)
 
-  const actions =
+  const logAction = onLogSession ? (
+    <Button variant="ghost" full style={{ marginTop: 6 }} onClick={onLogSession}>Log this session</Button>
+  ) : null
+  const planActions =
     state.kind === 'done' ? (
       <>
         <Button variant="primary" full onClick={onEdit}>Review / edit →</Button>
@@ -443,6 +450,8 @@ function SessionSheet({
         {state.kind === 'in_progress' ? 'Resume session →' : 'Start session →'}
       </Button>
     )
+  // Flag off, no logAction: the actions exactly as before.
+  const actions = logAction ? <>{planActions}{logAction}</> : planActions
 
   return (
     <Sheet title={routine.name} onClose={onClose} actions={actions}>
@@ -972,6 +981,9 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
   // logged after the fact. The note is the lock-on line once one is logged.
   const [offPlan, setOffPlan] = useState<'plan' | 'log' | null>(null)
   const [loggedNote, setLoggedNote] = useState<string | null>(null)
+  // log_session_v1: "Add session" (no card) or "Log this session" (a planned card).
+  const [sportSheet, setSportSheet] = useState<{ planned: { id: string; name: string } | null } | null>(null)
+  const [sportNote, setSportNote] = useState<string | null>(null)
   useEffect(() => {
     if (!loggedNote) return
     const t = setTimeout(() => setLoggedNote(null), 5000)
@@ -1431,6 +1443,25 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
               <CheckinCard key={`${readinessToday.date}:${readinessToday.checkin?.sleep_hours ?? ''}:${readinessToday.checkin?.stress ?? ''}:${readinessToday.checkin?.soreness ?? ''}`} today={readinessToday} onSaved={afterCheckin} />
             )}
 
+            {/* log_session_v1: always here on the current week — a primer-only,
+                rest or empty day included, arc_load_v1 or not. */}
+            {addSessionVisible({ flagOn: logSessionOn(), weekOffset: wOffset }) && (
+              <div className="offplan" style={{ marginTop: 0, marginBottom: 24 }}>
+                {sportNote && (
+                  <LockOn className="offplan__done">
+                    <span className="text-sm">Session logged</span>
+                    <span className="num text-xs text-dim">{sportNote}</span>
+                  </LockOn>
+                )}
+                <Row
+                  leading={<Dumbbell size={20} strokeWidth={1.75} aria-hidden />}
+                  title="Add session"
+                  sub="A game, a run, a class: how long, how hard, any pain"
+                  onClick={() => setSportSheet({ planned: null })}
+                />
+              </div>
+            )}
+
             {/* THE WEEK, AT A GLANCE — a ring and seven dots instead of a
                 sentence. Replaces the old "2/4 done" text plus a separate
                 day strip stranded in a desktop-only rail. */}
@@ -1566,7 +1597,7 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
                     />
                   ))}
                 </div>
-                {arcLoadOn() && wOffset === 0 && (
+                {outsidePlanEntryVisible({ arcLoad: arcLoadOn(), weekOffset: wOffset, liveCount: liveList.length }) && (
                   <div className="offplan">
                     {loggedNote && (
                       <LockOn className="offplan__done">
@@ -1663,6 +1694,20 @@ export function TodayScreen({ athleteId, routines, onboardingStep }: TodayScreen
             const s = statusFor(openSession.id)
             if (s.kind === 'done') navigate(`/app/workout/${openSession.id}?w=${s.lastWorkout.id}`)
           }}
+          onLogSession={logThisSessionVisible({ flagOn: logSessionOn(), weekOffset: wOffset, routine: openSession })
+            ? () => { setOpenSessionId(null); setSportSheet({ planned: { id: openSession.id, name: openSession.name } }) }
+            : undefined}
+        />
+      )}
+
+      {sportSheet && (
+        <SportSessionSheet
+          athleteId={athleteId}
+          athleteName={athleteName}
+          today={todayISO}
+          planned={sportSheet.planned}
+          onClose={() => setSportSheet(null)}
+          onDone={(summary) => { setSportSheet(null); setSportNote(summary) }}
         />
       )}
 

@@ -1595,6 +1595,19 @@ const NEVER_ACCESS = 'access is never given back by an undo. Invite the coach ag
  * One handler per change_log type. reverts.check.ts fails if the code writes a
  * type that isn't here. revert_change dispatches to the type it reverted.
  */
+/**
+ * log_session_v1: a sport / conditioning log is changed or deleted as a log —
+ * update_session / delete_session (History, or MCP), each its own logged
+ * change — not undone from the Changes feed, so a log, its pain reports and
+ * the planned card it closed never drift apart.
+ */
+const SPORT_LOG_EDITED_IN_PLACE = 'change or delete the session from History instead (each edit or delete is logged).'
+const SPORT_SESSION: Handler = {
+  defined: `Not reverted here: ${SPORT_LOG_EDITED_IN_PLACE}`,
+  blocked: () => SPORT_LOG_EDITED_IN_PLACE,
+  keys: (d, row) => [`sport_session:${String(d.workout_id ?? row.target_id ?? '')}`],
+}
+
 export const REVERT_HANDLERS: Record<string, Handler> = {
   apply_program_edits: ROUTINES,
   accept_proposal: ROUTINES,
@@ -1627,6 +1640,9 @@ export const REVERT_HANDLERS: Record<string, Handler> = {
   set_coach_role: coachAccessHandler('role', 'role'),
   set_birth_date: BIRTH_DATE,
   confirm_adult: ADULT_CONFIRMED,
+  log_session: SPORT_SESSION,
+  update_session: SPORT_SESSION,
+  delete_session: SPORT_SESSION,
   apply_activity_change: ACTIVITY,
   apply_composed_block: COMPOSED_BLOCK,
   revoke_coach: {

@@ -93,3 +93,19 @@ export function skillBlocksV1Enabled(env: FlagEnv, athleteFlags: unknown, search
   if (devOverride('skill_blocks_v1', env, search)) return true
   return readAthleteFlags(athleteFlags).skill_blocks_v1 === true
 }
+
+/**
+ * log_session_v1 (spec section 13): log a sport or conditioning session —
+ * "Add session" on Today, "Log this session" on a planned conditioning card,
+ * edit / delete from History, and the MCP log_session / update_session /
+ * delete_session tools. Athlete-row only, default off, no build-time ceiling,
+ * and independent of coach_v1, arc_load_v1 and tracks_v1: it turns none of
+ * them on, and none of them turns it on. DEV builds also take
+ * `?flag=log_session_v1`.
+ *
+ *   UPDATE athlete SET flags = flags - 'log_session_v1';
+ */
+export function logSessionV1Enabled(env: FlagEnv, athleteFlags: unknown, search: string): boolean {
+  if (devOverride('log_session_v1', env, search)) return true
+  return readAthleteFlags(athleteFlags).log_session_v1 === true
+}

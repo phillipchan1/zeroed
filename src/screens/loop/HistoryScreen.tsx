@@ -7,7 +7,12 @@ import {
   type LogSession, type ExerciseHistory,
 } from '../../engine'
 import { describeGap, labelForSlot, type BalanceRead } from '../../engine/balance'
-import { pendingSessionsRaw } from '../../lib/workoutOutbox'
+import { pendingSessionById, pendingSessionsRaw } from '../../lib/workoutOutbox'
+import { logSessionOn } from '../../lib/tracksFlag'
+import { listSportLogs, type SportLogView } from '../../lib/sportSessionApi'
+import { SportSessionSheet, type SportSheetEdit } from '../../components/SportSessionSheet'
+import { isoDateInZone } from '../../engine/weekDates'
+import { addDaysIso, sessionLoadAu } from '../../engine/sportLog'
 import { unitContext, type UnitContext } from '../../lib/units'
 import { prLabel } from '../../engine/prs'
 import { SectionHeader, Skeleton, PageHeader, Sheet, Chip, Stat, StatGrid, Meter } from '../../components/ui'
@@ -47,6 +52,29 @@ function OutsidePlanCard({ s }: { s: LogSession & { outsidePlan: NonNullable<Log
         {s.pending ? <Chip tone="pending">Syncing</Chip> : <Chip tone="info">Outside the plan</Chip>}
         {s.outsidePlan.minutes != null && <Chip tone="todo">{s.outsidePlan.minutes} min</Chip>}
         {s.outsidePlan.effort != null && <Chip tone="todo">Effort {s.outsidePlan.effort}</Chip>}
+      </div>
+    </div>
+  )
+}
+
+// log_session_v1: a sport / conditioning log. History is where it's reviewed,
+// changed or deleted, so the card is a door to the same sheet that logged it.
+function SportLogCard({ s, sport, onOpen }: { s: LogSession; sport: { activity: string; minutes: number; effort: number | null; pain: number }; onOpen: () => void }) {
+  const load = sessionLoadAu(sport.effort, sport.minutes)
+  return (
+    <div className="card card--tap" style={{ marginBottom: 10 }} onClick={onOpen}>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12 }}>
+        <h3 style={{ fontSize: 'var(--fs-lg)', fontWeight: 700, minWidth: 0 }}>{sport.activity}</h3>
+        <span className="meta" style={{ whiteSpace: 'nowrap' }}>
+          {dayAndDate(s.performedAt)}
+        </span>
+      </div>
+      <div style={{ marginTop: 10, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+        {s.pending ? <Chip tone="pending">Syncing</Chip> : <Chip tone="info">Session</Chip>}
+        <Chip tone="todo">{sport.minutes} min</Chip>
+        {sport.effort != null && <Chip tone="todo">Effort {sport.effort}</Chip>}
+        {load != null && <Chip tone="todo">{load} AU</Chip>}
+        {sport.pain > 0 && <Chip tone="pending">Pain logged</Chip>}
       </div>
     </div>
   )
@@ -281,12 +309,33 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
   const u = unitContext()
   const [exercise, setExercise] = useState<string | null>(null)
 
-  const { data, loading } = useCachedLoader(
+  const { data, loading, refetch } = useCachedLoader(
     `history:${athleteId}`,
     () => gatherTrainingLog(athleteId, pendingSessionsRaw()),
   )
   const { data: balance } = useCachedLoader(`balance:${athleteId}`, () => gatherBalance(athleteId))
   const weeks = data?.weeks ?? []
+  // log_session_v1: which rows are sport logs (synced: from the Worker; queued: from the outbox).
+  const sportOn = logSessionOn()
+  const today = isoDateInZone(new Date())
+  const oldest = weeks.length ? weeks[weeks.length - 1].weekStart : addDaysIso(today, -6)
+  const { data: sportLogs, refetch: refetchSport } = useCachedLoader<SportLogView[]>(
+    sportOn ? `sport-logs:${athleteId}:${oldest}` : null,
+    () => listSportLogs(oldest, today),
+  )
+  const sportById = new Map((sportLogs ?? []).map((l) => [l.workout_id, l]))
+  const [sportEdit, setSportEdit] = useState<SportSheetEdit | null>(null)
+  function sportFor(s: LogSession): { edit: SportSheetEdit; activity: string; minutes: number; effort: number | null; pain: number } | null {
+    if (!sportOn) return null
+    const queuedId = s.pending && s.workoutId.startsWith('pending:') ? s.workoutId.slice('pending:'.length) : null
+    const queued = queuedId ? pendingSessionById(queuedId) : null
+    if (queued?.sportLog) {
+      const q = queued.sportLog
+      return { edit: { kind: 'pending', session: queued }, activity: q.activity, minutes: q.minutes, effort: q.sessionRpe, pain: q.pain.length }
+    }
+    const log = sportById.get(s.workoutId)
+    return log ? { edit: { kind: 'committed', log }, activity: log.activity, minutes: log.duration_min, effort: log.session_rpe, pain: log.pain.length } : null
+  }
 
   return (
     <div className="screen with-nav">
@@ -323,21 +372,37 @@ export function HistoryScreen({ athleteId }: { athleteId: string }) {
                   {!!wk.totalVolume?.load && ` · ${u.volume(wk.totalVolume.load)}${u.unit}`}
                 </span>
               </div>
-              {wk.sessions.map((s) => (
-                <LogSessionCard
-                  key={s.workoutId}
-                  s={s}
-                  u={u}
-                  onOpen={() => navigate(`/app/workout/${s.routineId}?w=${s.workoutId}`)}
-                  onExercise={setExercise}
-                />
-              ))}
+              {wk.sessions.map((s) => {
+                const sport = sportFor(s)
+                return sport ? (
+                  <SportLogCard key={s.workoutId} s={s} sport={sport} onOpen={() => setSportEdit(sport.edit)} />
+                ) : (
+                  <LogSessionCard
+                    key={s.workoutId}
+                    s={s}
+                    u={u}
+                    onOpen={() => navigate(`/app/workout/${s.routineId}?w=${s.workoutId}`)}
+                    onExercise={setExercise}
+                  />
+                )
+              })}
             </div>
           ))}</div>
         )}
       </div></div>
 
       {exercise && <ExerciseHistorySheet athleteId={athleteId} name={exercise} onClose={() => setExercise(null)} />}
+
+      {sportEdit && (
+        <SportSessionSheet
+          athleteId={athleteId}
+          athleteName={null}
+          today={today}
+          edit={sportEdit}
+          onClose={() => setSportEdit(null)}
+          onDone={() => { setSportEdit(null); refetch(); refetchSport() }}
+        />
+      )}
     </div>
   )
 }

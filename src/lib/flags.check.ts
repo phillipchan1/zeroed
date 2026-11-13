@@ -1,5 +1,5 @@
 // Run: node --experimental-strip-types src/lib/flags.check.ts
-import { arcLoadV1Enabled, coachV1Enabled, onboardingAgentV1Enabled, readAthleteFlags, skillBlocksV1Enabled, tracksV1Enabled } from './flags.ts'
+import { arcLoadV1Enabled, coachV1Enabled, logSessionV1Enabled, onboardingAgentV1Enabled, readAthleteFlags, skillBlocksV1Enabled, tracksV1Enabled } from './flags.ts'
 
 const fails: string[] = []
 let checks = 0
@@ -95,6 +95,33 @@ ok(coachV1Enabled({}, { tracks_v1: true, coach_v1: false }, '') === false, 'coac
 ok(coachV1Enabled({ DEV: true }, null, '?flag=tracks_v1&flag=coach_v1') === true, 'coach: DEV query override with tracks_v1')
 ok(coachV1Enabled({ DEV: true }, null, '?flag=coach_v1') === false, 'coach: DEV override alone still needs tracks_v1')
 ok(coachV1Enabled({ DEV: false }, null, '?flag=tracks_v1&flag=coach_v1') === false, 'coach: production ignores the query override')
+
+// ---- log_session_v1: athlete row only, default off, independent of coach_v1 / arc_load_v1 ----
+ok(logSessionV1Enabled({}, null, '') === false, 'log: off with no flags')
+ok(logSessionV1Enabled({}, {}, '') === false, 'log: off with empty flags')
+ok(logSessionV1Enabled({ VITE_ARC_LOAD_V1: '1', VITE_ONBOARDING_AGENT_V1: '1' }, {}, '') === false, 'log: no build env turns it on (no ceiling, no env switch)')
+ok(logSessionV1Enabled({}, { log_session_v1: true }, '') === true, 'log: the athlete row turns it on, no VITE ceiling needed')
+ok(logSessionV1Enabled({}, { log_session_v1: 'true' }, '') === false, 'log: only literal true counts')
+ok(logSessionV1Enabled({}, { log_session_v1: false }, '') === false, 'log: false is the rollback')
+ok(logSessionV1Enabled({ DEV: true }, null, '?flag=log_session_v1') === true, 'log: DEV query override')
+ok(logSessionV1Enabled({ DEV: false }, null, '?flag=log_session_v1') === false, 'log: production ignores the query')
+ok(logSessionV1Enabled({}, null, '?flag=log_session_v1') === false, 'log: missing DEV is production')
+ok(logSessionV1Enabled({ DEV: true }, null, '?flag=arc_load_v1&flag=log_session_v1') === true, 'log: a second ?flag= is read too')
+// Independence, both ways.
+const LOG_ON = { log_session_v1: true }
+ok(coachV1Enabled({}, LOG_ON, '') === false, 'log on does not turn on coach_v1')
+ok(coachV1Enabled({}, { ...LOG_ON, tracks_v1: true }, '') === false, 'log on (with tracks_v1) still does not turn on coach_v1')
+ok(arcLoadV1Enabled({ VITE_ARC_LOAD_V1: '1' }, LOG_ON, '') === false, 'log on does not turn on arc_load_v1, even under its ceiling')
+ok(tracksV1Enabled({}, LOG_ON, '') === false && skillBlocksV1Enabled({}, LOG_ON, '') === false, 'log on does not turn on tracks_v1 or skill_blocks_v1')
+ok(logSessionV1Enabled({}, { tracks_v1: true, coach_v1: true }, '') === false, 'coach_v1 (with tracks_v1) does not turn on log_session_v1')
+ok(logSessionV1Enabled({ VITE_ARC_LOAD_V1: '1' }, { arc_load_v1: true }, '') === false, 'arc_load_v1 on does not turn on log_session_v1')
+ok(logSessionV1Enabled({}, { skill_blocks_v1: true, tracks_v1: true }, '') === false, 'skill_blocks_v1 / tracks_v1 do not turn on log_session_v1')
+ok(logSessionV1Enabled({ DEV: true }, null, '?flag=coach_v1&flag=tracks_v1&flag=arc_load_v1') === false, 'log: other DEV overrides do not turn it on')
+ok(coachV1Enabled({ DEV: true }, null, '?flag=log_session_v1') === false && arcLoadV1Enabled({ DEV: true }, null, '?flag=log_session_v1') === false,
+  'log DEV override does not turn on coach_v1 or arc_load_v1')
+ok(logSessionV1Enabled({}, { log_session_v1: true, coach_v1: false, arc_load_v1: false }, '') === true
+  && coachV1Enabled({}, { log_session_v1: true, coach_v1: false, arc_load_v1: false }, '') === false,
+  'log on with coach_v1 / arc_load_v1 explicitly off: log on, coach off')
 
 console.log(`${checks} checks, ${fails.length} failed`)
 if (fails.length) {

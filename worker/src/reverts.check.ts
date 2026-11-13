@@ -593,6 +593,18 @@ exercised.add('revoke_coach')
 const healthUndoRole = await tapRevert((await lastLog(A, 'set_coach_role')).id)
 ok(!healthUndoRole.ok, 'coach access: a revoked coach\'s role is not changed back')
 
+// log_session_v1: a sport log, its edit and its delete are changed from History, never undone here.
+await harness.query(`UPDATE athlete SET flags = COALESCE(flags, '{}'::jsonb) || '{"log_session_v1": true}'::jsonb WHERE id = $1`, [A])
+const sportLog = JSON.parse(await call('log_session', { activity: 'Basketball', date: today, duration_min: 25, session_rpe: 6, client_key: 'rv-sport-1', confirm: true })) as { workout_id: string }
+await call('update_session', { workout_id: sportLog.workout_id, duration_min: 30, confirm: true })
+await call('delete_session', { workout_id: sportLog.workout_id, confirm: true })
+for (const tool of ['log_session', 'update_session', 'delete_session']) {
+  const undo = await tapRevert((await lastLog(A, tool)).id)
+  ok(!undo.ok && undo.reason === 'not_revertible' && /from History/.test(undo.text), `${tool}: not undone from the feed; changed from History`)
+  exercised.add(tool)
+}
+await harness.query(`UPDATE athlete SET flags = flags - 'log_session_v1' WHERE id = $1`, [A])
+
 // ---- coach_v1: activities, composed blocks, birth date --------------------------------------
 await flags(A, { coach: true })
 await harness.query(`INSERT INTO athlete_goal (athlete_id, name, metric, unit, direction, target, due_date, test_protocol) VALUES ($1, 'Back Squat 1RM', 'Back Squat', 'lb', 'higher', 315, CURRENT_DATE + 120, 'Back Squat 1RM')`, [A])
