@@ -190,7 +190,9 @@ function rejectionCode(err: unknown): string | null {
 //   23502 — not-null violation (the payload can't satisfy the table)
 //   22P02 — invalid text representation (a malformed stored value)
 //   PGRST116 — no row returned where exactly one was required
-const PERMANENT_CODES = new Set(['42501', '23503', '23505', '23502', '22P02', 'PGRST116'])
+//   SPORT_REFUSED — the Worker refused a sport log (log_session_v1) on its
+//     merits: a date outside the window, a bad field. Only sport logs carry it.
+const PERMANENT_CODES = new Set(['42501', '23503', '23505', '23502', '22P02', 'PGRST116', 'SPORT_REFUSED'])
 
 function describe(err: unknown): string {
   if (!err) return 'unknown error'
@@ -379,6 +381,21 @@ export async function flushOutbox(): Promise<void> {
 export async function retryBlocked(): Promise<void> {
   writeQueue(readQueue().map((e) => (e.blocked ? { ...e, attempts: 0, blocked: false } : e)))
   await flushOutbox()
+}
+
+/**
+ * Discard one queued sport log the athlete deleted before it synced
+ * (log_session_v1). Only sport logs: a lifting session's set logs live nowhere
+ * else, so nothing else is dropped one by one. False while it is being sent —
+ * it may land; delete it from History once it has.
+ */
+export function discardQueuedSportLog(id: string): boolean {
+  if (inFlight.has(id)) return false
+  const entry = readQueue().find((e) => e.session.id === id)
+  if (!entry?.session.sportLog) return false
+  removeFromQueue(id)
+  invalidateLoopViews()
+  return true
 }
 
 /**

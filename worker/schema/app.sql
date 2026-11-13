@@ -1250,3 +1250,29 @@ CREATE TRIGGER change_tombstone_append_only
 -- with no birth date. Without a birth date or this, the age is unknown and
 -- the under-18 rules apply. A birth date always wins. Not in /api/data.
 ALTER TABLE public.athlete ADD COLUMN IF NOT EXISTS adult_confirmed_at TIMESTAMPTZ;
+
+-- =============================================================================
+-- LOG SESSION (spec section 13, log_session_v1) — mirrors supabase/migrations/20261113000001_log_session_v1.sql
+-- =============================================================================
+-- A sport / conditioning log is a workout of kind 'sport_conditioning' (one
+-- row per log). Session RPE in workout.session_rpe, minutes in duration_mins.
+-- A deleted log is voided (voided_at), never deleted; readers skip it. A pain
+-- report from a log names it (pain_report.workout_id); a voided or superseded
+-- log's reports no longer count for U7. Nothing reads or writes these unless
+-- athlete.flags.log_session_v1 is true.
+ALTER TABLE public.workout ADD COLUMN IF NOT EXISTS kind TEXT
+  CHECK (kind IS NULL OR kind = 'sport_conditioning');
+ALTER TABLE public.workout ADD COLUMN IF NOT EXISTS activity TEXT
+  CHECK (activity IS NULL OR length(activity) BETWEEN 1 AND 60);
+ALTER TABLE public.workout ADD COLUMN IF NOT EXISTS notes TEXT
+  CHECK (notes IS NULL OR length(notes) <= 2000);
+ALTER TABLE public.workout ADD COLUMN IF NOT EXISTS pain JSONB;
+ALTER TABLE public.workout ADD COLUMN IF NOT EXISTS logged_date DATE;
+ALTER TABLE public.workout ADD COLUMN IF NOT EXISTS change_id UUID;
+ALTER TABLE public.workout ADD COLUMN IF NOT EXISTS pain_change_id UUID;
+ALTER TABLE public.workout ADD COLUMN IF NOT EXISTS voided_at TIMESTAMPTZ;
+ALTER TABLE public.workout ADD COLUMN IF NOT EXISTS void_change_id UUID;
+CREATE INDEX IF NOT EXISTS workout_sport_log_idx
+  ON public.workout (athlete_id, logged_date)
+  WHERE kind = 'sport_conditioning';
+ALTER TABLE public.pain_report ADD COLUMN IF NOT EXISTS workout_id UUID;

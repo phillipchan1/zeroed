@@ -13,19 +13,21 @@ interface Props {
   value: number | null
   onChange: (rpe: number) => void
   disabled?: boolean
+  /** Lowest rating offered. 0 (rest) by default; a sport log (log_session_v1) starts at 1. */
+  min?: number
 }
 
-export function SessionEffort({ value, onChange, disabled }: Props) {
+export function SessionEffort({ value, onChange, disabled, min = 0 }: Props) {
   return (
     <div className="effort">
       <div className="effort__head">
         <span className="text-sm" id="effort-label">How hard was the whole session?</span>
         <span className="num text-xs text-dim" aria-live="polite">
-          {value != null ? `${value} · ${sessionRpeWord(value)}` : '0 rest · 10 max'}
+          {value != null ? `${value} · ${sessionRpeWord(value)}` : min > 0 ? `${min} ${sessionRpeWord(min).toLowerCase()} · 10 max` : '0 rest · 10 max'}
         </span>
       </div>
       <div className="effort__grid" role="radiogroup" aria-labelledby="effort-label">
-        {SESSION_RPE_VALUES.map((v) => (
+        {SESSION_RPE_VALUES.filter((v) => v >= min).map((v) => (
           <button
             key={v}
             type="button"

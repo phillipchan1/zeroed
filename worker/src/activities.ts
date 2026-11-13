@@ -55,6 +55,7 @@ import { runTrackTool } from './trackTools.ts'
 import { loadLiveProgram, type ConnectedStore, type LiveProgram } from './store.ts'
 import { hiddenIds, idList, tombstonesReady } from './tombstones.ts'
 import { McpUserError } from './userError.ts'
+import { logSessionV1On, sportSchemaReady } from './sportSessions.ts'
 import {
   addDaysIso, compose, composeKey, recomposeReason, TRAINING_AGES, weekLines,
   type ComposeActivity, type ComposedBlock, type ComposeGoal, type ComposeInjury, type ComposeInput, type GoalWeight,
@@ -245,17 +246,38 @@ export async function lastIntake(store: ConnectedStore): Promise<{ id: string; a
  * arc_load_v1) in the two weeks before `start`, per activity, a week. A
  * logged session counts for the first active activity of the module its
  * name maps to.
+ *
+ * log_session_v1: a sport / conditioning log counts by its activity
+ * ("Basketball"), not the sentinel routine name "Outside the plan", wherever
+ * it is filed (a planned card it closed included), and a deleted one doesn't
+ * count. Flag off: exactly the query before.
  */
-async function loggedPerWeek(store: ConnectedStore, activities: ComposeActivity[], start: string): Promise<Record<string, number>> {
-  const rows = await store.sql<{ name: string; n: number }[]>`
-    SELECT r.name, count(*)::int AS n
-    FROM workout w
-    JOIN routine r ON r.id = w.routine_id
-    JOIN program p ON p.id = r.program_id
-    WHERE p.athlete_id = ${store.athleteId} AND p.status = 'external'
-      AND w.performed_at >= (${start}::date - 14) AND w.performed_at < ${start}::date
-    GROUP BY r.name
-  `
+export async function loggedPerWeek(store: ConnectedStore, activities: ComposeActivity[], start: string): Promise<Record<string, number>> {
+  const rows = await logSessionV1On(store) && await sportSchemaReady(store)
+    ? await store.sql<{ name: string; n: number }[]>`
+        SELECT COALESCE(w.activity, r.name) AS name, count(*)::int AS n
+        FROM workout w
+        JOIN routine r ON r.id = w.routine_id
+        JOIN program p ON p.id = r.program_id
+        WHERE p.athlete_id = ${store.athleteId} AND (p.status = 'external' OR w.kind = 'sport_conditioning')
+          AND w.voided_at IS NULL
+          AND w.performed_at >= (${start}::date - 14) AND w.performed_at < ${start}::date
+        GROUP BY COALESCE(w.activity, r.name)
+      `
+    : await store.sql<{ name: string; n: number }[]>`
+        SELECT r.name, count(*)::int AS n
+        FROM workout w
+        JOIN routine r ON r.id = w.routine_id
+        JOIN program p ON p.id = r.program_id
+        WHERE p.athlete_id = ${store.athleteId} AND p.status = 'external'
+          AND w.performed_at >= (${start}::date - 14) AND w.performed_at < ${start}::date
+        GROUP BY r.name
+      `
+  return perActivityWeekly(rows, activities)
+}
+
+/** Logged counts by name (two weeks) → sessions a week per activity: each name to the first active activity of its module. */
+export function perActivityWeekly(rows: Array<{ name: string; n: number }>, activities: ComposeActivity[]): Record<string, number> {
   const out: Record<string, number> = {}
   for (const r of rows) {
     const m = moduleForSport(r.name)

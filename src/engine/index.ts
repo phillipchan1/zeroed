@@ -34,6 +34,8 @@ import { supabase } from '../lib/supabaseClient'
 import { carryLanesForward, ensureGeneralTrack, recordSessionGoals } from '../lib/tracksData'
 import { getDistanceUnit, getStorageWeightUnit } from '../lib/units'
 import { resolveWorkoutInsert } from '../lib/workoutCommit'
+import { commitSportLog } from '../lib/sportSessionApi'
+import type { SportLogPending } from './sportLog'
 import { orderByPlannedDay } from '../lib/weekOrder'
 import {
   callProbe, callSessionReview, callSessionDebrief, callProgramDesign, callPhaseDesign, callInfoGain, callTarget,
@@ -3577,6 +3579,12 @@ export interface PendingSession {
    * program, and never counts toward the planned week.
    */
   source?: WorkoutSource | null
+  /**
+   * log_session_v1: a sport / conditioning log (engine/sportLog.ts). Committed
+   * through the Worker's /api/sport-session, not the workout insert below, with
+   * its pain and session RPE riding along. Absent on every other session.
+   */
+  sportLog?: SportLogPending | null
 }
 
 /** What the athlete said about a session that wasn't in the plan. */
@@ -3746,6 +3754,14 @@ export interface CommitResult {
 }
 
 export async function commitSession(p: PendingSession): Promise<CommitResult> {
+  // log_session_v1: the Worker files it (planned card or external) and writes its pain.
+  if (p.sportLog) {
+    const workoutId = await commitSportLog(p)
+    return {
+      workoutId, summary: null, movedCount: 0, best: null,
+      setsDone: 0, durationMins: p.durationMins, athleteName: p.athleteName, firstSession: false,
+    }
+  }
   const rpeErr = workoutRpeError({ rpe: p.rpe, actual_weights: p.actualWeights })
   if (rpeErr) throw new Error(rpeErr)
 
@@ -4380,8 +4396,8 @@ export async function gatherTrainingLog(
   const dayKey = (s: { routineId: string; routineName: string; outsidePlan?: unknown }, at: string) =>
     s.outsidePlan ? `out|${s.routineName.toLowerCase()}|${isoDate(new Date(at))}` : `${s.routineId}|${isoDate(new Date(at))}`
   const committedDayKeys = new Set(committed.map((s) => dayKey(s, s.performedAt)))
-  const loggedOutside: LogSession[] = pending
-    .filter((p) => p.outsidePlan)
+  const outsidePending = pending.filter((p) => p.outsidePlan)
+  const loggedOutside: LogSession[] = outsidePending
     .map((p) => ({
       workoutId: `pending:${p.id}`,
       routineId: p.routineId,
@@ -4394,12 +4410,13 @@ export async function gatherTrainingLog(
       highlights: [],
       outsidePlan: { minutes: p.outsidePlan!.minutes, effort: p.sessionRpe ?? null },
     }))
-    .filter((s) => !committedDayKeys.has(dayKey(s, s.performedAt)))
+    // A sport log (log_session_v1) is never a copy of another row: two games the same day are two logs.
+    .filter((s, i) => outsidePending[i].sportLog != null || !committedDayKeys.has(dayKey(s, s.performedAt)))
   // Dedupe on the day the session HAPPENED. Keying on queuedAt filed a backdated
   // session under the day it was typed in, so it both escaped the dedupe against
   // its own committed row and landed in the wrong week of the log.
   const freshPending = pending.filter(
-    (p) => !p.outsidePlan && !committedDayKeys.has(`${p.routineId}|${isoDate(new Date(p.performedAt ?? p.queuedAt))}`),
+    (p) => !p.outsidePlan && (p.sportLog != null || !committedDayKeys.has(`${p.routineId}|${isoDate(new Date(p.performedAt ?? p.queuedAt))}`)),
   )
   let pendingSessions: LogSession[] = []
   if (freshPending.length) {

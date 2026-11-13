@@ -147,6 +147,17 @@ export function summarizeChange(row: { tool: string; target_type: string; diff: 
       const mins = after.duration_min != null ? ` · ${String(after.duration_min)} min` : ''
       return clip(`Session effort${str(d.session) ? ` (${str(d.session)})` : ''}: ${before ? `${String(before.rating)} → ` : ''}${String(after.rating ?? '')}/10${mins}`)
     }
+    case 'log_session': {
+      const pl = obj(d.planned)
+      return clip(`Logged ${str(d.activity) ?? 'a session'}${str(d.date) ? ` ${str(d.date)}` : ''}: ${String(d.duration_min ?? '')} min${d.session_rpe != null ? ` · effort ${String(d.session_rpe)}` : ''}${str(pl.session) ? ` (closed ${str(pl.session)})` : ''}`)
+    }
+    case 'update_session': {
+      const a = obj(d.after)
+      const keys = changedKeys(d.before, d.after).filter((k) => k !== 'session_load')
+      return clip(`Changed ${str(a.activity) ?? 'a session'}${str(a.date) ? ` ${str(a.date)}` : ''}${keys.length ? `: ${keys.join(', ').replace(/_/g, ' ')}` : ''}`)
+    }
+    case 'delete_session':
+      return clip(`Deleted ${str(d.activity) ?? 'a session'}${str(d.date) ? ` ${str(d.date)}` : ''}${str(obj(d.reopened_planned).session) ? ` (re-opened ${str(obj(d.reopened_planned).session)})` : ''}`)
     case 'apply_activity_change': {
       const a = obj(d.after)
       const what = d.op === 'add' ? 'Added' : d.op === 'remove' ? 'Removed' : 'Changed'

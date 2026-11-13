@@ -9,6 +9,7 @@ import { handleChangeLog } from './changeLogRoute.ts'
 import { handleApprovals } from './approvals.ts'
 import { handleReadiness } from './readiness.ts'
 import { handleSessionRpe } from './sessionRpe.ts'
+import { handleSportSession } from './sportSessions.ts'
 import { handleCoach } from './appCoach.ts'
 import { authFailureMessage, handleAuthRequest } from './auth.ts'
 import type { Env } from './env.ts'
@@ -92,6 +93,7 @@ app.all('/api/approvals', (c) => handleApprovals(c.req.raw, c.env, waitUntilOf(c
 app.all('/api/readiness', (c) => handleReadiness(c.req.raw, c.env, waitUntilOf(c)))
 app.all('/api/weekly-review', (c) => handleReadiness(c.req.raw, c.env, waitUntilOf(c)))
 app.all('/api/session-rpe', (c) => handleSessionRpe(c.req.raw, c.env, waitUntilOf(c)))
+app.all('/api/sport-session', (c) => handleSportSession(c.req.raw, c.env, waitUntilOf(c)))
 app.all('/api/coach', (c) => handleCoach(c.req.raw, c.env, waitUntilOf(c)))
 
 // Compatibility aliases so VITE_API_BASE_URL can point at either

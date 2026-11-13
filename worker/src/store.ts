@@ -277,6 +277,8 @@ export async function loadWorkouts(
     JOIN routine r ON r.id = w.routine_id
     JOIN program p ON p.id = r.program_id
     WHERE p.athlete_id = ${store.athleteId}
+      -- A deleted sport log (log_session_v1) is kept, voided, and read as gone.
+      AND (to_jsonb(w) ->> 'voided_at') IS NULL
       AND (${opts.since ?? null}::timestamptz IS NULL OR w.performed_at >= ${opts.since ?? null}::timestamptz)
       AND (${opts.until ?? null}::timestamptz IS NULL OR w.performed_at <= ${opts.until ?? null}::timestamptz)
     ORDER BY w.performed_at DESC

@@ -40,6 +40,13 @@ import { blockedDuring, loadCheckins, loadPain } from './regionStatus.ts'
 import { athleteToday } from './sessionOverride.ts'
 import { sessionLoadForWeek, type SessionLoadView } from './sessionRpe.ts'
 import { calendarZone, loadLiveProgram, loadWorkouts, type ConnectedStore } from './store.ts'
+import { loadSportLogs, logSessionV1On, sportSchemaReady } from './sportSessions.ts'
+
+/** log_session_v1: this week's sport logs on the external program. Empty with the flag off. */
+async function offPlanSportIds(store: ConnectedStore, monday: string, sunday: string): Promise<Set<string>> {
+  if (!(await logSessionV1On(store)) || !(await sportSchemaReady(store))) return new Set()
+  return new Set((await loadSportLogs(store, { from: monday, to: sunday })).filter((r) => !r.closed_planned).map((r) => r.workout_id))
+}
 
 export type WeeklyCall = 'progress' | 'hold' | 'deload'
 
@@ -222,7 +229,11 @@ export async function computeWeeklyReview(
   `
   const planned = Number(phase?.n ?? 0) || Number(tz[0]?.spw ?? 0)
   const weekWorkouts = workouts.filter((w) => inWeek(dayOf(w.performed_at)))
-  const logged = weekWorkouts.length
+  // log_session_v1: a sport log filed outside the plan (a second game, a rest-day
+  // run) fills no planned slot, so it isn't a logged planned session here; one
+  // that closed its card is. Flag off: every workout counts, as before.
+  const offPlanSport = await offPlanSportIds(store, monday, sunday)
+  const logged = weekWorkouts.filter((w) => !offPlanSport.has(w.id)).length
   const ratio = planned > 0 ? Math.round((logged / planned) * 100) / 100 : null
   const compliance = {
     planned, logged, ratio, target: params.U15.compliance_target,
