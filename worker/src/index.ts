@@ -121,8 +121,23 @@ async function fromAssets(c: { env: Env; req: { raw: Request; url: string } }): 
 
 app.all('/assets/*', (c) => fromAssets(c))
 
+// MCP is bearer-token only (opaque mcp_token). Discovery probes for RFC 9728
+// / RFC 8414 metadata must not fall through to the SPA document, or clients
+// try to parse index.html as OAuth. JSON 404 lets them fall back to bearer.
+function isOauthWellKnown(path: string): boolean {
+  return path.startsWith('/.well-known/oauth-')
+}
+
+function oauthWellKnownNotFound(): Response {
+  return json({ error: 'not_found' }, 404)
+}
+
 // Unknown paths with a file extension are real 404s. Extensionless deep
 // links still fall through to the SPA document.
-app.all('*', (c) => fromAssets(c))
+app.all('*', (c) => {
+  const path = new URL(c.req.url).pathname
+  if (isOauthWellKnown(path)) return oauthWellKnownNotFound()
+  return fromAssets(c)
+})
 
 export default app

@@ -74,10 +74,10 @@ through `/api/*` on Neon — including the ~90 `supabase.from()` call sites
 Supabase RLS would hide Phil's rows and reject writes, while the agent/MCP
 already write Neon, and the two would drift. After the Worker hosts the SPA,
 set `VITE_API_BASE_URL=/api` so agent / MCP / auth / data hit the Worker.
-Profile already uses `mcpUrl()` (`${base}/mcp` → `/api/mcp`). While the flag
-is off, Claude connectors keep using `functions/v1/mcp`. At cutover they must
-be re-pointed at the Worker URL — the edge function is retired then and would
-keep reading the old Supabase store if left in front. A relative `/api` is
+Profile already uses `mcpUrl()` (`${base}/mcp` → `/api/mcp`). The Worker is
+current: connectors use `https://zeroed.madeforgreatnesslabs.com/functions/v1/mcp`
+(`/api/mcp` and `/mcp` are aliases on `zeroed.madeforgreatnesslabs.com`). The
+Supabase MCP stays up only until ~Nov 20 for rollback. A relative `/api` is
 fine for the PWA on the Worker origin. **iOS / Capacitor must use an
 absolute** `https://<worker>/api` — a relative `/api` resolves against
 `capacitor://localhost` and never reaches the Worker.
