@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell, Volume2 } from 'lucide-react'
-import { supabase, supabaseAnonKey, supabaseUrl } from '../../lib/supabaseClient'
+import { supabase } from '../../lib/supabaseClient'
 import { signOutLocal } from '../../lib/authClient'
 import { mcpUrl } from '../../lib/api'
 import { useCachedLoader, mutateCache } from '../../lib/cache'
@@ -42,9 +42,7 @@ async function sha256Hex(s: string): Promise<string> {
 function mcpEndpoint(): string {
   const cloud = mcpUrl()
   if (cloud) return cloud
-  const url = new URL(`${supabaseUrl.replace(/\/$/, '')}/functions/v1/mcp`)
-  url.searchParams.set('apikey', supabaseAnonKey)
-  return url.toString()
+  return 'https://zeroed.madeforgreatnesslabs.com/functions/v1/mcp'
 }
 
 interface ProfileScreenProps {

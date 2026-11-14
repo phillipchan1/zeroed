@@ -8,10 +8,8 @@
       ],
       "cwd": "/ABSOLUTE/PATH/TO/zeroed/mcp",
       "env": {
-        "ZEROED_SUPABASE_URL": "https://your-project-id.supabase.co",
-        "ZEROED_SUPABASE_ANON_KEY": "your-anon-key",
-        "ZEROED_EMAIL": "you@example.com",
-        "ZEROED_PASSWORD": "your-app-password",
+        "ZEROED_MCP_URL": "https://zeroed.madeforgreatnesslabs.com/functions/v1/mcp",
+        "ZEROED_MCP_TOKEN": "",
         "ZEROED_WEIGHT_UNIT": "lb"
       }
     }
