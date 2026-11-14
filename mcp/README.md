@@ -4,7 +4,7 @@ Claude can talk to your live Zeroed log two ways:
 
 | Path | Where it works | Transport |
 | --- | --- | --- |
-| **Remote** (recommended for phone / web) | Claude web, Claude iOS/Android, Claude Desktop custom connector | Public HTTPS → Supabase Edge |
+| **Remote** (recommended for phone / web) | Claude web, Claude iOS/Android, Claude Desktop custom connector | Public HTTPS → Cloudflare Worker |
 | **Local** | Claude Desktop (Local dev), Cursor, Claude Code on this machine | stdio process |
 
 Same tools either way. The model proposes. The existing engine (`src/engine/programDraft.ts`) disposes: clamps, diffs, and writes. Claude never dumps a whole new week.
@@ -34,29 +34,27 @@ Program writes follow the app:
 
 ## Remote (Claude web / mobile)
 
-**Today (flag off):** Edge function `supabase/functions/mcp`. Auth is an opaque `mcp_token` bearer minted in the app — **not** a Supabase JWT.
-
-**At cutover (`VITE_API_BASE_URL=/api` or the Worker origin + `/api`):** the same tools live on the Hono Worker at `/api/mcp` (Profile already uses `mcpUrl()`). The edge function is retired then; existing hashed tokens keep working because the Neon copy of `mcp_token` is the same rows. Do not leave a connector pointed at `functions/v1/mcp` after cutover — it would keep reading the old Supabase store.
+**Current:** Cloudflare Worker `zeroed` at `https://zeroed.madeforgreatnesslabs.com/functions/v1/mcp`. `/api/mcp` and `/mcp` are aliases. Auth is an opaque `mcp_token` bearer minted in the app — **not** a Supabase JWT, and there is no `apikey` query. Existing hashed tokens keep working because the Neon copy of `mcp_token` is the same rows.
 
 ### Wire it once
 
 1. Open Zeroed → **You** (Profile) → **Claude connector** → Create a named token.
 2. **Copy URL + token** (shown once).
 3. In Claude: **Customize → Connectors → Add custom connector**.
-4. Name it `Zeroed`, paste the URL (it already includes `apikey=`).
+4. Name it `Zeroed`, paste the URL.
 5. Auth: `Authorization: Bearer <token>`. **Skip any OAuth / login card.**
 6. Enable the connector in a chat and ask: *What's on my training week?*
 
 URL shape:
 
 ```
-https://<project>.supabase.co/functions/v1/mcp?apikey=<anon_key>
+https://zeroed.madeforgreatnesslabs.com/functions/v1/mcp
 ```
 
-Deploy / redeploy the function:
+Deploy / redeploy the function (retired — production is the Cloudflare Worker `zeroed`, not the Supabase edge function):
 
 ```bash
-npx supabase functions deploy mcp --no-verify-jwt --project-ref pzxkcngdmkjjwbimncdx
+# retired: npx supabase functions deploy mcp --no-verify-jwt --project-ref pzxkcngdmkjjwbimncdx
 ```
 
 Revoke a leaked token from the same Profile screen.
