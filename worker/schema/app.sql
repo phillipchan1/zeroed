@@ -1276,3 +1276,26 @@ CREATE INDEX IF NOT EXISTS workout_sport_log_idx
   ON public.workout (athlete_id, logged_date)
   WHERE kind = 'sport_conditioning';
 ALTER TABLE public.pain_report ADD COLUMN IF NOT EXISTS workout_id UUID;
+
+-- =============================================================================
+-- COACH AUTO-APPLY — mirrors worker/schema/coach-auto-apply.sql
+-- =============================================================================
+-- Per-athlete toggle, default OFF. Nothing here turns it on. The athlete
+-- sets it in Profile (/api/data). When true, apply_program_edits may apply a
+-- pending program-edit proposal without approval_ref. Additive only.
+ALTER TABLE public.athlete ADD COLUMN IF NOT EXISTS coach_auto_apply BOOLEAN NOT NULL DEFAULT false;
+COMMENT ON COLUMN public.athlete.coach_auto_apply IS
+  'When true, apply_program_edits may apply a pending program-edit proposal without approval_ref. Default false; only the athlete turns it on.';
+
+CREATE TABLE IF NOT EXISTS public.coach_auto_apply_notice (
+  id             UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  athlete_id     UUID NOT NULL REFERENCES public.athlete(id) ON DELETE CASCADE,
+  proposal_id    UUID REFERENCES public.coach_proposal(id) ON DELETE SET NULL,
+  change_id      UUID,
+  diff_text      TEXT NOT NULL,
+  prior_version  JSONB NOT NULL,
+  created_at     TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  undone_at      TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS coach_auto_apply_notice_athlete_idx
+  ON public.coach_auto_apply_notice (athlete_id, created_at DESC);

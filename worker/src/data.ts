@@ -99,6 +99,9 @@ const COLUMNS: Record<string, Set<string>> = {
     // readable here and never writable: insert and update strip it.
     'flags', 'time_zone',
     'starter_pack', 'starter_pack_settings', 'onboarding_answers',
+    // coach auto-apply (worker/schema/coach-auto-apply.sql). Default false;
+    // the athlete turns it on in Profile. Readable and writable here.
+    'coach_auto_apply',
   ]),
   athlete_profile: new Set(['id', 'athlete_id', 'last_updated', 'current_phase', 'retest_date']),
   diagnostic: new Set([

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell, Volume2 } from 'lucide-react'
+import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell, Volume2, Shield } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { signOutLocal } from '../../lib/authClient'
 import { mcpUrl } from '../../lib/api'
@@ -54,12 +54,13 @@ interface ProfileMeta {
   sessions_per_week: number | null
   training_age: number | null
   goals: string | null
+  coach_auto_apply?: boolean | null
 }
 
 export async function fetchProfileMeta(athleteId: string): Promise<ProfileMeta | null> {
   const { data, error } = await supabase
     .from('athlete')
-    .select('sessions_per_week, training_age, goals')
+    .select('sessions_per_week, training_age, goals, coach_auto_apply')
     .eq('id', athleteId)
     .maybeSingle()
   if (error) throw error
@@ -358,6 +359,18 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
               sub="A click per set, a chime on a PR, a chord at the finish"
               value={setClick ? 'On' : 'Off'}
               onClick={() => { const next = !setClick; setSetClick(next); setSetClickEnabled(next) }}
+              chevron={false}
+            />
+            <Row
+              leading={<Shield size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
+              title="Coach auto-apply"
+              sub="Let your coach apply weekly program edits without waiting for you to approve each one. You get a notice with Undo."
+              value={meta?.coach_auto_apply === true ? 'On' : 'Off'}
+              onClick={() => {
+                const next = meta?.coach_auto_apply !== true
+                mutateCache<ProfileMeta | null>(profileKey, (m) => (m ? { ...m, coach_auto_apply: next } : m))
+                void supabase.from('athlete').update({ coach_auto_apply: next }).eq('id', athleteId)
+              }}
               chevron={false}
             />
           </div>

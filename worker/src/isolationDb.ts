@@ -16,6 +16,9 @@ import { makePgliteSql } from './pgliteSql.ts'
 const here = dirname(fileURLToPath(import.meta.url))
 const migrationsDir = join(here, '../../supabase/migrations')
 const seedPath = join(here, '../schema/isolation-seed.sql')
+const schemaDir = join(here, '../schema')
+/** Neon follow-ups isolation tests apply after supabase/migrations. Not a Supabase migration. */
+const NEON_FOLLOWUPS = ['coach-auto-apply.sql']
 
 const BOOTSTRAP = `
 CREATE SCHEMA IF NOT EXISTS auth;
@@ -85,6 +88,18 @@ function migrationFiles(): string[] {
   return files
 }
 
+async function applyNeonFollowups(exec: (sql: string) => Promise<unknown>): Promise<void> {
+  for (const file of NEON_FOLLOWUPS) {
+    const sql = readFileSync(join(schemaDir, file), 'utf8')
+    try {
+      await exec(sql)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      throw new Error(`${file}: ${message}`)
+    }
+  }
+}
+
 export async function applyIsolationSchema(db: PGlite): Promise<void> {
   await db.exec(BOOTSTRAP)
   for (const file of migrationFiles()) {
@@ -96,6 +111,7 @@ export async function applyIsolationSchema(db: PGlite): Promise<void> {
       throw new Error(`${file}: ${message}`)
     }
   }
+  await applyNeonFollowups((sql) => db.exec(sql))
   await db.exec(readFileSync(seedPath, 'utf8'))
 }
 
@@ -111,6 +127,7 @@ export async function applyIsolationSchemaPg(client: Client): Promise<void> {
       throw new Error(`${file}: ${message}`)
     }
   }
+  await applyNeonFollowups((sql) => client.query(sql))
   await client.query(readFileSync(seedPath, 'utf8'))
 }
 

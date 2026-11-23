@@ -90,6 +90,11 @@ await sql`DELETE FROM coach_proposal WHERE athlete_id = ${A}`
 
 // ---- flag ON: warnings on a parked proposal ------------------------------------------------------
 await flag(A, true)
+// Pin UTC so "this week" and region_status.created_at share a calendar date.
+// blockedDuring compares created_at to UTC midnight of Sunday+1; with the
+// default America/Los_Angeles zone that drops a same-day check-in whenever
+// UTC has already rolled to the next date (overnight CI).
+await sql`UPDATE athlete SET time_zone = 'UTC' WHERE id = ${A}`
 const today = await athleteToday(storeA)
 const parked = await call('preview_program_edits', { propose: true, title: 'Box jumps for pop.', edits: plyoAfterSquat })
 ok(parked.includes('Parked') && parked.includes('"rule": "U8"'), 'flag on: the coach sees the U8 warning and the proposal parks')

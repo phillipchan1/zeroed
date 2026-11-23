@@ -64,11 +64,40 @@ export async function fetchProposals(): Promise<CoachProposal[]> {
   }
 }
 
-export async function resolveProposal(id: string, action: 'accept' | 'decline'): Promise<ProposalResult> {
+export async function resolveProposal(id: string, action: 'accept' | 'decline' | 'dismiss'): Promise<ProposalResult> {
   try {
     const out = await post({ action, id }) as Partial<ProposalResult>
     return { ok: out?.ok === true, status: String(out?.status ?? 'error'), text: String(out?.text ?? '') }
   } catch {
     return { ok: false, status: 'error', text: 'Couldn’t reach the coach. Nothing changed; try again when you’re online.' }
+  }
+}
+
+export interface AutoApplyNotice {
+  id: string
+  proposal_id: string | null
+  change_id: string | null
+  diff_text: string
+  created_at: string
+  undone_at: string | null
+}
+
+/** Notices from coach auto-apply. Empty when the backend can't hold them yet. */
+export async function fetchAutoApplyNotices(): Promise<AutoApplyNotice[]> {
+  if (!proposalsUrl()) return []
+  try {
+    const out = await post({ action: 'auto_apply_notices' }) as { notices?: AutoApplyNotice[] | null }
+    return Array.isArray(out?.notices) ? out.notices : []
+  } catch {
+    return []
+  }
+}
+
+export async function undoAutoApplyNotice(id: string): Promise<ProposalResult> {
+  try {
+    const out = await post({ action: 'undo_auto_apply', id }) as Partial<ProposalResult>
+    return { ok: out?.ok === true, status: String(out?.status ?? 'error'), text: String(out?.text ?? '') }
+  } catch {
+    return { ok: false, status: 'error', text: 'Couldn’t undo. Nothing changed; try again when you’re online.' }
   }
 }

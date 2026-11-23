@@ -1018,6 +1018,7 @@ export const PUBLIC_RESTORE_ORDER = [
   'goal_measurement',
   'workout_note',
   'coach_proposal',
+  'coach_auto_apply_notice',
   'session_override',
   'session_override_preview',
   'session_override_log',
