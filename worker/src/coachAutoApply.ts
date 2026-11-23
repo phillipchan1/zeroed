@@ -7,12 +7,14 @@
  * tool still need an approval_ref. Missing column / table reads as off.
  *
  * Auto-apply records the prior program version and an in-app notice with a
- * plain-language diff and one-tap Undo. Undo is athlete-only, restores that
- * version exactly, and is idempotent.
+ * plain-language diff and one-tap Undo. Undo is athlete-only: it goes through
+ * revertChange so a later change refuses with "Undo that first", writes a
+ * change_log row, and is idempotent.
  */
-import { asJson, jsonParam, pgArrayLiteral } from './db.ts'
+import { jsonParam } from './db.ts'
 import { canonicalJson } from './sessionOverride.ts'
-import { phaseRoutineSnapshots, withTx, type RoutineSnap } from './changeLog.ts'
+import { phaseRoutineSnapshots, Refusal, withTx, type RoutineSnap } from './changeLog.ts'
+import { revertChange } from './reverts.ts'
 import type { ConnectedStore } from './store.ts'
 
 export const PROPOSAL_TTL_DAYS = 7
@@ -67,19 +69,6 @@ export async function captureProgramVersion(
     week_end: live.weekEnd,
     routines: await phaseRoutineSnapshots(store, live.phaseId),
   }
-}
-
-export async function currentProgramVersion(
-  store: ConnectedStore,
-  live: { programId: string; phaseId: string; sessionsPerWeek: number; weekEnd: string },
-): Promise<ProgramVersion> {
-  const [athlete] = await store.sql<{ n: number | null }[]>`
-    SELECT sessions_per_week AS n FROM athlete WHERE id = ${store.athleteId}
-  `
-  return captureProgramVersion(store, {
-    ...live,
-    sessionsPerWeek: Number(athlete?.n ?? live.sessionsPerWeek),
-  })
 }
 
 export function programVersionsEqual(a: ProgramVersion, b: ProgramVersion): boolean {
@@ -175,52 +164,17 @@ export type UndoAutoApplyResult =
   | { ok: true; text: string; already?: true }
   | { ok: false; status: 'not_found' | 'unavailable' | 'refused'; text: string }
 
-async function restoreProgramVersion(store: ConnectedStore, prior: ProgramVersion): Promise<void> {
-  const ids = prior.routines.map((r) => r.id).filter(Boolean)
-  for (const r of prior.routines) {
-    const done = await store.sql<{ id: string }[]>`
-      UPDATE routine rt
-      SET name = ${r.name},
-          session_type = ${r.session_type},
-          exercises = ${jsonParam(store.sql, r.exercises)},
-          intent = ${r.intent},
-          intended_dow = ${r.intended_dow},
-          phase_id = ${prior.phase_id}
-      FROM program p
-      WHERE rt.id = ${r.id} AND rt.program_id = p.id AND p.athlete_id = ${store.athleteId}
-        AND p.id = ${prior.program_id}
-      RETURNING rt.id
-    `
-    if (!done.length) {
-      throw new Error(`undo: could not restore ${r.name}`)
-    }
-  }
-  if (ids.length) {
-    await store.sql`
-      UPDATE routine rt SET phase_id = NULL
-      FROM program p
-      WHERE rt.program_id = p.id AND p.athlete_id = ${store.athleteId}
-        AND rt.phase_id = ${prior.phase_id}
-        AND NOT (rt.id::text = ANY(${pgArrayLiteral(ids)}::text[]))
-    `
-  }
-  await store.sql`
-    UPDATE athlete SET sessions_per_week = ${prior.sessions_per_week}
-    WHERE id = ${store.athleteId}
-  `
-  if (prior.week_end) {
-    await store.sql`
-      UPDATE phase ph SET week_end = ${prior.week_end}::date
-      FROM program p
-      WHERE ph.id = ${prior.phase_id} AND ph.program_id = p.id AND p.athlete_id = ${store.athleteId}
-        AND p.id = ${prior.program_id}
-    `
-  }
+function undoStatus(reason: string | undefined): 'not_found' | 'unavailable' | 'refused' {
+  if (reason === 'not_found') return 'not_found'
+  if (reason === 'unavailable') return 'unavailable'
+  return 'refused'
 }
 
 /**
- * Athlete-only undo of one auto-apply notice. Restores the recorded prior
- * program version (deep-equal). A second tap is a no-op success.
+ * Athlete-only undo of one auto-apply notice. Goes through revertChange so a
+ * later change on the same target is refused ("Undo that first") and a
+ * change_log row is written. undone_at is set only on success. A second tap
+ * is a no-op success.
  */
 export async function undoAutoApplyNotice(store: ConnectedStore, noticeId: string): Promise<UndoAutoApplyResult> {
   const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -229,73 +183,42 @@ export async function undoAutoApplyNotice(store: ConnectedStore, noticeId: strin
     return await withTx(store.sql, async () => {
       const [row] = await store.sql<{
         id: string
+        change_id: string | null
         undone_at: string | null
-        prior_version: unknown
-        program_id: string | null
-        phase_id: string | null
       }[]>`
-        SELECT n.id, to_json(n.undone_at) #>> '{}' AS undone_at, n.prior_version,
-               n.prior_version ->> 'program_id' AS program_id,
-               n.prior_version ->> 'phase_id' AS phase_id
+        SELECT n.id, n.change_id::text AS change_id, to_json(n.undone_at) #>> '{}' AS undone_at
         FROM coach_auto_apply_notice n
         WHERE n.id = ${noticeId} AND n.athlete_id = ${store.athleteId}
-        LIMIT 1
+        FOR UPDATE
       `
       if (!row) return { ok: false, status: 'not_found' as const, text: 'No such notice.' }
       if (row.undone_at) return { ok: true, text: 'Already undone. Nothing changed.', already: true as const }
-      const prior = asJson<ProgramVersion>(row.prior_version, {
-        program_id: '',
-        phase_id: '',
-        sessions_per_week: 0,
-        week_end: null,
-        routines: [],
-      })
-      if (!prior.program_id || !prior.phase_id) {
-        return { ok: false, status: 'refused' as const, text: 'That notice has no program version to restore.' }
+      if (!row.change_id) {
+        return { ok: false, status: 'refused' as const, text: 'That notice has no change to undo.' }
       }
-      const [spw] = await store.sql<{ n: number | null; week_end: string | null }[]>`
-        SELECT a.sessions_per_week AS n, ph.week_end::text AS week_end
-        FROM athlete a
-        LEFT JOIN phase ph ON ph.id = ${prior.phase_id}
-        LEFT JOIN program p ON p.id = ph.program_id AND p.athlete_id = a.id
-        WHERE a.id = ${store.athleteId}
-      `
-      const current: ProgramVersion = {
-        program_id: prior.program_id,
-        phase_id: prior.phase_id,
-        sessions_per_week: Number(spw?.n ?? prior.sessions_per_week),
-        week_end: spw?.week_end ?? prior.week_end,
-        routines: await phaseRoutineSnapshots(store, prior.phase_id),
-      }
-      if (!programVersionsEqual(current, prior)) {
-        await restoreProgramVersion(store, prior)
-        const restored: ProgramVersion = {
-          program_id: prior.program_id,
-          phase_id: prior.phase_id,
-          sessions_per_week: Number(
-            (await store.sql<{ n: number | null }[]>`SELECT sessions_per_week AS n FROM athlete WHERE id = ${store.athleteId}`)[0]?.n
-            ?? prior.sessions_per_week,
-          ),
-          week_end: (
-            await store.sql<{ week_end: string | null }[]>`
-              SELECT ph.week_end::text AS week_end FROM phase ph
-              JOIN program p ON p.id = ph.program_id
-              WHERE ph.id = ${prior.phase_id} AND p.athlete_id = ${store.athleteId}
-            `
-          )[0]?.week_end ?? prior.week_end,
-          routines: await phaseRoutineSnapshots(store, prior.phase_id),
+      const reverted = await revertChange(store, { type: 'athlete', id: store.athleteId }, row.change_id)
+      if (!reverted.ok) {
+        if (reverted.reason === 'refused' && reverted.text === 'Already undone.') {
+          await store.sql`
+            UPDATE coach_auto_apply_notice SET undone_at = NOW()
+            WHERE id = ${noticeId} AND athlete_id = ${store.athleteId} AND undone_at IS NULL
+          `
+          return { ok: true, text: 'Already undone. Nothing changed.', already: true as const }
         }
-        if (!programVersionsEqual(restored, prior)) {
-          throw new Error('undo: restored program is not deep-equal to the prior version')
-        }
+        throw new Refusal<UndoAutoApplyResult>({
+          ok: false,
+          status: undoStatus(reverted.reason),
+          text: reverted.text,
+        })
       }
       await store.sql`
         UPDATE coach_auto_apply_notice SET undone_at = NOW()
         WHERE id = ${noticeId} AND athlete_id = ${store.athleteId} AND undone_at IS NULL
       `
-      return { ok: true, text: 'Undone. Your previous plan is back.' }
+      return { ok: true, text: reverted.text }
     })
   } catch (e) {
+    if (e instanceof Refusal) return e.result as UndoAutoApplyResult
     if (missingRelation(e)) return { ok: false, status: 'unavailable', text: 'Undo for this change is not set up on this database yet. Nothing changed.' }
     throw e
   }

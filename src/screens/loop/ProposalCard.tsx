@@ -205,7 +205,8 @@ export function ProposalsBanner({ athleteId }: { athleteId: string }) {
 
 /**
  * In-app notice after the coach auto-applied a weekly program edit. One-tap
- * Undo restores the prior program version exactly.
+ * Undo goes through the change log (same as Changes): a later change is
+ * refused, and a clean revert is logged.
  */
 export function AutoApplyNotices({ athleteId }: { athleteId: string }) {
   const { data: notices, refetch } = useCachedLoader<AutoApplyNotice[]>(

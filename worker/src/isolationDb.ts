@@ -131,28 +131,31 @@ export async function applyIsolationSchemaPg(client: Client): Promise<void> {
   await client.query(readFileSync(seedPath, 'utf8'))
 }
 
+/** Always PGlite. Isolation tests that must cover both backends call this plus openIsolationHarness. */
+export async function openPgliteHarness(): Promise<IsolationHarness> {
+  const db = new PGlite()
+  await applyIsolationSchema(db)
+  const sql = makePgliteSql(db)
+  return {
+    sql,
+    backend: 'pglite',
+    async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {
+      const result = await db.query(text, params)
+      return result.rows as T[]
+    },
+    async exec(text) {
+      await db.exec(text)
+    },
+    async close() {
+      await db.close()
+    },
+  }
+}
+
 export async function openIsolationHarness(): Promise<IsolationHarness> {
   assertCiUsesRealPostgres()
   const url = testDatabaseUrl()
-  if (!url) {
-    const db = new PGlite()
-    await applyIsolationSchema(db)
-    const sql = makePgliteSql(db)
-    return {
-      sql,
-      backend: 'pglite',
-      async query<T extends Record<string, unknown>>(text: string, params: unknown[] = []) {
-        const result = await db.query(text, params)
-        return result.rows as T[]
-      },
-      async exec(text) {
-        await db.exec(text)
-      },
-      async close() {
-        await db.close()
-      },
-    }
-  }
+  if (!url) return openPgliteHarness()
 
   refuseUnsafeTestUrl(url)
   const client = new Client({ connectionString: url, ssl: false })

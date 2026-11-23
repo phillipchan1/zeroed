@@ -1,7 +1,7 @@
 // Coach auto-apply for MCP apply_program_edits: setting OFF is the same
 // writeApprovalProblem refusal as before; ON applies a pending program-edit
 // proposal with proposal_id + confirm=true and no approval_ref; notices +
-// athlete-only Undo restore the prior program version exactly; dismiss and
+// athlete-only Undo goes through revertChange; dismiss and
 // 7-day expiry refuse both paths. Scope is program edits only.
 // Synthetic athletes A and B from isolation-seed.sql.
 // Uses throwaway Postgres when ZEROED_TEST_DATABASE_URL is set, else PGlite.
@@ -10,7 +10,7 @@
 import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { openIsolationHarness } from './isolationDb.ts'
+import { openIsolationHarness, openPgliteHarness, type IsolationHarness } from './isolationDb.ts'
 import { executeDataQuery } from './data.ts'
 import { writeApprovalProblem } from './changeLog.ts'
 import { APP_COACH, type OverrideActor } from './sessionOverride.ts'
@@ -53,7 +53,10 @@ const sqlSrc = readFileSync(join(here, '../schema/coach-auto-apply.sql'), 'utf8'
 ok(/ADD COLUMN IF NOT EXISTS coach_auto_apply BOOLEAN NOT NULL DEFAULT false/.test(sqlSrc), 'migration: additive BOOLEAN DEFAULT false')
 ok(!/\bDROP\b|\bRENAME\b|\bALTER COLUMN\b|\bTYPE\b/.test(sqlSrc.replace(/--.*$/gm, '')), 'migration: no drops, renames, or type changes')
 ok(!/SET coach_auto_apply\s*=\s*true/i.test(sqlSrc), 'migration: does not turn the setting on')
-ok(!/SET coach_auto_apply\s*=\s*true/i.test(readFileSync(join(here, 'coachAutoApply.ts'), 'utf8')), 'worker: does not turn the setting on')
+const undoSrc = readFileSync(join(here, 'coachAutoApply.ts'), 'utf8')
+ok(!/SET coach_auto_apply\s*=\s*true/i.test(undoSrc), 'worker: does not turn the setting on')
+ok(undoSrc.includes("revertChange(store, { type: 'athlete', id: store.athleteId }"), 'undo: routes through revertChange')
+ok(undoSrc.includes('FOR UPDATE'), 'undo: takes a row lock')
 
 const harness = await openIsolationHarness()
 const sql = harness.sql
@@ -210,6 +213,11 @@ ok(/Back Squat/.test(notices![0].diff_text) && /3/.test(notices![0].diff_text) &
 const noticeId = notices![0].id
 const firstUndo = await undoAutoApplyNotice(storeA, noticeId)
 ok(firstUndo.ok && !('already' in firstUndo && firstUndo.already), `undo: restored (${firstUndo.text})`)
+const [undoLog] = await harness.query<{ tool: string; revert_of: string | null }>(
+  `SELECT tool, revert_of::text AS revert_of FROM change_log WHERE athlete_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+  [A],
+)
+ok(undoLog?.tool === 'revert_change' && undoLog.revert_of === notices![0].change_id, 'undo: writes a revert_change row for the notice change')
 const liveAfterUndo = await loadLiveProgram(storeA)
 if (!liveAfterUndo) throw new Error('no live program after undo')
 const restored = await captureProgramVersion(storeA, liveAfterUndo)
@@ -260,6 +268,104 @@ const [expireRow] = await harness.query<{ status: string }>(`SELECT status FROM 
 ok(expireRow?.status !== 'applied', 'expiry: neither path applied the expired proposal')
 const [stillSquat] = await harness.query<{ exercises: unknown }>(`SELECT exercises FROM routine WHERE id = $1`, [ROUTINE_A])
 ok(squatSets(stillSquat?.exercises) === 3, 'expiry: the program was not changed')
+
+async function stackedUndoCases(h: IsolationHarness) {
+  const tag = h.backend
+  const sql = h.sql
+  const store = makeStore(sql, A)
+  const coach: OverrideActor = { type: 'mcp', id: TOKEN_A_ID }
+  const run = (name: string, args: Record<string, unknown>) => executeZeroedTool(sql, A, name, args, {}, coach)
+  await h.query(
+    `UPDATE athlete SET adult_confirmed_at = NOW(),
+       flags = COALESCE(flags, '{}'::jsonb) || '{"tracks_v1": true}'::jsonb,
+       coach_auto_apply = true
+     WHERE id = $1`,
+    [A],
+  )
+  await h.query(`UPDATE routine SET exercises = $1::jsonb WHERE id = $2`, [originalSquat, ROUTINE_A])
+  await h.query(`UPDATE coach_proposal SET status = 'declined', resolved_at = NOW() WHERE athlete_id = $1 AND status = 'pending'`, [A])
+  async function parkSets(sets: number, title: string): Promise<string> {
+    const text = await run('preview_program_edits', {
+      propose: true, title, edits: [{ ...squatEdit, sets }],
+    })
+    ok(text.includes('Parked') || text.includes('Already parked'), `${tag} park ${sets}x (${text.slice(0, 80)})`)
+    const [row] = await h.query<{ id: string }>(
+      `SELECT id::text AS id FROM coach_proposal WHERE athlete_id = $1 AND status = 'pending' ORDER BY created_at DESC LIMIT 1`,
+      [A],
+    )
+    return row?.id ?? ''
+  }
+  const squatN = async () => squatSets((await h.query<{ exercises: unknown }>(`SELECT exercises FROM routine WHERE id = $1`, [ROUTINE_A]))[0]?.exercises)
+  const phaseMeta = async () => (await h.query<{ n: number; week_end: string | null }>(
+    `SELECT a.sessions_per_week AS n, ph.week_end::text AS week_end
+     FROM athlete a
+     JOIN program p ON p.athlete_id = a.id
+     JOIN phase ph ON ph.program_id = p.id AND ph.status = 'active'
+     WHERE a.id = $1`,
+    [A],
+  ))[0]
+  const revertCount = async () => Number((await h.query<{ n: number }>(
+    `SELECT count(*)::int AS n FROM change_log WHERE athlete_id = $1 AND tool = 'revert_change'`,
+    [A],
+  ))[0]?.n ?? 0)
+
+  const id4 = await parkSets(4, `${tag} squat to 4`)
+  ok((await run('apply_program_edits', { confirm: true, proposal_id: id4 })).startsWith('Applied'), `${tag}: 3 -> 4 applied`)
+  const id5 = await parkSets(5, `${tag} squat to 5`)
+  ok((await run('apply_program_edits', { confirm: true, proposal_id: id5 })).startsWith('Applied'), `${tag}: 4 -> 5 applied`)
+  ok(await squatN() === 5, `${tag}: squat is 5 after two auto-applies`)
+  const open = [...((await listAutoApplyNotices(store)) ?? [])].sort(
+    (a, b) => Date.parse(a.created_at) - Date.parse(b.created_at),
+  )
+  const older = open[open.length - 2]
+  const newer = open[open.length - 1]
+  ok(open.length >= 2 && older != null && newer != null && older.id !== newer.id, `${tag}: two open notices`)
+  if (!older || !newer) return
+  const metaBefore = await phaseMeta()
+  const beforeReverts = await revertCount()
+
+  const olderUndo = await undoAutoApplyNotice(store, older.id)
+  ok(
+    !olderUndo.ok && olderUndo.text.includes('changed since') && olderUndo.text.includes('Undo that first'),
+    `${tag}: undo older refused (${olderUndo.text.slice(0, 140)})`,
+  )
+  ok(await squatN() === 5, `${tag}: older undo wrote nothing (squat still 5)`)
+  ok(await revertCount() === beforeReverts, `${tag}: older undo wrote no change_log`)
+  const [olderRow] = await h.query<{ undone: string | null }>(
+    `SELECT to_json(undone_at) #>> '{}' AS undone FROM coach_auto_apply_notice WHERE id = $1`,
+    [older.id],
+  )
+  ok(olderRow?.undone == null, `${tag}: older notice undone_at stays null on refusal`)
+  const metaAfterRefuse = await phaseMeta()
+  ok(metaAfterRefuse?.n === metaBefore?.n && metaAfterRefuse?.week_end === metaBefore?.week_end, `${tag}: refusal left sessions_per_week and week_end`)
+
+  const newerUndo = await undoAutoApplyNotice(store, newer.id)
+  ok(newerUndo.ok && !newerUndo.already, `${tag}: undo newer succeeded (${newerUndo.text})`)
+  ok(await squatN() === 4, `${tag}: newer undo restored squat to 4`)
+  const [revertRow] = await h.query<{ tool: string; revert_of: string | null }>(
+    `SELECT tool, revert_of::text AS revert_of FROM change_log WHERE athlete_id = $1 ORDER BY created_at DESC, id DESC LIMIT 1`,
+    [A],
+  )
+  ok(revertRow?.tool === 'revert_change' && revertRow.revert_of === newer.change_id, `${tag}: newer undo wrote change_log revert_change`)
+  const metaAfterNewer = await phaseMeta()
+  ok(metaAfterNewer?.n === metaBefore?.n && metaAfterNewer?.week_end === metaBefore?.week_end, `${tag}: newer undo left sessions_per_week and week_end`)
+
+  const olderAgain = await undoAutoApplyNotice(store, older.id)
+  ok(olderAgain.ok && !olderAgain.already, `${tag}: undo older succeeded after newer was undone (${olderAgain.text})`)
+  ok(await squatN() === 3, `${tag}: older undo restored squat to 3`)
+  const metaAfterOlder = await phaseMeta()
+  ok(metaAfterOlder?.n === metaBefore?.n && metaAfterOlder?.week_end === metaBefore?.week_end, `${tag}: older undo left sessions_per_week and week_end`)
+}
+
+await stackedUndoCases(harness)
+if (harness.backend !== 'pglite') {
+  const lite = await openPgliteHarness()
+  try {
+    await stackedUndoCases(lite)
+  } finally {
+    await lite.close()
+  }
+}
 
 await harness.close()
 console.log(`${checks} checks, ${fails.length} failed`)
