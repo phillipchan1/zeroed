@@ -18,7 +18,7 @@ import { mergeCoachActions, proposePlaceholderRpeFixes } from '../../engine/rpeP
 import type { ExerciseTemplate } from '../../types/database'
 import { ConvergenceReticle } from '../../components/convergence/ConvergenceReticle'
 import { computeLoopConvergence } from '../../components/convergence/state'
-import { PendingProposals, ProposalsBanner } from './ProposalCard'
+import { AutoApplyNotices, PendingProposals, ProposalsBanner } from './ProposalCard'
 import { AppCoachPanel } from './AppCoachPanel'
 import { coachOn } from '../../lib/tracksFlag'
 import { CoachMessage, ProposedChangesCard, useThreadScroll, type ChatTurn } from './CoachThread'
@@ -347,6 +347,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
         {/* Changes the coach parked for you (tracks_v1). Desktop stacks the
             full cards above the read; a phone gets a one-line banner (below the
             header) that opens them in a sheet. */}
+        {isDesktop && <AutoApplyNotices athleteId={athleteId} />}
         {isDesktop && <PendingProposals athleteId={athleteId} />}
 
         {/* The header. On mobile it's a one-line bar — title left, "the read"
@@ -370,6 +371,7 @@ export function CoachScreen({ athleteId }: { athleteId: string }) {
             </span>
           </button>
         )}
+        {!isDesktop && <AutoApplyNotices athleteId={athleteId} />}
         {!isDesktop && <ProposalsBanner athleteId={athleteId} />}
 
         <div

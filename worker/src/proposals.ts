@@ -23,6 +23,11 @@ import { hiddenIds, idList } from './tombstones.ts'
 import { phaseRoutineSnapshots, queuedSnapshot, routineDelta, withTx, writeChange } from './changeLog.ts'
 import type { PreviewWarning } from './methodology/validators.ts'
 import { ApprovalSpent, checkApproval, consumeApproval, createApproval, proposalApprovalState } from './approvals.ts'
+import {
+  AUTO_APPLY_APPROVAL_REF, PROPOSAL_TTL_DAYS, captureProgramVersion,
+  listAutoApplyNotices, plainLanguageDiff, proposalExpiredAt, recordAutoApplyNotice,
+  undoAutoApplyNotice, type ProgramVersion,
+} from './coachAutoApply.ts'
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -144,6 +149,7 @@ export async function listProposals(store: ConnectedStore, status: ProposalRow['
              to_json(created_at) #>> '{}' AS created_at, to_jsonb(cp) ->> 'kind' AS kind
       FROM coach_proposal cp
       WHERE athlete_id = ${store.athleteId} AND status = ${status}
+        AND (${status} <> 'pending' OR created_at > NOW() - make_interval(days => ${PROPOSAL_TTL_DAYS}::int))
       ORDER BY created_at DESC
       LIMIT 20
     `)
@@ -178,7 +184,7 @@ export type ResolveResult =
 export async function acceptProposal(
   store: ConnectedStore,
   proposalId: string,
-  opts: { approvalRef?: string; actor?: OverrideActor } = {},
+  opts: { approvalRef?: string; actor?: OverrideActor; autoApply?: boolean } = {},
 ): Promise<ResolveResult> {
   if (!UUID_RE.test(proposalId)) return { ok: false, status: 'not_found', text: 'No such proposal.' }
   let rows: ProposalRow[]
@@ -199,8 +205,12 @@ export async function acceptProposal(
   if (p.status !== 'pending') {
     return { ok: false, status: p.status === 'stale' ? 'stale' : 'refused', text: `This proposal was already ${p.status}.` }
   }
+  if (proposalExpiredAt(p.created_at)) {
+    return { ok: false, status: 'refused', text: 'Refused: this proposal has expired (older than 7 days).' }
+  }
   if (p.kind === 'session_override') {
-    // Parked for the athlete: only their Accept applies it (G1).
+    // Parked for the athlete: only their Accept applies it (G1). Auto-apply
+    // is program edits only — week-only overrides never skip approval.
     if (opts.actor && await tracksV1On(store)) {
       return { ok: false, status: 'refused', text: 'Refused: this week-only change is parked for the athlete; they accept it in the app.' }
     }
@@ -209,25 +219,31 @@ export async function acceptProposal(
   const logged = await tracksV1On(store)
   let author: OverrideActor = opts.actor ?? APP_COACH
   if (logged) {
-    if (!opts.approvalRef) {
-      return { ok: false, status: 'refused', text: 'Refused: approval_ref is required (msg:<id> of the message where the athlete said yes), or the athlete accepts it in the app.' }
-    }
-    const [meta] = await store.sql<{ fresh: boolean; source: string; created_by: string | null }[]>`
-      SELECT (created_at > NOW() - make_interval(hours => ${PREVIEW_TTL_HOURS}::int)) AS fresh, source,
-             to_jsonb(cp) ->> 'created_by' AS created_by
-      FROM coach_proposal cp WHERE id = ${p.id} AND athlete_id = ${store.athleteId}
-    `
-    if (!meta?.fresh) {
-      await store.sql`
-        UPDATE coach_proposal SET status = 'stale', resolved_at = NOW()
-        WHERE id = ${p.id} AND athlete_id = ${store.athleteId} AND status = 'pending'
+    if (!opts.autoApply) {
+      if (!opts.approvalRef) {
+        return { ok: false, status: 'refused', text: 'Refused: approval_ref is required (msg:<id> of the message where the athlete said yes), or the athlete accepts it in the app.' }
+      }
+      const [meta] = await store.sql<{ fresh: boolean; source: string; created_by: string | null }[]>`
+        SELECT (created_at > NOW() - make_interval(hours => ${PREVIEW_TTL_HOURS}::int)) AS fresh, source,
+               to_jsonb(cp) ->> 'created_by' AS created_by
+        FROM coach_proposal cp WHERE id = ${p.id} AND athlete_id = ${store.athleteId}
       `
-      return { ok: false, status: 'stale', text: `This was proposed more than ${PREVIEW_TTL_HOURS} h ago, so it was not applied. Ask the coach to look again.` }
+      if (!meta?.fresh) {
+        await store.sql`
+          UPDATE coach_proposal SET status = 'stale', resolved_at = NOW()
+          WHERE id = ${p.id} AND athlete_id = ${store.athleteId} AND status = 'pending'
+        `
+        return { ok: false, status: 'stale', text: `This was proposed more than ${PREVIEW_TTL_HOURS} h ago, so it was not applied. Ask the coach to look again.` }
+      }
+      // G3: the coach that parked it, when the row says (rows before G3 don't).
+      if (!opts.actor) author = actorFromRef(meta.created_by) ?? (meta.source === 'app' ? APP_COACH : { type: 'mcp', id: 'coach' })
     }
-    // G3: the coach that parked it, when the row says (rows before G3 don't).
-    if (!opts.actor) author = actorFromRef(meta.created_by) ?? (meta.source === 'app' ? APP_COACH : { type: 'mcp', id: 'coach' })
   }
-  const run = () => applyProgramProposal(store, p, logged ? { approvalRef: opts.approvalRef!, author } : null)
+  const run = () => applyProgramProposal(store, p, logged ? {
+    approvalRef: opts.autoApply ? AUTO_APPLY_APPROVAL_REF : opts.approvalRef!,
+    author,
+    autoApply: opts.autoApply === true,
+  } : null)
   if (!logged) return run()
   try {
     return await withTx(store.sql, run)
@@ -240,7 +256,7 @@ export async function acceptProposal(
 async function applyProgramProposal(
   store: ConnectedStore,
   p: ProposalRow,
-  log: { approvalRef: string; author: OverrideActor } | null,
+  log: { approvalRef: string; author: OverrideActor; autoApply?: boolean } | null,
 ): Promise<ResolveResult> {
   // Claim it before writing anything, so an app Accept and an MCP apply racing
   // each other can't both apply it. Released back to pending if nothing lands.
@@ -270,9 +286,11 @@ async function applyProgramProposal(
     }
   }
   // G10: the athlete's approval of exactly this proposal, checked before any write.
+  // Auto-apply (standing:coach_auto_apply) skips the approval row: the athlete
+  // opted in, and the notice + Undo is the record instead.
   let approvalId: string | null = null
   let approvalRef = log?.approvalRef ?? null
-  if (log) {
+  if (log && !log.autoApply) {
     const approval = await checkApproval(store, log.approvalRef, { previewId: p.id, currentDiff: proposalApprovalState(p) })
     if (!approval.ok) {
       await release('pending')
@@ -281,7 +299,14 @@ async function applyProgramProposal(
     approvalId = approval.approvalId
     approvalRef = approval.approvalRef
   }
-  const before = log ? await phaseRoutineSnapshots(store, live.phaseId) : []
+  let prior: ProgramVersion | null = null
+  let before: Awaited<ReturnType<typeof phaseRoutineSnapshots>> = []
+  if (log?.autoApply) {
+    prior = await captureProgramVersion(store, live)
+    before = prior.routines
+  } else if (log) {
+    before = await phaseRoutineSnapshots(store, live.phaseId)
+  }
   let text: string
   try {
     text = await applyEdits(store, p.edits, { confirm: true, timing: p.timing, request: p.request ?? undefined })
@@ -296,6 +321,7 @@ async function applyProgramProposal(
   if (log) {
     const [athlete] = await store.sql<{ n: number }[]>`SELECT sessions_per_week AS n FROM athlete WHERE id = ${store.athleteId}`
     const spw = Number(athlete?.n ?? live.sessionsPerWeek)
+    const after = await phaseRoutineSnapshots(store, live.phaseId)
     const changeId = await writeChange(store, {
       actor: log.author,
       tool: 'accept_proposal',
@@ -308,7 +334,7 @@ async function applyProgramProposal(
         program_id: live.programId,
         phase_id: live.phaseId,
         revision: p.diff,
-        ...routineDelta(before, await phaseRoutineSnapshots(store, live.phaseId)),
+        ...routineDelta(before, after),
         ...(p.timing === 'next_week' ? { queued: await queuedSnapshot(store, live.programId, live.phaseId, live.weekEnd) } : {}),
         ...(spw !== live.sessionsPerWeek ? { sessions_per_week: { before: live.sessionsPerWeek, after: spw } } : {}),
       },
@@ -317,8 +343,16 @@ async function applyProgramProposal(
       approvalId,
       previewId: p.preview_id,
     })
-    // Single use: spent by this change, or the whole accept rolls back.
-    if (!(await consumeApproval(store, approvalId!, changeId))) throw new ApprovalSpent()
+    if (log.autoApply && prior) {
+      await recordAutoApplyNotice(store, {
+        proposalId: p.id,
+        changeId,
+        diffText: plainLanguageDiff(before, after, p.diff as Parameters<typeof plainLanguageDiff>[2]),
+        prior,
+      })
+    } else if (!(await consumeApproval(store, approvalId!, changeId))) {
+      throw new ApprovalSpent()
+    }
   }
   // The move, pinned to the goal it serves so the goal page shows it.
   const goalId = (Array.isArray(p.goal_ids) ? p.goal_ids : []).find((g) => UUID_RE.test(g)) ?? null
@@ -410,7 +444,9 @@ export async function approveAndAccept(store: ConnectedStore, proposalId: string
  * POST /api/proposals — the app's side. Session auth, same as /api/session-rx.
  *   { action: 'list' }                 → { proposals } (null when the table is missing)
  *   { action: 'accept', id }           → ResolveResult
- *   { action: 'decline', id }          → ResolveResult
+ *   { action: 'decline' | 'dismiss', id } → ResolveResult (dismiss is decline)
+ *   { action: 'auto_apply_notices' }   → { notices }
+ *   { action: 'undo_auto_apply', id }  → UndoAutoApplyResult (athlete session only)
  */
 export async function handleProposals(req: Request, env: Env, _waitUntil?: WaitUntil): Promise<Response> {
   const started = beginAuthCors(req.headers.get('Origin'), env)
@@ -441,7 +477,12 @@ export async function handleProposals(req: Request, env: Env, _waitUntil?: WaitU
           // The athlete's own tap on Accept is the approval.
           return json(await approveAndAccept(store, id), 200, cors)
         case 'decline':
+        case 'dismiss':
           return json(await declineProposal(store, id), 200, cors)
+        case 'auto_apply_notices':
+          return json({ notices: await listAutoApplyNotices(store) }, 200, cors)
+        case 'undo_auto_apply':
+          return json(await undoAutoApplyNotice(store, id), 200, cors)
         default:
           return json({ error: 'unknown action' }, 400, cors)
       }

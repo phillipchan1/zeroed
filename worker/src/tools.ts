@@ -4,6 +4,7 @@ import { parseLiftId, rpeHalfStepsOn } from '../../src/engine/liftModel.ts'
 import { applyEditsToDraft, diffDraft } from '../../supabase/functions/_shared/engine/programDraft.ts'
 import { applyEdits, liveToDraft, previewEdits, revisionPayload, toProgramEdit, type EditInput } from './edits.ts'
 import { acceptProposal, appliedOk, parkProposal, programFingerprint, resolveGoalIds } from './proposals.ts'
+import { coachAutoApplyOn } from './coachAutoApply.ts'
 import { formatDraft, formatLoggedWorkout, formatQueuedBlock, jsonBlock } from '../../supabase/functions/_shared/zeroedFormat.ts'
 import {
   loadAthlete,
@@ -741,6 +742,16 @@ async function runZeroedTool(
       const proposalId = asString(args.proposal_id)
       if (proposalId) {
         if (!gate) return (await acceptProposal(store, proposalId)).text
+        // Coach auto-apply: the athlete opted in, so this program-edit
+        // proposal may land without approval_ref. Every other actor, every
+        // other tool, and the OFF setting still hit writeApprovalProblem
+        // first — same string as before.
+        const autoApply = actor.type === 'mcp'
+          && (typeof args.approval_ref !== 'string' || !args.approval_ref.trim())
+          && await coachAutoApplyOn(store)
+        if (autoApply) {
+          return (await acceptProposal(store, proposalId, { actor, autoApply: true })).text
+        }
         // The proposal is the preview (fingerprint + 24 h); the coach still
         // needs the athlete's yes from the chat.
         const problem = writeApprovalProblem(actor, args.approval_ref)

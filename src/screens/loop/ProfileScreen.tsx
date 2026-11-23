@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
-import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell, Volume2 } from 'lucide-react'
+import { Target, CalendarDays, Scale, Activity, LogOut, Link2, Bell, Volume2, Shield } from 'lucide-react'
 import { supabase } from '../../lib/supabaseClient'
 import { signOutLocal } from '../../lib/authClient'
 import { mcpUrl } from '../../lib/api'
@@ -54,12 +54,13 @@ interface ProfileMeta {
   sessions_per_week: number | null
   training_age: number | null
   goals: string | null
+  coach_auto_apply?: boolean | null
 }
 
 export async function fetchProfileMeta(athleteId: string): Promise<ProfileMeta | null> {
   const { data, error } = await supabase
     .from('athlete')
-    .select('sessions_per_week, training_age, goals')
+    .select('sessions_per_week, training_age, goals, coach_auto_apply')
     .eq('id', athleteId)
     .maybeSingle()
   if (error) throw error
@@ -108,6 +109,8 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
   const [mcpLabel, setMcpLabel] = useState('')
   const [mcpBusy, setMcpBusy] = useState(false)
   const [mcpError, setMcpError] = useState<string | null>(null)
+  const [autoApplyBusy, setAutoApplyBusy] = useState(false)
+  const [autoApplyError, setAutoApplyError] = useState<string | null>(null)
   const [freshToken, setFreshToken] = useState<{ name: string; token: string } | null>(null)
   const [copied, setCopied] = useState(false)
 
@@ -133,6 +136,24 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
     setAgeBusy(false)
     setAgeNote(res.text || null)
     refetchAge()
+  }
+
+  async function toggleCoachAutoApply() {
+    if (autoApplyBusy) return
+    const prev = meta?.coach_auto_apply === true
+    const next = !prev
+    setAutoApplyBusy(true)
+    setAutoApplyError(null)
+    mutateCache<ProfileMeta | null>(profileKey, (m) => (m ? { ...m, coach_auto_apply: next } : m))
+    try {
+      const { error } = await supabase.from('athlete').update({ coach_auto_apply: next }).eq('id', athleteId)
+      if (error) throw error
+    } catch {
+      mutateCache<ProfileMeta | null>(profileKey, (m) => (m ? { ...m, coach_auto_apply: prev } : m))
+      setAutoApplyError('Couldn’t save coach auto-apply. Nothing changed; try again.')
+    } finally {
+      setAutoApplyBusy(false)
+    }
   }
 
   async function toggleHealth(id: string, on: boolean) {
@@ -360,6 +381,17 @@ export function ProfileScreen({ athleteId, athleteName }: ProfileScreenProps) {
               onClick={() => { const next = !setClick; setSetClick(next); setSetClickEnabled(next) }}
               chevron={false}
             />
+            <Row
+              leading={<Shield size={20} strokeWidth={1.75} style={{ color: 'var(--text-dim)' }} />}
+              title="Coach auto-apply"
+              sub="Let your coach apply weekly program edits without waiting for you to approve each one. You get a notice with Undo."
+              value={autoApplyBusy ? 'Saving…' : meta?.coach_auto_apply === true ? 'On' : 'Off'}
+              onClick={() => { if (!autoApplyBusy) void toggleCoachAutoApply() }}
+              chevron={false}
+            />
+            {autoApplyError && (
+              <p style={{ marginTop: 8, color: 'var(--danger, #c44)', fontSize: 'var(--fs-sm)' }}>{autoApplyError}</p>
+            )}
           </div>
         </div>
 

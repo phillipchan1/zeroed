@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { Banner, Button, LockOn, SectionHeader, Sheet } from '../../components/ui'
 import { invalidateCache, useCachedLoader } from '../../lib/cache'
 import { cacheKeys, invalidateLoopViews } from '../../lib/loopCache'
-import { fetchProposals, resolveProposal, type CoachProposal } from '../../lib/proposals'
+import { fetchAutoApplyNotices, fetchProposals, resolveProposal, undoAutoApplyNotice, type AutoApplyNotice, type CoachProposal } from '../../lib/proposals'
 import { fetchGoalsView, type GoalView } from '../../lib/tracksData'
 import { tracksOn } from '../../lib/tracksFlag'
 import { success } from '../../lib/haptics'
@@ -31,7 +31,7 @@ export function ProposalCard({ proposal, goalNames, onResolved }: {
   // tracks_v1 (G5): the validators' warnings on what the coach previewed.
   const warnings = proposalWarnings(proposal.diff, tracksOn())
 
-  async function act(action: 'accept' | 'decline') {
+  async function act(action: 'accept' | 'decline' | 'dismiss') {
     setPhase('working')
     const res = await resolveProposal(proposal.id, action)
     const next: Phase = res.ok ? (action === 'accept' ? 'applied' : 'declined') : res.status === 'stale' ? 'stale' : 'error'
@@ -101,7 +101,7 @@ export function ProposalCard({ proposal, goalNames, onResolved }: {
       {(phase === 'pending' || phase === 'working' || phase === 'error') && (
         <div className="proposal__acts">
           <Button variant="primary" disabled={phase === 'working'} onClick={() => void act('accept')}>Approve</Button>
-          <Button variant="outline" disabled={phase === 'working'} onClick={() => void act('decline')}>Not now</Button>
+          <Button variant="outline" disabled={phase === 'working'} onClick={() => void act('dismiss')}>Dismiss</Button>
         </div>
       )}
     </div>
@@ -199,6 +199,52 @@ export function ProposalsBanner({ athleteId }: { athleteId: string }) {
           ))}
         </Sheet>
       )}
+    </div>
+  )
+}
+
+/**
+ * In-app notice after the coach auto-applied a weekly program edit. One-tap
+ * Undo goes through the change log (same as Changes): a later change is
+ * refused, and a clean revert is logged.
+ */
+export function AutoApplyNotices({ athleteId }: { athleteId: string }) {
+  const { data: notices, refetch } = useCachedLoader<AutoApplyNotice[]>(
+    tracksOn() ? cacheKeys.proposals(athleteId) + ':auto-apply' : null,
+    fetchAutoApplyNotices,
+  )
+  const [busy, setBusy] = useState<string | null>(null)
+  const [message, setMessage] = useState<string | null>(null)
+  const open = (notices ?? []).filter((n) => !n.undone_at)
+  if (!open.length && !message) return null
+
+  async function undo(n: AutoApplyNotice) {
+    setBusy(n.id)
+    const res = await undoAutoApplyNotice(n.id)
+    setBusy(null)
+    setMessage(res.text || (res.ok ? 'Undone.' : null))
+    if (res.ok) {
+      success()
+      invalidateLoopViews()
+      refetch()
+    }
+  }
+
+  return (
+    <div className="pending-proposals fade-rise" style={{ marginBottom: 12 }}>
+      <SectionHeader>Coach applied a change</SectionHeader>
+      <div style={{ marginTop: 12 }}>
+        {open.map((n) => (
+          <div key={n.id} className="proposal proposal--pending">
+            <p className="proposal__k">Applied by your coach</p>
+            <p className="proposal__why">{n.diff_text}</p>
+            {message && <p className="proposal__message">{message}</p>}
+            <div className="proposal__acts">
+              <Button variant="outline" disabled={busy === n.id} onClick={() => void undo(n)}>Undo</Button>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   )
 }

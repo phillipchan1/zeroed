@@ -84,6 +84,9 @@ export interface AthleteRow {
   starter_pack_settings?: Record<string, unknown> | null
   // Envelope {"v":1,...}. Separate from starter_pack_settings. Validated on read/write.
   onboarding_answers?: Record<string, unknown> | null
+  // Coach auto-apply for MCP program-edit proposals. Default false; the
+  // athlete turns it on in Profile. Absent until coach-auto-apply.sql.
+  coach_auto_apply?: boolean | null
 }
 
 export interface DiagnosticRow {
